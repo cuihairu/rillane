@@ -1,0 +1,15 @@
+[package]
+name = "seep-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+seep-config = { path = "../seep-config" }
+seep-core = { path = "../seep-core" }
+seep-platform = { path = "../seep-platform" }
+seep-protocols = { path = "../seep-protocols" }
+seep-routing = { path = "../seep-routing" }
+seep-telemetry = { path = "../seep-telemetry" }

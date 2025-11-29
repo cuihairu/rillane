@@ -1,0 +1,46 @@
+control:
+  api_bind: 127.0.0.1:9090
+  uds_path: null
+  admin_token: seep
+
+telemetry:
+  log_level: info
+  enable_metrics: true
+  enable_tracing: false
+
+ingress:
+  - name: socks-in
+    type: socks5
+    bind: 0.0.0.0:7890
+    auth:
+      - username: demo
+        password: demo
+
+egress:
+  - name: direct-main
+    type: direct
+  - name: trojan-main
+    type: trojan
+    server: trojan.example.com
+    port: 443
+    password: secret
+
+routing:
+  default_node: direct-main
+  groups:
+    - name: auto
+      strategy: latency
+      members:
+        - trojan-main
+        - direct-main
+  rules:
+    - name: streaming
+      target: trojan-main
+      matches:
+        - type: domain_suffix
+          values: ["netflix.com", "youtube.com"]
+    - name: cn
+      target: direct-main
+      matches:
+        - type: geoip
+          country: CN

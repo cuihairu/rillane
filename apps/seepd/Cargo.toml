@@ -1,0 +1,12 @@
+[package]
+name = "seepd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+seep-config = { path = "../../crates/seep-config" }
+seep-runtime = { path = "../../crates/seep-runtime" }
+seep-telemetry = { path = "../../crates/seep-telemetry" }

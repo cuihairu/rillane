@@ -1,0 +1,11 @@
+[package]
+name = "seep-platform"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+seep-config = { path = "../seep-config" }

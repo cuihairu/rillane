@@ -1,0 +1,12 @@
+[package]
+name = "seepctl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+seep-config = { path = "../../crates/seep-config" }
+seep-runtime = { path = "../../crates/seep-runtime" }

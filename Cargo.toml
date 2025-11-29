@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "crates/seep-core",
+    "crates/seep-config",
+    "crates/seep-routing",
+    "crates/seep-protocols",
+    "crates/seep-telemetry",
+    "crates/seep-platform",
+    "crates/seep-runtime",
+    "apps/seepd",
+    "apps/seepctl",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+authors = ["Seep Contributors"]
+license = "Apache-2.0"
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+toml = { version = "0.8", features = ["preserve_order"] }
+thiserror = "1.0"
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
+uuid = { version = "1.8", features = ["serde", "v4"] }
