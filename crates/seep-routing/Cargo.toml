@@ -10,3 +10,4 @@ serde.workspace = true
 tracing.workspace = true
 seep-config = { path = "../seep-config" }
 seep-core = { path = "../seep-core" }
+rand.workspace = true

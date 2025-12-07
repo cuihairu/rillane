@@ -4,6 +4,9 @@ use seep_config::SeepConfig;
 use tokio::task::JoinHandle;
 use tracing::info;
 
+// Re-export network module
+pub mod network;
+
 #[derive(Debug, Clone, Copy)]
 pub enum PlatformKind {
     Linux,

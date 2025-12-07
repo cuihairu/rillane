@@ -8,8 +8,7 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config_path =
-        env::var("SEEP_CONFIG").unwrap_or_else(|_| "config/seep.yaml".to_string());
+    let config_path = env::var("SEEP_CONFIG").unwrap_or_else(|_| "config/seep.yaml".to_string());
     let config = SeepConfig::load_from_path(&config_path)?;
 
     seep_telemetry::init(TelemetryOptions::default()).await?;

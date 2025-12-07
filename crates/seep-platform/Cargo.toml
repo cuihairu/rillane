@@ -9,3 +9,15 @@ async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 seep-config = { path = "../seep-config" }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+nix = { version = "0.28", optional = true }
+winapi = { version = "0.3", optional = true }
+dns-lookup = "3.0"
+socket2 = "0.5"
+network-interface = "2.0"
+futures.workspace = true
+regex.workspace = true

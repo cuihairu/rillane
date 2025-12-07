@@ -24,6 +24,7 @@ seep/
 - `seep-telemetry`：日志、指标、Tracing 初始化，提供统一 `TelemetryOptions` 供 daemon / CLI 复用。
 - `seep-platform`：封装各平台的安装、服务管理、权限处理，编译期通过 feature 划分实现。
 - `seep-runtime`：编排引擎，串联配置、路由、协议组件，启动监听及热更新逻辑。
+- `seep-mesh`：协作节点模型与注册表，维护节点角色（client/relay/exit）、能力与心跳，为后续组网/加速提供统一数据面。
 
 ## 应用层
 - `apps/seepd`：常驻守护进程 (service/daemon)，负责加载配置、初始化 Telemetry、启动 runtime。
@@ -45,7 +46,28 @@ seep/
 - 支持热更新：`seepctl reload` -> 守护进程 watch 配置 -> `RuntimeBuilder` reload。
 - 文档及 ADR 集中在 `docs/`，重要决策使用 ADR 记录。
 
-## 后续路线
-1. 完成最小 MVP：Socks5 入站 + Direct/Trojan 出站，提供基础路由。
-2. 构建自动化测试 (unit + integration) 以及性能基准。
-3. 接入 Telemetry（Prometheus/OTLP），再扩展多平台分发。
+## Mesh / 协作加速 / 节点组
+- Seep 将把每个安装节点视作一个网元，可注册为 `client` / `relay` / `exit`，支持互联互通。Mesh 控制面负责登记节点元数据（地区、ISP、带宽、健康状态）、拓扑与 ACL。
+- 当前 `seep-mesh` crate 内提供 `MeshRegistry` 和后台心跳清理逻辑，`seep-runtime` 会默认注册本地节点并启动离线检测。
+- `RoutingConfig` 将扩展 `GroupDescriptor` 与 `chains`：路由规则先定位逻辑组，再由组策略（latency/bandwidth/random/weighted）选出具体节点，可表达链路如 `client -> relay -> exit`。组可以嵌套，方便按地区/游戏类型组织。
+- `FlowMetadata` / `ChainContext` 携带链路信息，egress/relay 会根据这些数据记录“哪个节点使用了哪个节点的流量”，便于统计与策略调度。
+- 游戏加速场景：结合虚拟网卡/Tun，针对特定端口/进程劫持流量，经由附近的 relay 与最优出口出国，实现跨运营商加速、低延迟路径与自动故障切换。
+
+## 系统路由与虚拟网卡
+- `seep-platform` 将新增 `network` 模块，提供 `TunProvider`/`RouteManager` trait，并针对 Linux/OpenWrt（TUN+policy routing）、Windows（Wintun/WFP）、macOS（utun/NE）、Android（VpnService）、iOS（NEPacketTunnel）实现具体能力。
+- `seep-runtime` 里会加入 `TunIngress`/`TunEgress`，直接处理 L3/L4 包，并与 FlowRouter 结合，实现“全局/指定流量”接管。
+- 配置层会新增 `network` 区域，指定模式（tun/redir）、分流规则（bypass/include）、进程/应用过滤等；CLI/控制面提供路由应用/撤销命令。
+
+## 订阅与配置编译
+- 将兼容 Clash 订阅（proxies/proxy-groups/rules）并自动转换为 SeepConfig；另行设计 Seep DSL（version/meta/nodes/chains/rulesets）以表达多节点 mesh、链路特性。
+- `seepctl subscription` 管理订阅源，支持 add/remove/list/refresh，守护进程可定时拉取并热更新路由。
+
+## 安全与观测
+- Mesh 节点通信默认启用 mTLS/Noise，加密所有链路，配合证书/密钥轮换工具。
+- Telemetry/metrics 包含 per-node/per-link 流量、延迟、丢包、重试次数，方便控制面统计“谁使用了谁的流量”与 SLA。当前 MVP 已在 `FlowStats` 中记录入口与出口之间的累计字节，并通过 `tracing` 输出；后续会暴露为 API/Prometheus 指标。
+- 控制面接口：`control.api_bind` 默认提供 HTTP 接口，现阶段可通过 `GET /flows` 获取入口→出口流量统计，通过 `GET /nodes` 获取 mesh 节点快照，未来会扩展为完整的 REST/gRPC API。
+
+## 当前状态与路线
+1. **MVP**（已完成）：Socks5 入站 + Direct 出站，完成基础 Flow/Router/Output 管线。
+2. **下一阶段**：实现更多协议（Trojan/Reality/UDP 等）、节点组与 mesh 控制面雏形；补齐 Tun/系统路由支持，为游戏加速奠定基础。
+3. **进阶阶段**：完成订阅 DSL、插件化中间件、自动链路自愈、Grafana/Prometheus 模板等，并在多平台发布。

@@ -19,11 +19,6 @@ ingress:
 egress:
   - name: direct-main
     type: direct
-  - name: trojan-main
-    type: trojan
-    server: trojan.example.com
-    port: 443
-    password: secret
 
 routing:
   default_node: direct-main
@@ -31,16 +26,10 @@ routing:
     - name: auto
       strategy: latency
       members:
-        - trojan-main
         - direct-main
   rules:
-    - name: streaming
-      target: trojan-main
-      matches:
-        - type: domain_suffix
-          values: ["netflix.com", "youtube.com"]
     - name: cn
-      target: direct-main
+      target: auto
       matches:
         - type: geoip
           country: CN

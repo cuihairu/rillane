@@ -1,10 +1,10 @@
 # Seep TODO
 
 ## 1. 架构与核心能力
-- [ ] 在 `seep-routing` 中引入 `GroupDescriptor` 概念，支持组内策略（latency/bandwidth/random/weighted），并调整 `RouteDecision` 可返回逻辑组与实际节点。
-- [ ] 设计 Mesh/协作节点模块 (`seep-mesh`)，包含节点注册、角色（client/relay/exit）、健康上报、拓扑管理等 API。
-- [ ] 扩展 `RuntimeBuilder` 与控制面，使其能够消费 Mesh 拓扑并构建多跳链路（源 → relay → exit），实现基本协作加速。
-- [ ] 在 `seep-core`/`seep-runtime` 中增加 `FlowSession/ChainContext` 概念，保存多跳路由状态、故障回退策略。
+- [ ] 在 `seep-routing` 中引入 `GroupDescriptor` 概念，支持组内策略（latency/bandwidth/random/weighted），并允许组嵌套；调整 `RouteDecision` 以表达逻辑组和最终节点。
+- [ ] 设计 Mesh/协作节点模块 (`seep-mesh`)，包含节点注册、角色（client/relay/exit）、健康上报、拓扑管理、节点 ACL/配额 和 link-state API。
+- [ ] 扩展 `RuntimeBuilder` 与守护进程控制面，使其能够消费 Mesh 拓扑并构建多跳链路（源 → relay → exit），支撑协作/游戏加速；加入链路 Dry Run / 预检。
+- [ ] 在 `seep-core`/`seep-runtime` 中增加 `FlowSession/ChainContext` 概念，保存多跳状态、节点使用统计、故障回退策略，用于“某节点使用了哪个节点流量”的统计。
 
 ## 2. 系统路由与虚拟网卡
 - [ ] 为 `seep-platform` 增加 `network` 模块，定义 `TunProvider`、`RouteManager` trait，并给出 Linux/OpenWrt/Windows/macOS/Android/iOS 的实现计划。
@@ -17,9 +17,9 @@
 - [ ] 为 `seepctl` 增加 `subscription` 子命令（add/remove/list/refresh），以及定时刷新器、ETag/Last-Modified 缓存，支持热更新 runtime。
 
 ## 4. 协作节点与安全
-- [ ] 规划节点认证体系（mTLS/Noise），实现证书管理/轮换工具，并在 Mesh 模块中强制加密传输。
-- [ ] 为协作模式设计 ACL 与资源配额机制（哪些节点可作为 relay/exit，带宽/连接数限制，贡献度追踪）。
-- [ ] 在 Telemetry 中加入多节点观测指标（节点状态、链路延迟、切换记录），并提供 Grafana/Prometheus 仪表板模板。
+- [ ] 规划节点认证体系（mTLS/Noise），实现证书管理/轮换工具，并在 Mesh 模块中强制加密传输；区分 client/relay/exit 权限。
+- [ ] 为协作模式设计 ACL 与资源配额机制（哪些节点可作为 relay/exit，带宽/连接数限制，贡献度/积分追踪）。
+- [ ] 在 Telemetry 中加入多节点观测指标（节点状态、链路延迟、切换记录、节点之间的流量统计），并提供 Grafana/Prometheus 仪表板模板。
 
 ## 5. 插件化与特色
 - [ ] 定义 FlowMiddleware 插件接口，支持 WASM/动态库加载，提供示例（限速、统计、内容过滤）。

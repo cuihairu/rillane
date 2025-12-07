@@ -1,17 +1,18 @@
-use std::{collections::BTreeMap, fmt, pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc, time::{Duration, Instant}};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
+use std::net::SocketAddr;
 
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.
-pub trait IoStream: AsyncRead + AsyncWrite + Send + Sync + Unpin {}
-impl<T> IoStream for T where T: AsyncRead + AsyncWrite + Send + Sync + Unpin {}
+pub trait IoStream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {}
+impl<T> IoStream for T where T: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {}
 
 /// Boxed bidirectional IO stream used by inbound/outbound handlers.
-pub type BoxedIo = Pin<Box<dyn IoStream + 'static>>;
+pub type BoxedIo = Box<dyn IoStream>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FlowId(Uuid);
@@ -82,8 +83,123 @@ pub struct FlowContext {
 
 #[derive(Debug, Clone)]
 pub struct RouteDecision {
-    pub next_hop: String,
+    /// 路由路径，包含逻辑组和最终节点
+    pub path: RoutePath,
+    /// 路由选择的原因
     pub reason: Option<String>,
+    /// 路由类型
+    pub route_type: RouteType,
+}
+
+#[derive(Debug, Clone)]
+pub enum RoutePath {
+    /// 直接路由到单个节点
+    Direct { node: String },
+    /// 通过组选择路由
+    ThroughGroup {
+        group: String,
+        selected_node: String,
+        intermediate_nodes: Vec<String>,
+    },
+    /// 多跳路由链
+    Chain {
+        hops: Vec<RouteHop>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteHop {
+    pub node: String,
+    pub hop_type: HopType,
+}
+
+#[derive(Debug, Clone)]
+pub enum HopType {
+    /// 入口节点
+    Ingress,
+    /// 中继节点
+    Relay,
+    /// 出口节点
+    Egress,
+    /// 中间处理节点
+    Process,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteType {
+    /// 标准路由
+    Standard,
+    /// 协作路由
+    Collaborative,
+    /// 游戏加速路由
+    Gaming,
+    /// 备用路由
+    Fallback,
+}
+
+impl RouteDecision {
+    pub fn direct(node: String) -> Self {
+        Self {
+            path: RoutePath::Direct { node },
+            reason: None,
+            route_type: RouteType::Standard,
+        }
+    }
+
+    pub fn through_group(group: String, selected_node: String, intermediate_nodes: Vec<String>) -> Self {
+        Self {
+            path: RoutePath::ThroughGroup { group, selected_node, intermediate_nodes },
+            reason: None,
+            route_type: RouteType::Standard,
+        }
+    }
+
+    pub fn chain(hops: Vec<RouteHop>) -> Self {
+        Self {
+            path: RoutePath::Chain { hops },
+            reason: None,
+            route_type: RouteType::Collaborative,
+        }
+    }
+
+    /// 获取最终的目标节点
+    pub fn final_node(&self) -> String {
+        match &self.path {
+            RoutePath::Direct { node } => node.clone(),
+            RoutePath::ThroughGroup { selected_node, .. } => selected_node.clone(),
+            RoutePath::Chain { hops } => hops.last().map(|h| h.node.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// 获取所有经过的节点（按顺序）
+    pub fn all_nodes(&self) -> Vec<String> {
+        match &self.path {
+            RoutePath::Direct { node } => vec![node.clone()],
+            RoutePath::ThroughGroup { selected_node: _selected_node, intermediate_nodes, .. } => {
+                let mut nodes = intermediate_nodes.clone();
+                nodes.push(_selected_node.clone());
+                nodes
+            }
+            RoutePath::Chain { hops } => hops.iter().map(|h| h.node.clone()).collect(),
+        }
+    }
+
+    /// 路径长度（跳数）
+    pub fn hop_count(&self) -> usize {
+        match &self.path {
+            RoutePath::Direct { .. } => 1,
+            RoutePath::ThroughGroup { selected_node: _, intermediate_nodes, .. } => {
+                intermediate_nodes.len() + 1
+            }
+            RoutePath::Chain { hops } => hops.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FlowReport {
+    pub upstream: u64,
+    pub downstream: u64,
 }
 
 #[async_trait]
@@ -92,19 +208,404 @@ pub trait FlowRouter: Send + Sync {
 }
 
 #[async_trait]
+pub trait FlowOutput: Send + Sync {
+    async fn forward(&self, decision: RouteDecision, flow: Flow) -> Result<FlowReport>;
+}
+
+#[async_trait]
 pub trait FlowMiddleware: Send + Sync {
     fn name(&self) -> &'static str;
     async fn handle(&self, flow: Flow) -> Result<Flow>;
 }
 
+/// 流量会话信息
+#[derive(Debug, Clone)]
+pub struct FlowSession {
+    /// 会话ID
+    pub id: FlowId,
+    /// 创建时间
+    pub created_at: Instant,
+    /// 最后活跃时间
+    pub last_active: Instant,
+    /// 会话状态
+    pub status: SessionStatus,
+    /// 客户端信息
+    pub client_info: ClientInfo,
+    /// 当前路由路径
+    pub current_path: Vec<String>,
+    /// 路由历史
+    pub route_history: Vec<RouteHistory>,
+    /// 使用统计
+    pub usage: SessionUsage,
+    /// 故障统计
+    pub failure_stats: FailureStats,
+}
+
+/// 会话状态
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionStatus {
+    /// 初始化
+    Initializing,
+    /// 活跃中
+    Active,
+    /// 空闲
+    Idle,
+    /// 连接中
+    Connecting,
+    /// 断开中
+    Disconnecting,
+    /// 已终止
+    Terminated,
+    /// 失败
+    Failed,
+}
+
+/// 客户端信息
+#[derive(Debug, Clone)]
+pub struct ClientInfo {
+    /// 客户端节点ID
+    pub node_id: Option<String>,
+    /// 客户端地址
+    pub address: Option<SocketAddr>,
+    /// 用户代理
+    pub user_agent: Option<String>,
+    /// 认证信息
+    pub auth_info: Option<AuthInfo>,
+}
+
+/// 认证信息
+#[derive(Debug, Clone)]
+pub struct AuthInfo {
+    /// 认证方法
+    pub method: AuthMethod,
+    /// 认证用户
+    pub username: Option<String>,
+    /// 认证时间
+    pub authenticated_at: Option<Instant>,
+}
+
+/// 认证方法
+#[derive(Debug, Clone)]
+pub enum AuthMethod {
+    /// 无认证
+    None,
+    /// 用户名密码
+    UsernamePassword,
+    /// Token认证
+    Token,
+    /// 证书认证
+    Certificate,
+}
+
+/// 路由历史记录
+#[derive(Debug, Clone)]
+pub struct RouteHistory {
+    /// 路由ID
+    pub route_id: String,
+    /// 路由路径
+    pub path: Vec<String>,
+    /// 路由类型
+    pub route_type: String,
+    /// 选择原因
+    pub reason: String,
+    /// 创建时间
+    pub created_at: Instant,
+    /// 是否成功
+    pub success: bool,
+    /// 错误信息
+    pub error: Option<String>,
+}
+
+/// 会话使用统计
+#[derive(Debug, Clone, Default)]
+pub struct SessionUsage {
+    /// 上传流量（字节）
+    pub bytes_uploaded: u64,
+    /// 下载流量（字节）
+    pub bytes_downloaded: u64,
+    /// 连接时长（秒）
+    pub duration_seconds: u64,
+    /// 数据包数量
+    pub packets_count: u64,
+    /// 重连次数
+    pub reconnect_count: u32,
+}
+
+/// 故障统计
+#[derive(Debug, Clone, Default)]
+pub struct FailureStats {
+    /// 连接失败次数
+    pub connection_failures: u32,
+    /// 路由失败次数
+    pub route_failures: u32,
+    /// 超时次数
+    pub timeout_count: u32,
+    /// 最后故障时间
+    pub last_failure: Option<Instant>,
+    /// 平均故障间隔（秒）
+    pub average_failure_interval: f32,
+}
+
+/// 链路上下文（多跳状态管理）
+#[derive(Debug, Clone)]
+pub struct ChainContext {
+    /// 链路ID
+    pub chain_id: String,
+    /// 源节点
+    pub source_node: String,
+    /// 目标节点
+    pub target_node: String,
+    /// 当前路径
+    pub current_path: Vec<String>,
+    /// 路径跳数
+    pub hop_count: usize,
+    /// 每跳的延迟统计
+    pub hop_latencies: Vec<u32>,
+    /// 每跳的带宽统计
+    pub hop_bandwidths: Vec<u32>,
+    /// 链路可靠性评分
+    pub reliability_score: f32,
+    /// 链路创建时间
+    pub created_at: Instant,
+    /// 最后更新时间
+    pub last_updated: Instant,
+    /// 链路状态
+    pub status: ChainStatus,
+    /// 备用路径列表
+    pub fallback_paths: Vec<Vec<String>>,
+    /// 当前使用的备用路径索引
+    pub current_fallback_index: usize,
+}
+
+/// 链路状态
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainStatus {
+    /// 初始化中
+    Initializing,
+    /// 活跃
+    Active,
+    /// 降级中
+    Degraded,
+    /// 故障转移中
+    FailingOver,
+    /// 已终止
+    Terminated,
+}
+
+impl FlowSession {
+    /// 创建新的流量会话
+    pub fn new(id: FlowId, _target: FlowTarget) -> Self {
+        Self {
+            id,
+            created_at: Instant::now(),
+            last_active: Instant::now(),
+            status: SessionStatus::Initializing,
+            client_info: ClientInfo::default(),
+            current_path: Vec::new(),
+            route_history: Vec::new(),
+            usage: SessionUsage::default(),
+            failure_stats: FailureStats::default(),
+        }
+    }
+
+    /// 更新路由路径
+    pub fn update_route(&mut self, path: Vec<String>, reason: String) {
+        self.current_path = path.clone();
+
+        let route_history = RouteHistory {
+            route_id: format!("route-{}", self.route_history.len() + 1),
+            path: path.clone(),
+            route_type: "mesh_chain".to_string(),
+            reason,
+            created_at: Instant::now(),
+            success: true,
+            error: None,
+        };
+
+        self.route_history.push(route_history);
+        self.status = SessionStatus::Active;
+        self.last_active = Instant::now();
+    }
+
+    /// 更新使用统计
+    pub fn update_usage(&mut self, bytes_uploaded: u64, bytes_downloaded: u64) {
+        self.usage.bytes_uploaded += bytes_uploaded;
+        self.usage.bytes_downloaded += bytes_downloaded;
+
+        let duration = self.created_at.elapsed().as_secs();
+        if duration > self.usage.duration_seconds {
+            self.usage.duration_seconds = duration;
+        }
+    }
+
+    /// 记录故障
+    pub fn record_failure(&mut self, failure_type: FailureType) {
+        match failure_type {
+            FailureType::Connection => self.failure_stats.connection_failures += 1,
+            FailureType::Route => self.failure_stats.route_failures += 1,
+            FailureType::Timeout => self.failure_stats.timeout_count += 1,
+        }
+
+        self.failure_stats.last_failure = Some(Instant::now());
+        self.status = SessionStatus::Failed;
+
+        // 计算平均故障间隔
+        self.failure_stats.average_failure_interval = if self.failure_stats.connection_failures +
+            self.failure_stats.route_failures + self.failure_stats.timeout_count > 0 {
+            let total_failures = self.failure_stats.connection_failures +
+                self.failure_stats.route_failures + self.failure_stats.timeout_count;
+            let total_duration = self.created_at.elapsed().as_secs() as f32;
+            total_duration / total_failures as f32
+        } else {
+            0.0
+        };
+    }
+
+    /// 获取会话持续时间
+    pub fn duration(&self) -> Duration {
+        self.created_at.elapsed()
+    }
+
+    /// 是否需要重连
+    pub fn should_reconnect(&self) -> bool {
+        match self.status {
+            SessionStatus::Failed | SessionStatus::Terminated => true,
+            SessionStatus::Idle => {
+                // 空闲超过30秒认为需要重连
+                self.last_active.elapsed() > Duration::from_secs(30)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Default for ClientInfo {
+    fn default() -> Self {
+        Self {
+            node_id: None,
+            address: None,
+            user_agent: None,
+            auth_info: None,
+        }
+    }
+}
+
+/// 故障类型
+#[derive(Debug, Clone)]
+pub enum FailureType {
+    /// 连接故障
+    Connection,
+    /// 路由故障
+    Route,
+    /// 超时故障
+    Timeout,
+}
+
+impl ChainContext {
+    /// 创建新的链路上下文
+    pub fn new(chain_id: String, source: String, target: String) -> Self {
+        Self {
+            chain_id,
+            source_node: source,
+            target_node: target,
+            current_path: Vec::new(),
+            hop_count: 0,
+            hop_latencies: Vec::new(),
+            hop_bandwidths: Vec::new(),
+            reliability_score: 1.0,
+            created_at: Instant::now(),
+            last_updated: Instant::now(),
+            status: ChainStatus::Initializing,
+            fallback_paths: Vec::new(),
+            current_fallback_index: 0,
+        }
+    }
+
+    /// 更新链路路径
+    pub fn update_path(&mut self, path: Vec<String>) {
+        self.current_path = path.clone();
+        self.hop_count = path.len();
+        self.last_updated = Instant::now();
+
+        // 初始化延迟和带宽统计（实际应用中应该从监控系统获取）
+        self.hop_latencies.resize(self.hop_count, 0);
+        self.hop_bandwidths.resize(self.hop_count, 0);
+
+        self.status = ChainStatus::Active;
+    }
+
+    /// 添加备用路径
+    pub fn add_fallback_path(&mut self, path: Vec<String>) {
+        self.fallback_paths.push(path);
+    }
+
+    /// 获取当前使用的路径
+    pub fn get_current_path(&self) -> Option<Vec<String>> {
+        if self.fallback_paths.is_empty() {
+            Some(self.current_path.clone())
+        } else {
+            self.fallback_paths.get(self.current_fallback_index).cloned()
+        }
+    }
+
+    /// 切换到下一个备用路径
+    pub fn switch_fallback_path(&mut self) -> bool {
+        if self.current_fallback_index + 1 < self.fallback_paths.len() {
+            self.current_fallback_index += 1;
+            self.last_updated = Instant::now();
+            self.status = ChainStatus::FailingOver;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 计算链路质量评分
+    pub fn calculate_quality_score(&self) -> f32 {
+        if self.hop_latencies.is_empty() {
+            return self.reliability_score;
+        }
+
+        // 平均延迟
+        let avg_latency: f32 = self.hop_latencies.iter()
+            .map(|&lat| lat as f32)
+            .sum::<f32>() / self.hop_latencies.len() as f32;
+
+        // 平均带宽
+        let avg_bandwidth: f32 = self.hop_bandwidths.iter()
+            .map(|&bw| bw as f32)
+            .sum::<f32>() / self.hop_bandwidths.len() as f32;
+
+        // 综合评分：延迟越低越好，带宽越高越好，结合可靠性
+        let latency_score = if avg_latency > 0.0 {
+            1000.0 / avg_latency
+        } else {
+            1000.0
+        };
+
+        let bandwidth_score = avg_bandwidth / 10.0; // 归一化到 0-100 分
+
+        (latency_score * 0.3 + bandwidth_score * 0.3 + self.reliability_score * 0.4).min(100.0)
+    }
+
+    /// 获取链路持续时间
+    pub fn duration(&self) -> Duration {
+        self.created_at.elapsed()
+    }
+}
+
 #[async_trait]
 pub trait EgressConnector: Send + Sync {
     fn name(&self) -> &'static str;
-    async fn forward(&self, flow: Flow) -> Result<()>;
+    async fn forward(&self, flow: Flow) -> Result<FlowReport>;
 }
 
 #[async_trait]
 pub trait IngressEndpoint: Send + Sync {
     fn name(&self) -> &'static str;
-    async fn run(self: Arc<Self>, router: Arc<dyn FlowRouter>) -> Result<()>;
+    async fn run(
+        self: Arc<Self>,
+        router: Arc<dyn FlowRouter>,
+        output: Arc<dyn FlowOutput>,
+    ) -> Result<()>;
 }

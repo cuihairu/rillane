@@ -5,11 +5,24 @@ edition = "2021"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+hyper.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
 seep-config = { path = "../seep-config" }
 seep-core = { path = "../seep-core" }
 seep-platform = { path = "../seep-platform" }
 seep-protocols = { path = "../seep-protocols" }
 seep-routing = { path = "../seep-routing" }
 seep-telemetry = { path = "../seep-telemetry" }
+seep-mesh = { path = "../seep-mesh" }
+seep-subscription = { path = "../seep-subscription" }
+notify.workspace = true
+futures.workspace = true
+whoami.workspace = true
+num_cpus.workspace = true
+regex.workspace = true
+chrono.workspace = true
