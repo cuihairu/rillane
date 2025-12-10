@@ -11,3 +11,6 @@ tracing.workspace = true
 seep-config = { path = "../seep-config" }
 seep-core = { path = "../seep-core" }
 rand.workspace = true
+sha2.workspace = true
+dashmap.workspace = true
+tokio.workspace = true
