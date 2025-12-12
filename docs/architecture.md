@@ -66,6 +66,7 @@ seep/
 - Mesh 节点通信默认启用 mTLS/Noise，加密所有链路，配合证书/密钥轮换工具。
 - Telemetry/metrics 包含 per-node/per-link 流量、延迟、丢包、重试次数，方便控制面统计“谁使用了谁的流量”与 SLA。当前 MVP 已在 `FlowStats` 中记录入口与出口之间的累计字节，并通过 `tracing` 输出；后续会暴露为 API/Prometheus 指标。
 - 控制面接口：`control.api_bind` 默认提供 HTTP 接口，现阶段可通过 `GET /flows` 获取入口→出口流量统计，通过 `GET /nodes` 获取 mesh 节点快照，未来会扩展为完整的 REST/gRPC API。
+  - 链路相关：`POST /chains/dry-run`、`POST /chains`、`GET /chains/{chain_id}`、`GET /chains/stats` 等接口用于多跳链路预检与管理（MVP：计算路径与附加元数据，数据面多跳转发后续实现）。
 
 ## 当前状态与路线
 1. **MVP**（已完成）：Socks5 入站 + Direct 出站，完成基础 Flow/Router/Output 管线。
