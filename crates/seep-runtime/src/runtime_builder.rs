@@ -839,3 +839,100 @@ fn register_local_mesh_node(mesh_cfg: MeshConfig) -> Result<Arc<MeshRegistry>> {
 
     Ok(registry)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{pin::Pin, task::{Context, Poll}};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    #[derive(Default)]
+    struct DummyIo;
+
+    impl AsyncRead for DummyIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for DummyIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(0))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct CaptureOutput {
+        annotations: Arc<Mutex<Option<std::collections::BTreeMap<String, String>>>>,
+    }
+
+    #[async_trait]
+    impl FlowOutput for CaptureOutput {
+        async fn forward(&self, _decision: RouteDecision, flow: Flow) -> Result<FlowReport> {
+            let mut guard = self.annotations.lock().await;
+            *guard = Some(flow.metadata.annotations);
+            Ok(FlowReport::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_chain_injects_metadata_annotations() {
+        let annotations = Arc::new(Mutex::new(None));
+        let mut outputs: HashMap<String, Arc<dyn FlowOutput>> = HashMap::new();
+        outputs.insert(
+            "direct".to_string(),
+            Arc::new(CaptureOutput {
+                annotations: annotations.clone(),
+            }),
+        );
+        let router = FlowOutputRouter::new(outputs, None);
+
+        let decision = {
+            let hops = vec![
+                seep_core::RouteHop {
+                    node: "direct".to_string(),
+                    hop_type: seep_core::HopType::Ingress,
+                },
+                seep_core::RouteHop {
+                    node: "exit1".to_string(),
+                    hop_type: seep_core::HopType::Egress,
+                },
+            ];
+            let mut d = RouteDecision::chain(hops);
+            d.reason = Some("test".to_string());
+            d
+        };
+
+        let flow = Flow {
+            id: seep_core::FlowId::new(),
+            target: seep_core::FlowTarget {
+                host: "example.com".to_string(),
+                port: 443,
+                proto: seep_core::TargetProto::Tcp,
+            },
+            io: Box::new(DummyIo::default()),
+            metadata: seep_core::FlowMetadata::default(),
+        };
+
+        router.forward(decision, flow).await.unwrap();
+        let guard = annotations.lock().await;
+        let map = guard.as_ref().expect("annotations captured");
+        assert!(map.contains_key("seep.chain.path"));
+        assert_eq!(map.get("seep.route.reason").map(|s| s.as_str()), Some("test"));
+    }
+}
