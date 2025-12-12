@@ -7,10 +7,16 @@
 //! - Mesh 协作
 //! - 订阅管理
 //! - 热更新
+//! - 多跳链路构建
 
+pub mod chain;
 pub mod hot_reload;
 pub mod runtime_builder;
 
+pub use chain::{
+    ChainBuilder, ChainBuildResult, ChainConfig, ChainConstraints, ChainDryRunResult,
+    ChainManager, ChainManagerStats, PathOptimizationStrategy,
+};
 pub use hot_reload::{HotReloadConfig, HotReloadManager, ReloadEvent, ReloadStats};
 pub use runtime_builder::{
     MeshConfig, NetworkEventType, Runtime, RuntimeBuilder, RuntimeConfig, RuntimeEvent,

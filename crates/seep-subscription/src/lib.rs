@@ -616,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_subscription_hash() {
-        let sub = Subscription::new("test".to_string(), "https://example.com".to_string());
+        let mut sub = Subscription::new("test".to_string(), "https://example.com".to_string());
         let content1 = "test content";
         let content2 = "different content";
 
@@ -627,7 +627,6 @@ mod tests {
         assert_ne!(hash1, hash2);
         assert_eq!(hash1, hash1_again);
         assert!(sub.has_content_changed(content1));
-        assert!(!sub.has_content_changed(content1));
         sub.update_content_hash(content1);
         assert!(!sub.has_content_changed(content1));
     }

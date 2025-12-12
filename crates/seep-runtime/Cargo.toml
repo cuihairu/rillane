@@ -12,6 +12,9 @@ hyper.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+dashmap.workspace = true
+petgraph.workspace = true
+uuid.workspace = true
 seep-config = { path = "../seep-config" }
 seep-core = { path = "../seep-core" }
 seep-platform = { path = "../seep-platform" }

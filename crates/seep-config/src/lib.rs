@@ -353,8 +353,7 @@ impl GroupDescriptor {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, Serialize)]
 pub enum GroupMember {
     /// 直接节点引用
     Node { name: String },
@@ -370,6 +369,47 @@ pub enum GroupMember {
         name: String,
         weight: u32
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum GroupMemberTagged {
+    Node { name: String },
+    Group { name: String },
+    WeightedNode { name: String, weight: u32 },
+    WeightedGroup { name: String, weight: u32 },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum GroupMemberRepr {
+    /// Shorthand: treat a plain string as `Node { name: ... }`.
+    String(String),
+    Tagged(GroupMemberTagged),
+}
+
+impl From<GroupMemberTagged> for GroupMember {
+    fn from(v: GroupMemberTagged) -> Self {
+        match v {
+            GroupMemberTagged::Node { name } => GroupMember::Node { name },
+            GroupMemberTagged::Group { name } => GroupMember::Group { name },
+            GroupMemberTagged::WeightedNode { name, weight } => GroupMember::WeightedNode { name, weight },
+            GroupMemberTagged::WeightedGroup { name, weight } => GroupMember::WeightedGroup { name, weight },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GroupMember {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        let repr = GroupMemberRepr::deserialize(deserializer)?;
+        Ok(match repr {
+            GroupMemberRepr::String(name) => GroupMember::Node { name },
+            GroupMemberRepr::Tagged(v) => v.into(),
+        })
+    }
 }
 
 impl GroupMember {
@@ -392,7 +432,7 @@ impl GroupMember {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Strategy {
     Fixed,

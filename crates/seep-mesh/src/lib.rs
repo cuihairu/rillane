@@ -308,6 +308,18 @@ impl MeshRegistry {
         Ok(())
     }
 
+    /// 获取链路状态
+    pub fn get_link_state(&self, source: &NodeId, target: &NodeId) -> Option<LinkState> {
+        self.link_states
+            .get(&(source.clone(), target.clone()))
+            .map(|v| v.clone())
+    }
+
+    /// 获取全部链路状态
+    pub fn get_all_link_states(&self) -> Vec<LinkState> {
+        self.link_states.iter().map(|e| e.value().clone()).collect()
+    }
+
     /// 创建会话
     pub fn create_session(&self, client_node: NodeId, path: Vec<NodeId>, target_addr: SocketAddr) -> Result<SessionId> {
         // 验证路径有效性

@@ -87,8 +87,17 @@ pub struct CacheConfig {
 
 impl Default for CacheConfig {
     fn default() -> Self {
+        fn default_cache_dir() -> PathBuf {
+            // Avoid privileged locations like /var/cache (often not writable without sudo).
+            // Prefer a per-user cache directory.
+            if let Ok(home) = std::env::var("HOME") {
+                return PathBuf::from(home).join(".cache/seep/subscriptions");
+            }
+            std::env::temp_dir().join("seep/subscriptions")
+        }
+
         Self {
-            cache_dir: PathBuf::from("/var/cache/seep/subscriptions"),
+            cache_dir: default_cache_dir(),
             default_ttl: Duration::from_secs(86400), // 24小时
             max_entries: 1000,
             max_size_bytes: 100 * 1024 * 1024, // 100MB

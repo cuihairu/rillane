@@ -499,8 +499,14 @@ impl SubscriptionConverter {
     /// 检查内容是否看起来像 Base64
     fn looks_like_base64(&self, content: &str) -> bool {
         let trimmed = content.trim();
-        trimmed.len() > 20 &&
-        trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        // A conservative heuristic:
+        // - Base64 strings are typically padded and length is a multiple of 4
+        // - allow URL-safe alphabet as well
+        trimmed.len() >= 8
+            && trimmed.len() % 4 == 0
+            && trimmed.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')
+            })
     }
 
     /// 解析 V2Ray 链接

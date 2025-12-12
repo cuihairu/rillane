@@ -364,8 +364,13 @@ impl SubscriptionFetcher {
         let lines: Vec<&str> = trimmed.lines().collect();
 
         // 单行且较长，可能是 Base64
-        if lines.len() == 1 && trimmed.len() > 50 {
-            return trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
+        if lines.len() == 1 {
+            let t = trimmed;
+            return t.len() >= 8
+                && t.len() % 4 == 0
+                && t.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')
+                });
         }
 
         // 多行，每行都是 Base64（V2Ray 订阅格式）
@@ -373,12 +378,23 @@ impl SubscriptionFetcher {
             let base64_lines = lines.iter()
                 .filter(|line| {
                     let line = line.trim();
-                    !line.is_empty() &&
-                    (line.starts_with("vmess://") ||
-                     line.starts_with("vless://") ||
-                     line.starts_with("trojan://") ||
-                     line.starts_with("ss://") ||
-                     (line.len() > 20 && line.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')))
+                    if line.is_empty() {
+                        return false;
+                    }
+
+                    if line.starts_with("vmess://")
+                        || line.starts_with("vless://")
+                        || line.starts_with("trojan://")
+                        || line.starts_with("ss://")
+                    {
+                        return true;
+                    }
+
+                    line.len() >= 8
+                        && line.len() % 4 == 0
+                        && line.chars().all(|c| {
+                            c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')
+                        })
                 })
                 .count();
 

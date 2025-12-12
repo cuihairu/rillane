@@ -2,6 +2,7 @@
 //!
 //! 整合配置、路由、网络虚拟化与 Mesh/订阅组件，
 //! 构建可运行的 Seep runtime。
+//! 支持多跳链路构建与故障转移。
 
 use std::{
     collections::HashMap,
@@ -22,7 +23,7 @@ use tokio::{
 use seep_config::{
     EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor, SeepConfig,
 };
-use seep_core::{Flow, FlowOutput, FlowReport, RouteDecision, EgressConnector, IngressEndpoint};
+use seep_core::{Flow, FlowOutput, FlowReport, RouteDecision, RoutePath, EgressConnector, IngressEndpoint};
 use seep_mesh::{MeshRegistry, MeshSession, NodeId, SessionId};
 use seep_platform::network::{NetworkConfig, NetworkManager};
 use seep_protocols::{
@@ -31,6 +32,8 @@ use seep_protocols::{
 };
 use seep_routing::RoutingEngine;
 use seep_subscription::SubscriptionManager;
+
+use crate::chain::{ChainBuilder, ChainConfig, ChainConstraints, ChainManager};
 
 /// 运行时构建器
 pub struct RuntimeBuilder {
@@ -122,6 +125,27 @@ impl RuntimeBuilder {
             None
         };
 
+        // 初始化链路管理器（需要先有 mesh_registry）
+        let chain_manager = if self.runtime_config.enable_chain {
+            if let Some(ref registry) = mesh_registry {
+                let chain_cfg = self
+                    .runtime_config
+                    .chain_config
+                    .clone()
+                    .unwrap_or_default();
+                let builder = Arc::new(ChainBuilder::new(chain_cfg.clone(), registry.clone()));
+                Some(Arc::new(ChainManager::new(chain_cfg, builder, registry.clone())))
+            } else {
+                tracing::warn!(
+                    target: "seep::runtime",
+                    "链路功能已启用但 Mesh 未启用，链路管理器将不可用"
+                );
+                None
+            }
+        } else {
+            None
+        };
+
         let subscription_manager = if self.runtime_config.enable_hot_reload {
             Some(Arc::new(SubscriptionManager::new()))
         } else {
@@ -138,6 +162,7 @@ impl RuntimeBuilder {
             flow_outputs: self.flow_outputs,
             egress_connectors: self.egress_connectors,
             mesh_registry,
+            chain_manager,
             network_manager,
             subscription_manager,
             event_tx,
@@ -170,8 +195,12 @@ pub struct RuntimeConfig {
     pub enable_mesh: bool,
     pub enable_network_virtualization: bool,
     pub enable_hot_reload: bool,
+    /// 启用多跳链路支持
+    pub enable_chain: bool,
     pub mesh_config: Option<MeshConfig>,
     pub network_config: Option<NetworkConfig>,
+    /// 链路配置
+    pub chain_config: Option<ChainConfig>,
     pub worker_threads: Option<usize>,
     pub connection_pool_size: Option<usize>,
     pub session_timeout: Option<Duration>,
@@ -185,8 +214,10 @@ impl Default for RuntimeConfig {
             enable_mesh: false,
             enable_network_virtualization: false,
             enable_hot_reload: true,
+            enable_chain: false,
             mesh_config: None,
             network_config: None,
+            chain_config: None,
             worker_threads: Some(num_cpus::get()),
             connection_pool_size: Some(1024),
             session_timeout: Some(Duration::from_secs(300)),
@@ -310,6 +341,8 @@ pub struct Runtime {
     flow_outputs: HashMap<String, Arc<dyn FlowOutput>>,
     egress_connectors: HashMap<String, Arc<dyn EgressConnector>>,
     mesh_registry: Option<Arc<MeshRegistry>>,
+    /// 链路管理器（多跳链路支持）
+    chain_manager: Option<Arc<ChainManager>>,
     network_manager: Option<Arc<Mutex<NetworkManager>>>,
     subscription_manager: Option<Arc<SubscriptionManager>>,
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
@@ -338,7 +371,11 @@ impl Runtime {
         let mut tasks = Vec::new();
         *self.running.write().expect("running lock poisoned") = true;
 
-        let output_router = Arc::new(FlowOutputRouter::new(self.flow_outputs.clone()));
+        // 创建流量输出路由器（支持多跳链路）
+        let output_router = Arc::new(FlowOutputRouter::new(
+            self.flow_outputs.clone(),
+            self.chain_manager.clone(),
+        ));
 
         for (name, endpoint) in self.ingress_endpoints.iter() {
             let router = self.router.clone();
@@ -371,6 +408,35 @@ impl Runtime {
                     let _ = tx.send(RuntimeEvent::TelemetryEvent {
                         metric_name: "mesh_nodes".into(),
                         value: stats.total_nodes as f64,
+                        tags: HashMap::new(),
+                    });
+                }
+            }));
+        }
+
+        // 启动链路管理器健康检查任务
+        if let Some(chain_mgr) = &self.chain_manager {
+            let mgr = chain_mgr.clone();
+            let tx = self.event_tx.clone();
+            tasks.push(tokio::spawn(async move {
+                let mgr_clone = mgr.clone();
+                tokio::spawn(async move {
+                    mgr_clone.start_health_check_task().await;
+                });
+
+                // 定期报告链路统计
+                let mut ticker = time::interval(Duration::from_secs(30));
+                loop {
+                    ticker.tick().await;
+                    let stats = mgr.get_stats().await;
+                    let _ = tx.send(RuntimeEvent::TelemetryEvent {
+                        metric_name: "chain_active_count".into(),
+                        value: stats.active_chains as f64,
+                        tags: HashMap::new(),
+                    });
+                    let _ = tx.send(RuntimeEvent::TelemetryEvent {
+                        metric_name: "chain_failover_count".into(),
+                        value: stats.failover_count as f64,
                         tags: HashMap::new(),
                     });
                 }
@@ -435,31 +501,125 @@ impl Runtime {
         let (_tx, rx) = mpsc::unbounded_channel();
         rx
     }
+
+    /// 获取链路管理器
+    pub fn get_chain_manager(&self) -> Option<Arc<ChainManager>> {
+        self.chain_manager.clone()
+    }
+
+    /// 获取 Mesh 注册表
+    pub fn get_mesh_registry(&self) -> Option<Arc<MeshRegistry>> {
+        self.mesh_registry.clone()
+    }
+
+    /// 执行链路 Dry Run（预检）
+    pub async fn dry_run_chain(
+        &self,
+        source: &NodeId,
+        target: &NodeId,
+        constraints: Option<ChainConstraints>,
+    ) -> Result<crate::chain::ChainDryRunResult> {
+        let chain_manager = self
+            .chain_manager
+            .as_ref()
+            .ok_or_else(|| anyhow!("链路管理器未启用"))?;
+
+        let mesh_registry = self
+            .mesh_registry
+            .as_ref()
+            .ok_or_else(|| anyhow!("Mesh 注册表未启用"))?;
+
+        let chain_cfg = self
+            .runtime_config
+            .chain_config
+            .clone()
+            .unwrap_or_default();
+
+        let builder = ChainBuilder::new(chain_cfg, mesh_registry.clone());
+        builder.dry_run(source, target, constraints).await
+    }
 }
 
-/// 派发路由决策到具体出口
+/// 派发路由决策到具体出口（支持多跳链路）
 struct FlowOutputRouter {
     outputs: HashMap<String, Arc<dyn FlowOutput>>,
+    chain_manager: Option<Arc<ChainManager>>,
 }
 
 impl FlowOutputRouter {
-    fn new(outputs: HashMap<String, Arc<dyn FlowOutput>>) -> Self {
-        Self { outputs }
+    fn new(outputs: HashMap<String, Arc<dyn FlowOutput>>, chain_manager: Option<Arc<ChainManager>>) -> Self {
+        Self { outputs, chain_manager }
     }
 }
 
 #[async_trait]
 impl FlowOutput for FlowOutputRouter {
     async fn forward(&self, decision: RouteDecision, flow: Flow) -> Result<FlowReport> {
+        // 检查是否是多跳链路路由
+        match &decision.path {
+            RoutePath::Chain { hops } if !hops.is_empty() => {
+                // 多跳链路转发
+                self.forward_chain(&decision, flow, hops).await
+            }
+            _ => {
+                // 单跳转发
+                self.forward_single(&decision, flow).await
+            }
+        }
+    }
+}
+
+impl FlowOutputRouter {
+    /// 单跳转发
+    async fn forward_single(&self, decision: &RouteDecision, flow: Flow) -> Result<FlowReport> {
         let mut target = decision.final_node();
         if let Some(stripped) = target.strip_prefix("egress.") {
             target = stripped.to_string();
         }
 
         if let Some(output) = self.outputs.get(&target) {
-            output.forward(decision, flow).await
+            output.forward(decision.clone(), flow).await
         } else {
             Err(anyhow!("未找到出口 {target}"))
+        }
+    }
+
+    /// 多跳链路转发
+    async fn forward_chain(
+        &self,
+        decision: &RouteDecision,
+        flow: Flow,
+        hops: &[seep_core::RouteHop],
+    ) -> Result<FlowReport> {
+        if hops.is_empty() {
+            return Err(anyhow!("多跳链路为空"));
+        }
+
+        // 获取第一跳（入口到第一个中继/出口）
+        let first_hop = &hops[0];
+        let mut target = first_hop.node.clone();
+        if let Some(stripped) = target.strip_prefix("egress.") {
+            target = stripped.to_string();
+        }
+
+        // 记录链路信息到日志
+        tracing::debug!(
+            target: "seep::chain",
+            path = ?hops.iter().map(|h| &h.node).collect::<Vec<_>>(),
+            "执行多跳链路转发"
+        );
+
+        // 对于多跳链路，需要在流量元数据中携带完整路径信息
+        // 这里简化处理：将路由决策传递给第一跳，由协议层处理后续跳转
+        if let Some(output) = self.outputs.get(&target) {
+            output.forward(decision.clone(), flow).await
+        } else {
+            // 如果没有对应的出口，尝试通过 direct 出口
+            if let Some(direct_output) = self.outputs.get("direct") {
+                direct_output.forward(decision.clone(), flow).await
+            } else {
+                Err(anyhow!("多跳链路第一跳 {} 无可用出口", target))
+            }
         }
     }
 }

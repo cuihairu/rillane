@@ -1670,10 +1670,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "dashmap 6.1.0",
  "futures",
  "hyper 0.14.32",
  "notify",
  "num_cpus",
+ "petgraph",
  "regex",
  "seep-config",
  "seep-core",
@@ -1688,6 +1690,7 @@ dependencies = [
  "serde_yaml",
  "tokio",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -1747,11 +1750,17 @@ name = "seepd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hyper 0.14.32",
  "seep-config",
+ "seep-core",
+ "seep-mesh",
  "seep-runtime",
  "seep-telemetry",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

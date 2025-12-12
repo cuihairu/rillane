@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
 use serde_yaml::Value;
 use tracing::{debug, warn};
 
@@ -102,8 +102,12 @@ pub struct ClashProxy {
 #[serde(rename_all = "lowercase")]
 pub enum ClashProxyGroupType {
     Select,
+    // Clash commonly uses `url-test` / `load-balance` (with dashes).
+    // Keep aliases for compatibility with older "urltest"/"loadbalance" spellings.
+    #[serde(rename = "url-test", alias = "urltest")]
     UrlTest,
     Fallback,
+    #[serde(rename = "load-balance", alias = "loadbalance")]
     LoadBalance,
     Relay,
 }
@@ -130,8 +134,7 @@ pub struct ClashProxyGroup {
 }
 
 /// Clash 规则
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[derive(Debug, Clone, Serialize)]
 pub enum ClashRule {
     /// 域名后缀
     DomainSuffix {
@@ -194,6 +197,183 @@ pub enum ClashRule {
     Match {
         target: String,
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum ClashRuleTagged {
+    DomainSuffix {
+        #[serde(rename = "domain-suffix")]
+        domains: Vec<String>,
+        target: String,
+    },
+    DomainKeyword {
+        #[serde(rename = "domain-keyword")]
+        keywords: Vec<String>,
+        target: String,
+    },
+    Domain {
+        domains: Vec<String>,
+        target: String,
+    },
+    IpCidr {
+        #[serde(rename = "ip-cidr")]
+        cidrs: Vec<String>,
+        target: String,
+    },
+    Geoip {
+        country_code: String,
+        target: String,
+    },
+    Geosite {
+        country_code: String,
+        target: String,
+    },
+    SrcPort {
+        #[serde(rename = "src-port")]
+        ports: Vec<u16>,
+        target: String,
+    },
+    DstPort {
+        #[serde(rename = "dst-port")]
+        ports: Vec<u16>,
+        target: String,
+    },
+    ProcessName {
+        #[serde(rename = "process-name")]
+        processes: Vec<String>,
+        target: String,
+    },
+    RuleSet {
+        #[serde(rename = "rule-set")]
+        rulesets: Vec<String>,
+        target: String,
+    },
+    Match {
+        target: String,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ClashRuleRepr {
+    String(String),
+    Tagged(ClashRuleTagged),
+}
+
+impl From<ClashRuleTagged> for ClashRule {
+    fn from(v: ClashRuleTagged) -> Self {
+        match v {
+            ClashRuleTagged::DomainSuffix { domains, target } => ClashRule::DomainSuffix { domains, target },
+            ClashRuleTagged::DomainKeyword { keywords, target } => ClashRule::DomainKeyword { keywords, target },
+            ClashRuleTagged::Domain { domains, target } => ClashRule::Domain { domains, target },
+            ClashRuleTagged::IpCidr { cidrs, target } => ClashRule::IpCidr { cidrs, target },
+            ClashRuleTagged::Geoip { country_code, target } => ClashRule::Geoip { country_code, target },
+            ClashRuleTagged::Geosite { country_code, target } => ClashRule::Geosite { country_code, target },
+            ClashRuleTagged::SrcPort { ports, target } => ClashRule::SrcPort { ports, target },
+            ClashRuleTagged::DstPort { ports, target } => ClashRule::DstPort { ports, target },
+            ClashRuleTagged::ProcessName { processes, target } => ClashRule::ProcessName { processes, target },
+            ClashRuleTagged::RuleSet { rulesets, target } => ClashRule::RuleSet { rulesets, target },
+            ClashRuleTagged::Match { target } => ClashRule::Match { target },
+        }
+    }
+}
+
+impl ClashRule {
+    fn parse_rule_string(s: &str) -> Result<Self, String> {
+        let raw = s.trim();
+        if raw.is_empty() {
+            return Err("empty rule".into());
+        }
+        let parts: Vec<&str> = raw.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() {
+            return Err("empty rule".into());
+        }
+
+        let kind = parts[0].to_ascii_uppercase();
+        let get = |idx: usize| parts.get(idx).copied().ok_or_else(|| format!("invalid rule: {raw}"));
+
+        fn parse_ports(s: &str) -> Result<Vec<u16>, String> {
+            let s = s.trim();
+            if s.is_empty() {
+                return Err("empty port".into());
+            }
+            if let Some((a, b)) = s.split_once('-') {
+                let start: u16 = a.trim().parse().map_err(|_| format!("invalid port range: {s}"))?;
+                let end: u16 = b.trim().parse().map_err(|_| format!("invalid port range: {s}"))?;
+                if start > end {
+                    return Err(format!("invalid port range: {s}"));
+                }
+                let span = (end - start) as usize;
+                if span > 4096 {
+                    return Err(format!("port range too large: {s}"));
+                }
+                return Ok((start..=end).collect());
+            }
+            let p: u16 = s.parse().map_err(|_| format!("invalid port: {s}"))?;
+            Ok(vec![p])
+        }
+
+        match kind.as_str() {
+            "DOMAIN-SUFFIX" => Ok(ClashRule::DomainSuffix {
+                domains: vec![get(1)?.to_string()],
+                target: get(2)?.to_string(),
+            }),
+            "DOMAIN-KEYWORD" => Ok(ClashRule::DomainKeyword {
+                keywords: vec![get(1)?.to_string()],
+                target: get(2)?.to_string(),
+            }),
+            "DOMAIN" => Ok(ClashRule::Domain {
+                domains: vec![get(1)?.to_string()],
+                target: get(2)?.to_string(),
+            }),
+            "IP-CIDR" | "IP-CIDR6" => Ok(ClashRule::IpCidr {
+                cidrs: vec![get(1)?.to_string()],
+                target: get(2)?.to_string(),
+            }),
+            "GEOIP" => Ok(ClashRule::Geoip {
+                country_code: get(1)?.to_string(),
+                target: get(2)?.to_string(),
+            }),
+            "GEOSITE" => Ok(ClashRule::Geosite {
+                country_code: get(1)?.to_string(),
+                target: get(2)?.to_string(),
+            }),
+            "SRC-PORT" => Ok(ClashRule::SrcPort {
+                ports: parse_ports(get(1)?)?,
+                target: get(2)?.to_string(),
+            }),
+            "DST-PORT" => Ok(ClashRule::DstPort {
+                ports: parse_ports(get(1)?)?,
+                target: get(2)?.to_string(),
+            }),
+            "PROCESS-NAME" => Ok(ClashRule::ProcessName {
+                processes: vec![get(1)?.to_string()],
+                target: get(2)?.to_string(),
+            }),
+            "RULE-SET" => Ok(ClashRule::RuleSet {
+                rulesets: vec![get(1)?.to_string()],
+                target: get(2)?.to_string(),
+            }),
+            "MATCH" => Ok(ClashRule::Match {
+                target: get(1)?.to_string(),
+            }),
+            _ => Err(format!("unsupported rule type: {}", parts[0])),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ClashRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let repr = ClashRuleRepr::deserialize(deserializer)?;
+        match repr {
+            ClashRuleRepr::Tagged(v) => Ok(v.into()),
+            ClashRuleRepr::String(s) => ClashRule::parse_rule_string(&s).map_err(de::Error::custom),
+        }
+    }
 }
 
 /// Clash 配置根结构
