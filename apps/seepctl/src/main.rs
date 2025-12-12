@@ -35,6 +35,13 @@ enum Command {
         #[arg(long)]
         endpoint: Option<String>,
     },
+    /// 链路管理（多跳链路）
+    Chain {
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[command(subcommand)]
+        command: ChainCommand,
+    },
     /// 从 Clash YAML 订阅转换为 Seep 配置 (preview)
     ImportClash {
         /// 订阅 URL 或文件路径
@@ -43,6 +50,37 @@ enum Command {
         #[arg(short, long, default_value = "config/clash_import.yaml")]
         output: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ChainCommand {
+    /// 链路 dry-run（预检）
+    DryRun {
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        target: String,
+    },
+    /// 创建链路（或复用同一 session_id 的链路）
+    Create {
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        target: String,
+        /// 可选：指定会话ID（UUID）；不指定会自动生成
+        #[arg(long)]
+        session_id: Option<String>,
+    },
+    /// 获取链路详情
+    Get {
+        chain_id: String,
+    },
+    /// 终止链路
+    Terminate {
+        chain_id: String,
+    },
+    /// 获取链路统计
+    Stats,
 }
 
 fn main() -> Result<()> {
@@ -63,8 +101,11 @@ fn main() -> Result<()> {
             let target =
                 endpoint.unwrap_or_else(|| format!("http://{}/flows", config.control.api_bind));
             let client = Client::new();
-            let resp = client
-                .get(&target)
+            let mut req = client.get(&target);
+            if let Some(token) = &config.control.admin_token {
+                req = req.header("x-admin-token", token);
+            }
+            let resp = req
                 .send()
                 .with_context(|| format!("无法访问 {target}"))?;
             if !resp.status().is_success() {
@@ -88,8 +129,11 @@ fn main() -> Result<()> {
             let target =
                 endpoint.unwrap_or_else(|| format!("http://{}/nodes", config.control.api_bind));
             let client = Client::new();
-            let resp = client
-                .get(&target)
+            let mut req = client.get(&target);
+            if let Some(token) = &config.control.admin_token {
+                req = req.header("x-admin-token", token);
+            }
+            let resp = req
                 .send()
                 .with_context(|| format!("无法访问 {target}"))?;
             if !resp.status().is_success() {
@@ -151,6 +195,85 @@ fn main() -> Result<()> {
             let rendered = serde_yaml::to_string(&converted)?;
             fs::write(&output, rendered)?;
             println!("已转换为 Seep 配置并保存至 {output}");
+        }
+        Command::Chain { endpoint, command } => {
+            let config = SeepConfig::load_from_path(&cli.config)?;
+            let base = endpoint.unwrap_or_else(|| format!("http://{}", config.control.api_bind));
+            let client = Client::new();
+
+            let token = config.control.admin_token.clone();
+            let with_auth = |req: reqwest::blocking::RequestBuilder| {
+                if let Some(t) = &token {
+                    req.header("x-admin-token", t)
+                } else {
+                    req
+                }
+            };
+
+            match command {
+                ChainCommand::DryRun { source, target } => {
+                    let url = format!("{base}/chains/dry-run");
+                    let body = serde_json::json!({ "source": source, "target": target });
+                    let resp = with_auth(client.post(&url).json(&body))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    if !resp.status().is_success() {
+                        anyhow::bail!("控制面返回错误: {}", resp.status());
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                ChainCommand::Create { source, target, session_id } => {
+                    let url = format!("{base}/chains");
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("source".into(), serde_json::Value::String(source));
+                    obj.insert("target".into(), serde_json::Value::String(target));
+                    if let Some(sid) = session_id {
+                        obj.insert("session_id".into(), serde_json::Value::String(sid));
+                    }
+                    let resp = with_auth(client.post(&url).json(&obj))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    if !resp.status().is_success() {
+                        anyhow::bail!("控制面返回错误: {}", resp.status());
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                ChainCommand::Get { chain_id } => {
+                    let url = format!("{base}/chains/{chain_id}");
+                    let resp = with_auth(client.get(&url))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    if !resp.status().is_success() {
+                        anyhow::bail!("控制面返回错误: {}", resp.status());
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                ChainCommand::Terminate { chain_id } => {
+                    let url = format!("{base}/chains/{chain_id}");
+                    let resp = with_auth(client.delete(&url))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    if !resp.status().is_success() {
+                        anyhow::bail!("控制面返回错误: {}", resp.status());
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                ChainCommand::Stats => {
+                    let url = format!("{base}/chains/stats");
+                    let resp = with_auth(client.get(&url))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    if !resp.status().is_success() {
+                        anyhow::bail!("控制面返回错误: {}", resp.status());
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+            }
         }
     }
     Ok(())

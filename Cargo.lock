@@ -1740,6 +1740,7 @@ dependencies = [
  "seep-config",
  "seep-runtime",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tokio",
  "tracing",

@@ -23,7 +23,10 @@ use tokio::{
 use seep_config::{
     EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor, SeepConfig,
 };
-use seep_core::{Flow, FlowOutput, FlowReport, RouteDecision, RoutePath, EgressConnector, IngressEndpoint};
+use seep_core::{
+    EgressConnector, Flow, FlowContext, FlowOutput, FlowReport, FlowRouter, IngressEndpoint,
+    RouteDecision, RoutePath,
+};
 use seep_mesh::{MeshRegistry, MeshSession, NodeId, SessionId};
 use seep_platform::network::{NetworkConfig, NetworkManager};
 use seep_protocols::{
@@ -114,15 +117,22 @@ impl RuntimeBuilder {
             None
         };
 
-        let mesh_registry = if self.runtime_config.enable_mesh {
+        let local_node_id = if self.runtime_config.enable_mesh {
             let mesh_cfg = self
                 .runtime_config
                 .mesh_config
                 .clone()
                 .unwrap_or_default();
-            Some(register_local_mesh_node(mesh_cfg)?)
+            let node_id = mesh_cfg.node_id.clone();
+            let _registry = register_local_mesh_node(mesh_cfg)?;
+            Some((node_id, _registry))
         } else {
             None
+        };
+
+        let (local_node_id, mesh_registry) = match local_node_id {
+            Some((id, reg)) => (Some(id), Some(reg)),
+            None => (None, None),
         };
 
         // 初始化链路管理器（需要先有 mesh_registry）
@@ -158,6 +168,7 @@ impl RuntimeBuilder {
             config,
             runtime_config: self.runtime_config,
             router,
+            local_node_id,
             ingress_endpoints: self.ingress_endpoints,
             flow_outputs: self.flow_outputs,
             egress_connectors: self.egress_connectors,
@@ -337,6 +348,7 @@ pub struct Runtime {
     config: Arc<RwLock<SeepConfig>>,
     runtime_config: RuntimeConfig,
     router: Arc<RoutingEngine>,
+    local_node_id: Option<NodeId>,
     ingress_endpoints: HashMap<String, Arc<dyn IngressEndpoint>>,
     flow_outputs: HashMap<String, Arc<dyn FlowOutput>>,
     egress_connectors: HashMap<String, Arc<dyn EgressConnector>>,
@@ -378,7 +390,7 @@ impl Runtime {
         ));
 
         for (name, endpoint) in self.ingress_endpoints.iter() {
-            let router = self.router.clone();
+            let router = self.flow_router();
             let output = output_router.clone();
             let ingress = endpoint.clone();
             let label = name.clone();
@@ -512,6 +524,24 @@ impl Runtime {
         self.mesh_registry.clone()
     }
 
+    /// 获取 FlowRouter（必要时自动包装为 mesh-chain 路由器）
+    pub fn flow_router(&self) -> Arc<dyn FlowRouter> {
+        if let (Some(chain_mgr), Some(mesh), Some(local_id)) = (
+            self.chain_manager.clone(),
+            self.mesh_registry.clone(),
+            self.local_node_id.clone(),
+        ) {
+            Arc::new(RuntimeFlowRouter::new(
+                self.router.clone(),
+                mesh,
+                chain_mgr,
+                local_id,
+            ))
+        } else {
+            self.router.clone()
+        }
+    }
+
     /// 执行链路 Dry Run（预检）
     pub async fn dry_run_chain(
         &self,
@@ -537,6 +567,75 @@ impl Runtime {
 
         let builder = ChainBuilder::new(chain_cfg, mesh_registry.clone());
         builder.dry_run(source, target, constraints).await
+    }
+}
+
+/// 在普通 routing 结果之上，识别 mesh.* 目标并自动构建链路
+struct RuntimeFlowRouter {
+    engine: Arc<RoutingEngine>,
+    mesh_registry: Arc<MeshRegistry>,
+    chain_manager: Arc<ChainManager>,
+    local_node_id: NodeId,
+}
+
+impl RuntimeFlowRouter {
+    fn new(
+        engine: Arc<RoutingEngine>,
+        mesh_registry: Arc<MeshRegistry>,
+        chain_manager: Arc<ChainManager>,
+        local_node_id: NodeId,
+    ) -> Self {
+        Self {
+            engine,
+            mesh_registry,
+            chain_manager,
+            local_node_id,
+        }
+    }
+
+    fn parse_mesh_target(target: &str) -> Option<&str> {
+        target
+            .strip_prefix("mesh.")
+            .or_else(|| target.strip_prefix("mesh:"))
+    }
+}
+
+#[async_trait]
+impl FlowRouter for RuntimeFlowRouter {
+    async fn route(&self, ctx: FlowContext) -> Result<RouteDecision> {
+        let base = self.engine.route(ctx.clone()).await?;
+
+        // Already a chain decision; keep as-is.
+        if matches!(base.path, RoutePath::Chain { .. }) {
+            return Ok(base);
+        }
+
+        let target = base.final_node();
+        let Some(mesh_target) = Self::parse_mesh_target(&target) else {
+            return Ok(base);
+        };
+
+        // Validate the target exists/online; otherwise keep base decision.
+        let online = self
+            .mesh_registry
+            .get_online_nodes()
+            .into_iter()
+            .any(|n| n.id == mesh_target);
+        if !online {
+            return Ok(base);
+        }
+
+        // Use FlowId UUID as session id, so retries of the same flow can reuse the chain.
+        let session_id = ctx.id.as_uuid();
+        let target_node: NodeId = mesh_target.to_string();
+        match self
+            .chain_manager
+            .get_or_create_chain(session_id, &self.local_node_id, &target_node, None)
+            .await
+        {
+            Ok(chain_ctx) => Ok(self.chain_manager.build_route_decision(&chain_ctx)),
+            Err(_) => Ok(base),
+        }
     }
 }
 
@@ -588,7 +687,7 @@ impl FlowOutputRouter {
     async fn forward_chain(
         &self,
         decision: &RouteDecision,
-        flow: Flow,
+        mut flow: Flow,
         hops: &[seep_core::RouteHop],
     ) -> Result<FlowReport> {
         if hops.is_empty() {
@@ -608,6 +707,18 @@ impl FlowOutputRouter {
             path = ?hops.iter().map(|h| &h.node).collect::<Vec<_>>(),
             "执行多跳链路转发"
         );
+
+        // Attach chain path metadata for downstream protocol layers (future: actual mesh transport).
+        if let Ok(path_json) = serde_json::to_string(&decision.all_nodes()) {
+            flow.metadata
+                .annotations
+                .insert("seep.chain.path".to_string(), path_json);
+        }
+        if let Some(reason) = decision.reason.as_deref() {
+            flow.metadata
+                .annotations
+                .insert("seep.route.reason".to_string(), reason.to_string());
+        }
 
         // 对于多跳链路，需要在流量元数据中携带完整路径信息
         // 这里简化处理：将路由决策传递给第一跳，由协议层处理后续跳转
