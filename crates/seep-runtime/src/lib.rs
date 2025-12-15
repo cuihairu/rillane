@@ -8,9 +8,11 @@
 //! - 订阅管理
 //! - 热更新
 //! - 多跳链路构建
+//! - Mesh 数据平面传输
 
 pub mod chain;
 pub mod hot_reload;
+pub mod mesh_transport;
 pub mod runtime_builder;
 
 pub use chain::{
@@ -18,6 +20,7 @@ pub use chain::{
     ChainManager, ChainManagerStats, PathOptimizationStrategy,
 };
 pub use hot_reload::{HotReloadConfig, HotReloadManager, ReloadEvent, ReloadStats};
+pub use mesh_transport::{MeshDataPlane, MeshEnvelope};
 pub use runtime_builder::{
     MeshConfig, NetworkEventType, Runtime, RuntimeBuilder, RuntimeConfig, RuntimeEvent,
     RuntimeStats, SubscriptionEventType,

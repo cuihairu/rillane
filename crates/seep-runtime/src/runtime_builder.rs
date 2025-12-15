@@ -37,6 +37,7 @@ use seep_routing::RoutingEngine;
 use seep_subscription::SubscriptionManager;
 
 use crate::chain::{ChainBuilder, ChainConfig, ChainConstraints, ChainManager};
+use crate::mesh_transport::{MeshDataPlane, MeshEnvelope};
 
 /// 运行时构建器
 pub struct RuntimeBuilder {
@@ -118,11 +119,11 @@ impl RuntimeBuilder {
         };
 
         let local_node_id = if self.runtime_config.enable_mesh {
-            let mesh_cfg = self
-                .runtime_config
-                .mesh_config
-                .clone()
-                .unwrap_or_default();
+            // Persist mesh_config back into runtime_config for later (listener bind, etc).
+            if self.runtime_config.mesh_config.is_none() {
+                self.runtime_config.mesh_config = Some(MeshConfig::default());
+            }
+            let mesh_cfg = self.runtime_config.mesh_config.clone().unwrap_or_default();
             let node_id = mesh_cfg.node_id.clone();
             let _registry = register_local_mesh_node(mesh_cfg)?;
             Some((node_id, _registry))
@@ -387,7 +388,21 @@ impl Runtime {
         let output_router = Arc::new(FlowOutputRouter::new(
             self.flow_outputs.clone(),
             self.chain_manager.clone(),
+            self.mesh_registry.clone(),
+            self.local_node_id.clone(),
         ));
+
+        // Spawn mesh data-plane listener (TCP) for multi-hop transport (requires chain feature).
+        if self.runtime_config.enable_chain {
+            if let (Some(mesh), Some(local_id), Some(mesh_cfg)) = (
+                self.mesh_registry.clone(),
+                self.local_node_id.clone(),
+                self.runtime_config.mesh_config.clone(),
+            ) {
+                let plane = MeshDataPlane::new(local_id, mesh);
+                tasks.push(plane.spawn(mesh_cfg.listen_address));
+            }
+        }
 
         for (name, endpoint) in self.ingress_endpoints.iter() {
             let router = self.flow_router();
@@ -524,6 +539,16 @@ impl Runtime {
         self.mesh_registry.clone()
     }
 
+    /// 获取出口连接器
+    pub fn get_egress_connectors(&self) -> &HashMap<String, Arc<dyn EgressConnector>> {
+        &self.egress_connectors
+    }
+
+    /// 获取订阅管理器
+    pub fn get_subscription_manager(&self) -> Option<Arc<SubscriptionManager>> {
+        self.subscription_manager.clone()
+    }
+
     /// 获取 FlowRouter（必要时自动包装为 mesh-chain 路由器）
     pub fn flow_router(&self) -> Arc<dyn FlowRouter> {
         if let (Some(chain_mgr), Some(mesh), Some(local_id)) = (
@@ -549,7 +574,8 @@ impl Runtime {
         target: &NodeId,
         constraints: Option<ChainConstraints>,
     ) -> Result<crate::chain::ChainDryRunResult> {
-        let chain_manager = self
+        // 验证链路管理器已启用
+        let _ = self
             .chain_manager
             .as_ref()
             .ok_or_else(|| anyhow!("链路管理器未启用"))?;
@@ -642,12 +668,26 @@ impl FlowRouter for RuntimeFlowRouter {
 /// 派发路由决策到具体出口（支持多跳链路）
 struct FlowOutputRouter {
     outputs: HashMap<String, Arc<dyn FlowOutput>>,
+    /// 链路管理器（预留用于故障转移）
+    #[allow(dead_code)]
     chain_manager: Option<Arc<ChainManager>>,
+    mesh_registry: Option<Arc<MeshRegistry>>,
+    local_node_id: Option<NodeId>,
 }
 
 impl FlowOutputRouter {
-    fn new(outputs: HashMap<String, Arc<dyn FlowOutput>>, chain_manager: Option<Arc<ChainManager>>) -> Self {
-        Self { outputs, chain_manager }
+    fn new(
+        outputs: HashMap<String, Arc<dyn FlowOutput>>,
+        chain_manager: Option<Arc<ChainManager>>,
+        mesh_registry: Option<Arc<MeshRegistry>>,
+        local_node_id: Option<NodeId>,
+    ) -> Self {
+        Self {
+            outputs,
+            chain_manager,
+            mesh_registry,
+            local_node_id,
+        }
     }
 }
 
@@ -694,21 +734,7 @@ impl FlowOutputRouter {
             return Err(anyhow!("多跳链路为空"));
         }
 
-        // 获取第一跳（入口到第一个中继/出口）
-        let first_hop = &hops[0];
-        let mut target = first_hop.node.clone();
-        if let Some(stripped) = target.strip_prefix("egress.") {
-            target = stripped.to_string();
-        }
-
-        // 记录链路信息到日志
-        tracing::debug!(
-            target: "seep::chain",
-            path = ?hops.iter().map(|h| &h.node).collect::<Vec<_>>(),
-            "执行多跳链路转发"
-        );
-
-        // Attach chain path metadata for downstream protocol layers (future: actual mesh transport).
+        // Always attach chain metadata (useful for telemetry and future multi-hop implementations).
         if let Ok(path_json) = serde_json::to_string(&decision.all_nodes()) {
             flow.metadata
                 .annotations
@@ -720,18 +746,53 @@ impl FlowOutputRouter {
                 .insert("seep.route.reason".to_string(), reason.to_string());
         }
 
-        // 对于多跳链路，需要在流量元数据中携带完整路径信息
-        // 这里简化处理：将路由决策传递给第一跳，由协议层处理后续跳转
-        if let Some(output) = self.outputs.get(&target) {
-            output.forward(decision.clone(), flow).await
-        } else {
-            // 如果没有对应的出口，尝试通过 direct 出口
-            if let Some(direct_output) = self.outputs.get("direct") {
-                direct_output.forward(decision.clone(), flow).await
-            } else {
-                Err(anyhow!("多跳链路第一跳 {} 无可用出口", target))
+        // For mesh chains, hops[0] is usually the local node id; the first actionable remote hop is hops[1].
+        if hops.len() >= 2 {
+            if let (Some(mesh), Some(local_id)) = (self.mesh_registry.clone(), self.local_node_id.clone()) {
+                let next_hop = hops[1].node.clone();
+
+                // Best-effort: if next_hop exists in mesh registry, use mesh transport; otherwise fall back.
+                if mesh.get_node_addr(&next_hop).is_some() {
+                    tracing::debug!(
+                        target: "seep::mesh::transport",
+                        next = %next_hop,
+                        "使用 mesh data-plane 转发链路流量"
+                    );
+
+                    let plane = MeshDataPlane::new(local_id.clone(), mesh);
+                    let env = MeshEnvelope::new(
+                        flow.id.as_uuid().to_string(),
+                        flow.target.host.clone(),
+                        flow.target.port,
+                        hops.iter().map(|h| h.node.clone()).collect(),
+                    );
+
+                    plane.dial_and_tunnel(&next_hop, &env, &mut *flow.io).await?;
+                    return Ok(FlowReport::default());
+                }
             }
         }
+
+        // 记录链路信息到日志
+        tracing::debug!(
+            target: "seep::chain",
+            path = ?hops.iter().map(|h| &h.node).collect::<Vec<_>>(),
+            "执行多跳链路转发"
+        );
+
+        // Fallback behavior: try forward to the first hop that maps to an egress output.
+        for hop in hops {
+            let mut name = hop.node.clone();
+            if let Some(stripped) = name.strip_prefix("egress.") {
+                name = stripped.to_string();
+            }
+            if let Some(output) = self.outputs.get(&name) {
+                return output.forward(decision.clone(), flow).await;
+            }
+        }
+
+        // Last resort: try forward to the final node like a regular egress.
+        self.forward_single(decision, flow).await
     }
 }
 
@@ -900,7 +961,7 @@ mod tests {
                 annotations: annotations.clone(),
             }),
         );
-        let router = FlowOutputRouter::new(outputs, None);
+        let router = FlowOutputRouter::new(outputs, None, None, None);
 
         let decision = {
             let hops = vec![

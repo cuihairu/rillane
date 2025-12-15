@@ -384,6 +384,15 @@ impl MeshRegistry {
             .collect()
     }
 
+    /// 获取节点监听地址
+    pub fn get_node_addr(&self, node_id: &NodeId) -> Option<SocketAddr> {
+        self.nodes
+            .read()
+            .expect("mesh registry poisoned")
+            .get(node_id)
+            .map(|r| r.addr)
+    }
+
     /// 按角色获取节点
     pub fn get_nodes_by_role(&self, role: NodeRole) -> Vec<NodeRecord> {
         self.nodes

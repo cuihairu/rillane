@@ -21,8 +21,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use seep_core::{
-    ChainContext, ChainStatus, Flow, FlowContext, FlowReport, HopType, RouteDecision,
-    RouteHop, RoutePath, RouteType,
+    ChainContext, ChainStatus, HopType, RouteDecision, RouteHop, RouteType,
 };
 use seep_mesh::{LinkState, MeshRegistry, NodeId, NodeRecord, NodeRole, SessionId};
 
@@ -918,6 +917,11 @@ impl ChainManager {
     /// 获取统计信息
     pub async fn get_stats(&self) -> ChainManagerStats {
         self.stats.read().await.clone()
+    }
+
+    /// 获取 Mesh 注册表引用
+    pub fn mesh_registry(&self) -> &Arc<MeshRegistry> {
+        &self.mesh_registry
     }
 }
 
