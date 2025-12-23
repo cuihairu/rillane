@@ -7,20 +7,18 @@
 //! - 热更新支持
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use tokio::time::{interval, MissedTickBehavior};
-use tracing::{debug, error, info, warn};
-use url::Url;
-use uuid::Uuid;
+use tracing::{debug, info};
 
 pub mod clash;
 pub mod seep_dsl;
@@ -374,7 +372,7 @@ impl SubscriptionManager {
         }
 
         // 检查缓存
-        if let Some(cached_content) = self.cache.get(name) {
+        if self.cache.get(name).is_some() {
             if let Some(etag) = &subscription.etag {
                 fetcher.add_header("If-None-Match".to_string(), etag.clone());
             }

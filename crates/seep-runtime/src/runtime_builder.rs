@@ -15,7 +15,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{mpsc, Mutex},
+    sync::{broadcast, Mutex},
     task::JoinHandle,
     time,
 };
@@ -30,11 +30,12 @@ use seep_core::{
 use seep_mesh::{MeshRegistry, MeshSession, NodeId, SessionId};
 use seep_platform::network::{NetworkConfig, NetworkManager};
 use seep_protocols::{
-    inbound::Socks5Ingress,
-    outbound::DirectConnector,
+    DirectConnector, HttpConnector, HttpIngress, MixedIngress, ShadowsocksConnector, Socks5Connector,
+    Socks5Ingress, TrojanConnector, Hysteria2Connector,
 };
 use seep_routing::RoutingEngine;
 use seep_subscription::SubscriptionManager;
+use seep_subscription::SubscriptionConverter;
 
 use crate::chain::{ChainBuilder, ChainConfig, ChainConstraints, ChainManager};
 use crate::mesh_transport::{MeshDataPlane, MeshEnvelope};
@@ -163,7 +164,7 @@ impl RuntimeBuilder {
             None
         };
 
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = broadcast::channel(1024);
 
         Ok(Runtime {
             config,
@@ -171,8 +172,8 @@ impl RuntimeBuilder {
             router,
             local_node_id,
             ingress_endpoints: self.ingress_endpoints,
-            flow_outputs: self.flow_outputs,
-            egress_connectors: self.egress_connectors,
+            flow_outputs: Arc::new(RwLock::new(self.flow_outputs)),
+            egress_connectors: Arc::new(RwLock::new(self.egress_connectors)),
             mesh_registry,
             chain_manager,
             network_manager,
@@ -218,6 +219,8 @@ pub struct RuntimeConfig {
     pub session_timeout: Option<Duration>,
     pub heartbeat_interval: Option<Duration>,
     pub stats_interval: Option<Duration>,
+    /// 订阅检查间隔（用于 enable_hot_reload 的自动刷新与应用）
+    pub subscription_check_interval: Option<Duration>,
 }
 
 impl Default for RuntimeConfig {
@@ -235,6 +238,7 @@ impl Default for RuntimeConfig {
             session_timeout: Some(Duration::from_secs(300)),
             heartbeat_interval: Some(Duration::from_secs(30)),
             stats_interval: Some(Duration::from_secs(60)),
+            subscription_check_interval: Some(Duration::from_secs(30)),
         }
     }
 }
@@ -344,6 +348,14 @@ impl RuntimeStats {
     }
 }
 
+/// 配置合并统计信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigMergeStats {
+    pub nodes_added: usize,
+    pub groups_added: usize,
+    pub rules_added: usize,
+}
+
 /// Runtime 实例
 pub struct Runtime {
     config: Arc<RwLock<SeepConfig>>,
@@ -351,14 +363,14 @@ pub struct Runtime {
     router: Arc<RoutingEngine>,
     local_node_id: Option<NodeId>,
     ingress_endpoints: HashMap<String, Arc<dyn IngressEndpoint>>,
-    flow_outputs: HashMap<String, Arc<dyn FlowOutput>>,
-    egress_connectors: HashMap<String, Arc<dyn EgressConnector>>,
+    flow_outputs: Arc<RwLock<HashMap<String, Arc<dyn FlowOutput>>>>,
+    egress_connectors: Arc<RwLock<HashMap<String, Arc<dyn EgressConnector>>>>,
     mesh_registry: Option<Arc<MeshRegistry>>,
     /// 链路管理器（多跳链路支持）
     chain_manager: Option<Arc<ChainManager>>,
     network_manager: Option<Arc<Mutex<NetworkManager>>>,
     subscription_manager: Option<Arc<SubscriptionManager>>,
-    event_tx: mpsc::UnboundedSender<RuntimeEvent>,
+    event_tx: broadcast::Sender<RuntimeEvent>,
     stats: Arc<RwLock<RuntimeStats>>,
     running: Arc<RwLock<bool>>,
 }
@@ -441,6 +453,147 @@ impl Runtime {
             }));
         }
 
+        // Subscription auto-refresh + apply loop.
+        if self.runtime_config.enable_hot_reload {
+            if let Some(sub_mgr) = &self.subscription_manager {
+                let sub_mgr = sub_mgr.clone();
+                let config = self.config.clone();
+                let router = self.router.clone();
+                let flow_outputs = self.flow_outputs.clone();
+                let egress_connectors = self.egress_connectors.clone();
+                let tx = self.event_tx.clone();
+                let running = self.running.clone();
+                let check_interval = self
+                    .runtime_config
+                    .subscription_check_interval
+                    .unwrap_or(Duration::from_secs(30));
+
+                tasks.push(tokio::spawn(async move {
+                    let converter = SubscriptionConverter::new();
+                    let mut ticker = time::interval(check_interval);
+                    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
+                    while *running.read().expect("running lock poisoned") {
+                        ticker.tick().await;
+
+                        let names_to_refresh: Vec<String> = sub_mgr
+                            .list_subscriptions()
+                            .into_iter()
+                            .filter(|s| s.needs_refresh())
+                            .map(|s| s.name)
+                            .collect();
+
+                        if names_to_refresh.is_empty() {
+                            continue;
+                        }
+
+                        for name in names_to_refresh {
+                            let old_hash = sub_mgr
+                                .get_subscription(&name)
+                                .and_then(|s| s.content_hash.clone());
+
+                            let content = match sub_mgr.refresh_subscription(&name).await {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    let _ = tx.send(RuntimeEvent::SubscriptionEvent {
+                                        subscription_name: name.clone(),
+                                        event: SubscriptionEventType::Error {
+                                            name: name.clone(),
+                                            error: e.to_string(),
+                                        },
+                                    });
+                                    continue;
+                                }
+                            };
+
+                            let new_hash = sub_mgr
+                                .get_subscription(&name)
+                                .and_then(|s| s.content_hash.clone());
+
+                            let changed = new_hash != old_hash;
+                            let _ = tx.send(RuntimeEvent::SubscriptionEvent {
+                                subscription_name: name.clone(),
+                                event: SubscriptionEventType::Refreshed {
+                                    name: name.clone(),
+                                    status: if changed {
+                                        "changed".to_string()
+                                    } else {
+                                        "not_modified".to_string()
+                                    },
+                                },
+                            });
+
+                            if !changed {
+                                continue;
+                            }
+
+                            let Some(sub) = sub_mgr.get_subscription(&name) else {
+                                continue;
+                            };
+
+                            let converted = match converter.auto_convert(&sub, &content).await {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    let _ = tx.send(RuntimeEvent::SubscriptionEvent {
+                                        subscription_name: name.clone(),
+                                        event: SubscriptionEventType::Error {
+                                            name: name.clone(),
+                                            error: format!("convert failed: {e}"),
+                                        },
+                                    });
+                                    continue;
+                                }
+                            };
+
+                            // Merge and apply.
+                            let mut merged = config.read().expect("config lock poisoned").clone();
+                            let merge_stats =
+                                merge_config_delta_in_place(&mut merged, &converted.config);
+
+                            let (outputs, connectors) = match build_egress_outputs(&merged.egress) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    let _ = tx.send(RuntimeEvent::SubscriptionEvent {
+                                        subscription_name: name.clone(),
+                                        event: SubscriptionEventType::Error {
+                                            name: name.clone(),
+                                            error: format!("build egress failed: {e}"),
+                                        },
+                                    });
+                                    continue;
+                                }
+                            };
+
+                            *config.write().expect("config lock poisoned") = merged.clone();
+                            router.reload(merged.routing.clone());
+                            *flow_outputs
+                                .write()
+                                .expect("flow_outputs lock poisoned") = outputs;
+                            *egress_connectors
+                                .write()
+                                .expect("egress_connectors lock poisoned") = connectors;
+                            let _ = tx.send(RuntimeEvent::ConfigUpdated { config: merged });
+
+                            let changes = vec![
+                                format!("nodes_added={}", merge_stats.nodes_added),
+                                format!("groups_added={}", merge_stats.groups_added),
+                                format!("rules_added={}", merge_stats.rules_added),
+                            ];
+                            let _ = tx.send(RuntimeEvent::SubscriptionEvent {
+                                subscription_name: name.clone(),
+                                event: SubscriptionEventType::Updated {
+                                    name: name.clone(),
+                                    changes,
+                                },
+                            });
+                        }
+                    }
+
+                    Ok::<(), anyhow::Error>(())
+                }));
+            }
+        }
+
         // 启动链路管理器健康检查任务
         if let Some(chain_mgr) = &self.chain_manager {
             let mgr = chain_mgr.clone();
@@ -518,15 +671,38 @@ impl Runtime {
     }
 
     pub async fn update_config(&self, new_config: SeepConfig) -> Result<()> {
+        // Build egress outputs/connectors before mutating runtime state.
+        let (outputs, connectors) = build_egress_outputs(&new_config.egress)?;
+
         *self.config.write().expect("config lock poisoned") = new_config.clone();
         self.router.reload(new_config.routing.clone());
+        *self.flow_outputs.write().expect("flow_outputs lock poisoned") = outputs;
+        *self.egress_connectors.write().expect("egress_connectors lock poisoned") = connectors;
         let _ = self.event_tx.send(RuntimeEvent::ConfigUpdated { config: new_config });
         Ok(())
     }
 
-    pub fn get_event_receiver(&self) -> mpsc::UnboundedReceiver<RuntimeEvent> {
-        let (_tx, rx) = mpsc::unbounded_channel();
-        rx
+    /// 将订阅/外部生成的配置增量合并进当前配置，并触发 runtime 更新。
+    ///
+    /// 当前策略为“只追加不删除”：新增 egress / group，rules 直接追加（不去重）。
+    pub async fn merge_config_delta(&self, delta: &SeepConfig) -> Result<ConfigMergeStats> {
+        let mut merged = self.get_config();
+
+        let stats = merge_config_delta_in_place(&mut merged, delta);
+
+        self.update_config(merged).await?;
+
+        Ok(stats)
+    }
+
+    /// 订阅运行时事件（广播通道）
+    pub fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEvent> {
+        self.event_tx.subscribe()
+    }
+
+    /// 兼容旧接口：返回事件订阅者
+    pub fn get_event_receiver(&self) -> broadcast::Receiver<RuntimeEvent> {
+        self.subscribe_events()
     }
 
     /// 获取链路管理器
@@ -540,8 +716,11 @@ impl Runtime {
     }
 
     /// 获取出口连接器
-    pub fn get_egress_connectors(&self) -> &HashMap<String, Arc<dyn EgressConnector>> {
-        &self.egress_connectors
+    pub fn get_egress_connectors(&self) -> HashMap<String, Arc<dyn EgressConnector>> {
+        self.egress_connectors
+            .read()
+            .expect("egress_connectors lock poisoned")
+            .clone()
     }
 
     /// 获取订阅管理器
@@ -593,6 +772,38 @@ impl Runtime {
 
         let builder = ChainBuilder::new(chain_cfg, mesh_registry.clone());
         builder.dry_run(source, target, constraints).await
+    }
+}
+
+fn merge_config_delta_in_place(target: &mut SeepConfig, delta: &SeepConfig) -> ConfigMergeStats {
+    let mut existing_egress: std::collections::HashSet<String> =
+        target.egress.iter().map(|e| e.name.clone()).collect();
+    let mut existing_groups: std::collections::HashSet<String> =
+        target.routing.groups.iter().map(|g| g.name.clone()).collect();
+
+    let mut nodes_added = 0usize;
+    for e in &delta.egress {
+        if existing_egress.insert(e.name.clone()) {
+            target.egress.push(e.clone());
+            nodes_added += 1;
+        }
+    }
+
+    let mut groups_added = 0usize;
+    for g in &delta.routing.groups {
+        if existing_groups.insert(g.name.clone()) {
+            target.routing.groups.push(g.clone());
+            groups_added += 1;
+        }
+    }
+
+    let rules_added = delta.routing.rules.len();
+    target.routing.rules.extend(delta.routing.rules.clone());
+
+    ConfigMergeStats {
+        nodes_added,
+        groups_added,
+        rules_added,
     }
 }
 
@@ -667,7 +878,7 @@ impl FlowRouter for RuntimeFlowRouter {
 
 /// 派发路由决策到具体出口（支持多跳链路）
 struct FlowOutputRouter {
-    outputs: HashMap<String, Arc<dyn FlowOutput>>,
+    outputs: Arc<RwLock<HashMap<String, Arc<dyn FlowOutput>>>>,
     /// 链路管理器（预留用于故障转移）
     #[allow(dead_code)]
     chain_manager: Option<Arc<ChainManager>>,
@@ -677,7 +888,7 @@ struct FlowOutputRouter {
 
 impl FlowOutputRouter {
     fn new(
-        outputs: HashMap<String, Arc<dyn FlowOutput>>,
+        outputs: Arc<RwLock<HashMap<String, Arc<dyn FlowOutput>>>>,
         chain_manager: Option<Arc<ChainManager>>,
         mesh_registry: Option<Arc<MeshRegistry>>,
         local_node_id: Option<NodeId>,
@@ -716,7 +927,11 @@ impl FlowOutputRouter {
             target = stripped.to_string();
         }
 
-        if let Some(output) = self.outputs.get(&target) {
+        let output = {
+            let outputs = self.outputs.read().expect("flow_outputs lock poisoned");
+            outputs.get(&target).cloned()
+        };
+        if let Some(output) = output {
             output.forward(decision.clone(), flow).await
         } else {
             Err(anyhow!("未找到出口 {target}"))
@@ -786,7 +1001,11 @@ impl FlowOutputRouter {
             if let Some(stripped) = name.strip_prefix("egress.") {
                 name = stripped.to_string();
             }
-            if let Some(output) = self.outputs.get(&name) {
+            let output = {
+                let outputs = self.outputs.read().expect("flow_outputs lock poisoned");
+                outputs.get(&name).cloned()
+            };
+            if let Some(output) = output {
                 return output.forward(decision.clone(), flow).await;
             }
         }
@@ -831,8 +1050,11 @@ fn build_ingress_endpoints(
                     auth.clone().unwrap_or_default(),
                 ))
             }
-            _ => {
-                return Err(anyhow!("暂不支持的入口类型: {}", desc.name));
+            IngressConfig::Http { bind } => {
+                Arc::new(HttpIngress::new(desc.name.clone(), bind.clone()))
+            }
+            IngressConfig::Mixed { bind } => {
+                Arc::new(MixedIngress::new(desc.name.clone(), bind.clone()))
             }
         };
         map.insert(desc.name.clone(), endpoint);
@@ -853,6 +1075,136 @@ fn build_egress_outputs(
         match &desc.spec {
             EgressConfig::Direct => {
                 let connector: Arc<dyn EgressConnector> = Arc::new(DirectConnector::default());
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Socks5 {
+                server,
+                port,
+                username,
+                password,
+            } => {
+                let connector: Arc<dyn EgressConnector> = Arc::new(Socks5Connector::new(
+                    server.clone(),
+                    *port,
+                    username.clone(),
+                    password.clone(),
+                ));
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Http {
+                server,
+                port,
+                username,
+                password,
+                tls,
+                skip_cert_verify,
+                sni,
+            } => {
+                let connector: Arc<dyn EgressConnector> = Arc::new(HttpConnector::new(
+                    server.clone(),
+                    *port,
+                    username.clone(),
+                    password.clone(),
+                    *tls,
+                    *skip_cert_verify,
+                    sni.clone(),
+                ));
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Shadowsocks {
+                server,
+                port,
+                method,
+                password,
+            } => {
+                let connector: Arc<dyn EgressConnector> = Arc::new(ShadowsocksConnector::new(
+                    server.clone(),
+                    *port,
+                    method.clone(),
+                    password.clone(),
+                )?);
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Trojan {
+                server,
+                port,
+                password,
+                network,
+                tls,
+                skip_cert_verify,
+                sni,
+                ..
+            } => {
+                if network != "tcp" {
+                    return Err(anyhow!(
+                        "暂不支持的 Trojan network: {} (egress={})",
+                        network,
+                        desc.name
+                    ));
+                }
+                if !*tls {
+                    return Err(anyhow!(
+                        "暂不支持的 Trojan 配置：tls=false (egress={})",
+                        desc.name
+                    ));
+                }
+
+                let connector: Arc<dyn EgressConnector> = Arc::new(TrojanConnector::new(
+                    server.clone(),
+                    *port,
+                    password.clone(),
+                    sni.clone(),
+                    *skip_cert_verify,
+                ));
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Hysteria2 {
+                server,
+                port,
+                password,
+                mport,
+                obfs,
+                obfs_param,
+                server_name,
+                skip_cert_verify,
+                alpn,
+            } => {
+                let connector: Arc<dyn EgressConnector> = Arc::new(Hysteria2Connector::new(
+                    server.clone(),
+                    *port,
+                    password.clone(),
+                    mport.clone(),
+                    obfs.clone(),
+                    obfs_param.clone(),
+                    server_name.clone(),
+                    *skip_cert_verify,
+                    alpn.clone(),
+                ));
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
                     connector.clone(),
@@ -952,16 +1304,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forward_chain_injects_metadata_annotations() {
-        let annotations = Arc::new(Mutex::new(None));
-        let mut outputs: HashMap<String, Arc<dyn FlowOutput>> = HashMap::new();
-        outputs.insert(
-            "direct".to_string(),
-            Arc::new(CaptureOutput {
-                annotations: annotations.clone(),
-            }),
-        );
-        let router = FlowOutputRouter::new(outputs, None, None, None);
+	    async fn forward_chain_injects_metadata_annotations() {
+	        let annotations = Arc::new(Mutex::new(None));
+	        let mut outputs: HashMap<String, Arc<dyn FlowOutput>> = HashMap::new();
+	        outputs.insert(
+	            "direct".to_string(),
+	            Arc::new(CaptureOutput {
+	                annotations: annotations.clone(),
+	            }),
+	        );
+	        let router = FlowOutputRouter::new(Arc::new(RwLock::new(outputs)), None, None, None);
 
         let decision = {
             let hops = vec![
@@ -995,5 +1347,112 @@ mod tests {
         let map = guard.as_ref().expect("annotations captured");
         assert!(map.contains_key("seep.chain.path"));
         assert_eq!(map.get("seep.route.reason").map(|s| s.as_str()), Some("test"));
+    }
+
+    #[test]
+    fn build_egress_outputs_supports_hysteria2() {
+        let egress = vec![EgressDescriptor {
+            name: "hy2".to_string(),
+            spec: EgressConfig::Hysteria2 {
+                server: "example.com".to_string(),
+                port: 443,
+                password: "secret".to_string(),
+                mport: None,
+                obfs: None,
+                obfs_param: None,
+                server_name: Some("example.com".to_string()),
+                skip_cert_verify: true,
+                alpn: None,
+            },
+        }];
+
+        let (outputs, connectors) = build_egress_outputs(&egress).expect("build egress outputs");
+        assert!(outputs.contains_key("hy2"));
+        assert_eq!(
+            connectors
+                .get("hy2")
+                .expect("connector")
+                .name(),
+            "hysteria2"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_config_delta_updates_egress_connectors() {
+        let cfg = SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![IngressDescriptor {
+                name: "in1".to_string(),
+                spec: IngressConfig::Socks5 {
+                    bind: "127.0.0.1:0".to_string(),
+                    auth: None,
+                },
+            }],
+            egress: vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            routing: seep_config::RoutingConfig {
+                default_node: "direct".to_string(),
+                groups: vec![],
+                rules: vec![],
+            },
+        };
+
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(RuntimeConfig {
+                enable_hot_reload: false,
+                ..RuntimeConfig::default()
+            })
+            .build()
+            .expect("build runtime");
+
+        assert!(!runtime.get_egress_connectors().contains_key("p1"));
+
+        let delta = SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![],
+            egress: vec![EgressDescriptor {
+                name: "p1".to_string(),
+                spec: EgressConfig::Socks5 {
+                    server: "127.0.0.1".to_string(),
+                    port: 1080,
+                    username: None,
+                    password: None,
+                },
+            }],
+            routing: seep_config::RoutingConfig {
+                default_node: "direct".to_string(),
+                groups: vec![],
+                rules: vec![],
+            },
+        };
+
+        let stats = runtime
+            .merge_config_delta(&delta)
+            .await
+            .expect("merge delta");
+        assert_eq!(stats.nodes_added, 1);
+
+        let connectors = runtime.get_egress_connectors();
+        assert_eq!(connectors.get("p1").expect("p1 connector").name(), "socks5");
     }
 }

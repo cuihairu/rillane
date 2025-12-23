@@ -16,3 +16,4 @@ seep-core = { path = "../../crates/seep-core" }
 seep-runtime = { path = "../../crates/seep-runtime" }
 seep-telemetry = { path = "../../crates/seep-telemetry" }
 seep-mesh = { path = "../../crates/seep-mesh" }
+seep-subscription = { path = "../../crates/seep-subscription" }

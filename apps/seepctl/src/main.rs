@@ -50,6 +50,13 @@ enum Command {
         #[arg(short, long, default_value = "config/clash_import.yaml")]
         output: String,
     },
+    /// 订阅管理（seepd 控制面）
+    Subscription {
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[command(subcommand)]
+        command: SubscriptionCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -81,6 +88,39 @@ enum ChainCommand {
     },
     /// 获取链路统计
     Stats,
+}
+
+#[derive(Subcommand)]
+enum SubscriptionCommand {
+    /// 列出订阅
+    List,
+    /// 添加订阅
+    Add {
+        name: String,
+        url: String,
+        #[arg(long)]
+        r#type: Option<String>,
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[arg(long)]
+        refresh_interval: Option<u64>,
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// 自定义请求头（可多次传入）：--header k=v
+        #[arg(long = "header")]
+        headers: Vec<String>,
+        #[arg(long)]
+        user_agent: Option<String>,
+    },
+    /// 移除订阅
+    Remove {
+        name: String,
+    },
+    /// 刷新订阅（并尝试合并到 runtime）
+    Refresh {
+        /// 不指定则刷新全部
+        name: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -265,6 +305,95 @@ fn main() -> Result<()> {
                 ChainCommand::Stats => {
                     let url = format!("{base}/chains/stats");
                     let resp = with_auth(client.get(&url))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    if !resp.status().is_success() {
+                        anyhow::bail!("控制面返回错误: {}", resp.status());
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+            }
+        }
+        Command::Subscription { endpoint, command } => {
+            let config = SeepConfig::load_from_path(&cli.config)?;
+            let base = endpoint.unwrap_or_else(|| format!("http://{}", config.control.api_bind));
+            let client = Client::new();
+
+            let token = config.control.admin_token.clone();
+            let with_auth = |req: reqwest::blocking::RequestBuilder| {
+                if let Some(t) = &token {
+                    req.header("x-admin-token", t)
+                } else {
+                    req
+                }
+            };
+
+            match command {
+                SubscriptionCommand::List => {
+                    let url = format!("{base}/subscriptions");
+                    let resp = with_auth(client.get(&url))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    if !resp.status().is_success() {
+                        anyhow::bail!("控制面返回错误: {}", resp.status());
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                SubscriptionCommand::Add {
+                    name,
+                    url: sub_url,
+                    r#type,
+                    enabled,
+                    refresh_interval,
+                    timeout,
+                    headers,
+                    user_agent,
+                } => {
+                    let url = format!("{base}/subscriptions");
+                    let mut headers_map = serde_json::Map::new();
+                    for kv in headers {
+                        if let Some((k, v)) = kv.split_once('=') {
+                            headers_map.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+                        }
+                    }
+                    let body = serde_json::json!({
+                        "name": name,
+                        "url": sub_url,
+                        "type": r#type,
+                        "enabled": enabled,
+                        "refresh_interval": refresh_interval,
+                        "timeout": timeout,
+                        "headers": if headers_map.is_empty() { serde_json::Value::Null } else { serde_json::Value::Object(headers_map) },
+                        "user_agent": user_agent,
+                    });
+                    let resp = with_auth(client.post(&url).json(&body))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    if !resp.status().is_success() {
+                        anyhow::bail!("控制面返回错误: {}", resp.status());
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                SubscriptionCommand::Remove { name } => {
+                    let url = format!("{base}/subscriptions/{name}");
+                    let resp = with_auth(client.delete(&url))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    if !resp.status().is_success() {
+                        anyhow::bail!("控制面返回错误: {}", resp.status());
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                SubscriptionCommand::Refresh { name } => {
+                    let url = match name.as_deref() {
+                        Some(n) => format!("{base}/subscriptions/{n}/refresh"),
+                        None => format!("{base}/subscriptions/refresh"),
+                    };
+                    let resp = with_auth(client.post(&url))
                         .send()
                         .with_context(|| format!("无法访问 {url}"))?;
                     if !resp.status().is_success() {

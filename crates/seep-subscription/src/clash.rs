@@ -8,9 +8,8 @@ use serde_yaml::Value;
 use tracing::{debug, warn};
 
 use seep_config::{
-    EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor,
-    MatchCondition, PolicyGroup, RouteRule, RoutingConfig, Strategy,
-    GroupMember, GroupDescriptor, GroupDescriptorMember,
+    EgressConfig, EgressDescriptor, MatchCondition, PolicyGroup, RouteRule, RoutingConfig,
+    Strategy, GroupMember,
 };
 
 /// Clash 代理类型枚举
@@ -53,6 +52,28 @@ pub struct ClashProxy {
     /// 密码
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Hysteria2: 端口跳跃范围（常见字段名为 ports，也可能叫 mport）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "ports",
+        alias = "ports-range",
+        alias = "port-range"
+    )]
+    pub mport: Option<String>,
+    /// Hysteria2: obfs 类型（例如 salamander）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obfs: Option<String>,
+    /// Hysteria2: obfs 参数（例如密码）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "obfs-param",
+        alias = "obfs_param",
+        alias = "obfs-password",
+        alias = "obfs_password"
+    )]
+    pub obfs_param: Option<String>,
     /// 加密方法（用于 Shadowsocks）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cipher: Option<String>,
@@ -674,8 +695,9 @@ impl ClashConverter {
                     server: proxy.server.clone(),
                     port: proxy.port,
                     password,
-                    obfs: None, // Clash Hysteria2 可能配置 obfs
-                    obfs_param: None,
+                    mport: proxy.mport.clone(),
+                    obfs: proxy.obfs.clone(),
+                    obfs_param: proxy.obfs_param.clone(),
                     server_name: proxy.servername.clone(),
                     skip_cert_verify: proxy.skip_cert_verify,
                     alpn: if proxy.alpn.is_empty() { None } else { Some(proxy.alpn.clone()) },
@@ -789,7 +811,7 @@ impl ClashConverter {
                 }];
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
-            ClashRule::Geosite { country_code: _, target } => {
+            ClashRule::Geosite { country_code: _, target: _ } => {
                 // Seep 暂不支持 GeoSite，跳过
                 warn!(
                     target: "seep::subscription::clash",
@@ -809,7 +831,7 @@ impl ClashConverter {
                 }];
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
-            ClashRule::ProcessName { processes: _, target } => {
+            ClashRule::ProcessName { processes: _, target: _ } => {
                 // Seep 暂不支持进程名匹配
                 warn!(
                     target: "seep::subscription::clash",
@@ -817,7 +839,7 @@ impl ClashConverter {
                 );
                 Err(anyhow!("进程名规则暂不支持"))
             }
-            ClashRule::RuleSet { rulesets: _, target } => {
+            ClashRule::RuleSet { rulesets: _, target: _ } => {
                 // Seep 暂不支持规则集
                 warn!(
                     target: "seep::subscription::clash",
@@ -920,6 +942,12 @@ proxies:
     uuid: 12345678-1234-1234-1234-123456789abc
     network: ws
     tls: true
+  - name: "test-hy2"
+    type: hysteria2
+    server: example.net
+    port: 443
+    password: secret
+    ports: "35000-39000"
 
 proxy-groups:
   - name: "auto"
@@ -939,7 +967,7 @@ rules:
         let converter = ClashConverter::new();
         let clash_config = converter.parse(yaml_content).unwrap();
 
-        assert_eq!(clash_config.proxies.len(), 2);
+        assert_eq!(clash_config.proxies.len(), 3);
         assert_eq!(clash_config.proxy_groups.len(), 1);
         assert_eq!(clash_config.rules.len(), 3);
 
@@ -950,6 +978,43 @@ rules:
         let vmess_proxy = &clash_config.proxies[1];
         assert_eq!(vmess_proxy.proxy_type, ClashProxyType::Vmess);
         assert!(vmess_proxy.tls);
+
+        let hy2_proxy = &clash_config.proxies[2];
+        assert_eq!(hy2_proxy.proxy_type, ClashProxyType::Hysteria2);
+        assert_eq!(hy2_proxy.mport.as_deref(), Some("35000-39000"));
+    }
+
+    #[test]
+    fn test_hysteria2_ports_mapping_to_egress() {
+        let yaml_content = r#"
+proxies:
+  - name: "test-hy2"
+    type: hysteria2
+    server: example.net
+    port: 443
+    password: secret
+    ports: "35000-39000"
+
+proxy-groups: []
+rules: []
+        "#;
+
+        let converter = ClashConverter::new();
+        let clash_config = converter.parse(yaml_content).unwrap();
+        let seep_config = converter.convert_to_seep(&clash_config).unwrap();
+
+        let hy2 = seep_config
+            .egress
+            .iter()
+            .find(|e| e.name == "test-hy2")
+            .expect("hy2 egress");
+
+        match &hy2.spec {
+            EgressConfig::Hysteria2 { mport, .. } => {
+                assert_eq!(mport.as_deref(), Some("35000-39000"));
+            }
+            other => panic!("unexpected egress config: {:?}", other),
+        }
     }
 
     #[test]

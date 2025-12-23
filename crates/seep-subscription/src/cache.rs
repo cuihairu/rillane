@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::RwLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -188,7 +188,7 @@ impl SubscriptionCache {
 
         // 检查缓存容量限制
         {
-            let mut current_size = self.current_size.write().expect("current_size lock poisoned");
+            let current_size = self.current_size.write().expect("current_size lock poisoned");
             if *current_size + content_size > self.config.max_size_bytes {
                 // 清理过期条目
                 self.cleanup_expired()?;

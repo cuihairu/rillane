@@ -10,5 +10,24 @@ serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+bytes.workspace = true
+base64.workspace = true
+sha2.workspace = true
+httparse.workspace = true
+pin-project-lite.workspace = true
 seep-core = { path = "../seep-core" }
 seep-config = { path = "../seep-config" }
+
+# TLS support
+tokio-rustls.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+
+# SOCKS5 client
+tokio-socks.workspace = true
+
+# Shadowsocks
+shadowsocks.workspace = true
+
+# Hysteria2
+hysteria2.workspace = true

@@ -22,7 +22,7 @@ pub use chain::{
 pub use hot_reload::{HotReloadConfig, HotReloadManager, ReloadEvent, ReloadStats};
 pub use mesh_transport::{MeshDataPlane, MeshEnvelope};
 pub use runtime_builder::{
-    MeshConfig, NetworkEventType, Runtime, RuntimeBuilder, RuntimeConfig, RuntimeEvent,
+    ConfigMergeStats, MeshConfig, NetworkEventType, Runtime, RuntimeBuilder, RuntimeConfig, RuntimeEvent,
     RuntimeStats, SubscriptionEventType,
 };
 

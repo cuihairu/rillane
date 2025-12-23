@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use reqwest::{header, Client, Proxy, Response};
 use tracing::{debug, warn};
 
@@ -100,12 +101,11 @@ impl SubscriptionFetcher {
             }
         }
 
-        let mut client = builder.build().unwrap_or_default();
-
-        // 设置默认请求头
         if let Some(user_agent) = &config.user_agent {
-            client = Default::default();
+            builder = builder.user_agent(user_agent.clone());
         }
+
+        let client = builder.build().unwrap_or_default();
 
         Self { client, config }
     }
@@ -313,8 +313,7 @@ impl SubscriptionFetcher {
     fn is_valid_content_start(&self, c: char) -> bool {
         matches!(c,
             '{' | '[' | '<' | // JSON, YAML, XML
-            'A'..='Z' | 'a'..='z' | // 字母开头（可能是纯文本）
-            'v' | 't' | 's' // VMess, Trojan, Shadowsocks 链接前缀
+            'A'..='Z' | 'a'..='z' // 字母开头（可能是纯文本）
         )
     }
 
@@ -325,7 +324,7 @@ impl SubscriptionFetcher {
             return Ok(content.to_string());
         }
 
-        match base64::decode(content.trim()) {
+        match BASE64.decode(content.trim()) {
             Ok(decoded_bytes) => {
                 match String::from_utf8(decoded_bytes) {
                     Ok(decoded_string) => {

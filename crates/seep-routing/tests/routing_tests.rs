@@ -223,7 +223,7 @@ async fn test_bandwidth_routing() -> Result<()> {
     engine.update_bandwidth_stats("node2", 2000); // 2Mbps
 
     // 直接使用带宽组名进行测试
-    let mut direct_ctx = create_flow_context("bandwidth-test.example.com", 443);
+    let direct_ctx = create_flow_context("bandwidth-test.example.com", 443);
     // 手动创建一个流量上下文来测试带宽组选择
 
     // 创建一个新的配置，默认节点指向带宽组

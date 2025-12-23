@@ -220,6 +220,8 @@ pub enum EgressConfig {
         port: u16,
         password: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        mport: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         obfs: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         obfs_param: Option<String>,

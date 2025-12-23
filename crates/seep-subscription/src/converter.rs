@@ -1,13 +1,12 @@
 //! 订阅格式转换器
 
-use std::collections::HashMap;
-
 use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use tracing::{debug, info, warn};
 
 use crate::{SubscriptionType, Subscription};
 use crate::clash::{ClashConfig, ClashConverter, ClashProxy, ClashProxyGroup, ClashProxyGroupType, ClashProxyType, ClashRule};
-use crate::seep_dsl::{SeepConfig, SeepDslConverter};
+use crate::seep_dsl::SeepDslConverter;
 
 /// 通用转换器
 pub struct SubscriptionConverter {
@@ -402,7 +401,7 @@ impl SubscriptionConverter {
             }
 
             let node_content = if self.looks_like_base64(line) {
-                match base64::decode(line) {
+                match BASE64.decode(line) {
                     Ok(decoded) => match String::from_utf8(decoded) {
                         Ok(decoded_string) => decoded_string,
                         Err(_) => {
@@ -487,7 +486,7 @@ impl SubscriptionConverter {
     }
 
     /// 转换自定义格式
-    async fn convert_custom(&self, content: &str) -> Result<ConversionResult> {
+    async fn convert_custom(&self, _content: &str) -> Result<ConversionResult> {
         warn!(
             target: "seep::subscription::converter",
             "自定义格式暂不支持转换"
@@ -713,7 +712,7 @@ impl SubscriptionConverter {
         let mut total_filtered: usize = 0;
         let mut total_duration: u64 = 0;
         let mut successful_conversions: usize = 0;
-        let mut failed_conversions: usize = 0;
+        let failed_conversions: usize = 0;
         let mut total_warnings: usize = 0;
 
         for result in results {

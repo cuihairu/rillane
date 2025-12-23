@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use seep_config::{
-    EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor,
-    MatchCondition, PolicyGroup, RouteRule, RoutingConfig, Strategy,
-    GroupMember, GroupDescriptor, GroupDescriptorMember,
+    EgressConfig, EgressDescriptor, MatchCondition, PolicyGroup, RouteRule, RoutingConfig,
+    Strategy, GroupMember,
 };
 
 /// Seep DSL 版本
@@ -84,8 +83,11 @@ pub enum NodeAuth {
         username: String,
         password: String,
     },
-    /// UUID（用于 VMess/VLESS/Trojan）
-    Uuid(String),
+    /// UUID（用于 VMess/VLESS/Trojan/Hysteria2 等）
+    Uuid {
+        #[serde(alias = "value")]
+        uuid: String,
+    },
     /// 密钥（用于 Shadowsocks）
     Key {
         method: String,
@@ -645,7 +647,7 @@ impl SeepDslConverter {
 
                 let uuid = if let Some(auth) = &node.auth {
                     match auth {
-                        NodeAuth::Uuid(uuid) => uuid.clone(),
+                        NodeAuth::Uuid { uuid } => uuid.clone(),
                         _ => return Err(anyhow!("VMess 节点认证类型错误")),
                     }
                 } else {
@@ -701,7 +703,7 @@ impl SeepDslConverter {
 
                 let uuid = if let Some(auth) = &node.auth {
                     match auth {
-                        NodeAuth::Uuid(uuid) => uuid.clone(),
+                        NodeAuth::Uuid { uuid } => uuid.clone(),
                         _ => return Err(anyhow!("VLESS 节点认证类型错误")),
                     }
                 } else {
@@ -756,7 +758,7 @@ impl SeepDslConverter {
 
                 let password = if let Some(auth) = &node.auth {
                     match auth {
-                        NodeAuth::Uuid(uuid) => uuid.clone(),
+                        NodeAuth::Uuid { uuid } => uuid.clone(),
                         _ => return Err(anyhow!("Trojan 节点认证类型错误")),
                     }
                 } else {
@@ -805,7 +807,7 @@ impl SeepDslConverter {
 
                 let password = if let Some(auth) = &node.auth {
                     match auth {
-                        NodeAuth::Uuid(uuid) => uuid.clone(),
+                        NodeAuth::Uuid { uuid } => uuid.clone(),
                         _ => return Err(anyhow!("Hysteria 节点认证类型错误")),
                     }
                 } else {
@@ -841,19 +843,34 @@ impl SeepDslConverter {
 
                 let password = if let Some(auth) = &node.auth {
                     match auth {
-                        NodeAuth::Uuid(uuid) => uuid.clone(),
+                        NodeAuth::Uuid { uuid } => uuid.clone(),
                         _ => return Err(anyhow!("Hysteria2 节点认证类型错误")),
                     }
                 } else {
                     return Err(anyhow!("Hysteria2 节点缺少密码"));
                 };
 
+                let mport = node
+                    .metadata
+                    .get("mport")
+                    .cloned()
+                    .or_else(|| node.metadata.get("ports").cloned());
+                let obfs = node.metadata.get("obfs").cloned();
+                let obfs_param = node
+                    .metadata
+                    .get("obfs_param")
+                    .cloned()
+                    .or_else(|| node.metadata.get("obfs-param").cloned())
+                    .or_else(|| node.metadata.get("obfs_password").cloned())
+                    .or_else(|| node.metadata.get("obfs-password").cloned());
+
                 Ok(EgressConfig::Hysteria2 {
                     server,
                     port,
                     password,
-                    obfs: None,
-                    obfs_param: None,
+                    mport,
+                    obfs,
+                    obfs_param,
                     server_name: node.tls.as_ref().and_then(|t| t.server_name.clone()),
                     skip_cert_verify: node.tls.as_ref()
                         .map(|t| t.skip_cert_verify)
@@ -997,7 +1014,7 @@ impl SeepDslConverter {
                 }];
                 (matches, target.clone())
             }
-            SeepRule::Process { processes: _, target } => {
+            SeepRule::Process { processes: _, target: _ } => {
                 // Seep 暂不支持进程名匹配
                 warn!(
                     target: "seep::subscription::seep_dsl",
@@ -1005,7 +1022,7 @@ impl SeepDslConverter {
                 );
                 return Err(anyhow!("进程名规则暂不支持"));
             }
-            SeepRule::RuleSet { name: _, target } => {
+            SeepRule::RuleSet { name: _, target: _ } => {
                 // Seep 暂不支持规则集
                 warn!(
                     target: "seep::subscription::seep_dsl",
@@ -1226,5 +1243,47 @@ rules:
         assert_eq!(counts.get(&NodeType::Direct), Some(&2));
         assert_eq!(counts.get(&NodeType::Shadowsocks), Some(&1));
         assert_eq!(counts.get(&NodeType::Vmess), None);
+    }
+
+    #[test]
+    fn test_hysteria2_metadata_mapping_to_egress() {
+        let yaml_content = r#"
+version: "1.0"
+meta:
+  name: "Test Config"
+
+nodes:
+  - name: "hy2"
+    type: hysteria2
+    server: example.net
+    port: 443
+    auth:
+      type: uuid
+      value: secret
+    metadata:
+      mport: "35000-39000"
+
+groups: []
+rules: []
+default_target: hy2
+rulesets: []
+        "#;
+
+        let converter = SeepDslConverter::new();
+        let seep_dsl = converter.parse(yaml_content).unwrap();
+        let seep_config = converter.convert_to_seep(&seep_dsl).unwrap();
+
+        let hy2 = seep_config
+            .egress
+            .iter()
+            .find(|e| e.name == "hy2")
+            .expect("hy2 egress");
+
+        match &hy2.spec {
+            seep_config::EgressConfig::Hysteria2 { mport, .. } => {
+                assert_eq!(mport.as_deref(), Some("35000-39000"));
+            }
+            other => panic!("unexpected egress config: {:?}", other),
+        }
     }
 }

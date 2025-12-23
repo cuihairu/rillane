@@ -9,7 +9,8 @@ use hyper::{
 use serde::{Deserialize, Serialize};
 
 use seep_mesh::{LinkState, MeshRegistry, NodeCapability, NodeRecord, NodeRole};
-use seep_runtime::{ChainConstraints, Runtime};
+use seep_runtime::{ChainConstraints, ConfigMergeStats, Runtime};
+use seep_subscription::{Subscription, SubscriptionConverter, SubscriptionType};
 
 #[derive(Clone)]
 pub struct ControlPlane {
@@ -67,6 +68,14 @@ impl ControlPlane {
             (Method::POST, "/chains") => self.handle_chain_create(req).await,
             (Method::GET, "/chains/stats") => self.handle_chain_stats().await,
 
+            (Method::GET, "/subscriptions") => self.handle_subscriptions_list().await,
+            (Method::POST, "/subscriptions") => self.handle_subscription_add(req).await,
+            (Method::POST, "/subscriptions/refresh") => self.handle_subscriptions_refresh_all().await,
+            (Method::POST, p) if p.starts_with("/subscriptions/") && p.ends_with("/refresh") => {
+                self.handle_subscription_refresh(p).await
+            }
+            (Method::DELETE, p) if p.starts_with("/subscriptions/") => self.handle_subscription_remove(p).await,
+
             // /chains/{chain_id}
             (Method::GET, p) if p.starts_with("/chains/") => self.handle_chain_get(p).await,
             (Method::DELETE, p) if p.starts_with("/chains/") => self.handle_chain_delete(p).await,
@@ -100,6 +109,12 @@ impl ControlPlane {
         self.runtime
             .get_chain_manager()
             .ok_or_else(|| text(StatusCode::SERVICE_UNAVAILABLE, "chain not enabled"))
+    }
+
+    fn subscription_mgr(&self) -> Result<Arc<seep_subscription::SubscriptionManager>, Response<Body>> {
+        self.runtime
+            .get_subscription_manager()
+            .ok_or_else(|| text(StatusCode::SERVICE_UNAVAILABLE, "subscription not enabled"))
     }
 
     async fn handle_nodes(&self) -> Response<Body> {
@@ -276,6 +291,205 @@ impl ControlPlane {
         let stats = mgr.get_stats().await;
         json(StatusCode::OK, &stats)
     }
+
+    async fn handle_subscriptions_list(&self) -> Response<Body> {
+        let mgr = match self.subscription_mgr() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+
+        let subs = mgr.list_subscriptions();
+        let dtos: Vec<SubscriptionDto> = subs
+            .into_iter()
+            .map(SubscriptionDto::from)
+            .collect();
+        json(StatusCode::OK, &dtos)
+    }
+
+    async fn handle_subscription_add(&self, req: Request<Body>) -> Response<Body> {
+        let mgr = match self.subscription_mgr() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+
+        let dto: AddSubscriptionRequest = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+
+        let mut sub = Subscription::new(dto.name, dto.url);
+        sub.r#type = dto.r#type;
+        if let Some(enabled) = dto.enabled {
+            sub.enabled = enabled;
+        }
+        if let Some(refresh_interval) = dto.refresh_interval {
+            sub.refresh_interval = refresh_interval;
+        }
+        if let Some(timeout) = dto.timeout {
+            sub.timeout = timeout;
+        }
+        if let Some(headers) = dto.headers {
+            sub.headers = headers;
+        }
+        sub.user_agent = dto.user_agent;
+
+        if let Err(e) = mgr.add_subscription(sub) {
+            return text(StatusCode::BAD_REQUEST, &format!("add subscription failed: {e}"));
+        }
+
+        json(StatusCode::OK, &serde_json::json!({ "ok": true }))
+    }
+
+    async fn handle_subscription_remove(&self, path: &str) -> Response<Body> {
+        let mgr = match self.subscription_mgr() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+
+        let name = path.trim_start_matches("/subscriptions/").trim();
+        if name.is_empty() {
+            return text(StatusCode::BAD_REQUEST, "missing name");
+        }
+
+        if let Err(e) = mgr.remove_subscription(name) {
+            return text(StatusCode::BAD_REQUEST, &format!("remove subscription failed: {e}"));
+        }
+        json(StatusCode::OK, &serde_json::json!({ "ok": true }))
+    }
+
+    async fn handle_subscription_refresh(&self, path: &str) -> Response<Body> {
+        let mgr = match self.subscription_mgr() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+
+        let trimmed = path
+            .trim_start_matches("/subscriptions/")
+            .trim_end_matches("/refresh")
+            .trim_matches('/');
+        if trimmed.is_empty() {
+            return text(StatusCode::BAD_REQUEST, "missing name");
+        }
+
+        let subscription = match mgr.get_subscription(trimmed) {
+            Some(s) => s,
+            None => return text(StatusCode::NOT_FOUND, "subscription not found"),
+        };
+
+        let old_hash = subscription.content_hash.clone();
+
+        let content = match mgr.refresh_subscription(trimmed).await {
+            Ok(v) => v,
+            Err(e) => return text(StatusCode::BAD_REQUEST, &format!("refresh failed: {e}")),
+        };
+
+        let new_hash = mgr
+            .get_subscription(trimmed)
+            .and_then(|s| s.content_hash.clone());
+        let changed = new_hash != old_hash;
+
+        if !changed {
+            return json(
+                StatusCode::OK,
+                &serde_json::json!({
+                    "ok": true,
+                    "subscription": trimmed,
+                    "changed": false,
+                }),
+            );
+        }
+
+        let subscription = match mgr.get_subscription(trimmed) {
+            Some(s) => s,
+            None => return text(StatusCode::NOT_FOUND, "subscription not found"),
+        };
+
+        let converter = SubscriptionConverter::new();
+        let converted = match converter.auto_convert(&subscription, &content).await {
+            Ok(v) => v,
+            Err(e) => return text(StatusCode::BAD_REQUEST, &format!("convert failed: {e}")),
+        };
+
+        let merge_stats: ConfigMergeStats = match self.runtime.merge_config_delta(&converted.config).await {
+            Ok(v) => v,
+            Err(e) => return text(StatusCode::BAD_REQUEST, &format!("apply failed: {e}")),
+        };
+
+        json(
+            StatusCode::OK,
+            &serde_json::json!({
+                "ok": true,
+                "subscription": trimmed,
+                "changed": true,
+                "converted": {
+                    "nodes": converted.config.egress.len(),
+                    "groups": converted.config.routing.groups.len(),
+                    "rules": converted.config.routing.rules.len(),
+                    "warnings": converted.warnings,
+                },
+                "merged": merge_stats,
+            }),
+        )
+    }
+
+    async fn handle_subscriptions_refresh_all(&self) -> Response<Body> {
+        let mgr = match self.subscription_mgr() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+
+        let converter = SubscriptionConverter::new();
+        let mut out = Vec::new();
+        let names: Vec<String> = mgr.list_subscriptions().into_iter().map(|s| s.name).collect();
+        for name in names {
+            let old_hash = mgr
+                .get_subscription(&name)
+                .and_then(|s| s.content_hash.clone());
+
+            let content = match mgr.refresh_subscription(&name).await {
+                Ok(v) => v,
+                Err(e) => {
+                    out.push(serde_json::json!({"name": name, "ok": false, "error": format!("refresh failed: {e}")}));
+                    continue;
+                }
+            };
+
+            let new_hash = mgr
+                .get_subscription(&name)
+                .and_then(|s| s.content_hash.clone());
+            let changed = new_hash != old_hash;
+            if !changed {
+                out.push(serde_json::json!({
+                    "name": name,
+                    "ok": true,
+                    "changed": false,
+                }));
+                continue;
+            }
+
+            let Some(sub) = mgr.get_subscription(&name) else {
+                out.push(serde_json::json!({"name": name, "ok": false, "error": "subscription missing"}));
+                continue;
+            };
+
+            match converter.auto_convert(&sub, &content).await {
+                Ok(converted) => match self.runtime.merge_config_delta(&converted.config).await {
+                    Ok(merge_stats) => out.push(serde_json::json!({
+                        "name": name,
+                        "ok": true,
+                        "changed": true,
+                        "converted_nodes": converted.config.egress.len(),
+                        "merged": merge_stats,
+                        "warnings": converted.warnings,
+                    })),
+                    Err(e) => out.push(serde_json::json!({"name": name, "ok": false, "error": format!("apply failed: {e}")})),
+                },
+                Err(e) => out.push(serde_json::json!({"name": name, "ok": false, "error": format!("convert failed: {e}")})),
+            }
+        }
+
+        json(StatusCode::OK, &out)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,6 +500,51 @@ struct MeshNodeDto {
     capability: NodeCapability,
     online: bool,
     last_seen_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SubscriptionDto {
+    name: String,
+    url: String,
+    r#type: Option<SubscriptionType>,
+    enabled: bool,
+    refresh_interval: u64,
+    timeout: u64,
+    last_error: Option<String>,
+    last_updated: Option<String>,
+}
+
+impl From<Subscription> for SubscriptionDto {
+    fn from(s: Subscription) -> Self {
+        Self {
+            name: s.name,
+            url: s.url,
+            r#type: s.r#type,
+            enabled: s.enabled,
+            refresh_interval: s.refresh_interval,
+            timeout: s.timeout,
+            last_error: s.last_error,
+            last_updated: s.last_updated.map(|t| t.to_rfc3339()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AddSubscriptionRequest {
+    name: String,
+    url: String,
+    #[serde(default)]
+    r#type: Option<SubscriptionType>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    refresh_interval: Option<u64>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default)]
+    headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -545,6 +804,48 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = cp.handle(get).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn can_add_list_and_remove_subscription_via_control_plane() {
+        let runtime = build_runtime(true, true).await;
+        let cp = ControlPlane::new(runtime.clone(), None);
+
+        // Add subscription.
+        let add = Request::builder()
+            .method(Method::POST)
+            .uri("/subscriptions")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"name":"sub1","url":"https://example.com/sub.yaml","type":"clash"}"#,
+            ))
+            .unwrap();
+        let resp = cp.handle(add).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // List subscriptions.
+        let list = Request::builder()
+            .method(Method::GET)
+            .uri("/subscriptions")
+            .body(Body::empty())
+            .unwrap();
+        let resp = cp.handle(list).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = v.as_array().expect("subscription list array");
+        assert!(arr
+            .iter()
+            .any(|s| s.get("name").and_then(|x| x.as_str()) == Some("sub1")));
+
+        // Remove subscription.
+        let remove = Request::builder()
+            .method(Method::DELETE)
+            .uri("/subscriptions/sub1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = cp.handle(remove).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 }
