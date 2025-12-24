@@ -95,7 +95,14 @@ impl Socks5Ingress {
         router: Arc<dyn FlowRouter>,
         output: Arc<dyn FlowOutput>,
     ) -> Result<()> {
-        handle_socks5_stream(self.name.as_str(), &self.credentials, stream, router, output).await
+        handle_socks5_stream(
+            self.name.as_str(),
+            &self.credentials,
+            stream,
+            router,
+            output,
+        )
+        .await
     }
 }
 

@@ -6,37 +6,32 @@
 //! - 流量拦截和重定向
 //! - 跨平台实现适配
 
-use std::{
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-pub mod tun;
-pub mod route;
-pub mod filter;
 pub mod dns;
+pub mod filter;
+pub mod route;
+pub mod tun;
 // TODO: 平台特定实现待完成
 // pub mod platform;
 
-pub use tun::{PacketInfo as TunPacketInfo, PacketType, TunConfig, TunProvider};
+pub use dns::{
+    DnsConfig, DnsFilterAction, DnsHandler, DnsRecordType, DomainPattern as DnsDomainPattern,
+};
+pub use filter::{
+    ApplicationRule, DomainPattern as FilterDomainPattern, FilterAction, FilterResult, FilterStats,
+    FilteringConfig, FilteringMode, IpRule, PacketFilter, PortRule, ProcessRule, ProtocolRule,
+};
 pub use route::{
     BypassAction, BypassCondition, BypassRule, RouteDestination, RouteManager, RouteRule,
     RouteStats, RouteType, RoutingConfig, RoutingMode,
 };
-pub use filter::{
-    ApplicationRule, DomainPattern as FilterDomainPattern, FilterAction, FilterResult,
-    FilterStats, FilteringConfig, FilteringMode, IpRule, PacketFilter, PortRule, ProcessRule,
-    ProtocolRule,
-};
-pub use dns::{
-    DnsConfig, DnsFilterAction, DnsHandler, DnsRecordType,
-    DomainPattern as DnsDomainPattern,
-};
+pub use tun::{PacketInfo as TunPacketInfo, PacketType, TunConfig, TunProvider};
 // pub use platform::*;
 
 /// 网络虚拟化配置
@@ -206,28 +201,32 @@ impl NetworkManager {
 
         // 启动 TUN 接口
         if let Some(tun_provider) = self.tun_provider.as_mut() {
-            tun_provider.create_interface().await
+            tun_provider
+                .create_interface()
+                .await
                 .context("创建 TUN 接口失败")?;
-            tun_provider.up_interface().await
+            tun_provider
+                .up_interface()
+                .await
                 .context("启动 TUN 接口失败")?;
         }
 
         // 应用路由规则
         if let Some(route_manager) = self.route_manager.as_ref() {
-            route_manager.apply_routing().await
+            route_manager
+                .apply_routing()
+                .await
                 .context("应用路由规则失败")?;
         }
 
         // 启动包过滤
         if let Some(packet_filter) = self.packet_filter.as_ref() {
-            packet_filter.enable().await
-                .context("启用包过滤失败")?;
+            packet_filter.enable().await.context("启用包过滤失败")?;
         }
 
         // 启动 DNS 处理
         if let Some(dns_handler) = self.dns_handler.as_ref() {
-            dns_handler.start().await
-                .context("启动 DNS 处理失败")?;
+            dns_handler.start().await.context("启动 DNS 处理失败")?;
         }
 
         info!(target: "seep::network", "网络虚拟化启动成功");
@@ -299,7 +298,6 @@ impl NetworkManager {
     pub async fn is_running(&self) -> bool {
         *self.running.read().await
     }
-
 }
 
 /// 创建平台特定的 TUN 提供者

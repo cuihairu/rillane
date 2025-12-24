@@ -20,9 +20,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use seep_core::{
-    ChainContext, ChainStatus, HopType, RouteDecision, RouteHop, RouteType,
-};
+use seep_core::{ChainContext, ChainStatus, HopType, RouteDecision, RouteHop, RouteType};
 use seep_mesh::{LinkState, MeshRegistry, NodeId, NodeRecord, NodeRole, SessionId};
 
 /// 链路构建配置
@@ -134,13 +132,8 @@ impl ChainBuilder {
             .ok_or_else(|| anyhow!("目标节点 {} 不在拓扑图中", target))?;
 
         // 运行路径优化算法
-        let primary_path = self.find_optimal_path(
-            &graph,
-            &node_indices,
-            source_idx,
-            target_idx,
-            &constraints,
-        )?;
+        let primary_path =
+            self.find_optimal_path(&graph, &node_indices, source_idx, target_idx, &constraints)?;
 
         // 构建备用路径
         let fallback_paths = if self.config.enable_failover {
@@ -158,11 +151,7 @@ impl ChainBuilder {
 
         // 创建链路上下文
         let chain_id = Uuid::new_v4().to_string();
-        let mut chain_context = ChainContext::new(
-            chain_id.clone(),
-            source.clone(),
-            target.clone(),
-        );
+        let mut chain_context = ChainContext::new(chain_id.clone(), source.clone(), target.clone());
         chain_context.update_path(primary_path.clone());
 
         for fallback in &fallback_paths {
@@ -241,17 +230,22 @@ impl ChainBuilder {
                 nodes.iter().map(|n| (&n.id, n)).collect();
 
             for ls in link_states {
-                let Some(source_node) = node_map.get(&ls.source) else { continue };
-                let Some(target_node) = node_map.get(&ls.target) else { continue };
+                let Some(source_node) = node_map.get(&ls.source) else {
+                    continue;
+                };
+                let Some(target_node) = node_map.get(&ls.target) else {
+                    continue;
+                };
                 if source_node.id == target_node.id {
                     continue;
                 }
                 if !self.can_connect(source_node, target_node) {
                     continue;
                 }
-                let (Some(&source_idx), Some(&target_idx)) =
-                    (node_indices.get(&source_node.id), node_indices.get(&target_node.id))
-                else {
+                let (Some(&source_idx), Some(&target_idx)) = (
+                    node_indices.get(&source_node.id),
+                    node_indices.get(&target_node.id),
+                ) else {
                     continue;
                 };
                 let weight = self.calculate_link_weight(source_node, target_node, Some(ls));
@@ -405,10 +399,8 @@ impl ChainBuilder {
         costs: &HashMap<NodeIndex, i32>,
     ) -> Result<Vec<NodeId>> {
         // 反向索引
-        let index_to_node: HashMap<NodeIndex, NodeId> = node_indices
-            .iter()
-            .map(|(k, v)| (*v, k.clone()))
-            .collect();
+        let index_to_node: HashMap<NodeIndex, NodeId> =
+            node_indices.iter().map(|(k, v)| (*v, k.clone())).collect();
 
         let mut path = Vec::new();
         let mut current = target;
@@ -730,11 +722,16 @@ impl ChainManager {
         }
 
         // 构建新链路
-        let build_result = self.builder.build_chain(source, target, constraints).await?;
+        let build_result = self
+            .builder
+            .build_chain(source, target, constraints)
+            .await?;
 
         // 注册链路
-        self.active_chains
-            .insert(build_result.chain_id.clone(), build_result.chain_context.clone());
+        self.active_chains.insert(
+            build_result.chain_id.clone(),
+            build_result.chain_context.clone(),
+        );
         self.session_chain_map
             .insert(session_id, build_result.chain_id.clone());
 
@@ -804,8 +801,7 @@ impl ChainManager {
         }
 
         // 移除会话映射
-        self.session_chain_map
-            .retain(|_, v| v.as_str() != chain_id);
+        self.session_chain_map.retain(|_, v| v.as_str() != chain_id);
 
         // 从活跃链路中移除
         self.active_chains.remove(chain_id);

@@ -12,15 +12,16 @@
 //! - HTTP - 通过 HTTP CONNECT 代理连接
 //! - Shadowsocks - Shadowsocks 协议
 //! - Trojan - Trojan 协议（TLS + 密码认证）
+//! - WireGuard - WireGuard VPN（系统级接口）
 
 pub mod inbound;
-pub mod outbound;
 pub mod middleware;
+pub mod outbound;
 mod tls;
 
 pub use inbound::{HttpIngress, MixedIngress, Socks5Ingress};
+pub use middleware::LatencyProbe;
 pub use outbound::{
     DirectConnector, HttpConnector, Hysteria2Connector, ShadowsocksConnector, Socks5Connector,
-    TrojanConnector,
+    TrojanConnector, VlessConnector, WireguardConnector,
 };
-pub use middleware::LatencyProbe;

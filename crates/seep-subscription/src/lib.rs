@@ -20,17 +20,17 @@ use sha2::{Digest, Sha256};
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info};
 
-pub mod clash;
-pub mod seep_dsl;
 pub mod cache;
-pub mod fetcher;
+pub mod clash;
 pub mod converter;
+pub mod fetcher;
+pub mod seep_dsl;
 
-pub use clash::*;
-pub use seep_dsl::*;
 pub use cache::*;
-pub use fetcher::*;
+pub use clash::*;
 pub use converter::*;
+pub use fetcher::*;
+pub use seep_dsl::*;
 
 /// 订阅类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,9 +99,15 @@ pub struct Subscription {
     pub content_hash: Option<String>,
 }
 
-fn default_enabled() -> bool { true }
-fn default_refresh_interval() -> u64 { 60 } // 1小时
-fn default_timeout() -> u64 { 30 }
+fn default_enabled() -> bool {
+    true
+}
+fn default_refresh_interval() -> u64 {
+    60
+} // 1小时
+fn default_timeout() -> u64 {
+    30
+}
 
 impl Subscription {
     /// 创建新的订阅
@@ -192,10 +198,16 @@ impl Subscription {
 
         // 检查是否是 V2Ray 订阅（Base64 编码的 VMess 链接）
         if content.lines().any(|line| {
-            line.trim().starts_with("vmess://") ||
-            line.trim().starts_with("vless://") ||
-            line.trim().starts_with("trojan://") ||
-            line.trim().starts_with("ss://")
+            line.trim().starts_with("vmess://")
+                || line.trim().starts_with("vless://")
+                || line.trim().starts_with("trojan://")
+                || line.trim().starts_with("ss://")
+                || line.trim().starts_with("hysteria2://")
+                || line.trim().starts_with("hy2://")
+                || line.trim().starts_with("socks5://")
+                || line.trim().starts_with("socks://")
+                || line.trim().starts_with("http://")
+                || line.trim().starts_with("https://")
         }) {
             return SubscriptionType::V2Ray;
         }
@@ -256,9 +268,12 @@ impl SubscriptionManager {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("无法读取订阅配置文件: {}", path.display()))?;
 
-        let subscriptions: Vec<Subscription> = if path.extension()
+        let subscriptions: Vec<Subscription> = if path
+            .extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_lowercase()) == Some("json".to_string()) {
+            .map(|ext| ext.to_lowercase())
+            == Some("json".to_string())
+        {
             serde_json::from_str(&content)?
         } else {
             serde_yaml::from_str(&content)?
@@ -273,7 +288,10 @@ impl SubscriptionManager {
             subs_map.insert(sub.name.clone(), sub);
         }
 
-        *manager.subscriptions.write().expect("subscriptions lock poisoned") = subs_map;
+        *manager
+            .subscriptions
+            .write()
+            .expect("subscriptions lock poisoned") = subs_map;
 
         info!(
             target: "seep::subscription",
@@ -287,7 +305,10 @@ impl SubscriptionManager {
 
     /// 添加订阅
     pub fn add_subscription(&self, subscription: Subscription) -> Result<()> {
-        let mut subs = self.subscriptions.write().expect("subscriptions lock poisoned");
+        let mut subs = self
+            .subscriptions
+            .write()
+            .expect("subscriptions lock poisoned");
 
         if subs.contains_key(&subscription.name) {
             return Err(anyhow!("订阅 {} 已存在", subscription.name));
@@ -306,7 +327,10 @@ impl SubscriptionManager {
 
     /// 移除订阅
     pub fn remove_subscription(&self, name: &str) -> Result<()> {
-        let mut subs = self.subscriptions.write().expect("subscriptions lock poisoned");
+        let mut subs = self
+            .subscriptions
+            .write()
+            .expect("subscriptions lock poisoned");
 
         if subs.remove(name).is_none() {
             return Err(anyhow!("订阅 {} 不存在", name));
@@ -326,7 +350,8 @@ impl SubscriptionManager {
 
     /// 获取订阅列表
     pub fn list_subscriptions(&self) -> Vec<Subscription> {
-        self.subscriptions.read()
+        self.subscriptions
+            .read()
             .expect("subscriptions lock poisoned")
             .values()
             .cloned()
@@ -335,7 +360,8 @@ impl SubscriptionManager {
 
     /// 获取特定订阅
     pub fn get_subscription(&self, name: &str) -> Option<Subscription> {
-        self.subscriptions.read()
+        self.subscriptions
+            .read()
             .expect("subscriptions lock poisoned")
             .get(name)
             .cloned()
@@ -344,7 +370,10 @@ impl SubscriptionManager {
     /// 刷新单个订阅
     pub async fn refresh_subscription(&self, name: &str) -> Result<String> {
         let mut subscription = {
-            let subs = self.subscriptions.read().expect("subscriptions lock poisoned");
+            let subs = self
+                .subscriptions
+                .read()
+                .expect("subscriptions lock poisoned");
             subs.get(name)
                 .ok_or_else(|| anyhow!("订阅 {} 不存在", name))?
                 .clone()
@@ -382,7 +411,9 @@ impl SubscriptionManager {
         }
 
         // 获取内容
-        let fetch_result = fetcher.fetch(&subscription.url).await
+        let fetch_result = fetcher
+            .fetch(&subscription.url)
+            .await
             .with_context(|| format!("获取订阅 {} 失败", name))?;
 
         let content = fetch_result.content;
@@ -426,7 +457,8 @@ impl SubscriptionManager {
     /// 刷新所有订阅
     pub async fn refresh_all_subscriptions(&self) -> Vec<(String, Result<String>)> {
         let subscriptions: Vec<String> = {
-            self.subscriptions.read()
+            self.subscriptions
+                .read()
                 .expect("subscriptions lock poisoned")
                 .keys()
                 .cloned()
@@ -458,15 +490,20 @@ impl SubscriptionManager {
             return Err(anyhow!("未设置配置文件路径"));
         };
 
-        let subscriptions: Vec<Subscription> = self.subscriptions.read()
+        let subscriptions: Vec<Subscription> = self
+            .subscriptions
+            .read()
             .expect("subscriptions lock poisoned")
             .values()
             .cloned()
             .collect();
 
-        let content = if config_path.extension()
+        let content = if config_path
+            .extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_lowercase()) == Some("json".to_string()) {
+            .map(|ext| ext.to_lowercase())
+            == Some("json".to_string())
+        {
             serde_json::to_string_pretty(&subscriptions)?
         } else {
             serde_yaml::to_string(&subscriptions)?
@@ -501,7 +538,8 @@ impl SubscriptionManager {
 
                 // 获取需要刷新的订阅
                 let names_to_refresh: Vec<String> = {
-                    self.subscriptions.read()
+                    self.subscriptions
+                        .read()
                         .expect("subscriptions lock poisoned")
                         .iter()
                         .filter(|(_, sub)| sub.enabled && sub.needs_refresh())
@@ -528,9 +566,7 @@ impl SubscriptionManager {
 
                 // 等待所有任务完成
                 let results = futures::future::join_all(tasks).await;
-                let success_count = results.iter().filter(|r| {
-                    matches!(r, Ok(Ok(_)))
-                }).count();
+                let success_count = results.iter().filter(|r| matches!(r, Ok(Ok(_)))).count();
 
                 info!(
                     target: "seep::subscription",
@@ -545,14 +581,20 @@ impl SubscriptionManager {
 
     /// 更新订阅信息到映射中
     fn update_subscription_in_map(&self, subscription: Subscription) -> Result<()> {
-        let mut subs = self.subscriptions.write().expect("subscriptions lock poisoned");
+        let mut subs = self
+            .subscriptions
+            .write()
+            .expect("subscriptions lock poisoned");
         subs.insert(subscription.name.clone(), subscription);
         Ok(())
     }
 
     /// 获取订阅统计信息
     pub fn get_stats(&self) -> SubscriptionStats {
-        let subs = self.subscriptions.read().expect("subscriptions lock poisoned");
+        let subs = self
+            .subscriptions
+            .read()
+            .expect("subscriptions lock poisoned");
 
         let total = subs.len();
         let enabled = subs.values().filter(|s| s.enabled).count();

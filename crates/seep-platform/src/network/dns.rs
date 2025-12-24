@@ -126,7 +126,9 @@ impl DnsServer {
         }
 
         // 验证 TLS 配置
-        if matches!(self.server_type, DnsServerType::Dot | DnsServerType::Doh) && self.tls_config.is_none() {
+        if matches!(self.server_type, DnsServerType::Dot | DnsServerType::Doh)
+            && self.tls_config.is_none()
+        {
             return Err(anyhow!("DoT/DoH 服务器需要 TLS 配置"));
         }
 
@@ -164,7 +166,10 @@ impl DnsServerType {
 
     /// 检查是否加密
     pub fn is_encrypted(&self) -> bool {
-        matches!(self, DnsServerType::Dot | DnsServerType::Doh | DnsServerType::Doq)
+        matches!(
+            self,
+            DnsServerType::Dot | DnsServerType::Doh | DnsServerType::Doq
+        )
     }
 
     /// 检查是否使用 HTTP
@@ -527,13 +532,21 @@ impl DnsRecord {
             DnsRecordData::A(addr) => addr.to_string(),
             DnsRecordData::Aaaa(addr) => addr.to_string(),
             DnsRecordData::Cname(name) => name.clone(),
-            DnsRecordData::Mx { preference, exchange } => {
+            DnsRecordData::Mx {
+                preference,
+                exchange,
+            } => {
                 format!("{} {}", preference, exchange)
             }
             DnsRecordData::Txt(data) => String::from_utf8_lossy(data).to_string(),
             DnsRecordData::Ns(name) => name.clone(),
             DnsRecordData::Ptr(name) => name.clone(),
-            DnsRecordData::Srv { priority, weight, port, target } => {
+            DnsRecordData::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            } => {
                 format!("{} {} {} {}", priority, weight, port, target)
             }
             DnsRecordData::Unknown(data) => format!("{:?}", data),
@@ -559,7 +572,12 @@ pub enum DnsRecordData {
     /// SOA 记录 (简化)
     Ptr(String),
     /// SRV 记录
-    Srv { priority: u16, weight: u16, port: u16, target: String },
+    Srv {
+        priority: u16,
+        weight: u16,
+        port: u16,
+        target: String,
+    },
     /// 未知类型
     Unknown(Vec<u8>),
 }
@@ -721,7 +739,10 @@ impl DnsStats {
     /// 记录查询
     pub fn record_query(&mut self, query: &DnsQuery) {
         self.total_queries += 1;
-        *self.record_type_queries.entry(query.record_type).or_insert(0) += 1;
+        *self
+            .record_type_queries
+            .entry(query.record_type)
+            .or_insert(0) += 1;
     }
 
     /// 记录缓存命中
@@ -754,8 +775,9 @@ impl DnsStats {
 
         // 更新平均响应时间
         let response_time_ms = response.response_time.as_millis() as f64;
-        self.average_response_time_ms =
-            (self.average_response_time_ms * (self.successful_responses - 1) as f64 + response_time_ms)
+        self.average_response_time_ms = (self.average_response_time_ms
+            * (self.successful_responses - 1) as f64
+            + response_time_ms)
             / self.successful_responses as f64;
     }
 
@@ -773,7 +795,8 @@ impl DnsStats {
         if self.successful_responses + self.failed_responses == 0 {
             0.0
         } else {
-            self.successful_responses as f64 / (self.successful_responses + self.failed_responses) as f64
+            self.successful_responses as f64
+                / (self.successful_responses + self.failed_responses) as f64
         }
     }
 }
@@ -833,10 +856,7 @@ pub enum DnsEvent {
     /// 响应事件
     Response(DnsResponse),
     /// 缓存事件
-    Cache {
-        domain: String,
-        action: CacheAction,
-    },
+    Cache { domain: String, action: CacheAction },
     /// 过滤事件
     Filter {
         rule_name: String,
@@ -863,7 +883,8 @@ pub enum CacheAction {
 /// 便捷函数
 pub fn parse_dns_server(s: &str) -> Result<DnsServer> {
     if let Some((name, addr_str)) = s.split_once('=') {
-        let address: SocketAddr = addr_str.parse()
+        let address: SocketAddr = addr_str
+            .parse()
             .with_context(|| format!("无效的 DNS 服务器地址: {}", addr_str))?;
 
         // 根据端口猜测服务器类型
@@ -907,12 +928,16 @@ pub fn default_dns_filters() -> Vec<DnsFilterRule> {
     vec![
         DnsFilterRule::new(
             "block_ads".to_string(),
-            DomainPattern::Suffix { suffix: ".doubleclick.net".to_string() },
+            DomainPattern::Suffix {
+                suffix: ".doubleclick.net".to_string(),
+            },
             DnsFilterAction::Block,
         ),
         DnsFilterRule::new(
             "block_tracking".to_string(),
-            DomainPattern::Suffix { suffix: ".google-analytics.com".to_string() },
+            DomainPattern::Suffix {
+                suffix: ".google-analytics.com".to_string(),
+            },
             DnsFilterAction::Block,
         ),
     ]

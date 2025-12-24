@@ -2,10 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use seep_config::{
-    MatchCondition, PolicyGroup, RouteRule, RoutingConfig, Strategy, GroupMember,
-};
-use seep_core::{FlowContext, FlowId, FlowTarget, TargetProto, FlowMetadata, FlowRouter};
+use seep_config::{GroupMember, MatchCondition, PolicyGroup, RouteRule, RoutingConfig, Strategy};
+use seep_core::{FlowContext, FlowId, FlowMetadata, FlowRouter, FlowTarget, TargetProto};
 use seep_routing::RoutingEngine;
 use tokio::time::{sleep, Duration};
 
@@ -17,42 +15,67 @@ fn create_test_config() -> RoutingConfig {
                 name: "primary-group".to_string(),
                 strategy: Strategy::RoundRobin,
                 members: vec![
-                    GroupMember::Node { name: "node1".to_string() },
-                    GroupMember::Node { name: "node2".to_string() },
-                    GroupMember::WeightedNode { name: "node3".to_string(), weight: 3 },
+                    GroupMember::Node {
+                        name: "node1".to_string(),
+                    },
+                    GroupMember::Node {
+                        name: "node2".to_string(),
+                    },
+                    GroupMember::WeightedNode {
+                        name: "node3".to_string(),
+                        weight: 3,
+                    },
                 ],
             },
             PolicyGroup {
                 name: "latency-group".to_string(),
                 strategy: Strategy::Latency,
                 members: vec![
-                    GroupMember::Node { name: "node1".to_string() },
-                    GroupMember::Node { name: "node2".to_string() },
+                    GroupMember::Node {
+                        name: "node1".to_string(),
+                    },
+                    GroupMember::Node {
+                        name: "node2".to_string(),
+                    },
                 ],
             },
             PolicyGroup {
                 name: "bandwidth-group".to_string(),
                 strategy: Strategy::Bandwidth,
                 members: vec![
-                    GroupMember::Node { name: "node1".to_string() },
-                    GroupMember::Node { name: "node2".to_string() },
+                    GroupMember::Node {
+                        name: "node1".to_string(),
+                    },
+                    GroupMember::Node {
+                        name: "node2".to_string(),
+                    },
                 ],
             },
             PolicyGroup {
                 name: "hash-group".to_string(),
                 strategy: Strategy::ConsistentHash,
                 members: vec![
-                    GroupMember::Node { name: "node1".to_string() },
-                    GroupMember::Node { name: "node2".to_string() },
-                    GroupMember::Node { name: "node3".to_string() },
+                    GroupMember::Node {
+                        name: "node1".to_string(),
+                    },
+                    GroupMember::Node {
+                        name: "node2".to_string(),
+                    },
+                    GroupMember::Node {
+                        name: "node3".to_string(),
+                    },
                 ],
             },
             PolicyGroup {
                 name: "random-group".to_string(),
                 strategy: Strategy::Random,
                 members: vec![
-                    GroupMember::Node { name: "node1".to_string() },
-                    GroupMember::Node { name: "node2".to_string() },
+                    GroupMember::Node {
+                        name: "node1".to_string(),
+                    },
+                    GroupMember::Node {
+                        name: "node2".to_string(),
+                    },
                 ],
             },
         ],
@@ -73,7 +96,9 @@ fn create_test_config() -> RoutingConfig {
             },
             RouteRule {
                 name: "bandwidth-rule".to_string(),
-                matches: vec![MatchCondition::Port { values: vec![8080, 8443] }],
+                matches: vec![MatchCondition::Port {
+                    values: vec![8080, 8443],
+                }],
                 target: "bandwidth-group".to_string(),
             },
             RouteRule {
@@ -251,8 +276,12 @@ async fn test_group_nesting() -> Result<()> {
         name: "nested-group".to_string(),
         strategy: Strategy::Fixed,
         members: vec![
-            GroupMember::Group { name: "primary-group".to_string() },
-            GroupMember::Node { name: "node4".to_string() },
+            GroupMember::Group {
+                name: "primary-group".to_string(),
+            },
+            GroupMember::Node {
+                name: "node4".to_string(),
+            },
         ],
     });
 

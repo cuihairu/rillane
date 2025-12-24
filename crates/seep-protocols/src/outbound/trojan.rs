@@ -4,10 +4,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use seep_core::{EgressConnector, Flow, FlowReport};
 use sha2::{Digest, Sha224};
-use tokio::{
-    io::{AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use crate::tls::create_tls_connector;
 

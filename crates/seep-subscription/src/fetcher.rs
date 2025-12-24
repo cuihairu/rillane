@@ -1,9 +1,6 @@
 //! 订阅内容获取器
 
-use std::{
-    collections::HashMap,
-    time::Duration,
-};
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -78,15 +75,16 @@ impl SubscriptionFetcher {
     /// 使用自定义配置创建获取器
     pub fn with_config(config: FetcherConfig) -> Self {
         let follow_redirects = config.follow_redirects;
-        let mut builder = Client::builder()
-            .timeout(config.timeout)
-            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-                if follow_redirects && attempt.previous().len() < 10 {
-                    attempt.follow()
-                } else {
-                    attempt.stop()
-                }
-            }));
+        let mut builder =
+            Client::builder()
+                .timeout(config.timeout)
+                .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                    if follow_redirects && attempt.previous().len() < 10 {
+                        attempt.follow()
+                    } else {
+                        attempt.stop()
+                    }
+                }));
 
         // 设置代理
         if let Some(proxy_url) = &config.proxy {
@@ -193,7 +191,9 @@ impl SubscriptionFetcher {
         }
 
         // 发送请求
-        let response = request.send().await
+        let response = request
+            .send()
+            .await
             .with_context(|| format!("发送请求到 {} 失败", url))?;
 
         let status_code = response.status().as_u16();
@@ -207,17 +207,20 @@ impl SubscriptionFetcher {
             );
             return Ok(FetchResult {
                 content: String::new(),
-                etag: response.headers()
+                etag: response
+                    .headers()
                     .get(header::ETAG)
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string()),
-                last_modified: response.headers()
+                last_modified: response
+                    .headers()
                     .get(header::LAST_MODIFIED)
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string()),
                 status_code,
                 headers: self.extract_headers(&response),
-                content_type: response.headers()
+                content_type: response
+                    .headers()
                     .get(header::CONTENT_TYPE)
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string()),
@@ -234,26 +237,28 @@ impl SubscriptionFetcher {
         }
 
         // 在消费 response 前提取响应头
-        let etag = response.headers()
+        let etag = response
+            .headers()
             .get(header::ETAG)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let last_modified = response.headers()
+        let last_modified = response
+            .headers()
             .get(header::LAST_MODIFIED)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
         let headers = self.extract_headers(&response);
 
-        let content_type = response.headers()
+        let content_type = response
+            .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
         // 读取内容
-        let content = response.text().await
-            .with_context(|| "读取响应内容失败")?;
+        let content = response.text().await.with_context(|| "读取响应内容失败")?;
 
         Ok(FetchResult {
             content,
@@ -285,7 +290,8 @@ impl SubscriptionFetcher {
         }
 
         // 检查内容长度
-        if content.len() > 50 * 1024 * 1024 { // 50MB
+        if content.len() > 50 * 1024 * 1024 {
+            // 50MB
             return Err(anyhow!("订阅内容过大: {} 字节", content.len()));
         }
 
@@ -325,26 +331,24 @@ impl SubscriptionFetcher {
         }
 
         match BASE64.decode(content.trim()) {
-            Ok(decoded_bytes) => {
-                match String::from_utf8(decoded_bytes) {
-                    Ok(decoded_string) => {
-                        debug!(
-                            target: "seep::subscription::fetcher",
-                            original_len = content.len(),
-                            decoded_len = decoded_string.len(),
-                            "成功解码 Base64 内容"
-                        );
-                        Ok(decoded_string)
-                    }
-                    Err(_) => {
-                        warn!(
-                            target: "seep::subscription::fetcher",
-                            "Base64 解码成功但不是有效的 UTF-8"
-                        );
-                        Ok(content.to_string())
-                    }
+            Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
+                Ok(decoded_string) => {
+                    debug!(
+                        target: "seep::subscription::fetcher",
+                        original_len = content.len(),
+                        decoded_len = decoded_string.len(),
+                        "成功解码 Base64 内容"
+                    );
+                    Ok(decoded_string)
                 }
-            }
+                Err(_) => {
+                    warn!(
+                        target: "seep::subscription::fetcher",
+                        "Base64 解码成功但不是有效的 UTF-8"
+                    );
+                    Ok(content.to_string())
+                }
+            },
             Err(_) => {
                 debug!(
                     target: "seep::subscription::fetcher",
@@ -374,7 +378,8 @@ impl SubscriptionFetcher {
 
         // 多行，每行都是 Base64（V2Ray 订阅格式）
         if lines.len() > 1 {
-            let base64_lines = lines.iter()
+            let base64_lines = lines
+                .iter()
                 .filter(|line| {
                     let line = line.trim();
                     if line.is_empty() {
@@ -472,17 +477,23 @@ trojan://password@server.com:443#test
 
         // 有效内容
         let valid_content = "{\"proxies\": []}";
-        assert!(fetcher.validate_content(valid_content, "http://example.com").is_ok());
+        assert!(fetcher
+            .validate_content(valid_content, "http://example.com")
+            .is_ok());
 
         // 空内容
         assert!(fetcher.validate_content("", "http://example.com").is_err());
 
         // 空白内容
-        assert!(fetcher.validate_content("   \n\t   ", "http://example.com").is_err());
+        assert!(fetcher
+            .validate_content("   \n\t   ", "http://example.com")
+            .is_err());
 
         // 过大内容（模拟）
         let large_content = "x".repeat(50 * 1024 * 1024 + 1);
-        assert!(fetcher.validate_content(&large_content, "http://example.com").is_err());
+        assert!(fetcher
+            .validate_content(&large_content, "http://example.com")
+            .is_err());
     }
 
     #[test]

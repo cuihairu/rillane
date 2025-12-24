@@ -237,6 +237,18 @@ pub enum EgressConfig {
         private_key: String,
         public_key: String,
         address: String,
+        /// Allowed IPs for peer routing (e.g. ["10.0.0.0/24", "0.0.0.0/0"]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allowed_ips: Option<Vec<String>>,
+        /// Optional pre-shared key (base64 or hex).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preshared_key: Option<String>,
+        /// Optional persistent keepalive in seconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persistent_keepalive: Option<u16>,
+        /// Optional local listen port (0/None means auto).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        listen_port: Option<u16>,
         #[serde(skip_serializing_if = "Option::is_none")]
         mtu: Option<u16>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -244,10 +256,18 @@ pub enum EgressConfig {
     },
 }
 
-fn default_security() -> String { "auto".to_string() }
-fn default_network() -> String { "tcp".to_string() }
-fn default_protocol() -> String { "udp".to_string() }
-fn default_tls_true() -> bool { true }
+fn default_security() -> String {
+    "auto".to_string()
+}
+fn default_network() -> String {
+    "tcp".to_string()
+}
+fn default_protocol() -> String {
+    "udp".to_string()
+}
+fn default_tls_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingConfig {
@@ -329,9 +349,7 @@ impl GroupDescriptor {
     }
 
     pub fn healthy_members(&self) -> Vec<&GroupDescriptorMember> {
-        self.members.iter()
-            .filter(|m| m.is_healthy())
-            .collect()
+        self.members.iter().filter(|m| m.is_healthy()).collect()
     }
 
     /// 展开所有节点（处理组嵌套）
@@ -342,7 +360,9 @@ impl GroupDescriptor {
                 GroupDescriptorMember::Node { name, weight, .. } => {
                     nodes.push((name.clone(), *weight));
                 }
-                GroupDescriptorMember::Group { descriptor, weight, .. } => {
+                GroupDescriptorMember::Group {
+                    descriptor, weight, ..
+                } => {
                     // 递归展开嵌套组，应用权重
                     let nested_nodes = descriptor.flatten_nodes();
                     for (node_name, node_weight) in nested_nodes {
@@ -362,15 +382,9 @@ pub enum GroupMember {
     /// 嵌套组引用
     Group { name: String },
     /// 带权重的节点
-    WeightedNode {
-        name: String,
-        weight: u32
-    },
+    WeightedNode { name: String, weight: u32 },
     /// 带权重的组
-    WeightedGroup {
-        name: String,
-        weight: u32
-    },
+    WeightedGroup { name: String, weight: u32 },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -395,8 +409,12 @@ impl From<GroupMemberTagged> for GroupMember {
         match v {
             GroupMemberTagged::Node { name } => GroupMember::Node { name },
             GroupMemberTagged::Group { name } => GroupMember::Group { name },
-            GroupMemberTagged::WeightedNode { name, weight } => GroupMember::WeightedNode { name, weight },
-            GroupMemberTagged::WeightedGroup { name, weight } => GroupMember::WeightedGroup { name, weight },
+            GroupMemberTagged::WeightedNode { name, weight } => {
+                GroupMember::WeightedNode { name, weight }
+            }
+            GroupMemberTagged::WeightedGroup { name, weight } => {
+                GroupMember::WeightedGroup { name, weight }
+            }
         }
     }
 }

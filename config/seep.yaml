@@ -15,10 +15,73 @@ ingress:
     auth:
       - username: demo
         password: demo
+  # - name: http-in
+  #   type: http
+  #   bind: 0.0.0.0:7891
+  # - name: mixed-in
+  #   type: mixed
+  #   bind: 0.0.0.0:7892
 
 egress:
   - name: direct-main
     type: direct
+  # - name: ss-node
+  #   type: shadowsocks
+  #   server: 1.2.3.4
+  #   port: 8388
+  #   method: aes-256-gcm
+  #   password: your_password
+  # - name: trojan-node
+  #   type: trojan
+  #   server: example.com
+  #   port: 443
+  #   password: your_password
+  #   sni: example.com
+  #   skip_cert_verify: false
+  # - name: hy2-node
+  #   type: hysteria2
+  #   server: example.com
+  #   port: 443
+  #   password: your_password
+  #   mport: 20000-30000
+  #   server_name: example.com
+  #   skip_cert_verify: true
+  #   alpn: ["h3"]
+  # - name: vless-node
+  #   type: vless
+  #   server: example.com
+  #   port: 443
+  #   uuid: 11111111-2222-3333-4444-555555555555
+  #   network: ws
+  #   path: /ws
+  #   host: ["example.com"]
+  #   tls: true
+  #   sni: example.com
+  #   skip_cert_verify: false
+  # - name: socks5-node
+  #   type: socks5
+  #   server: 127.0.0.1
+  #   port: 1080
+  #   username: user
+  #   password: pass
+  # - name: http-node
+  #   type: http
+  #   server: 127.0.0.1
+  #   port: 3128
+  #   tls: false
+  #   skip_cert_verify: false
+  # - name: wg-node
+  #   type: wireguard
+  #   endpoint: 1.2.3.4:51820
+  #   private_key: <base64>
+  #   public_key: <base64>
+  #   preshared_key: <base64>
+  #   address: 10.0.0.2/32,fd00::2/128
+  #   allowed_ips: ["0.0.0.0/0", "::/0"]
+  #   persistent_keepalive: 25
+  #   listen_port: 0
+  #   mtu: 1420
+  #   dns: ["1.1.1.1", "8.8.8.8"]
 
 routing:
   default_node: direct-main

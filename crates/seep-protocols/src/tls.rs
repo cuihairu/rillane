@@ -8,7 +8,15 @@ use tokio_rustls::TlsConnector;
 
 /// 创建 TLS 连接器
 pub fn create_tls_connector(skip_cert_verify: bool) -> Result<TlsConnector> {
-    let config = if skip_cert_verify {
+    create_tls_connector_with_alpn(skip_cert_verify, None)
+}
+
+/// 创建支持 ALPN 的 TLS 连接器
+pub fn create_tls_connector_with_alpn(
+    skip_cert_verify: bool,
+    alpn: Option<&[String]>,
+) -> Result<TlsConnector> {
+    let mut config = if skip_cert_verify {
         ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerifier))
@@ -21,6 +29,20 @@ pub fn create_tls_connector(skip_cert_verify: bool) -> Result<TlsConnector> {
             .with_root_certificates(root_store)
             .with_no_client_auth()
     };
+
+    if let Some(alpn) = alpn {
+        let mut protos = Vec::new();
+        for p in alpn {
+            let p = p.trim();
+            if p.is_empty() {
+                continue;
+            }
+            protos.push(p.as_bytes().to_vec());
+        }
+        if !protos.is_empty() {
+            config.alpn_protocols = protos;
+        }
+    }
 
     Ok(TlsConnector::from(Arc::new(config)))
 }

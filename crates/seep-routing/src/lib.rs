@@ -1,10 +1,17 @@
-use std::{collections::HashMap, sync::{Arc, RwLock}, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rand::{seq::SliceRandom, thread_rng, Rng};
-use seep_config::{MatchCondition, PolicyGroup, RouteRule, RoutingConfig, Strategy, GroupDescriptor, GroupDescriptorMember};
+use seep_config::{
+    GroupDescriptor, GroupDescriptorMember, MatchCondition, PolicyGroup, RouteRule, RoutingConfig,
+    Strategy,
+};
 use seep_core::{FlowContext, FlowRouter, RouteDecision};
 use sha2::{Digest, Sha256};
 use tokio::time::{interval, sleep};
@@ -60,7 +67,9 @@ impl RoutingEngine {
 
             for group in &config.groups {
                 if !resolved_groups.contains(&group.name) {
-                    if let Some(descriptor) = self.resolve_group_descriptor(&config, group, &resolved_groups) {
+                    if let Some(descriptor) =
+                        self.resolve_group_descriptor(&config, group, &resolved_groups)
+                    {
                         cache.insert(group.name.clone(), descriptor);
                         resolved_groups.insert(group.name.clone());
                     }
@@ -91,7 +100,9 @@ impl RoutingEngine {
                 seep_config::GroupMember::Group { name } => {
                     if resolved.contains(name) {
                         if let Some(nested_group) = config.groups.iter().find(|g| g.name == *name) {
-                            if let Some(nested_descriptor) = self.resolve_group_descriptor(config, nested_group, resolved) {
+                            if let Some(nested_descriptor) =
+                                self.resolve_group_descriptor(config, nested_group, resolved)
+                            {
                                 members.push(GroupDescriptorMember::Group {
                                     name: name.clone(),
                                     weight: 1,
@@ -112,7 +123,9 @@ impl RoutingEngine {
                 seep_config::GroupMember::WeightedGroup { name, weight } => {
                     if resolved.contains(name) {
                         if let Some(nested_group) = config.groups.iter().find(|g| g.name == *name) {
-                            if let Some(nested_descriptor) = self.resolve_group_descriptor(config, nested_group, resolved) {
+                            if let Some(nested_descriptor) =
+                                self.resolve_group_descriptor(config, nested_group, resolved)
+                            {
                                 members.push(GroupDescriptorMember::Group {
                                     name: name.clone(),
                                     weight: *weight,
@@ -128,7 +141,11 @@ impl RoutingEngine {
         if members.is_empty() {
             None
         } else {
-            Some(GroupDescriptor::new(group.name.clone(), group.strategy.clone(), members))
+            Some(GroupDescriptor::new(
+                group.name.clone(),
+                group.strategy.clone(),
+                members,
+            ))
         }
     }
 
@@ -140,13 +157,19 @@ impl RoutingEngine {
 
     /// 清理轮询计数器
     fn clear_round_robin_counters(&self) {
-        let mut counters = self.round_robin_counters.write().expect("round robin counters poisoned");
+        let mut counters = self
+            .round_robin_counters
+            .write()
+            .expect("round robin counters poisoned");
         counters.clear();
     }
 
     /// 获取下一个轮询索引
     fn get_next_round_robin_index(&self, group_name: &str, member_count: usize) -> usize {
-        let mut counters = self.round_robin_counters.write().expect("round robin counters poisoned");
+        let mut counters = self
+            .round_robin_counters
+            .write()
+            .expect("round robin counters poisoned");
         let index = counters.entry(group_name.to_string()).or_insert(0);
         let current = *index;
         *index = (current + 1) % member_count;
@@ -183,7 +206,9 @@ impl RoutingEngine {
     /// 执行健康检查
     pub async fn perform_health_checks(&self) {
         let config = self.snapshot();
-        let nodes_to_check: Vec<String> = config.groups.iter()
+        let nodes_to_check: Vec<String> = config
+            .groups
+            .iter()
             .flat_map(|group| group.members.iter())
             .map(|member| member.as_name())
             .collect();
@@ -193,7 +218,8 @@ impl RoutingEngine {
             let is_healthy = self.check_node_health(&node_name).await;
 
             // 更新健康状态缓存
-            self.health_status.insert(node_name.clone(), (is_healthy, std::time::Instant::now()));
+            self.health_status
+                .insert(node_name.clone(), (is_healthy, std::time::Instant::now()));
 
             // 如果节点健康，更新延迟统计
             if is_healthy {
@@ -227,7 +253,10 @@ impl RoutingEngine {
     }
 
     /// 基于带宽选择成员
-    fn select_bandwidth_member<'a>(&self, members: &'a [&GroupDescriptorMember]) -> Option<&'a GroupDescriptorMember> {
+    fn select_bandwidth_member<'a>(
+        &self,
+        members: &'a [&GroupDescriptorMember],
+    ) -> Option<&'a GroupDescriptorMember> {
         if members.is_empty() {
             return None;
         }
@@ -236,7 +265,8 @@ impl RoutingEngine {
         const BANDWIDTH_TTL: Duration = Duration::from_secs(60);
 
         // 过滤出有有效带宽统计的成员
-        let members_with_bandwidth: Vec<(&GroupDescriptorMember, u32)> = members.iter()
+        let members_with_bandwidth: Vec<(&GroupDescriptorMember, u32)> = members
+            .iter()
             .filter_map(|member| {
                 if let Some(entry) = self.bandwidth_stats.get(member.as_name()) {
                     let (bandwidth, last_update) = entry.value();
@@ -254,21 +284,27 @@ impl RoutingEngine {
         }
 
         // 选择带宽最高的成员
-        members_with_bandwidth.into_iter()
+        members_with_bandwidth
+            .into_iter()
             .max_by_key(|(_, bandwidth)| *bandwidth)
             .map(|(member, _)| member)
     }
 
     /// 基于延迟选择成员
-    fn select_latency_member<'a>(&self, members: &'a [&GroupDescriptorMember]) -> Option<&'a GroupDescriptorMember> {
+    fn select_latency_member<'a>(
+        &self,
+        members: &'a [&GroupDescriptorMember],
+    ) -> Option<&'a GroupDescriptorMember> {
         if members.is_empty() {
             return None;
         }
 
         // 过滤出有延迟统计的成员
-        let members_with_latency: Vec<(&GroupDescriptorMember, u32)> = members.iter()
+        let members_with_latency: Vec<(&GroupDescriptorMember, u32)> = members
+            .iter()
             .filter_map(|member| {
-                self.latency_stats.get(member.as_name())
+                self.latency_stats
+                    .get(member.as_name())
                     .map(|latency| (*member, *latency))
             })
             .collect();
@@ -279,7 +315,8 @@ impl RoutingEngine {
         }
 
         // 选择延迟最低的成员
-        members_with_latency.into_iter()
+        members_with_latency
+            .into_iter()
             .min_by_key(|(_, latency)| *latency)
             .map(|(member, _)| member)
     }
@@ -288,14 +325,16 @@ impl RoutingEngine {
     pub fn update_bandwidth_stats(&self, node_name: &str, bandwidth_kbps: u32) {
         self.bandwidth_stats.insert(
             node_name.to_string(),
-            (bandwidth_kbps, std::time::Instant::now())
+            (bandwidth_kbps, std::time::Instant::now()),
         );
     }
 
     /// 获取节点健康状态统计
     pub fn get_health_stats(&self) -> (usize, usize) {
         let total = self.health_status.len();
-        let healthy = self.health_status.iter()
+        let healthy = self
+            .health_status
+            .iter()
             .filter(|entry| entry.value().0)
             .count();
         (healthy, total)
@@ -308,17 +347,25 @@ impl FlowRouter for RoutingEngine {
         let config = self.snapshot();
         for rule in &config.rules {
             if matches_rule(rule, &ctx) {
-                return self.resolve_target(&rule.target, Some(rule.name.clone()), Some(&ctx)).await;
+                return self
+                    .resolve_target(&rule.target, Some(rule.name.clone()), Some(&ctx))
+                    .await;
             }
         }
 
-        self.resolve_target(&config.default_node, Some("default".into()), Some(&ctx)).await
+        self.resolve_target(&config.default_node, Some("default".into()), Some(&ctx))
+            .await
     }
 }
 
 impl RoutingEngine {
     /// 解析目标并返回路由决策
-    async fn resolve_target(&self, target: &str, reason: Option<String>, ctx: Option<&FlowContext>) -> Result<RouteDecision> {
+    async fn resolve_target(
+        &self,
+        target: &str,
+        reason: Option<String>,
+        ctx: Option<&FlowContext>,
+    ) -> Result<RouteDecision> {
         // 如果是组，则从组描述符中选择
         if let Some(descriptor) = self.get_group_descriptor(target) {
             self.select_from_group(&descriptor, reason, ctx).await
@@ -331,7 +378,12 @@ impl RoutingEngine {
     }
 
     /// 从组中选择成员
-    async fn select_from_group(&self, descriptor: &GroupDescriptor, reason: Option<String>, ctx: Option<&FlowContext>) -> Result<RouteDecision> {
+    async fn select_from_group(
+        &self,
+        descriptor: &GroupDescriptor,
+        reason: Option<String>,
+        ctx: Option<&FlowContext>,
+    ) -> Result<RouteDecision> {
         let healthy_members = descriptor.healthy_members();
         if healthy_members.is_empty() {
             return Err(anyhow!("组 {} 无健康成员", descriptor.name));
@@ -344,24 +396,18 @@ impl RoutingEngine {
                 healthy_members.choose(&mut rng).copied()
             }
             Strategy::Weighted => self.select_weighted_member(&healthy_members),
-            Strategy::Bandwidth => {
-                self.select_bandwidth_member(&healthy_members)
-            }
-            Strategy::ConsistentHash => {
-                self.select_consistent_hash_member(&healthy_members, ctx)
-            }
+            Strategy::Bandwidth => self.select_bandwidth_member(&healthy_members),
+            Strategy::ConsistentHash => self.select_consistent_hash_member(&healthy_members, ctx),
             Strategy::RoundRobin => {
-                let index = self.get_next_round_robin_index(&descriptor.name, healthy_members.len());
+                let index =
+                    self.get_next_round_robin_index(&descriptor.name, healthy_members.len());
                 healthy_members.get(index).copied()
             }
-            Strategy::Latency => {
-                self.select_latency_member(&healthy_members)
-            }
+            Strategy::Latency => self.select_latency_member(&healthy_members),
         };
 
-        let selected_member = selected_member.ok_or_else(|| {
-            anyhow!("组 {} 选择成员失败", descriptor.name)
-        })?;
+        let selected_member =
+            selected_member.ok_or_else(|| anyhow!("组 {} 选择成员失败", descriptor.name))?;
 
         match selected_member {
             GroupDescriptorMember::Node { name, .. } => {
@@ -373,7 +419,10 @@ impl RoutingEngine {
                 decision.reason = reason;
                 Ok(decision)
             }
-            GroupDescriptorMember::Group { descriptor: nested_desc, .. } => {
+            GroupDescriptorMember::Group {
+                descriptor: nested_desc,
+                ..
+            } => {
                 // 递归选择嵌套组的成员
                 Box::pin(self.select_from_group(nested_desc.as_ref(), reason, ctx)).await
             }
@@ -381,7 +430,11 @@ impl RoutingEngine {
     }
 
     /// 一致性哈希选择
-    fn select_consistent_hash_member<'a>(&self, members: &'a [&GroupDescriptorMember], ctx: Option<&FlowContext>) -> Option<&'a GroupDescriptorMember> {
+    fn select_consistent_hash_member<'a>(
+        &self,
+        members: &'a [&GroupDescriptorMember],
+        ctx: Option<&FlowContext>,
+    ) -> Option<&'a GroupDescriptorMember> {
         if members.is_empty() {
             return None;
         }
@@ -391,7 +444,8 @@ impl RoutingEngine {
             Some(ctx) => ctx.target.host.clone(),
             None => {
                 // 如果没有上下文，使用所有成员名的组合作为哈希键
-                members.iter()
+                members
+                    .iter()
                     .map(|m| m.as_name())
                     .collect::<Vec<_>>()
                     .join(":")
@@ -401,8 +455,7 @@ impl RoutingEngine {
         // 计算哈希值
         let hash = Sha256::digest(hash_key.as_bytes());
         let hash_num = u64::from_be_bytes([
-            hash[0], hash[1], hash[2], hash[3],
-            hash[4], hash[5], hash[6], hash[7],
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
         ]);
 
         // 使用哈希值选择成员
@@ -411,7 +464,10 @@ impl RoutingEngine {
     }
 
     /// 加权随机选择
-    fn select_weighted_member<'a>(&self, members: &'a [&GroupDescriptorMember]) -> Option<&'a GroupDescriptorMember> {
+    fn select_weighted_member<'a>(
+        &self,
+        members: &'a [&GroupDescriptorMember],
+    ) -> Option<&'a GroupDescriptorMember> {
         if members.is_empty() {
             return None;
         }

@@ -72,13 +72,10 @@ impl EgressConnector for ShadowsocksConnector {
         );
 
         // 建立 Shadowsocks 连接
-        let mut outbound = ProxyClientStream::connect(
-            self.context.clone(),
-            &server_config,
-            target_addr,
-        )
-        .await
-        .with_context(|| format!("Shadowsocks 连接失败: {}:{}", self.server, self.port))?;
+        let mut outbound =
+            ProxyClientStream::connect(self.context.clone(), &server_config, target_addr)
+                .await
+                .with_context(|| format!("Shadowsocks 连接失败: {}:{}", self.server, self.port))?;
 
         let (up, down) = tokio::io::copy_bidirectional(&mut flow.io, &mut outbound)
             .await

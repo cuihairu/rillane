@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 use seep_config::SeepConfig;
 use seep_routing::RoutingEngine;
-use seep_subscription::{SubscriptionManager, Subscription, SubscriptionConverter};
+use seep_subscription::{Subscription, SubscriptionConverter, SubscriptionManager};
 
 /// 热更新管理器
 pub struct HotReloadManager {
@@ -90,9 +90,7 @@ pub enum ReloadEvent {
         error: Option<String>,
     },
     /// 错误事件
-    Error {
-        error: String,
-    },
+    Error { error: String },
 }
 
 /// 重载统计信息
@@ -210,7 +208,10 @@ impl HotReloadManager {
 
     /// 获取当前配置
     pub fn get_current_config(&self) -> SeepConfig {
-        self.current_config.read().expect("config lock poisoned").clone()
+        self.current_config
+            .read()
+            .expect("config lock poisoned")
+            .clone()
     }
 
     /// 手动重载配置
@@ -373,7 +374,11 @@ impl HotReloadManager {
     /// 处理单个重载事件
     async fn handle_reload_event(&self, event: ReloadEvent) {
         match event {
-            ReloadEvent::ConfigReloaded { path, success, error } => {
+            ReloadEvent::ConfigReloaded {
+                path,
+                success,
+                error,
+            } => {
                 if success {
                     info!(
                         target: "seep::runtime::hot_reload",
@@ -389,7 +394,13 @@ impl HotReloadManager {
                     );
                 }
             }
-            ReloadEvent::SubscriptionUpdated { name, success, nodes_added, nodes_removed, error } => {
+            ReloadEvent::SubscriptionUpdated {
+                name,
+                success,
+                nodes_added,
+                nodes_removed,
+                error,
+            } => {
                 if success {
                     info!(
                         target: "seep::runtime::hot_reload",
@@ -476,7 +487,9 @@ impl HotReloadManager {
         }
 
         // 验证默认节点存在
-        let default_node_exists = config.egress.iter()
+        let default_node_exists = config
+            .egress
+            .iter()
             .any(|e| e.name == config.routing.default_node);
 
         if !default_node_exists {
@@ -498,13 +511,17 @@ impl HotReloadManager {
                     // 尝试解析订阅内容
                     let subscription = self.subscription_manager.get_subscription(name);
                     if let Some(sub) = subscription {
-                        let conversion_result = self.subscription_converter
-                            .auto_convert(&sub, content).await;
+                        let conversion_result = self
+                            .subscription_converter
+                            .auto_convert(&sub, content)
+                            .await;
 
                         match conversion_result {
                             Ok(converted) => {
                                 // 合并到当前配置
-                                if let Err(e) = self.merge_subscription_config(&converted.config).await {
+                                if let Err(e) =
+                                    self.merge_subscription_config(&converted.config).await
+                                {
                                     let _ = self.reload_tx.send(ReloadEvent::Error {
                                         error: format!("合并订阅配置失败: {}", e),
                                     });
@@ -545,7 +562,11 @@ impl HotReloadManager {
 
     /// 合并订阅配置到当前配置
     async fn merge_subscription_config(&self, subscription_config: &SeepConfig) -> Result<()> {
-        let mut current_config = self.current_config.write().expect("config lock poisoned").clone();
+        let mut current_config = self
+            .current_config
+            .write()
+            .expect("config lock poisoned")
+            .clone();
 
         // 合并出口节点
         for egress in &subscription_config.egress {
@@ -556,7 +577,12 @@ impl HotReloadManager {
 
         // 合并路由组
         for group in &subscription_config.routing.groups {
-            if !current_config.routing.groups.iter().any(|g| g.name == group.name) {
+            if !current_config
+                .routing
+                .groups
+                .iter()
+                .any(|g| g.name == group.name)
+            {
                 current_config.routing.groups.push(group.clone());
             }
         }
@@ -570,8 +596,7 @@ impl HotReloadManager {
         self.router.reload(current_config.routing.clone());
 
         // 保存更新后的配置
-        let config_content = serde_yaml::to_string(&current_config)
-            .context("序列化配置失败")?;
+        let config_content = serde_yaml::to_string(&current_config).context("序列化配置失败")?;
 
         fs::write(&self.config_path, config_content)
             .await

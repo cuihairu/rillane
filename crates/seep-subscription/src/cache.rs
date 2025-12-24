@@ -100,7 +100,7 @@ impl Default for CacheConfig {
             cache_dir: default_cache_dir(),
             default_ttl: Duration::from_secs(86400), // 24小时
             max_entries: 1000,
-            max_size_bytes: 100 * 1024 * 1024, // 100MB
+            max_size_bytes: 100 * 1024 * 1024,           // 100MB
             cleanup_interval: Duration::from_secs(3600), // 1小时
         }
     }
@@ -188,7 +188,10 @@ impl SubscriptionCache {
 
         // 检查缓存容量限制
         {
-            let current_size = self.current_size.write().expect("current_size lock poisoned");
+            let current_size = self
+                .current_size
+                .write()
+                .expect("current_size lock poisoned");
             if *current_size + content_size > self.config.max_size_bytes {
                 // 清理过期条目
                 self.cleanup_expired()?;
@@ -210,10 +213,18 @@ impl SubscriptionCache {
             // 更新大小计算
             if let Some(old_entry) = cache.get(key) {
                 let old_size = old_entry.content.len() as u64;
-                let mut current_size = self.current_size.write().expect("current_size lock poisoned");
-                *current_size = current_size.saturating_sub(old_size).saturating_add(content_size);
+                let mut current_size = self
+                    .current_size
+                    .write()
+                    .expect("current_size lock poisoned");
+                *current_size = current_size
+                    .saturating_sub(old_size)
+                    .saturating_add(content_size);
             } else {
-                let mut current_size = self.current_size.write().expect("current_size lock poisoned");
+                let mut current_size = self
+                    .current_size
+                    .write()
+                    .expect("current_size lock poisoned");
                 *current_size += content_size;
             }
 
@@ -240,7 +251,10 @@ impl SubscriptionCache {
         let old_content = cache.remove(key).map(|entry| {
             // 更新大小统计
             let content_size = entry.content.len() as u64;
-            let mut current_size = self.current_size.write().expect("current_size lock poisoned");
+            let mut current_size = self
+                .current_size
+                .write()
+                .expect("current_size lock poisoned");
             *current_size = current_size.saturating_sub(content_size);
 
             entry.content
@@ -276,7 +290,10 @@ impl SubscriptionCache {
         cache.clear();
 
         // 重置大小统计
-        let mut current_size = self.current_size.write().expect("current_size lock poisoned");
+        let mut current_size = self
+            .current_size
+            .write()
+            .expect("current_size lock poisoned");
         *current_size = 0;
 
         // 删除所有磁盘文件
@@ -313,15 +330,16 @@ impl SubscriptionCache {
     /// 获取缓存统计信息
     pub fn get_stats(&self) -> CacheStats {
         let cache = self.memory_cache.read().expect("cache lock poisoned");
-        let current_size = *self.current_size.read().expect("current_size lock poisoned");
+        let current_size = *self
+            .current_size
+            .read()
+            .expect("current_size lock poisoned");
 
         let total_entries = cache.len();
         let expired_entries = cache.values().filter(|e| e.is_expired()).count();
         let total_accesses: u64 = cache.values().map(|e| e.access_count).sum();
         let avg_age_seconds = if !cache.is_empty() {
-            cache.values()
-                .map(|e| e.age_seconds())
-                .sum::<u64>() / cache.len() as u64
+            cache.values().map(|e| e.age_seconds()).sum::<u64>() / cache.len() as u64
         } else {
             0
         };
@@ -369,7 +387,10 @@ impl SubscriptionCache {
 
         // 更新大小统计
         {
-            let mut current_size = self.current_size.write().expect("current_size lock poisoned");
+            let mut current_size = self
+                .current_size
+                .write()
+                .expect("current_size lock poisoned");
             *current_size = current_size.saturating_sub(total_size_removed);
         }
 
@@ -427,7 +448,10 @@ impl SubscriptionCache {
 
         // 更新大小统计
         {
-            let mut current_size = self.current_size.write().expect("current_size lock poisoned");
+            let mut current_size = self
+                .current_size
+                .write()
+                .expect("current_size lock poisoned");
             *current_size = current_size.saturating_sub(freed_space);
         }
 
@@ -479,7 +503,10 @@ impl SubscriptionCache {
 
         // 更新大小统计
         {
-            let mut current_size = self.current_size.write().expect("current_size lock poisoned");
+            let mut current_size = self
+                .current_size
+                .write()
+                .expect("current_size lock poisoned");
             *current_size = current_size.saturating_sub(freed_space);
         }
 

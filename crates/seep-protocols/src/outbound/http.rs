@@ -48,10 +48,7 @@ impl HttpConnector {
     }
 
     fn build_connect_request(&self, target: &str) -> String {
-        let mut request = format!(
-            "CONNECT {} HTTP/1.1\r\nHost: {}\r\n",
-            target, target
-        );
+        let mut request = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n", target, target);
 
         // 添加代理认证
         if let (Some(user), Some(pass)) = (self.username.as_ref(), self.password.as_ref()) {
@@ -93,8 +90,7 @@ impl EgressConnector for HttpConnector {
             // TLS 包装
             let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
             let connector = create_tls_connector(self.skip_cert_verify)?;
-            let server_name =
-                rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+            let server_name = rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
             let tls_stream = connector.connect(server_name, tcp_stream).await?;
 
             // 发送 CONNECT 请求
@@ -154,7 +150,10 @@ where
 
     // 检查状态码
     if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
-        bail!("HTTP 代理连接失败: {}", response.lines().next().unwrap_or("未知错误"));
+        bail!(
+            "HTTP 代理连接失败: {}",
+            response.lines().next().unwrap_or("未知错误")
+        );
     }
 
     Ok(stream)

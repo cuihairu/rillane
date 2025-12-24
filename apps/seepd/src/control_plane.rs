@@ -20,10 +20,17 @@ pub struct ControlPlane {
 
 impl ControlPlane {
     pub fn new(runtime: Arc<Runtime>, admin_token: Option<String>) -> Self {
-        Self { runtime, admin_token }
+        Self {
+            runtime,
+            admin_token,
+        }
     }
 
-    pub async fn serve(self, bind: SocketAddr, shutdown: tokio::sync::oneshot::Receiver<()>) -> anyhow::Result<()> {
+    pub async fn serve(
+        self,
+        bind: SocketAddr,
+        shutdown: tokio::sync::oneshot::Receiver<()>,
+    ) -> anyhow::Result<()> {
         let make = make_service_fn(move |_conn| {
             let state = self.clone();
             async move {
@@ -53,7 +60,10 @@ impl ControlPlane {
         }
 
         // Read-only endpoints don't require auth; mutating endpoints do (if token configured).
-        let is_mutating = matches!(method, Method::POST | Method::PUT | Method::PATCH | Method::DELETE);
+        let is_mutating = matches!(
+            method,
+            Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+        );
         if is_mutating && self.admin_token.is_some() && !self.is_authorized(&req) {
             return text(StatusCode::UNAUTHORIZED, "unauthorized");
         }
@@ -70,11 +80,15 @@ impl ControlPlane {
 
             (Method::GET, "/subscriptions") => self.handle_subscriptions_list().await,
             (Method::POST, "/subscriptions") => self.handle_subscription_add(req).await,
-            (Method::POST, "/subscriptions/refresh") => self.handle_subscriptions_refresh_all().await,
+            (Method::POST, "/subscriptions/refresh") => {
+                self.handle_subscriptions_refresh_all().await
+            }
             (Method::POST, p) if p.starts_with("/subscriptions/") && p.ends_with("/refresh") => {
                 self.handle_subscription_refresh(p).await
             }
-            (Method::DELETE, p) if p.starts_with("/subscriptions/") => self.handle_subscription_remove(p).await,
+            (Method::DELETE, p) if p.starts_with("/subscriptions/") => {
+                self.handle_subscription_remove(p).await
+            }
 
             // /chains/{chain_id}
             (Method::GET, p) if p.starts_with("/chains/") => self.handle_chain_get(p).await,
@@ -90,11 +104,22 @@ impl ControlPlane {
         };
 
         // Accept either `Authorization: Bearer <token>` or `X-Admin-Token: <token>`.
-        if let Some(v) = req.headers().get("x-admin-token").and_then(|v| v.to_str().ok()) {
+        if let Some(v) = req
+            .headers()
+            .get("x-admin-token")
+            .and_then(|v| v.to_str().ok())
+        {
             return v == expected;
         }
-        if let Some(v) = req.headers().get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-            return v.strip_prefix("Bearer ").map(|t| t == expected).unwrap_or(false);
+        if let Some(v) = req
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+        {
+            return v
+                .strip_prefix("Bearer ")
+                .map(|t| t == expected)
+                .unwrap_or(false);
         }
         false
     }
@@ -111,7 +136,9 @@ impl ControlPlane {
             .ok_or_else(|| text(StatusCode::SERVICE_UNAVAILABLE, "chain not enabled"))
     }
 
-    fn subscription_mgr(&self) -> Result<Arc<seep_subscription::SubscriptionManager>, Response<Body>> {
+    fn subscription_mgr(
+        &self,
+    ) -> Result<Arc<seep_subscription::SubscriptionManager>, Response<Body>> {
         self.runtime
             .get_subscription_manager()
             .ok_or_else(|| text(StatusCode::SERVICE_UNAVAILABLE, "subscription not enabled"))
@@ -195,7 +222,10 @@ impl ControlPlane {
         };
 
         if let Err(e) = registry.update_link_state(link) {
-            return text(StatusCode::BAD_REQUEST, &format!("update link state failed: {e}"));
+            return text(
+                StatusCode::BAD_REQUEST,
+                &format!("update link state failed: {e}"),
+            );
         }
 
         json(StatusCode::OK, &serde_json::json!({ "ok": true }))
@@ -245,7 +275,10 @@ impl ControlPlane {
 
         match chain {
             Ok(ctx) => json(StatusCode::OK, &ChainContextDto::from(ctx)),
-            Err(e) => text(StatusCode::BAD_REQUEST, &format!("create chain failed: {e}")),
+            Err(e) => text(
+                StatusCode::BAD_REQUEST,
+                &format!("create chain failed: {e}"),
+            ),
         }
     }
 
@@ -299,10 +332,7 @@ impl ControlPlane {
         };
 
         let subs = mgr.list_subscriptions();
-        let dtos: Vec<SubscriptionDto> = subs
-            .into_iter()
-            .map(SubscriptionDto::from)
-            .collect();
+        let dtos: Vec<SubscriptionDto> = subs.into_iter().map(SubscriptionDto::from).collect();
         json(StatusCode::OK, &dtos)
     }
 
@@ -334,7 +364,10 @@ impl ControlPlane {
         sub.user_agent = dto.user_agent;
 
         if let Err(e) = mgr.add_subscription(sub) {
-            return text(StatusCode::BAD_REQUEST, &format!("add subscription failed: {e}"));
+            return text(
+                StatusCode::BAD_REQUEST,
+                &format!("add subscription failed: {e}"),
+            );
         }
 
         json(StatusCode::OK, &serde_json::json!({ "ok": true }))
@@ -352,7 +385,10 @@ impl ControlPlane {
         }
 
         if let Err(e) = mgr.remove_subscription(name) {
-            return text(StatusCode::BAD_REQUEST, &format!("remove subscription failed: {e}"));
+            return text(
+                StatusCode::BAD_REQUEST,
+                &format!("remove subscription failed: {e}"),
+            );
         }
         json(StatusCode::OK, &serde_json::json!({ "ok": true }))
     }
@@ -410,10 +446,11 @@ impl ControlPlane {
             Err(e) => return text(StatusCode::BAD_REQUEST, &format!("convert failed: {e}")),
         };
 
-        let merge_stats: ConfigMergeStats = match self.runtime.merge_config_delta(&converted.config).await {
-            Ok(v) => v,
-            Err(e) => return text(StatusCode::BAD_REQUEST, &format!("apply failed: {e}")),
-        };
+        let merge_stats: ConfigMergeStats =
+            match self.runtime.merge_config_delta(&converted.config).await {
+                Ok(v) => v,
+                Err(e) => return text(StatusCode::BAD_REQUEST, &format!("apply failed: {e}")),
+            };
 
         json(
             StatusCode::OK,
@@ -440,7 +477,11 @@ impl ControlPlane {
 
         let converter = SubscriptionConverter::new();
         let mut out = Vec::new();
-        let names: Vec<String> = mgr.list_subscriptions().into_iter().map(|s| s.name).collect();
+        let names: Vec<String> = mgr
+            .list_subscriptions()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
         for name in names {
             let old_hash = mgr
                 .get_subscription(&name)
@@ -468,7 +509,9 @@ impl ControlPlane {
             }
 
             let Some(sub) = mgr.get_subscription(&name) else {
-                out.push(serde_json::json!({"name": name, "ok": false, "error": "subscription missing"}));
+                out.push(
+                    serde_json::json!({"name": name, "ok": false, "error": "subscription missing"}),
+                );
                 continue;
             };
 
@@ -666,7 +709,8 @@ async fn read_json<T: for<'de> Deserialize<'de>>(req: Request<Body>) -> Result<T
     let bytes = body::to_bytes(req.into_body())
         .await
         .map_err(|_| text(StatusCode::BAD_REQUEST, "invalid body"))?;
-    serde_json::from_slice::<T>(&bytes).map_err(|e| text(StatusCode::BAD_REQUEST, &format!("invalid json: {e}")))
+    serde_json::from_slice::<T>(&bytes)
+        .map_err(|e| text(StatusCode::BAD_REQUEST, &format!("invalid json: {e}")))
 }
 
 fn json<T: Serialize>(status: StatusCode, value: &T) -> Response<Body> {
@@ -695,8 +739,8 @@ mod tests {
     use seep_runtime::{RuntimeBuilder, RuntimeConfig};
 
     async fn build_runtime(mesh: bool, chain: bool) -> Arc<Runtime> {
-        let cfg_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config/seep.yaml");
+        let cfg_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/seep.yaml");
         let cfg = SeepConfig::load_from_path(cfg_path).unwrap();
         let rt_cfg = RuntimeConfig {
             enable_mesh: mesh,
@@ -758,8 +802,14 @@ mod tests {
                 )))
                 .unwrap()
         };
-        assert_eq!(cp.handle(reg("client1", "client", 10001)).await.status(), StatusCode::OK);
-        assert_eq!(cp.handle(reg("exit1", "exit", 10002)).await.status(), StatusCode::OK);
+        assert_eq!(
+            cp.handle(reg("client1", "client", 10001)).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            cp.handle(reg("exit1", "exit", 10002)).await.status(),
+            StatusCode::OK
+        );
 
         // Provide link-state so ChainBuilder uses mesh topology edges.
         let link = Request::builder()
@@ -796,7 +846,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body::to_bytes(resp.into_body()).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let chain_id = v.get("chain_id").and_then(|x| x.as_str()).unwrap().to_string();
+        let chain_id = v
+            .get("chain_id")
+            .and_then(|x| x.as_str())
+            .unwrap()
+            .to_string();
 
         let get = Request::builder()
             .method(Method::GET)

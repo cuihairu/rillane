@@ -24,7 +24,11 @@ async fn main() -> Result<()> {
         ..RuntimeConfig::default()
     };
 
-    let runtime = Arc::new(RuntimeBuilder::new(config.clone()).with_runtime_config(runtime_config).build()?);
+    let runtime = Arc::new(
+        RuntimeBuilder::new(config.clone())
+            .with_runtime_config(runtime_config)
+            .build()?,
+    );
 
     let bind: SocketAddr = config.control.api_bind.parse()?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();

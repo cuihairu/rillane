@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use seep_config::{
-    EgressConfig, EgressDescriptor, MatchCondition, PolicyGroup, RouteRule, RoutingConfig,
-    Strategy, GroupMember,
+    EgressConfig, EgressDescriptor, GroupMember, MatchCondition, PolicyGroup, RouteRule,
+    RoutingConfig, Strategy,
 };
 
 /// Seep DSL 版本
@@ -79,20 +79,14 @@ pub struct SeepNode {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum NodeAuth {
     /// 用户名密码
-    Password {
-        username: String,
-        password: String,
-    },
+    Password { username: String, password: String },
     /// UUID（用于 VMess/VLESS/Trojan/Hysteria2 等）
     Uuid {
         #[serde(alias = "value")]
         uuid: String,
     },
     /// 密钥（用于 Shadowsocks）
-    Key {
-        method: String,
-        password: String,
-    },
+    Key { method: String, password: String },
     /// 无认证
     None,
 }
@@ -217,9 +211,15 @@ pub struct SeepGroup {
     pub metadata: HashMap<String, String>,
 }
 
-fn default_health_check_interval() -> u64 { 30 }
-fn default_fallback_enabled() -> bool { true }
-fn default_fallback_timeout() -> u64 { 5 }
+fn default_health_check_interval() -> u64 {
+    30
+}
+fn default_fallback_enabled() -> bool {
+    true
+}
+fn default_fallback_timeout() -> u64 {
+    5
+}
 
 /// 组成员引用
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,17 +228,11 @@ pub enum GroupMemberRef {
     /// 节点名称
     Node(String),
     /// 带权重的节点
-    WeightedNode {
-        name: String,
-        weight: u32,
-    },
+    WeightedNode { name: String, weight: u32 },
     /// 组名称
     Group(String),
     /// 带权重的组
-    WeightedGroup {
-        name: String,
-        weight: u32,
-    },
+    WeightedGroup { name: String, weight: u32 },
 }
 
 /// 规则集
@@ -273,34 +267,20 @@ pub enum SeepRule {
         target: String,
     },
     /// IP CIDR
-    IpCidr {
-        cidrs: Vec<String>,
-        target: String,
-    },
+    IpCidr { cidrs: Vec<String>, target: String },
     /// GeoIP
-    Geoip {
-        country: String,
-        target: String,
-    },
+    Geoip { country: String, target: String },
     /// 端口范围
-    Port {
-        ports: Vec<u16>,
-        target: String,
-    },
+    Port { ports: Vec<u16>, target: String },
     /// 进程名
     Process {
         processes: Vec<String>,
         target: String,
     },
     /// 规则集引用
-    RuleSet {
-        name: String,
-        target: String,
-    },
+    RuleSet { name: String, target: String },
     /// 默认规则
-    Match {
-        target: String,
-    },
+    Match { target: String },
 }
 
 /// Seep 配置根结构
@@ -325,7 +305,9 @@ pub struct SeepConfig {
     pub default_target: String,
 }
 
-fn default_target() -> String { "direct".to_string() }
+fn default_target() -> String {
+    "direct".to_string()
+}
 
 /// Seep DSL 转换器
 pub struct SeepDslConverter {
@@ -363,8 +345,7 @@ impl SeepDslConverter {
             "开始解析 Seep DSL 配置"
         );
 
-        let config: SeepConfig = serde_yaml::from_str(content)
-            .context("解析 Seep DSL 配置失败")?;
+        let config: SeepConfig = serde_yaml::from_str(content).context("解析 Seep DSL 配置失败")?;
 
         if self.validate {
             self.validate_config(&config)?;
@@ -404,7 +385,11 @@ impl SeepDslConverter {
             for (index, rule) in ruleset.rules.iter().enumerate() {
                 let name = format!("{}-rule-{}", ruleset.name, index + 1);
                 let (matches, target) = self.convert_seep_rule(rule)?;
-                rules.push(RouteRule { name, matches, target });
+                rules.push(RouteRule {
+                    name,
+                    matches,
+                    target,
+                });
             }
         }
 
@@ -412,7 +397,11 @@ impl SeepDslConverter {
         for (index, rule) in seep_config.rules.iter().enumerate() {
             let name = format!("rule-{}", index + 1);
             let (matches, target) = self.convert_seep_rule(rule)?;
-            rules.push(RouteRule { name, matches, target });
+            rules.push(RouteRule {
+                name,
+                matches,
+                target,
+            });
         }
 
         let routing = RoutingConfig {
@@ -489,30 +478,33 @@ impl SeepDslConverter {
 
     /// 验证引用有效性
     fn validate_references(&self, config: &SeepConfig) -> Result<()> {
-        let node_names: std::collections::HashSet<_> = config.nodes.iter()
-            .map(|n| n.name.as_str())
-            .collect();
+        let node_names: std::collections::HashSet<_> =
+            config.nodes.iter().map(|n| n.name.as_str()).collect();
 
-        let group_names: std::collections::HashSet<_> = config.groups.iter()
-            .map(|g| g.name.as_str())
-            .collect();
+        let group_names: std::collections::HashSet<_> =
+            config.groups.iter().map(|g| g.name.as_str()).collect();
 
-        let ruleset_names: std::collections::HashSet<_> = config.rulesets.iter()
-            .map(|r| r.name.as_str())
-            .collect();
+        let ruleset_names: std::collections::HashSet<_> =
+            config.rulesets.iter().map(|r| r.name.as_str()).collect();
 
         // 检查组成员引用
         for group in &config.groups {
             for member in &group.members {
                 let ref_name = match member {
-                    GroupMemberRef::Node(name) |
-                    GroupMemberRef::WeightedNode { name, .. } => name,
-                    GroupMemberRef::Group(name) |
-                    GroupMemberRef::WeightedGroup { name, .. } => name,
+                    GroupMemberRef::Node(name) | GroupMemberRef::WeightedNode { name, .. } => name,
+                    GroupMemberRef::Group(name) | GroupMemberRef::WeightedGroup { name, .. } => {
+                        name
+                    }
                 };
 
-                if !node_names.contains(ref_name.as_str()) && !group_names.contains(ref_name.as_str()) {
-                    return Err(anyhow!("组 {} 引用了不存在的节点或组: {}", group.name, ref_name));
+                if !node_names.contains(ref_name.as_str())
+                    && !group_names.contains(ref_name.as_str())
+                {
+                    return Err(anyhow!(
+                        "组 {} 引用了不存在的节点或组: {}",
+                        group.name,
+                        ref_name
+                    ));
                 }
             }
         }
@@ -531,7 +523,11 @@ impl SeepDslConverter {
             for rule in &ruleset.rules {
                 if let SeepRule::RuleSet { name, .. } = rule {
                     if !ruleset_names.contains(name.as_str()) {
-                        return Err(anyhow!("规则集 {} 中的规则引用了不存在的规则集: {}", ruleset.name, name));
+                        return Err(anyhow!(
+                            "规则集 {} 中的规则引用了不存在的规则集: {}",
+                            ruleset.name,
+                            name
+                        ));
                     }
                 }
             }
@@ -571,13 +567,17 @@ impl SeepDslConverter {
             NodeType::Direct => Ok(EgressConfig::Direct),
             NodeType::Reject => Err(anyhow!("Reject 节点类型暂不支持")),
             NodeType::Socks5 => {
-                let server = node.server.clone()
+                let server = node
+                    .server
+                    .clone()
                     .ok_or_else(|| anyhow!("Socks5 节点缺少服务器地址"))?;
                 let port = node.port.ok_or_else(|| anyhow!("Socks5 节点缺少端口"))?;
 
                 let (username, password) = if let Some(auth) = &node.auth {
                     match auth {
-                        NodeAuth::Password { username, password } => (Some(username.clone()), Some(password.clone())),
+                        NodeAuth::Password { username, password } => {
+                            (Some(username.clone()), Some(password.clone()))
+                        }
                         _ => return Err(anyhow!("Socks5 节点认证类型错误")),
                     }
                 } else {
@@ -592,13 +592,17 @@ impl SeepDslConverter {
                 })
             }
             NodeType::Http => {
-                let server = node.server.clone()
+                let server = node
+                    .server
+                    .clone()
                     .ok_or_else(|| anyhow!("HTTP 节点缺少服务器地址"))?;
                 let port = node.port.ok_or_else(|| anyhow!("HTTP 节点缺少端口"))?;
 
                 let (username, password) = if let Some(auth) = &node.auth {
                     match auth {
-                        NodeAuth::Password { username, password } => (Some(username.clone()), Some(password.clone())),
+                        NodeAuth::Password { username, password } => {
+                            (Some(username.clone()), Some(password.clone()))
+                        }
                         _ => return Err(anyhow!("HTTP 节点认证类型错误")),
                     }
                 } else {
@@ -613,16 +617,22 @@ impl SeepDslConverter {
                     username,
                     password,
                     tls: tls_enabled,
-                    skip_cert_verify: node.tls.as_ref()
+                    skip_cert_verify: node
+                        .tls
+                        .as_ref()
                         .map(|t| t.skip_cert_verify)
                         .unwrap_or(false),
                     sni: node.tls.as_ref().and_then(|t| t.server_name.clone()),
                 })
             }
             NodeType::Shadowsocks => {
-                let server = node.server.clone()
+                let server = node
+                    .server
+                    .clone()
                     .ok_or_else(|| anyhow!("Shadowsocks 节点缺少服务器地址"))?;
-                let port = node.port.ok_or_else(|| anyhow!("Shadowsocks 节点缺少端口"))?;
+                let port = node
+                    .port
+                    .ok_or_else(|| anyhow!("Shadowsocks 节点缺少端口"))?;
 
                 let (method, password) = if let Some(auth) = &node.auth {
                     match auth {
@@ -641,7 +651,9 @@ impl SeepDslConverter {
                 })
             }
             NodeType::Vmess => {
-                let server = node.server.clone()
+                let server = node
+                    .server
+                    .clone()
                     .ok_or_else(|| anyhow!("VMess 节点缺少服务器地址"))?;
                 let port = node.port.ok_or_else(|| anyhow!("VMess 节点缺少端口"))?;
 
@@ -659,8 +671,13 @@ impl SeepDslConverter {
                         TransportConfig::Tcp { path: tcp_path, .. } => {
                             ("tcp".to_string(), tcp_path.clone(), None)
                         }
-                        TransportConfig::Ws { path: ws_path, headers } => {
-                            let host = headers.as_ref().and_then(|h| h.get("Host").cloned())
+                        TransportConfig::Ws {
+                            path: ws_path,
+                            headers,
+                        } => {
+                            let host = headers
+                                .as_ref()
+                                .and_then(|h| h.get("Host").cloned())
                                 .or_else(|| node.server.clone())
                                 .map(|h| vec![h]);
                             ("ws".to_string(), Some(ws_path.clone()), host)
@@ -668,18 +685,21 @@ impl SeepDslConverter {
                         TransportConfig::Grpc { service_name, .. } => {
                             ("grpc".to_string(), Some(service_name.clone()), None)
                         }
-                        TransportConfig::H2 { host: h2_host, path: h2_path, .. } => {
-                            ("h2".to_string(), h2_path.clone(), h2_host.clone())
-                        }
-                        TransportConfig::Quic { .. } => {
-                            ("quic".to_string(), None, None)
-                        }
+                        TransportConfig::H2 {
+                            host: h2_host,
+                            path: h2_path,
+                            ..
+                        } => ("h2".to_string(), h2_path.clone(), h2_host.clone()),
+                        TransportConfig::Quic { .. } => ("quic".to_string(), None, None),
                     }
                 } else {
                     ("tcp".to_string(), None, None)
                 };
 
-                let tls_config = node.tls.as_ref().ok_or_else(|| anyhow!("VMess 节点缺少 TLS 配置"))?;
+                let tls_config = node
+                    .tls
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("VMess 节点缺少 TLS 配置"))?;
 
                 Ok(EgressConfig::Vmess {
                     server,
@@ -693,11 +713,17 @@ impl SeepDslConverter {
                     tls: tls_config.enabled,
                     skip_cert_verify: tls_config.skip_cert_verify,
                     sni: tls_config.server_name.clone(),
-                    alpn: if tls_config.alpn.is_empty() { None } else { Some(tls_config.alpn.clone()) },
+                    alpn: if tls_config.alpn.is_empty() {
+                        None
+                    } else {
+                        Some(tls_config.alpn.clone())
+                    },
                 })
             }
             NodeType::Vless => {
-                let server = node.server.clone()
+                let server = node
+                    .server
+                    .clone()
                     .ok_or_else(|| anyhow!("VLESS 节点缺少服务器地址"))?;
                 let port = node.port.ok_or_else(|| anyhow!("VLESS 节点缺少端口"))?;
 
@@ -712,8 +738,13 @@ impl SeepDslConverter {
 
                 let (network, path, host) = if let Some(transport) = &node.transport {
                     match transport {
-                        TransportConfig::Ws { path: ws_path, headers } => {
-                            let host = headers.as_ref().and_then(|h| h.get("Host").cloned())
+                        TransportConfig::Ws {
+                            path: ws_path,
+                            headers,
+                        } => {
+                            let host = headers
+                                .as_ref()
+                                .and_then(|h| h.get("Host").cloned())
                                 .or_else(|| node.server.clone())
                                 .map(|h| vec![h]);
                             ("ws".to_string(), Some(ws_path.clone()), host)
@@ -724,18 +755,21 @@ impl SeepDslConverter {
                         TransportConfig::Tcp { path: tcp_path, .. } => {
                             ("tcp".to_string(), tcp_path.clone(), None)
                         }
-                        TransportConfig::H2 { host: h2_host, path: h2_path, .. } => {
-                            ("h2".to_string(), h2_path.clone(), h2_host.clone())
-                        }
-                        TransportConfig::Quic { .. } => {
-                            ("quic".to_string(), None, None)
-                        }
+                        TransportConfig::H2 {
+                            host: h2_host,
+                            path: h2_path,
+                            ..
+                        } => ("h2".to_string(), h2_path.clone(), h2_host.clone()),
+                        TransportConfig::Quic { .. } => ("quic".to_string(), None, None),
                     }
                 } else {
                     ("tcp".to_string(), None, None)
                 };
 
-                let tls_config = node.tls.as_ref().ok_or_else(|| anyhow!("VLESS 节点缺少 TLS 配置"))?;
+                let tls_config = node
+                    .tls
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("VLESS 节点缺少 TLS 配置"))?;
 
                 Ok(EgressConfig::Vless {
                     server,
@@ -748,11 +782,17 @@ impl SeepDslConverter {
                     tls: tls_config.enabled,
                     skip_cert_verify: tls_config.skip_cert_verify,
                     sni: tls_config.server_name.clone(),
-                    alpn: if tls_config.alpn.is_empty() { None } else { Some(tls_config.alpn.clone()) },
+                    alpn: if tls_config.alpn.is_empty() {
+                        None
+                    } else {
+                        Some(tls_config.alpn.clone())
+                    },
                 })
             }
             NodeType::Trojan => {
-                let server = node.server.clone()
+                let server = node
+                    .server
+                    .clone()
                     .ok_or_else(|| anyhow!("Trojan 节点缺少服务器地址"))?;
                 let port = node.port.ok_or_else(|| anyhow!("Trojan 节点缺少端口"))?;
 
@@ -767,8 +807,13 @@ impl SeepDslConverter {
 
                 let (network, path, host) = if let Some(transport) = &node.transport {
                     match transport {
-                        TransportConfig::Ws { path: ws_path, headers } => {
-                            let host = headers.as_ref().and_then(|h| h.get("Host").cloned())
+                        TransportConfig::Ws {
+                            path: ws_path,
+                            headers,
+                        } => {
+                            let host = headers
+                                .as_ref()
+                                .and_then(|h| h.get("Host").cloned())
                                 .or_else(|| node.server.clone())
                                 .map(|h| vec![h]);
                             ("ws".to_string(), Some(ws_path.clone()), host)
@@ -785,7 +830,10 @@ impl SeepDslConverter {
                     ("tcp".to_string(), None, None)
                 };
 
-                let tls_config = node.tls.as_ref().ok_or_else(|| anyhow!("Trojan 节点缺少 TLS 配置"))?;
+                let tls_config = node
+                    .tls
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Trojan 节点缺少 TLS 配置"))?;
 
                 Ok(EgressConfig::Trojan {
                     server,
@@ -797,11 +845,17 @@ impl SeepDslConverter {
                     tls: tls_config.enabled,
                     skip_cert_verify: tls_config.skip_cert_verify,
                     sni: tls_config.server_name.clone(),
-                    alpn: if tls_config.alpn.is_empty() { None } else { Some(tls_config.alpn.clone()) },
+                    alpn: if tls_config.alpn.is_empty() {
+                        None
+                    } else {
+                        Some(tls_config.alpn.clone())
+                    },
                 })
             }
             NodeType::Hysteria => {
-                let server = node.server.clone()
+                let server = node
+                    .server
+                    .clone()
                     .ok_or_else(|| anyhow!("Hysteria 节点缺少服务器地址"))?;
                 let port = node.port.ok_or_else(|| anyhow!("Hysteria 节点缺少端口"))?;
 
@@ -826,18 +880,34 @@ impl SeepDslConverter {
                     obfs: None,
                     obfs_param: None,
                     server_name: node.tls.as_ref().and_then(|t| t.server_name.clone()),
-                    skip_cert_verify: node.tls.as_ref()
+                    skip_cert_verify: node
+                        .tls
+                        .as_ref()
                         .map(|t| t.skip_cert_verify)
                         .unwrap_or(false),
-                    alpn: if node.tls.as_ref().unwrap_or(&TlsConfig::default()).alpn.is_empty() {
+                    alpn: if node
+                        .tls
+                        .as_ref()
+                        .unwrap_or(&TlsConfig::default())
+                        .alpn
+                        .is_empty()
+                    {
                         None
                     } else {
-                        Some(node.tls.as_ref().unwrap_or(&TlsConfig::default()).alpn.clone())
+                        Some(
+                            node.tls
+                                .as_ref()
+                                .unwrap_or(&TlsConfig::default())
+                                .alpn
+                                .clone(),
+                        )
                     },
                 })
             }
             NodeType::Hysteria2 => {
-                let server = node.server.clone()
+                let server = node
+                    .server
+                    .clone()
                     .ok_or_else(|| anyhow!("Hysteria2 节点缺少服务器地址"))?;
                 let port = node.port.ok_or_else(|| anyhow!("Hysteria2 节点缺少端口"))?;
 
@@ -872,35 +942,58 @@ impl SeepDslConverter {
                     obfs,
                     obfs_param,
                     server_name: node.tls.as_ref().and_then(|t| t.server_name.clone()),
-                    skip_cert_verify: node.tls.as_ref()
+                    skip_cert_verify: node
+                        .tls
+                        .as_ref()
                         .map(|t| t.skip_cert_verify)
                         .unwrap_or(false),
-                    alpn: if node.tls.as_ref().unwrap_or(&TlsConfig::default()).alpn.is_empty() {
+                    alpn: if node
+                        .tls
+                        .as_ref()
+                        .unwrap_or(&TlsConfig::default())
+                        .alpn
+                        .is_empty()
+                    {
                         None
                     } else {
-                        Some(node.tls.as_ref().unwrap_or(&TlsConfig::default()).alpn.clone())
+                        Some(
+                            node.tls
+                                .as_ref()
+                                .unwrap_or(&TlsConfig::default())
+                                .alpn
+                                .clone(),
+                        )
                     },
                 })
             }
             NodeType::Wireguard => {
                 let private_key = if let Some(auth) = &node.auth {
                     match auth {
-                        NodeAuth::Key { method: _, password } => password.clone(),
+                        NodeAuth::Key {
+                            method: _,
+                            password,
+                        } => password.clone(),
                         _ => return Err(anyhow!("WireGuard 节点认证类型错误")),
                     }
                 } else {
                     return Err(anyhow!("WireGuard 节点缺少私钥"));
                 };
 
-                let endpoint = format!("{}:{}",
+                let endpoint = format!(
+                    "{}:{}",
                     node.server.as_deref().unwrap_or("127.0.0.1"),
-                    node.port.unwrap_or(51820));
+                    node.port.unwrap_or(51820)
+                );
 
                 Ok(EgressConfig::Wireguard {
                     endpoint,
                     private_key,
                     public_key: "unknown".to_string(), // Seep DSL 暂不提供
                     address: "10.0.0.2/32".to_string(),
+                    allowed_ips: None,
+                    preshared_key: None,
+                    persistent_keepalive: None,
+                    listen_port: None,
                     mtu: None,
                     dns: None,
                 })
@@ -919,9 +1012,15 @@ impl SeepDslConverter {
         match node.node_type {
             NodeType::Direct => true,
             NodeType::Reject => false, // 暂不支持
-            NodeType::Socks5 | NodeType::Http | NodeType::Shadowsocks |
-            NodeType::Vmess | NodeType::Vless | NodeType::Trojan |
-            NodeType::Hysteria | NodeType::Hysteria2 | NodeType::Wireguard => {
+            NodeType::Socks5
+            | NodeType::Http
+            | NodeType::Shadowsocks
+            | NodeType::Vmess
+            | NodeType::Vless
+            | NodeType::Trojan
+            | NodeType::Hysteria
+            | NodeType::Hysteria2
+            | NodeType::Wireguard => {
                 node.server.is_some() && node.port.is_some() && node.port.unwrap() > 0
             }
         }
@@ -963,13 +1062,15 @@ impl SeepDslConverter {
         refs.iter()
             .map(|member| match member {
                 GroupMemberRef::Node(name) => GroupMember::Node { name: name.clone() },
-                GroupMemberRef::WeightedNode { name, weight } => {
-                    GroupMember::WeightedNode { name: name.clone(), weight: *weight }
-                }
+                GroupMemberRef::WeightedNode { name, weight } => GroupMember::WeightedNode {
+                    name: name.clone(),
+                    weight: *weight,
+                },
                 GroupMemberRef::Group(name) => GroupMember::Group { name: name.clone() },
-                GroupMemberRef::WeightedGroup { name, weight } => {
-                    GroupMember::WeightedGroup { name: name.clone(), weight: *weight }
-                }
+                GroupMemberRef::WeightedGroup { name, weight } => GroupMember::WeightedGroup {
+                    name: name.clone(),
+                    weight: *weight,
+                },
             })
             .collect()
     }
@@ -1014,7 +1115,10 @@ impl SeepDslConverter {
                 }];
                 (matches, target.clone())
             }
-            SeepRule::Process { processes: _, target: _ } => {
+            SeepRule::Process {
+                processes: _,
+                target: _,
+            } => {
                 // Seep 暂不支持进程名匹配
                 warn!(
                     target: "seep::subscription::seep_dsl",

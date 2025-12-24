@@ -10,6 +10,7 @@ tokio.workspace = true
 tracing.workspace = true
 seep-config = { path = "../../crates/seep-config" }
 seep-runtime = { path = "../../crates/seep-runtime" }
+seep-subscription = { path = "../../crates/seep-subscription" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

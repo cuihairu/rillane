@@ -4,12 +4,13 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{de, Deserialize, Serialize};
+use serde_with::serde_as;
 use serde_yaml::Value;
 use tracing::{debug, warn};
 
 use seep_config::{
-    EgressConfig, EgressDescriptor, MatchCondition, PolicyGroup, RouteRule, RoutingConfig,
-    Strategy, GroupMember,
+    EgressConfig, EgressDescriptor, GroupMember, MatchCondition, PolicyGroup, RouteRule,
+    RoutingConfig, Strategy,
 };
 
 /// Clash 代理类型枚举
@@ -22,6 +23,8 @@ pub enum ClashProxyType {
     Trojan,
     Http,
     Https,
+    #[serde(rename = "socks5")]
+    Socks5,
     Snell,
     Hysteria,
     Hysteria2,
@@ -35,6 +38,7 @@ impl Default for ClashProxyType {
 }
 
 /// Clash 代理服务器配置
+#[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClashProxy {
     /// 代理名称
@@ -116,6 +120,54 @@ pub struct ClashProxy {
     /// Public key (for WireGuard)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_key: Option<String>,
+    /// Pre-shared key (for WireGuard)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "preshared-key",
+        alias = "preshared_key",
+        alias = "pre-shared-key",
+        alias = "pre_shared_key"
+    )]
+    pub preshared_key: Option<String>,
+    /// Persistent keepalive (seconds)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "keepalive",
+        alias = "persistent-keepalive",
+        alias = "persistent_keepalive"
+    )]
+    pub persistent_keepalive: Option<u16>,
+    /// WireGuard client IP(s) (Clash commonly uses `ip` and `ipv6`)
+    #[serde_as(as = "Option<serde_with::OneOrMany<_>>")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "ip",
+        alias = "address"
+    )]
+    pub ip: Option<Vec<String>>,
+    #[serde_as(as = "Option<serde_with::OneOrMany<_>>")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "ipv6")]
+    pub ipv6: Option<Vec<String>>,
+    /// Allowed IPs (for WireGuard peer routing)
+    #[serde_as(as = "Option<serde_with::OneOrMany<_>>")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "allowed-ips",
+        alias = "allowed_ips",
+        alias = "allowedips"
+    )]
+    pub allowed_ips: Option<Vec<String>>,
+    /// DNS servers (WireGuard)
+    #[serde_as(as = "Option<serde_with::OneOrMany<_>>")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns: Option<Vec<String>>,
+    /// MTU (WireGuard)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
 }
 
 /// Clash 代理组类型
@@ -215,9 +267,7 @@ pub enum ClashRule {
         target: String,
     },
     /// MATCH（默认规则）
-    Match {
-        target: String,
-    },
+    Match { target: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -285,16 +335,36 @@ enum ClashRuleRepr {
 impl From<ClashRuleTagged> for ClashRule {
     fn from(v: ClashRuleTagged) -> Self {
         match v {
-            ClashRuleTagged::DomainSuffix { domains, target } => ClashRule::DomainSuffix { domains, target },
-            ClashRuleTagged::DomainKeyword { keywords, target } => ClashRule::DomainKeyword { keywords, target },
+            ClashRuleTagged::DomainSuffix { domains, target } => {
+                ClashRule::DomainSuffix { domains, target }
+            }
+            ClashRuleTagged::DomainKeyword { keywords, target } => {
+                ClashRule::DomainKeyword { keywords, target }
+            }
             ClashRuleTagged::Domain { domains, target } => ClashRule::Domain { domains, target },
             ClashRuleTagged::IpCidr { cidrs, target } => ClashRule::IpCidr { cidrs, target },
-            ClashRuleTagged::Geoip { country_code, target } => ClashRule::Geoip { country_code, target },
-            ClashRuleTagged::Geosite { country_code, target } => ClashRule::Geosite { country_code, target },
+            ClashRuleTagged::Geoip {
+                country_code,
+                target,
+            } => ClashRule::Geoip {
+                country_code,
+                target,
+            },
+            ClashRuleTagged::Geosite {
+                country_code,
+                target,
+            } => ClashRule::Geosite {
+                country_code,
+                target,
+            },
             ClashRuleTagged::SrcPort { ports, target } => ClashRule::SrcPort { ports, target },
             ClashRuleTagged::DstPort { ports, target } => ClashRule::DstPort { ports, target },
-            ClashRuleTagged::ProcessName { processes, target } => ClashRule::ProcessName { processes, target },
-            ClashRuleTagged::RuleSet { rulesets, target } => ClashRule::RuleSet { rulesets, target },
+            ClashRuleTagged::ProcessName { processes, target } => {
+                ClashRule::ProcessName { processes, target }
+            }
+            ClashRuleTagged::RuleSet { rulesets, target } => {
+                ClashRule::RuleSet { rulesets, target }
+            }
             ClashRuleTagged::Match { target } => ClashRule::Match { target },
         }
     }
@@ -306,13 +376,22 @@ impl ClashRule {
         if raw.is_empty() {
             return Err("empty rule".into());
         }
-        let parts: Vec<&str> = raw.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+        let parts: Vec<&str> = raw
+            .split(',')
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .collect();
         if parts.is_empty() {
             return Err("empty rule".into());
         }
 
         let kind = parts[0].to_ascii_uppercase();
-        let get = |idx: usize| parts.get(idx).copied().ok_or_else(|| format!("invalid rule: {raw}"));
+        let get = |idx: usize| {
+            parts
+                .get(idx)
+                .copied()
+                .ok_or_else(|| format!("invalid rule: {raw}"))
+        };
 
         fn parse_ports(s: &str) -> Result<Vec<u16>, String> {
             let s = s.trim();
@@ -320,8 +399,14 @@ impl ClashRule {
                 return Err("empty port".into());
             }
             if let Some((a, b)) = s.split_once('-') {
-                let start: u16 = a.trim().parse().map_err(|_| format!("invalid port range: {s}"))?;
-                let end: u16 = b.trim().parse().map_err(|_| format!("invalid port range: {s}"))?;
+                let start: u16 = a
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("invalid port range: {s}"))?;
+                let end: u16 = b
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("invalid port range: {s}"))?;
                 if start > end {
                     return Err(format!("invalid port range: {s}"));
                 }
@@ -430,7 +515,9 @@ pub struct ClashConfig {
     pub external_controller: Option<String>,
 }
 
-fn default_log_level() -> String { "info".to_string() }
+fn default_log_level() -> String {
+    "info".to_string()
+}
 
 /// Clash 配置转换器
 pub struct ClashConverter {
@@ -486,8 +573,8 @@ impl ClashConverter {
             "开始解析 Clash 配置"
         );
 
-        let config: ClashConfig = serde_yaml::from_str(content)
-            .context("解析 Clash YAML 配置失败")?;
+        let config: ClashConfig =
+            serde_yaml::from_str(content).context("解析 Clash YAML 配置失败")?;
 
         debug!(
             target: "seep::subscription::clash",
@@ -517,7 +604,8 @@ impl ClashConverter {
         let rules = self.convert_rules_to_routing_rules(&clash_config.rules)?;
 
         // 创建默认节点
-        let default_node = egress.first()
+        let default_node = egress
+            .first()
             .map(|e| e.name.clone())
             .unwrap_or_else(|| "direct".to_string());
 
@@ -584,30 +672,35 @@ impl ClashConverter {
     /// 转换单个代理为出口配置
     fn convert_proxy_to_egress_config(&self, proxy: &ClashProxy) -> Result<EgressConfig> {
         match proxy.proxy_type {
-            ClashProxyType::Http => {
-                Ok(EgressConfig::Http {
-                    server: proxy.server.clone(),
-                    port: proxy.port,
-                    username: proxy.username.clone(),
-                    password: proxy.password.clone(),
-                    tls: proxy.tls,
-                    skip_cert_verify: proxy.skip_cert_verify,
-                    sni: proxy.servername.clone(),
-                })
-            }
-            ClashProxyType::Https => {
-                Ok(EgressConfig::Http {
-                    server: proxy.server.clone(),
-                    port: proxy.port,
-                    username: proxy.username.clone(),
-                    password: proxy.password.clone(),
-                    tls: true,
-                    skip_cert_verify: proxy.skip_cert_verify,
-                    sni: proxy.servername.clone(),
-                })
-            }
+            ClashProxyType::Http => Ok(EgressConfig::Http {
+                server: proxy.server.clone(),
+                port: proxy.port,
+                username: proxy.username.clone(),
+                password: proxy.password.clone(),
+                tls: proxy.tls,
+                skip_cert_verify: proxy.skip_cert_verify,
+                sni: proxy.servername.clone(),
+            }),
+            ClashProxyType::Https => Ok(EgressConfig::Http {
+                server: proxy.server.clone(),
+                port: proxy.port,
+                username: proxy.username.clone(),
+                password: proxy.password.clone(),
+                tls: true,
+                skip_cert_verify: proxy.skip_cert_verify,
+                sni: proxy.servername.clone(),
+            }),
+            ClashProxyType::Socks5 => Ok(EgressConfig::Socks5 {
+                server: proxy.server.clone(),
+                port: proxy.port,
+                username: proxy.username.clone(),
+                password: proxy.password.clone(),
+            }),
             ClashProxyType::Ss => {
-                let method = proxy.cipher.clone().unwrap_or_else(|| "aes-256-gcm".to_string());
+                let method = proxy
+                    .cipher
+                    .clone()
+                    .unwrap_or_else(|| "aes-256-gcm".to_string());
                 let password = proxy.password.clone().unwrap_or_default();
 
                 Ok(EgressConfig::Shadowsocks {
@@ -618,7 +711,10 @@ impl ClashConverter {
                 })
             }
             ClashProxyType::Vmess => {
-                let uuid = proxy.uuid.clone().ok_or_else(|| anyhow!("VMess 缺少 UUID"))?;
+                let uuid = proxy
+                    .uuid
+                    .clone()
+                    .ok_or_else(|| anyhow!("VMess 缺少 UUID"))?;
                 let alter_id = 0; // Clash 默认 alterId 为 0
 
                 Ok(EgressConfig::Vmess {
@@ -633,11 +729,18 @@ impl ClashConverter {
                     tls: proxy.tls,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),
-                    alpn: if proxy.alpn.is_empty() { None } else { Some(proxy.alpn.clone()) },
+                    alpn: if proxy.alpn.is_empty() {
+                        None
+                    } else {
+                        Some(proxy.alpn.clone())
+                    },
                 })
             }
             ClashProxyType::Vless => {
-                let uuid = proxy.uuid.clone().ok_or_else(|| anyhow!("VLESS 缺少 UUID"))?;
+                let uuid = proxy
+                    .uuid
+                    .clone()
+                    .ok_or_else(|| anyhow!("VLESS 缺少 UUID"))?;
 
                 Ok(EgressConfig::Vless {
                     server: proxy.server.clone(),
@@ -650,11 +753,18 @@ impl ClashConverter {
                     tls: proxy.tls,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),
-                    alpn: if proxy.alpn.is_empty() { None } else { Some(proxy.alpn.clone()) },
+                    alpn: if proxy.alpn.is_empty() {
+                        None
+                    } else {
+                        Some(proxy.alpn.clone())
+                    },
                 })
             }
             ClashProxyType::Trojan => {
-                let password = proxy.password.clone().ok_or_else(|| anyhow!("Trojan 缺少密码"))?;
+                let password = proxy
+                    .password
+                    .clone()
+                    .ok_or_else(|| anyhow!("Trojan 缺少密码"))?;
 
                 Ok(EgressConfig::Trojan {
                     server: proxy.server.clone(),
@@ -666,11 +776,18 @@ impl ClashConverter {
                     tls: true,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),
-                    alpn: if proxy.alpn.is_empty() { None } else { Some(proxy.alpn.clone()) },
+                    alpn: if proxy.alpn.is_empty() {
+                        None
+                    } else {
+                        Some(proxy.alpn.clone())
+                    },
                 })
             }
             ClashProxyType::Hysteria => {
-                let password = proxy.password.clone().ok_or_else(|| anyhow!("Hysteria 缺少密码"))?;
+                let password = proxy
+                    .password
+                    .clone()
+                    .ok_or_else(|| anyhow!("Hysteria 缺少密码"))?;
 
                 Ok(EgressConfig::Hysteria {
                     server: proxy.server.clone(),
@@ -685,11 +802,18 @@ impl ClashConverter {
                     obfs_param: None,
                     server_name: proxy.servername.clone(),
                     skip_cert_verify: proxy.skip_cert_verify,
-                    alpn: if proxy.alpn.is_empty() { None } else { Some(proxy.alpn.clone()) },
+                    alpn: if proxy.alpn.is_empty() {
+                        None
+                    } else {
+                        Some(proxy.alpn.clone())
+                    },
                 })
             }
             ClashProxyType::Hysteria2 => {
-                let password = proxy.password.clone().ok_or_else(|| anyhow!("Hysteria2 缺少密码"))?;
+                let password = proxy
+                    .password
+                    .clone()
+                    .ok_or_else(|| anyhow!("Hysteria2 缺少密码"))?;
 
                 Ok(EgressConfig::Hysteria2 {
                     server: proxy.server.clone(),
@@ -700,20 +824,37 @@ impl ClashConverter {
                     obfs_param: proxy.obfs_param.clone(),
                     server_name: proxy.servername.clone(),
                     skip_cert_verify: proxy.skip_cert_verify,
-                    alpn: if proxy.alpn.is_empty() { None } else { Some(proxy.alpn.clone()) },
+                    alpn: if proxy.alpn.is_empty() {
+                        None
+                    } else {
+                        Some(proxy.alpn.clone())
+                    },
                 })
             }
             ClashProxyType::Wireguard => {
-                let private_key = proxy.private_key.clone().ok_or_else(|| anyhow!("WireGuard 缺少私钥"))?;
-                let public_key = proxy.public_key.clone().ok_or_else(|| anyhow!("WireGuard 缺少公钥"))?;
+                let private_key = proxy
+                    .private_key
+                    .clone()
+                    .ok_or_else(|| anyhow!("WireGuard 缺少私钥"))?;
+                let public_key = proxy
+                    .public_key
+                    .clone()
+                    .ok_or_else(|| anyhow!("WireGuard 缺少公钥"))?;
+
+                let address = build_wireguard_address(proxy)
+                    .ok_or_else(|| anyhow!("WireGuard 缺少 ip/ipv6/address"))?;
 
                 Ok(EgressConfig::Wireguard {
                     endpoint: format!("{}:{}", proxy.server, proxy.port),
                     private_key,
                     public_key,
-                    address: "10.0.0.2/32".to_string(), // 默认地址
-                    mtu: None,
-                    dns: None,
+                    address,
+                    allowed_ips: proxy.allowed_ips.clone(),
+                    preshared_key: proxy.preshared_key.clone(),
+                    persistent_keepalive: proxy.persistent_keepalive,
+                    listen_port: None,
+                    mtu: proxy.mtu,
+                    dns: proxy.dns.clone(),
                 })
             }
             proxy_type => Err(anyhow!("暂不支持的代理类型: {:?}", proxy_type)),
@@ -721,7 +862,10 @@ impl ClashConverter {
     }
 
     /// 转换代理组为策略组
-    fn convert_proxy_groups_to_groups(&self, proxy_groups: &[ClashProxyGroup]) -> Result<Vec<PolicyGroup>> {
+    fn convert_proxy_groups_to_groups(
+        &self,
+        proxy_groups: &[ClashProxyGroup],
+    ) -> Result<Vec<PolicyGroup>> {
         let mut groups = Vec::new();
 
         for group in proxy_groups {
@@ -752,7 +896,8 @@ impl ClashConverter {
 
     /// 转换代理列表为组成员
     fn convert_proxies_to_group_members(&self, proxies: &[String]) -> Vec<GroupMember> {
-        proxies.iter()
+        proxies
+            .iter()
             .map(|proxy| GroupMember::Node {
                 name: format!("{}{}", self.node_prefix, proxy),
             })
@@ -765,13 +910,23 @@ impl ClashConverter {
 
         for (index, rule) in rules.iter().enumerate() {
             let name = format!("{}rule-{}", self.rule_prefix, index + 1);
-            let (matches, target) = self.convert_clash_rule(rule)?;
-
-            routing_rules.push(RouteRule {
-                name,
-                matches,
-                target,
-            });
+            match self.convert_clash_rule(rule) {
+                Ok((matches, target)) => {
+                    routing_rules.push(RouteRule {
+                        name,
+                        matches,
+                        target,
+                    });
+                }
+                Err(err) => {
+                    warn!(
+                        target: "seep::subscription::clash",
+                        rule = ?rule,
+                        error = %err,
+                        "跳过不支持的 Clash 规则"
+                    );
+                }
+            }
         }
 
         Ok(routing_rules)
@@ -805,13 +960,19 @@ impl ClashConverter {
                 }];
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
-            ClashRule::Geoip { country_code, target } => {
+            ClashRule::Geoip {
+                country_code,
+                target,
+            } => {
                 let matches = vec![MatchCondition::Geoip {
                     country: country_code.clone(),
                 }];
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
-            ClashRule::Geosite { country_code: _, target: _ } => {
+            ClashRule::Geosite {
+                country_code: _,
+                target: _,
+            } => {
                 // Seep 暂不支持 GeoSite，跳过
                 warn!(
                     target: "seep::subscription::clash",
@@ -831,7 +992,10 @@ impl ClashConverter {
                 }];
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
-            ClashRule::ProcessName { processes: _, target: _ } => {
+            ClashRule::ProcessName {
+                processes: _,
+                target: _,
+            } => {
                 // Seep 暂不支持进程名匹配
                 warn!(
                     target: "seep::subscription::clash",
@@ -839,7 +1003,10 @@ impl ClashConverter {
                 );
                 Err(anyhow!("进程名规则暂不支持"))
             }
-            ClashRule::RuleSet { rulesets: _, target: _ } => {
+            ClashRule::RuleSet {
+                rulesets: _,
+                target: _,
+            } => {
                 // Seep 暂不支持规则集
                 warn!(
                     target: "seep::subscription::clash",
@@ -863,26 +1030,18 @@ impl ClashConverter {
 
         // 根据代理类型检查特定字段
         match proxy.proxy_type {
-            ClashProxyType::Http | ClashProxyType::Https => {
-                proxy.password.is_some()
-            }
-            ClashProxyType::Ss => {
-                proxy.cipher.is_some() && proxy.password.is_some()
-            }
-            ClashProxyType::Vmess | ClashProxyType::Vless => {
-                proxy.uuid.is_some()
-            }
-            ClashProxyType::Trojan => {
-                proxy.password.is_some()
-            }
-            ClashProxyType::Hysteria | ClashProxyType::Hysteria2 => {
-                proxy.password.is_some()
-            }
-            ClashProxyType::Snell => {
-                proxy.password.is_some()
-            }
+            ClashProxyType::Http | ClashProxyType::Https => true,
+            ClashProxyType::Socks5 => true,
+            ClashProxyType::Ss => proxy.cipher.is_some() && proxy.password.is_some(),
+            ClashProxyType::Vmess | ClashProxyType::Vless => proxy.uuid.is_some(),
+            ClashProxyType::Trojan => proxy.password.is_some(),
+            ClashProxyType::Hysteria | ClashProxyType::Hysteria2 => proxy.password.is_some(),
+            ClashProxyType::Snell => proxy.password.is_some(),
             ClashProxyType::Wireguard => {
-                proxy.private_key.is_some() && proxy.public_key.is_some()
+                proxy.private_key.is_some()
+                    && proxy.public_key.is_some()
+                    && (proxy.ip.as_ref().is_some_and(|v| !v.is_empty())
+                        || proxy.ipv6.as_ref().is_some_and(|v| !v.is_empty()))
             }
         }
     }
@@ -896,6 +1055,7 @@ impl ClashConverter {
             ClashProxyType::Trojan => "Trojan",
             ClashProxyType::Http => "HTTP",
             ClashProxyType::Https => "HTTPS",
+            ClashProxyType::Socks5 => "SOCKS5",
             ClashProxyType::Snell => "Snell",
             ClashProxyType::Hysteria => "Hysteria",
             ClashProxyType::Hysteria2 => "Hysteria2",
@@ -918,6 +1078,44 @@ impl ClashConverter {
 impl Default for ClashConverter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn build_wireguard_address(proxy: &ClashProxy) -> Option<String> {
+    let mut addrs: Vec<String> = Vec::new();
+
+    if let Some(ip_list) = &proxy.ip {
+        for ip in ip_list {
+            let ip = ip.trim();
+            if ip.is_empty() {
+                continue;
+            }
+            if ip.contains('/') {
+                addrs.push(ip.to_string());
+            } else {
+                addrs.push(format!("{ip}/32"));
+            }
+        }
+    }
+
+    if let Some(ip_list) = &proxy.ipv6 {
+        for ip in ip_list {
+            let ip = ip.trim();
+            if ip.is_empty() {
+                continue;
+            }
+            if ip.contains('/') {
+                addrs.push(ip.to_string());
+            } else {
+                addrs.push(format!("{ip}/128"));
+            }
+        }
+    }
+
+    if addrs.is_empty() {
+        None
+    } else {
+        Some(addrs.join(","))
     }
 }
 

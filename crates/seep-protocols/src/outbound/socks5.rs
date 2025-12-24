@@ -55,14 +55,9 @@ impl EgressConnector for Socks5Connector {
         let mut outbound = if let (Some(user), Some(pass)) =
             (self.username.as_ref(), self.password.as_ref())
         {
-            Socks5Stream::connect_with_password(
-                proxy_addr.as_str(),
-                target.as_str(),
-                user,
-                pass,
-            )
-            .await
-            .with_context(|| format!("SOCKS5 代理连接失败: {}", proxy_addr))?
+            Socks5Stream::connect_with_password(proxy_addr.as_str(), target.as_str(), user, pass)
+                .await
+                .with_context(|| format!("SOCKS5 代理连接失败: {}", proxy_addr))?
         } else {
             Socks5Stream::connect(proxy_addr.as_str(), target.as_str())
                 .await

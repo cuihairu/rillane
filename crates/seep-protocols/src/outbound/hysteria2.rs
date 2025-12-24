@@ -140,10 +140,7 @@ impl EgressConnector for Hysteria2Connector {
         match flow.target.proto {
             TargetProto::Tcp => {}
             other => {
-                return Err(anyhow!(
-                    "Hysteria2 暂仅支持 TCP 转发（got {:?}）",
-                    other
-                ));
+                return Err(anyhow!("Hysteria2 暂仅支持 TCP 转发（got {:?}）", other));
             }
         }
 

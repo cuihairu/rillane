@@ -20,9 +20,7 @@ use tokio::{
     time,
 };
 
-use seep_config::{
-    EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor, SeepConfig,
-};
+use seep_config::{EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor, SeepConfig};
 use seep_core::{
     EgressConnector, Flow, FlowContext, FlowOutput, FlowReport, FlowRouter, IngressEndpoint,
     RouteDecision, RoutePath,
@@ -30,12 +28,13 @@ use seep_core::{
 use seep_mesh::{MeshRegistry, MeshSession, NodeId, SessionId};
 use seep_platform::network::{NetworkConfig, NetworkManager};
 use seep_protocols::{
-    DirectConnector, HttpConnector, HttpIngress, MixedIngress, ShadowsocksConnector, Socks5Connector,
-    Socks5Ingress, TrojanConnector, Hysteria2Connector,
+    DirectConnector, HttpConnector, HttpIngress, Hysteria2Connector, MixedIngress,
+    ShadowsocksConnector, Socks5Connector, Socks5Ingress, TrojanConnector, VlessConnector,
+    WireguardConnector,
 };
 use seep_routing::RoutingEngine;
-use seep_subscription::SubscriptionManager;
 use seep_subscription::SubscriptionConverter;
+use seep_subscription::SubscriptionManager;
 
 use crate::chain::{ChainBuilder, ChainConfig, ChainConstraints, ChainManager};
 use crate::mesh_transport::{MeshDataPlane, MeshEnvelope};
@@ -44,7 +43,7 @@ use crate::mesh_transport::{MeshDataPlane, MeshEnvelope};
 pub struct RuntimeBuilder {
     config: SeepConfig,
     runtime_config: RuntimeConfig,
-    ingress_endpoints: HashMap<String, Arc<dyn IngressEndpoint>>, 
+    ingress_endpoints: HashMap<String, Arc<dyn IngressEndpoint>>,
     flow_outputs: HashMap<String, Arc<dyn FlowOutput>>,
     egress_connectors: HashMap<String, Arc<dyn EgressConnector>>,
 }
@@ -68,19 +67,31 @@ impl RuntimeBuilder {
     }
 
     /// 注入自定义入口
-    pub fn with_ingress_endpoint<S: Into<String>>(mut self, name: S, endpoint: Arc<dyn IngressEndpoint>) -> Self {
+    pub fn with_ingress_endpoint<S: Into<String>>(
+        mut self,
+        name: S,
+        endpoint: Arc<dyn IngressEndpoint>,
+    ) -> Self {
         self.ingress_endpoints.insert(name.into(), endpoint);
         self
     }
 
     /// 注入自定义流量输出
-    pub fn with_flow_output<S: Into<String>>(mut self, name: S, output: Arc<dyn FlowOutput>) -> Self {
+    pub fn with_flow_output<S: Into<String>>(
+        mut self,
+        name: S,
+        output: Arc<dyn FlowOutput>,
+    ) -> Self {
         self.flow_outputs.insert(name.into(), output);
         self
     }
 
     /// 注入自定义出口连接器
-    pub fn with_egress_connector<S: Into<String>>(mut self, name: S, connector: Arc<dyn EgressConnector>) -> Self {
+    pub fn with_egress_connector<S: Into<String>>(
+        mut self,
+        name: S,
+        connector: Arc<dyn EgressConnector>,
+    ) -> Self {
         self.egress_connectors.insert(name.into(), connector);
         self
     }
@@ -140,13 +151,13 @@ impl RuntimeBuilder {
         // 初始化链路管理器（需要先有 mesh_registry）
         let chain_manager = if self.runtime_config.enable_chain {
             if let Some(ref registry) = mesh_registry {
-                let chain_cfg = self
-                    .runtime_config
-                    .chain_config
-                    .clone()
-                    .unwrap_or_default();
+                let chain_cfg = self.runtime_config.chain_config.clone().unwrap_or_default();
                 let builder = Arc::new(ChainBuilder::new(chain_cfg.clone(), registry.clone()));
-                Some(Arc::new(ChainManager::new(chain_cfg, builder, registry.clone())))
+                Some(Arc::new(ChainManager::new(
+                    chain_cfg,
+                    builder,
+                    registry.clone(),
+                )))
             } else {
                 tracing::warn!(
                     target: "seep::runtime",
@@ -272,21 +283,52 @@ impl Default for MeshConfig {
 /// 运行时事件
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
-    ConfigUpdated { config: SeepConfig },
-    MeshEvent { session_id: SessionId, event: MeshEventType },
-    NetworkEvent { event_type: NetworkEventType, details: String },
-    SubscriptionEvent { subscription_name: String, event: SubscriptionEventType },
-    TelemetryEvent { metric_name: String, value: f64, tags: HashMap<String, String> },
-    Error { source: String, error: String, context: HashMap<String, String> },
+    ConfigUpdated {
+        config: SeepConfig,
+    },
+    MeshEvent {
+        session_id: SessionId,
+        event: MeshEventType,
+    },
+    NetworkEvent {
+        event_type: NetworkEventType,
+        details: String,
+    },
+    SubscriptionEvent {
+        subscription_name: String,
+        event: SubscriptionEventType,
+    },
+    TelemetryEvent {
+        metric_name: String,
+        value: f64,
+        tags: HashMap<String, String>,
+    },
+    Error {
+        source: String,
+        error: String,
+        context: HashMap<String, String>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum MeshEventType {
-    NodeRegistered { node_id: NodeId },
-    NodeOffline { node_id: NodeId },
-    SessionCreated { session: MeshSession },
-    SessionEnded { session_id: SessionId, reason: String },
-    PathUpdated { session_id: SessionId, path: Vec<NodeId> },
+    NodeRegistered {
+        node_id: NodeId,
+    },
+    NodeOffline {
+        node_id: NodeId,
+    },
+    SessionCreated {
+        session: MeshSession,
+    },
+    SessionEnded {
+        session_id: SessionId,
+        reason: String,
+    },
+    PathUpdated {
+        session_id: SessionId,
+        path: Vec<NodeId>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -422,9 +464,10 @@ impl Runtime {
             let ingress = endpoint.clone();
             let label = name.clone();
             tasks.push(tokio::spawn(async move {
-                ingress.run(router, output).await.map_err(|e| {
-                    anyhow!("入口 {label} 异常退出: {e}")
-                })
+                ingress
+                    .run(router, output)
+                    .await
+                    .map_err(|e| anyhow!("入口 {label} 异常退出: {e}"))
             }));
         }
 
@@ -566,9 +609,7 @@ impl Runtime {
 
                             *config.write().expect("config lock poisoned") = merged.clone();
                             router.reload(merged.routing.clone());
-                            *flow_outputs
-                                .write()
-                                .expect("flow_outputs lock poisoned") = outputs;
+                            *flow_outputs.write().expect("flow_outputs lock poisoned") = outputs;
                             *egress_connectors
                                 .write()
                                 .expect("egress_connectors lock poisoned") = connectors;
@@ -676,9 +717,17 @@ impl Runtime {
 
         *self.config.write().expect("config lock poisoned") = new_config.clone();
         self.router.reload(new_config.routing.clone());
-        *self.flow_outputs.write().expect("flow_outputs lock poisoned") = outputs;
-        *self.egress_connectors.write().expect("egress_connectors lock poisoned") = connectors;
-        let _ = self.event_tx.send(RuntimeEvent::ConfigUpdated { config: new_config });
+        *self
+            .flow_outputs
+            .write()
+            .expect("flow_outputs lock poisoned") = outputs;
+        *self
+            .egress_connectors
+            .write()
+            .expect("egress_connectors lock poisoned") = connectors;
+        let _ = self
+            .event_tx
+            .send(RuntimeEvent::ConfigUpdated { config: new_config });
         Ok(())
     }
 
@@ -764,11 +813,7 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| anyhow!("Mesh 注册表未启用"))?;
 
-        let chain_cfg = self
-            .runtime_config
-            .chain_config
-            .clone()
-            .unwrap_or_default();
+        let chain_cfg = self.runtime_config.chain_config.clone().unwrap_or_default();
 
         let builder = ChainBuilder::new(chain_cfg, mesh_registry.clone());
         builder.dry_run(source, target, constraints).await
@@ -778,8 +823,12 @@ impl Runtime {
 fn merge_config_delta_in_place(target: &mut SeepConfig, delta: &SeepConfig) -> ConfigMergeStats {
     let mut existing_egress: std::collections::HashSet<String> =
         target.egress.iter().map(|e| e.name.clone()).collect();
-    let mut existing_groups: std::collections::HashSet<String> =
-        target.routing.groups.iter().map(|g| g.name.clone()).collect();
+    let mut existing_groups: std::collections::HashSet<String> = target
+        .routing
+        .groups
+        .iter()
+        .map(|g| g.name.clone())
+        .collect();
 
     let mut nodes_added = 0usize;
     for e in &delta.egress {
@@ -963,7 +1012,9 @@ impl FlowOutputRouter {
 
         // For mesh chains, hops[0] is usually the local node id; the first actionable remote hop is hops[1].
         if hops.len() >= 2 {
-            if let (Some(mesh), Some(local_id)) = (self.mesh_registry.clone(), self.local_node_id.clone()) {
+            if let (Some(mesh), Some(local_id)) =
+                (self.mesh_registry.clone(), self.local_node_id.clone())
+            {
                 let next_hop = hops[1].node.clone();
 
                 // Best-effort: if next_hop exists in mesh registry, use mesh transport; otherwise fall back.
@@ -982,7 +1033,9 @@ impl FlowOutputRouter {
                         hops.iter().map(|h| h.node.clone()).collect(),
                     );
 
-                    plane.dial_and_tunnel(&next_hop, &env, &mut *flow.io).await?;
+                    plane
+                        .dial_and_tunnel(&next_hop, &env, &mut *flow.io)
+                        .await?;
                     return Ok(FlowReport::default());
                 }
             }
@@ -1043,13 +1096,11 @@ fn build_ingress_endpoints(
     let mut map = HashMap::new();
     for desc in descriptors {
         let endpoint: Arc<dyn IngressEndpoint> = match &desc.spec {
-            IngressConfig::Socks5 { bind, auth } => {
-                Arc::new(Socks5Ingress::new(
-                    desc.name.clone(),
-                    bind.clone(),
-                    auth.clone().unwrap_or_default(),
-                ))
-            }
+            IngressConfig::Socks5 { bind, auth } => Arc::new(Socks5Ingress::new(
+                desc.name.clone(),
+                bind.clone(),
+                auth.clone().unwrap_or_default(),
+            )),
             IngressConfig::Http { bind } => {
                 Arc::new(HttpIngress::new(desc.name.clone(), bind.clone()))
             }
@@ -1212,6 +1263,71 @@ fn build_egress_outputs(
                 outputs.insert(desc.name.clone(), flow_output);
                 connectors.insert(desc.name.clone(), connector);
             }
+            EgressConfig::Vless {
+                server,
+                port,
+                uuid,
+                flow,
+                network,
+                path,
+                host,
+                tls,
+                skip_cert_verify,
+                sni,
+                alpn,
+            } => {
+                let connector: Arc<dyn EgressConnector> = Arc::new(VlessConnector::new(
+                    server.clone(),
+                    *port,
+                    uuid.clone(),
+                    flow.clone(),
+                    network.clone(),
+                    path.clone(),
+                    host.clone(),
+                    *tls,
+                    *skip_cert_verify,
+                    sni.clone(),
+                    alpn.clone(),
+                ));
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Wireguard {
+                endpoint,
+                private_key,
+                public_key,
+                address,
+                allowed_ips,
+                preshared_key,
+                persistent_keepalive,
+                listen_port,
+                mtu,
+                dns,
+            } => {
+                let connector: Arc<dyn EgressConnector> = Arc::new(WireguardConnector::new(
+                    desc.name.clone(),
+                    endpoint.clone(),
+                    private_key.clone(),
+                    public_key.clone(),
+                    address.clone(),
+                    allowed_ips.clone(),
+                    preshared_key.clone(),
+                    *persistent_keepalive,
+                    *listen_port,
+                    *mtu,
+                    dns.clone(),
+                ));
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
             _ => {
                 return Err(anyhow!("暂不支持的出口类型: {}", desc.name));
             }
@@ -1256,7 +1372,10 @@ fn register_local_mesh_node(mesh_cfg: MeshConfig) -> Result<Arc<MeshRegistry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{pin::Pin, task::{Context, Poll}};
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
     #[derive(Default)]
@@ -1304,16 +1423,16 @@ mod tests {
     }
 
     #[tokio::test]
-	    async fn forward_chain_injects_metadata_annotations() {
-	        let annotations = Arc::new(Mutex::new(None));
-	        let mut outputs: HashMap<String, Arc<dyn FlowOutput>> = HashMap::new();
-	        outputs.insert(
-	            "direct".to_string(),
-	            Arc::new(CaptureOutput {
-	                annotations: annotations.clone(),
-	            }),
-	        );
-	        let router = FlowOutputRouter::new(Arc::new(RwLock::new(outputs)), None, None, None);
+    async fn forward_chain_injects_metadata_annotations() {
+        let annotations = Arc::new(Mutex::new(None));
+        let mut outputs: HashMap<String, Arc<dyn FlowOutput>> = HashMap::new();
+        outputs.insert(
+            "direct".to_string(),
+            Arc::new(CaptureOutput {
+                annotations: annotations.clone(),
+            }),
+        );
+        let router = FlowOutputRouter::new(Arc::new(RwLock::new(outputs)), None, None, None);
 
         let decision = {
             let hops = vec![
@@ -1346,7 +1465,10 @@ mod tests {
         let guard = annotations.lock().await;
         let map = guard.as_ref().expect("annotations captured");
         assert!(map.contains_key("seep.chain.path"));
-        assert_eq!(map.get("seep.route.reason").map(|s| s.as_str()), Some("test"));
+        assert_eq!(
+            map.get("seep.route.reason").map(|s| s.as_str()),
+            Some("test")
+        );
     }
 
     #[test]
@@ -1369,10 +1491,7 @@ mod tests {
         let (outputs, connectors) = build_egress_outputs(&egress).expect("build egress outputs");
         assert!(outputs.contains_key("hy2"));
         assert_eq!(
-            connectors
-                .get("hy2")
-                .expect("connector")
-                .name(),
+            connectors.get("hy2").expect("connector").name(),
             "hysteria2"
         );
     }

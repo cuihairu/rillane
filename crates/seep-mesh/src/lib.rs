@@ -1,18 +1,18 @@
 use std::{
     collections::HashMap,
+    fmt,
+    net::SocketAddr,
     sync::{Arc, RwLock},
     time::{Duration, Instant},
-    net::SocketAddr,
-    fmt,
 };
 
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
-use petgraph::{Graph, Directed};
+use petgraph::{Directed, Graph};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::time::interval;
-use tracing::{warn, info, debug};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 pub type NodeId = String;
@@ -321,7 +321,12 @@ impl MeshRegistry {
     }
 
     /// 创建会话
-    pub fn create_session(&self, client_node: NodeId, path: Vec<NodeId>, target_addr: SocketAddr) -> Result<SessionId> {
+    pub fn create_session(
+        &self,
+        client_node: NodeId,
+        path: Vec<NodeId>,
+        target_addr: SocketAddr,
+    ) -> Result<SessionId> {
         // 验证路径有效性
         self.validate_path(&client_node, &path)?;
 
@@ -345,7 +350,12 @@ impl MeshRegistry {
     }
 
     /// 更新会话统计
-    pub fn update_session_stats(&self, session_id: SessionId, bytes_up: u64, bytes_down: u64) -> Result<()> {
+    pub fn update_session_stats(
+        &self,
+        session_id: SessionId,
+        bytes_up: u64,
+        bytes_down: u64,
+    ) -> Result<()> {
         use dashmap::mapref::entry::Entry;
 
         match self.sessions.entry(session_id) {
@@ -356,9 +366,7 @@ impl MeshRegistry {
                 session.status = SessionStatus::Active;
                 Ok(())
             }
-            Entry::Vacant(_) => {
-                Err(anyhow!("会话 {:?} 不存在", session_id))
-            }
+            Entry::Vacant(_) => Err(anyhow!("会话 {:?} 不存在", session_id)),
         }
     }
 
@@ -473,7 +481,11 @@ impl MeshRegistry {
         let mut topology = self.topology.write().expect("mesh topology poisoned");
 
         // 添加节点到拓扑（如果不存在）
-        if topology.node_indices().find(|i| topology[*i] == *node_id).is_none() {
+        if topology
+            .node_indices()
+            .find(|i| topology[*i] == *node_id)
+            .is_none()
+        {
             topology.add_node(node_id.clone());
         }
     }
@@ -497,10 +509,9 @@ impl MeshRegistry {
             let (source, target) = entry.key();
             let link_state = entry.value();
 
-            if let (Some(&source_idx), Some(&target_idx)) = (
-                node_indices.get(source),
-                node_indices.get(target)
-            ) {
+            if let (Some(&source_idx), Some(&target_idx)) =
+                (node_indices.get(source), node_indices.get(target))
+            {
                 topology.add_edge(source_idx, target_idx, link_state.clone());
             }
         }
@@ -518,10 +529,16 @@ impl MeshRegistry {
         stats.active_sessions = session_count;
 
         // 计算平均延迟
-        let links: Vec<LinkState> = self.link_states.iter().map(|entry| entry.value().clone()).collect();
+        let links: Vec<LinkState> = self
+            .link_states
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
         if !links.is_empty() {
-            stats.average_latency_ms = links.iter().map(|l| l.latency_ms as f32).sum::<f32>() / links.len() as f32;
-            stats.packet_loss_rate = links.iter().map(|l| l.packet_loss_rate).sum::<f32>() / links.len() as f32;
+            stats.average_latency_ms =
+                links.iter().map(|l| l.latency_ms as f32).sum::<f32>() / links.len() as f32;
+            stats.packet_loss_rate =
+                links.iter().map(|l| l.packet_loss_rate).sum::<f32>() / links.len() as f32;
         }
     }
 
@@ -599,39 +616,27 @@ impl MeshRegistry {
     /// 获取所有节点快照
     pub fn get_all_node_snapshots(&self) -> Vec<NodeRecordSnapshot> {
         let nodes = self.nodes.read().expect("mesh registry poisoned");
-        nodes.values().map(|record| NodeRecordSnapshot {
-            id: record.id.clone(),
-            role: record.role,
-            addr: record.addr.to_string(),
-            capability: record.capability.clone(),
-            online: record.online,
-            last_seen_seconds: record.last_seen.elapsed().as_secs(),
-            health_score: record.health_score,
-            connection_count: record.connection_count,
-            total_bytes_transferred: record.total_bytes_transferred,
-        }).collect()
+        nodes
+            .values()
+            .map(|record| NodeRecordSnapshot {
+                id: record.id.clone(),
+                role: record.role,
+                addr: record.addr.to_string(),
+                capability: record.capability.clone(),
+                online: record.online,
+                last_seen_seconds: record.last_seen.elapsed().as_secs(),
+                health_score: record.health_score,
+                connection_count: record.connection_count,
+                total_bytes_transferred: record.total_bytes_transferred,
+            })
+            .collect()
     }
 
     /// 获取会话快照
     pub fn get_session_snapshot(&self, session_id: SessionId) -> Option<SessionSnapshot> {
-        self.sessions.get(&session_id).map(|session| SessionSnapshot {
-            id: session.id,
-            client_node: session.client_node.clone(),
-            path: session.path.clone(),
-            target_addr: session.target_addr.to_string(),
-            created_at_seconds: session.created_at.elapsed().as_secs(),
-            bytes_up: session.bytes_up,
-            bytes_down: session.bytes_down,
-            status: format!("{:?}", session.status),
-            duration_seconds: session.created_at.elapsed().as_secs(),
-        })
-    }
-
-    /// 获取所有会话快照
-    pub fn get_all_session_snapshots(&self) -> Vec<SessionSnapshot> {
-        self.sessions.iter().map(|entry| {
-            let session = entry.value();
-            SessionSnapshot {
+        self.sessions
+            .get(&session_id)
+            .map(|session| SessionSnapshot {
                 id: session.id,
                 client_node: session.client_node.clone(),
                 path: session.path.clone(),
@@ -641,8 +646,28 @@ impl MeshRegistry {
                 bytes_down: session.bytes_down,
                 status: format!("{:?}", session.status),
                 duration_seconds: session.created_at.elapsed().as_secs(),
-            }
-        }).collect()
+            })
+    }
+
+    /// 获取所有会话快照
+    pub fn get_all_session_snapshots(&self) -> Vec<SessionSnapshot> {
+        self.sessions
+            .iter()
+            .map(|entry| {
+                let session = entry.value();
+                SessionSnapshot {
+                    id: session.id,
+                    client_node: session.client_node.clone(),
+                    path: session.path.clone(),
+                    target_addr: session.target_addr.to_string(),
+                    created_at_seconds: session.created_at.elapsed().as_secs(),
+                    bytes_up: session.bytes_up,
+                    bytes_down: session.bytes_down,
+                    status: format!("{:?}", session.status),
+                    duration_seconds: session.created_at.elapsed().as_secs(),
+                }
+            })
+            .collect()
     }
 
     /// 标记节点为离线
@@ -666,9 +691,9 @@ impl MeshRegistry {
             if let Some(daily_gb) = record.quota.daily_bandwidth_gb {
                 let daily_bytes = daily_gb as u64 * 1024 * 1024 * 1024;
                 if record.total_bytes_transferred + additional_bytes > daily_bytes {
-                    return Err(MeshError::QuotaExceeded(
-                        format!("日配额超限: {}GB", daily_gb)
-                    ).into());
+                    return Err(
+                        MeshError::QuotaExceeded(format!("日配额超限: {}GB", daily_gb)).into(),
+                    );
                 }
             }
 
@@ -676,21 +701,25 @@ impl MeshRegistry {
             if let Some(monthly_gb) = record.quota.monthly_bandwidth_gb {
                 let monthly_bytes = monthly_gb as u64 * 1024 * 1024 * 1024;
                 if record.total_bytes_transferred + additional_bytes > monthly_bytes {
-                    return Err(MeshError::QuotaExceeded(
-                        format!("月配额超限: {}GB", monthly_gb)
-                    ).into());
+                    return Err(
+                        MeshError::QuotaExceeded(format!("月配额超限: {}GB", monthly_gb)).into(),
+                    );
                 }
             }
 
             // 检查并发连接数
             if let Some(max_connections) = record.quota.max_concurrent_connections {
-                let current_connections = self.sessions.iter()
+                let current_connections = self
+                    .sessions
+                    .iter()
                     .filter(|entry| entry.value().client_node == *node_id)
                     .count();
                 if current_connections >= max_connections as usize {
-                    return Err(MeshError::QuotaExceeded(
-                        format!("并发连接数超限: {}", max_connections)
-                    ).into());
+                    return Err(MeshError::QuotaExceeded(format!(
+                        "并发连接数超限: {}",
+                        max_connections
+                    ))
+                    .into());
                 }
             }
 
@@ -713,19 +742,21 @@ impl MeshRegistry {
             let target_port = target_addr.port();
             for (start, end) in &acl.denied_target_ports {
                 if target_port >= *start && target_port <= *end {
-                    return Err(MeshError::AccessDenied(
-                        format!("端口 {} 被禁止", target_port)
-                    ).into());
+                    return Err(
+                        MeshError::AccessDenied(format!("端口 {} 被禁止", target_port)).into(),
+                    );
                 }
             }
 
             if !acl.allowed_target_ports.is_empty() {
-                let allowed = acl.allowed_target_ports.iter()
+                let allowed = acl
+                    .allowed_target_ports
+                    .iter()
                     .any(|(start, end)| target_port >= *start && target_port <= *end);
                 if !allowed {
-                    return Err(MeshError::AccessDenied(
-                        format!("端口 {} 未被允许", target_port)
-                    ).into());
+                    return Err(
+                        MeshError::AccessDenied(format!("端口 {} 未被允许", target_port)).into(),
+                    );
                 }
             }
 
@@ -744,10 +775,9 @@ pub async fn spawn_health_checker(registry: Arc<MeshRegistry>, ttl: Duration) {
 
         let stale_ids: Vec<NodeId> = {
             let nodes = registry.nodes.read().expect("mesh registry poisoned");
-            nodes.iter()
-                .filter(|(_, record)| {
-                    record.online && record.last_seen.elapsed() >= ttl
-                })
+            nodes
+                .iter()
+                .filter(|(_, record)| record.online && record.last_seen.elapsed() >= ttl)
                 .map(|(id, _)| id.clone())
                 .collect()
         };

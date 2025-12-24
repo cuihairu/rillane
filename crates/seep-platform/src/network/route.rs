@@ -22,14 +22,12 @@ fn is_ip_private(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(addr) => {
             let octets = addr.octets();
-            addr.is_loopback() ||
-                (octets[0] == 10) ||
-                (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) ||
-                (octets[0] == 192 && octets[1] == 168)
+            addr.is_loopback()
+                || (octets[0] == 10)
+                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
+                || (octets[0] == 192 && octets[1] == 168)
         }
-        IpAddr::V6(addr) => {
-            addr.is_loopback() || (addr.segments()[0] & 0xfe00) == 0xfc00
-        }
+        IpAddr::V6(addr) => addr.is_loopback() || (addr.segments()[0] & 0xfe00) == 0xfc00,
     }
 }
 
@@ -180,21 +178,13 @@ impl RouteRule {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RouteDestination {
     /// IPv4 网络
-    Ipv4Network {
-        network: Ipv4Addr,
-        prefix: u8,
-    },
+    Ipv4Network { network: Ipv4Addr, prefix: u8 },
     /// IPv6 网络
-    Ipv6Network {
-        network: Ipv6Addr,
-        prefix: u8,
-    },
+    Ipv6Network { network: Ipv6Addr, prefix: u8 },
     /// 默认路由
     Default,
     /// 主机路由
-    Host {
-        address: IpAddr,
-    },
+    Host { address: IpAddr },
 }
 
 impl RouteDestination {
@@ -247,12 +237,10 @@ impl RouteDestination {
         match (self, gateway) {
             (RouteDestination::Ipv4Network { .. }, IpAddr::V4(_)) => true,
             (RouteDestination::Ipv6Network { .. }, IpAddr::V6(_)) => true,
-            (RouteDestination::Host { address }, gateway) => {
-                match address {
-                    IpAddr::V4(_) => gateway.is_ipv4(),
-                    IpAddr::V6(_) => gateway.is_ipv6(),
-                }
-            }
+            (RouteDestination::Host { address }, gateway) => match address {
+                IpAddr::V4(_) => gateway.is_ipv4(),
+                IpAddr::V6(_) => gateway.is_ipv6(),
+            },
             (RouteDestination::Default, _) => true,
             _ => false,
         }
@@ -263,7 +251,8 @@ impl RouteDestination {
         match (self, address) {
             (RouteDestination::Ipv4Network { network, prefix }, IpAddr::V4(addr)) => {
                 let netmask = ipv4_netmask(*prefix);
-                u32::from_be_bytes(network.octets()) & netmask == u32::from_be_bytes(addr.octets()) & netmask
+                u32::from_be_bytes(network.octets()) & netmask
+                    == u32::from_be_bytes(addr.octets()) & netmask
             }
             (RouteDestination::Ipv6Network { network, prefix }, IpAddr::V6(addr)) => {
                 let netmask = ipv6_netmask(*prefix);
@@ -358,32 +347,26 @@ impl BypassRule {
         }
 
         match &self.condition {
-            BypassCondition::IpRange { start, end } => {
-                match (address, start, end) {
-                    (IpAddr::V4(addr), IpAddr::V4(start), IpAddr::V4(end)) => {
-                        let addr_u32 = u32::from_be_bytes(addr.octets());
-                        let start_u32 = u32::from_be_bytes(start.octets());
-                        let end_u32 = u32::from_be_bytes(end.octets());
-                        addr_u32 >= start_u32 && addr_u32 <= end_u32
-                    }
-                    (IpAddr::V6(addr), IpAddr::V6(start), IpAddr::V6(end)) => {
-                        let addr_u128 = u128::from_be_bytes(addr.octets());
-                        let start_u128 = u128::from_be_bytes(start.octets());
-                        let end_u128 = u128::from_be_bytes(end.octets());
-                        addr_u128 >= start_u128 && addr_u128 <= end_u128
-                    }
-                    _ => false,
+            BypassCondition::IpRange { start, end } => match (address, start, end) {
+                (IpAddr::V4(addr), IpAddr::V4(start), IpAddr::V4(end)) => {
+                    let addr_u32 = u32::from_be_bytes(addr.octets());
+                    let start_u32 = u32::from_be_bytes(start.octets());
+                    let end_u32 = u32::from_be_bytes(end.octets());
+                    addr_u32 >= start_u32 && addr_u32 <= end_u32
                 }
-            }
-            BypassCondition::Interface { name } => {
-                interface.map(|i| i == name).unwrap_or(false)
-            }
+                (IpAddr::V6(addr), IpAddr::V6(start), IpAddr::V6(end)) => {
+                    let addr_u128 = u128::from_be_bytes(addr.octets());
+                    let start_u128 = u128::from_be_bytes(start.octets());
+                    let end_u128 = u128::from_be_bytes(end.octets());
+                    addr_u128 >= start_u128 && addr_u128 <= end_u128
+                }
+                _ => false,
+            },
+            BypassCondition::Interface { name } => interface.map(|i| i == name).unwrap_or(false),
             BypassCondition::PrivateIp => {
                 is_ip_private(&address) || address.is_loopback() || is_ip_link_local(&address)
             }
-            BypassCondition::LanIp => {
-                is_ip_private(&address) || is_ip_link_local(&address)
-            }
+            BypassCondition::LanIp => is_ip_private(&address) || is_ip_link_local(&address),
         }
     }
 }
@@ -393,14 +376,9 @@ impl BypassRule {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BypassCondition {
     /// IP 范围
-    IpRange {
-        start: IpAddr,
-        end: IpAddr,
-    },
+    IpRange { start: IpAddr, end: IpAddr },
     /// 接口名称
-    Interface {
-        name: String,
-    },
+    Interface { name: String },
     /// 私有 IP
     PrivateIp,
     /// 局域网 IP
@@ -416,9 +394,7 @@ pub enum BypassAction {
     /// 忽略
     Ignore,
     /// 转发
-    Forward {
-        gateway: IpAddr,
-    },
+    Forward { gateway: IpAddr },
 }
 
 /// 路由统计信息
@@ -481,7 +457,11 @@ impl RouteStats {
     pub fn top_routes(&self, limit: usize) -> Vec<(String, u64)> {
         let mut routes: Vec<_> = self.route_hits.iter().collect();
         routes.sort_by(|a, b| b.1.cmp(a.1));
-        routes.into_iter().take(limit).map(|(name, count)| (name.clone(), *count)).collect()
+        routes
+            .into_iter()
+            .take(limit)
+            .map(|(name, count)| (name.clone(), *count))
+            .collect()
     }
 }
 
@@ -567,9 +547,11 @@ pub fn ipv6_netmask(prefix: u8) -> u128 {
 /// 解析 CIDR 格式
 pub fn parse_cidr(cidr: &str) -> Result<RouteDestination> {
     if let Some((addr_str, prefix_str)) = cidr.split_once('/') {
-        let addr: IpAddr = addr_str.parse()
+        let addr: IpAddr = addr_str
+            .parse()
             .with_context(|| format!("无效的 IP 地址: {}", addr_str))?;
-        let prefix: u8 = prefix_str.parse()
+        let prefix: u8 = prefix_str
+            .parse()
             .with_context(|| format!("无效的前缀长度: {}", prefix_str))?;
 
         match addr {
@@ -578,7 +560,8 @@ pub fn parse_cidr(cidr: &str) -> Result<RouteDestination> {
         }
     } else {
         // 如果没有前缀，尝试解析为主机地址
-        let addr: IpAddr = cidr.parse()
+        let addr: IpAddr = cidr
+            .parse()
             .with_context(|| format!("无效的 IP 地址: {}", cidr))?;
         Ok(RouteDestination::host(addr))
     }

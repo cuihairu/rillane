@@ -7,11 +7,7 @@
 //! - 端口过滤
 //! - 域名过滤
 
-use std::{
-    collections::HashMap,
-    fmt,
-    net::IpAddr,
-};
+use std::{collections::HashMap, fmt, net::IpAddr};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -22,14 +18,12 @@ fn is_ip_private(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(addr) => {
             let octets = addr.octets();
-            addr.is_loopback() ||
-                (octets[0] == 10) ||
-                (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) ||
-                (octets[0] == 192 && octets[1] == 168)
+            addr.is_loopback()
+                || (octets[0] == 10)
+                || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
+                || (octets[0] == 192 && octets[1] == 168)
         }
-        IpAddr::V6(addr) => {
-            addr.is_loopback() || (addr.segments()[0] & 0xfe00) == 0xfc00
-        }
+        IpAddr::V6(addr) => addr.is_loopback() || (addr.segments()[0] & 0xfe00) == 0xfc00,
     }
 }
 
@@ -526,40 +520,36 @@ impl IpRange {
     pub fn contains(&self, ip: IpAddr) -> bool {
         match self {
             IpRange::Single { address } => *address == ip,
-            IpRange::Network { network, prefix } => {
-                match (network, ip) {
-                    (IpAddr::V4(net), IpAddr::V4(addr)) => {
-                        let netmask = super::route::ipv4_netmask(*prefix);
-                        let net_u32 = u32::from_be_bytes(net.octets());
-                        let addr_u32 = u32::from_be_bytes(addr.octets());
-                        (net_u32 & netmask) == (addr_u32 & netmask)
-                    }
-                    (IpAddr::V6(net), IpAddr::V6(addr)) => {
-                        let netmask = super::route::ipv6_netmask(*prefix);
-                        let net_u128 = u128::from_be_bytes(net.octets());
-                        let addr_u128 = u128::from_be_bytes(addr.octets());
-                        (net_u128 & netmask) == (addr_u128 & netmask)
-                    }
-                    _ => false,
+            IpRange::Network { network, prefix } => match (network, ip) {
+                (IpAddr::V4(net), IpAddr::V4(addr)) => {
+                    let netmask = super::route::ipv4_netmask(*prefix);
+                    let net_u32 = u32::from_be_bytes(net.octets());
+                    let addr_u32 = u32::from_be_bytes(addr.octets());
+                    (net_u32 & netmask) == (addr_u32 & netmask)
                 }
-            }
-            IpRange::Range { start, end } => {
-                match (start, end, ip) {
-                    (IpAddr::V4(start), IpAddr::V4(end), IpAddr::V4(addr)) => {
-                        let start_u32 = u32::from_be_bytes(start.octets());
-                        let end_u32 = u32::from_be_bytes(end.octets());
-                        let addr_u32 = u32::from_be_bytes(addr.octets());
-                        addr_u32 >= start_u32 && addr_u32 <= end_u32
-                    }
-                    (IpAddr::V6(start), IpAddr::V6(end), IpAddr::V6(addr)) => {
-                        let start_u128 = u128::from_be_bytes(start.octets());
-                        let end_u128 = u128::from_be_bytes(end.octets());
-                        let addr_u128 = u128::from_be_bytes(addr.octets());
-                        addr_u128 >= start_u128 && addr_u128 <= end_u128
-                    }
-                    _ => false,
+                (IpAddr::V6(net), IpAddr::V6(addr)) => {
+                    let netmask = super::route::ipv6_netmask(*prefix);
+                    let net_u128 = u128::from_be_bytes(net.octets());
+                    let addr_u128 = u128::from_be_bytes(addr.octets());
+                    (net_u128 & netmask) == (addr_u128 & netmask)
                 }
-            }
+                _ => false,
+            },
+            IpRange::Range { start, end } => match (start, end, ip) {
+                (IpAddr::V4(start), IpAddr::V4(end), IpAddr::V4(addr)) => {
+                    let start_u32 = u32::from_be_bytes(start.octets());
+                    let end_u32 = u32::from_be_bytes(end.octets());
+                    let addr_u32 = u32::from_be_bytes(addr.octets());
+                    addr_u32 >= start_u32 && addr_u32 <= end_u32
+                }
+                (IpAddr::V6(start), IpAddr::V6(end), IpAddr::V6(addr)) => {
+                    let start_u128 = u128::from_be_bytes(start.octets());
+                    let end_u128 = u128::from_be_bytes(end.octets());
+                    let addr_u128 = u128::from_be_bytes(addr.octets());
+                    addr_u128 >= start_u128 && addr_u128 <= end_u128
+                }
+                _ => false,
+            },
             IpRange::List { addresses } => addresses.contains(&ip),
             IpRange::Predefined { predefined } => predefined.contains(ip),
         }
@@ -572,7 +562,14 @@ impl IpRange {
             IpRange::Network { network, prefix } => format!("{}/{}", network, prefix),
             IpRange::Range { start, end } => format!("{}-{}", start, end),
             IpRange::List { addresses } => {
-                format!("[{}]", addresses.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "))
+                format!(
+                    "[{}]",
+                    addresses
+                        .iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
             IpRange::Predefined { predefined } => predefined.as_string(),
         }
@@ -609,8 +606,10 @@ impl PredefinedIpRange {
             PredefinedIpRange::Multicast => ip.is_multicast(),
             PredefinedIpRange::Broadcast => match ip {
                 IpAddr::V4(addr) => {
-                    addr.octets()[0] == 255 && addr.octets()[1] == 255 &&
-                    addr.octets()[2] == 255 && addr.octets()[3] == 255
+                    addr.octets()[0] == 255
+                        && addr.octets()[1] == 255
+                        && addr.octets()[2] == 255
+                        && addr.octets()[3] == 255
                 }
                 IpAddr::V6(_) => false, // IPv6 没有广播地址
             },
@@ -619,9 +618,9 @@ impl PredefinedIpRange {
                     IpAddr::V4(addr) => {
                         let octets = addr.octets();
                         // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
-                        (octets[0] == 192 && octets[1] == 0 && octets[2] == 2) ||
-                        (octets[0] == 198 && octets[1] == 51 && octets[2] == 100) ||
-                        (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                        (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+                            || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                            || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
                     }
                     IpAddr::V6(addr) => {
                         let segments = addr.segments();
@@ -631,11 +630,14 @@ impl PredefinedIpRange {
                 }
             }
             PredefinedIpRange::Public => {
-                !(is_ip_private(&ip) || ip.is_loopback() || is_ip_link_local(&ip) ||
-                  ip.is_multicast() || match ip {
-                    IpAddr::V4(addr) => addr.octets()[0] == 255,
-                    IpAddr::V6(_) => false,
-                })
+                !(is_ip_private(&ip)
+                    || ip.is_loopback()
+                    || is_ip_link_local(&ip)
+                    || ip.is_multicast()
+                    || match ip {
+                        IpAddr::V4(addr) => addr.octets()[0] == 255,
+                        IpAddr::V6(_) => false,
+                    })
             }
         }
     }
@@ -851,9 +853,9 @@ impl FilterStats {
         match action {
             FilterAction::Allow => self.allowed_packets += 1,
             FilterAction::Deny => self.denied_packets += 1,
-            FilterAction::Redirect { .. } | FilterAction::Rewrite { .. } | FilterAction::Throttle { .. } => {
-                self.redirected_packets += 1
-            }
+            FilterAction::Redirect { .. }
+            | FilterAction::Rewrite { .. }
+            | FilterAction::Throttle { .. } => self.redirected_packets += 1,
         }
 
         if let Some(name) = rule_name {
@@ -874,7 +876,11 @@ impl FilterStats {
     pub fn top_rules(&self, limit: usize) -> Vec<(String, u64)> {
         let mut rules: Vec<_> = self.rule_hits.iter().collect();
         rules.sort_by(|a, b| b.1.cmp(a.1));
-        rules.into_iter().take(limit).map(|(name, count)| (name.clone(), *count)).collect()
+        rules
+            .into_iter()
+            .take(limit)
+            .map(|(name, count)| (name.clone(), *count))
+            .collect()
     }
 }
 
@@ -946,12 +952,7 @@ pub struct PacketInfo {
 
 impl PacketInfo {
     /// 创建新的包信息
-    pub fn new(
-        src_ip: IpAddr,
-        dst_ip: IpAddr,
-        protocol: ProtocolType,
-        length: usize,
-    ) -> Self {
+    pub fn new(src_ip: IpAddr, dst_ip: IpAddr, protocol: ProtocolType, length: usize) -> Self {
         Self {
             src_ip,
             dst_ip,

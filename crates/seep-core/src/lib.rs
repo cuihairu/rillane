@@ -1,11 +1,16 @@
-use std::{collections::BTreeMap, fmt, sync::Arc, time::{Duration, Instant}};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
-use std::net::SocketAddr;
 
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.
 pub trait IoStream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {}
@@ -102,9 +107,7 @@ pub enum RoutePath {
         intermediate_nodes: Vec<String>,
     },
     /// 多跳路由链
-    Chain {
-        hops: Vec<RouteHop>,
-    },
+    Chain { hops: Vec<RouteHop> },
 }
 
 #[derive(Debug, Clone)]
@@ -146,9 +149,17 @@ impl RouteDecision {
         }
     }
 
-    pub fn through_group(group: String, selected_node: String, intermediate_nodes: Vec<String>) -> Self {
+    pub fn through_group(
+        group: String,
+        selected_node: String,
+        intermediate_nodes: Vec<String>,
+    ) -> Self {
         Self {
-            path: RoutePath::ThroughGroup { group, selected_node, intermediate_nodes },
+            path: RoutePath::ThroughGroup {
+                group,
+                selected_node,
+                intermediate_nodes,
+            },
             reason: None,
             route_type: RouteType::Standard,
         }
@@ -175,7 +186,11 @@ impl RouteDecision {
     pub fn all_nodes(&self) -> Vec<String> {
         match &self.path {
             RoutePath::Direct { node } => vec![node.clone()],
-            RoutePath::ThroughGroup { selected_node: _selected_node, intermediate_nodes, .. } => {
+            RoutePath::ThroughGroup {
+                selected_node: _selected_node,
+                intermediate_nodes,
+                ..
+            } => {
                 let mut nodes = intermediate_nodes.clone();
                 nodes.push(_selected_node.clone());
                 nodes
@@ -188,9 +203,11 @@ impl RouteDecision {
     pub fn hop_count(&self) -> usize {
         match &self.path {
             RoutePath::Direct { .. } => 1,
-            RoutePath::ThroughGroup { selected_node: _, intermediate_nodes, .. } => {
-                intermediate_nodes.len() + 1
-            }
+            RoutePath::ThroughGroup {
+                selected_node: _,
+                intermediate_nodes,
+                ..
+            } => intermediate_nodes.len() + 1,
             RoutePath::Chain { hops } => hops.len(),
         }
     }
@@ -450,10 +467,14 @@ impl FlowSession {
         self.status = SessionStatus::Failed;
 
         // 计算平均故障间隔
-        self.failure_stats.average_failure_interval = if self.failure_stats.connection_failures +
-            self.failure_stats.route_failures + self.failure_stats.timeout_count > 0 {
-            let total_failures = self.failure_stats.connection_failures +
-                self.failure_stats.route_failures + self.failure_stats.timeout_count;
+        self.failure_stats.average_failure_interval = if self.failure_stats.connection_failures
+            + self.failure_stats.route_failures
+            + self.failure_stats.timeout_count
+            > 0
+        {
+            let total_failures = self.failure_stats.connection_failures
+                + self.failure_stats.route_failures
+                + self.failure_stats.timeout_count;
             let total_duration = self.created_at.elapsed().as_secs() as f32;
             total_duration / total_failures as f32
         } else {
@@ -544,7 +565,9 @@ impl ChainContext {
         if self.fallback_paths.is_empty() {
             Some(self.current_path.clone())
         } else {
-            self.fallback_paths.get(self.current_fallback_index).cloned()
+            self.fallback_paths
+                .get(self.current_fallback_index)
+                .cloned()
         }
     }
 
@@ -567,14 +590,16 @@ impl ChainContext {
         }
 
         // 平均延迟
-        let avg_latency: f32 = self.hop_latencies.iter()
+        let avg_latency: f32 = self
+            .hop_latencies
+            .iter()
             .map(|&lat| lat as f32)
-            .sum::<f32>() / self.hop_latencies.len() as f32;
+            .sum::<f32>()
+            / self.hop_latencies.len() as f32;
 
         // 平均带宽
-        let avg_bandwidth: f32 = self.hop_bandwidths.iter()
-            .map(|&bw| bw as f32)
-            .sum::<f32>() / self.hop_bandwidths.len() as f32;
+        let avg_bandwidth: f32 = self.hop_bandwidths.iter().map(|&bw| bw as f32).sum::<f32>()
+            / self.hop_bandwidths.len() as f32;
 
         // 综合评分：延迟越低越好，带宽越高越好，结合可靠性
         let latency_score = if avg_latency > 0.0 {

@@ -6,8 +6,7 @@
 //! - 跨平台实现 (Linux, Windows, macOS, Android, iOS)
 
 use std::{
-    fmt,
-    io,
+    fmt, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     pin::Pin,
     task::{Context as TaskContext, Poll},
@@ -273,7 +272,10 @@ impl PacketInfo {
         if let Some(protocol) = self.protocol {
             if matches!(protocol, 6 /* TCP */ | 17 /* UDP */) && data.len() >= header_len + 4 {
                 self.src_port = Some(u16::from_be_bytes([data[header_len], data[header_len + 1]]));
-                self.dst_port = Some(u16::from_be_bytes([data[header_len + 2], data[header_len + 3]]));
+                self.dst_port = Some(u16::from_be_bytes([
+                    data[header_len + 2],
+                    data[header_len + 3],
+                ]));
             }
         }
 
@@ -489,8 +491,7 @@ pub async fn create_tun_interface(
     config: TunConfig,
     _mode: super::NetworkMode,
 ) -> Result<Box<dyn TunProvider>> {
-    config.validate()
-        .context("验证 TUN 配置失败")?;
+    config.validate().context("验证 TUN 配置失败")?;
 
     debug!(target: "seep::tun",
         name = ?config.name,

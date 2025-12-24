@@ -16,14 +16,14 @@ pub mod mesh_transport;
 pub mod runtime_builder;
 
 pub use chain::{
-    ChainBuilder, ChainBuildResult, ChainConfig, ChainConstraints, ChainDryRunResult,
-    ChainManager, ChainManagerStats, PathOptimizationStrategy,
+    ChainBuildResult, ChainBuilder, ChainConfig, ChainConstraints, ChainDryRunResult, ChainManager,
+    ChainManagerStats, PathOptimizationStrategy,
 };
 pub use hot_reload::{HotReloadConfig, HotReloadManager, ReloadEvent, ReloadStats};
 pub use mesh_transport::{MeshDataPlane, MeshEnvelope};
 pub use runtime_builder::{
-    ConfigMergeStats, MeshConfig, NetworkEventType, Runtime, RuntimeBuilder, RuntimeConfig, RuntimeEvent,
-    RuntimeStats, SubscriptionEventType,
+    ConfigMergeStats, MeshConfig, NetworkEventType, Runtime, RuntimeBuilder, RuntimeConfig,
+    RuntimeEvent, RuntimeStats, SubscriptionEventType,
 };
 
 use seep_config::EgressDescriptor;

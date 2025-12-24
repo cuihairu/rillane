@@ -1,12 +1,19 @@
 //! 订阅格式转换器
 
 use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
+    Engine,
+};
 use tracing::{debug, info, warn};
+use url::Url;
 
-use crate::{SubscriptionType, Subscription};
-use crate::clash::{ClashConfig, ClashConverter, ClashProxy, ClashProxyGroup, ClashProxyGroupType, ClashProxyType, ClashRule};
+use crate::clash::{
+    ClashConfig, ClashConverter, ClashProxy, ClashProxyGroup, ClashProxyGroupType, ClashProxyType,
+    ClashRule,
+};
 use crate::seep_dsl::SeepDslConverter;
+use crate::{Subscription, SubscriptionType};
 
 /// 通用转换器
 pub struct SubscriptionConverter {
@@ -140,7 +147,11 @@ impl SubscriptionConverter {
     }
 
     /// 自动检测并转换订阅内容
-    pub async fn auto_convert(&self, subscription: &Subscription, content: &str) -> Result<ConversionResult> {
+    pub async fn auto_convert(
+        &self,
+        subscription: &Subscription,
+        content: &str,
+    ) -> Result<ConversionResult> {
         let start_time = std::time::Instant::now();
 
         // 检测订阅类型
@@ -213,14 +224,21 @@ impl SubscriptionConverter {
 
         // 检查 V2Ray 订阅（Base64 编码的链接列表）
         let lines: Vec<&str> = cleaned.lines().collect();
-        let v2ray_lines = lines.iter()
+        let v2ray_lines = lines
+            .iter()
             .filter(|line| {
                 let line = line.trim();
-                line.starts_with("vmess://") ||
-                line.starts_with("vless://") ||
-                line.starts_with("trojan://") ||
-                line.starts_with("ss://") ||
-                (line.len() > 50 && self.looks_like_base64(line))
+                line.starts_with("vmess://")
+                    || line.starts_with("vless://")
+                    || line.starts_with("trojan://")
+                    || line.starts_with("ss://")
+                    || line.starts_with("hysteria2://")
+                    || line.starts_with("hy2://")
+                    || line.starts_with("socks5://")
+                    || line.starts_with("socks://")
+                    || line.starts_with("http://")
+                    || line.starts_with("https://")
+                    || (line.len() > 50 && self.looks_like_base64(line))
             })
             .count();
 
@@ -266,7 +284,9 @@ impl SubscriptionConverter {
         );
 
         // 解析 Clash 配置
-        let clash_config = self.clash_converter.parse(content)
+        let clash_config = self
+            .clash_converter
+            .parse(content)
             .context("解析 Clash 配置失败")?;
 
         let mut warnings = Vec::new();
@@ -292,7 +312,9 @@ impl SubscriptionConverter {
         filtered_config.proxies = filtered_proxies;
 
         // 转换为 Seep 配置
-        let seep_config = self.clash_converter.convert_to_seep(&filtered_config)
+        let seep_config = self
+            .clash_converter
+            .convert_to_seep(&filtered_config)
             .context("转换 Clash 配置为 Seep 配置失败")?;
 
         let stats = ConversionStats {
@@ -309,7 +331,9 @@ impl SubscriptionConverter {
                 duplicate_nodes: 0, // 在 filter_and_dedup_proxies 中计算
                 converted_groups: seep_config.routing.groups.len(),
                 converted_rules: seep_config.routing.rules.len(),
-                converted_size_bytes: serde_yaml::to_string(&seep_config).unwrap_or_default().len(),
+                converted_size_bytes: serde_yaml::to_string(&seep_config)
+                    .unwrap_or_default()
+                    .len(),
                 conversion_duration_ms: 0, // 在调用方设置
             },
         };
@@ -329,7 +353,9 @@ impl SubscriptionConverter {
         );
 
         // 解析 Seep DSL 配置
-        let seep_dsl_config = self.seep_converter.parse(content)
+        let seep_dsl_config = self
+            .seep_converter
+            .parse(content)
             .context("解析 Seep DSL 配置失败")?;
 
         let mut warnings = Vec::new();
@@ -340,7 +366,8 @@ impl SubscriptionConverter {
         let original_rules = seep_dsl_config.rules.len();
 
         // 过滤和去重节点
-        let filtered_nodes = self.filter_and_dedup_seep_nodes(&seep_dsl_config.nodes, &mut warnings);
+        let filtered_nodes =
+            self.filter_and_dedup_seep_nodes(&seep_dsl_config.nodes, &mut warnings);
 
         if filtered_nodes.len() != original_nodes {
             warnings.push(format!(
@@ -355,7 +382,9 @@ impl SubscriptionConverter {
         filtered_config.nodes = filtered_nodes;
 
         // 转换为标准 Seep 配置
-        let seep_config = self.seep_converter.convert_to_seep(&filtered_config)
+        let seep_config = self
+            .seep_converter
+            .convert_to_seep(&filtered_config)
             .context("转换 Seep DSL 为标准 Seep 配置失败")?;
 
         let stats = ConversionStats {
@@ -372,7 +401,9 @@ impl SubscriptionConverter {
                 duplicate_nodes: 0,
                 converted_groups: seep_config.routing.groups.len(),
                 converted_rules: seep_config.routing.rules.len(),
-                converted_size_bytes: serde_yaml::to_string(&seep_config).unwrap_or_default().len(),
+                converted_size_bytes: serde_yaml::to_string(&seep_config)
+                    .unwrap_or_default()
+                    .len(),
                 conversion_duration_ms: 0,
             },
         };
@@ -394,58 +425,39 @@ impl SubscriptionConverter {
         let mut warnings = Vec::new();
         let mut nodes = Vec::new();
 
-        for (index, line) in content.lines().enumerate() {
+        let cleaned = self.clean_content(content);
+        let expanded_lines = self.expand_v2ray_payload(&cleaned, &mut warnings);
+
+        for (index, line) in expanded_lines.iter().enumerate() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
 
-            let node_content = if self.looks_like_base64(line) {
-                match BASE64.decode(line) {
-                    Ok(decoded) => match String::from_utf8(decoded) {
-                        Ok(decoded_string) => decoded_string,
-                        Err(_) => {
-                            warnings.push(format!("行 {}：Base64 解码成功但不是有效的 UTF-8", index + 1));
-                            continue;
-                        }
-                    }
-                    Err(_) => {
-                        // 可能不是 Base64，作为普通链接处理
-                        line.to_string()
-                    }
-                }
-            } else {
-                line.to_string()
-            };
-
-            // 解析 V2Ray 链接
-            if let Some(node) = self.parse_v2ray_link(&node_content) {
-                nodes.push(node);
-            } else {
-                warnings.push(format!("行 {}：无法解析的链接", index + 1));
+            match self.parse_v2ray_link(line) {
+                Ok(node) => nodes.push(node),
+                Err(err) => warnings.push(format!("行 {}：{}", index + 1, err)),
             }
         }
 
         // 过滤和去重
         let filtered_nodes = self.filter_and_dedup_v2ray_nodes(nodes, &mut warnings);
-        let node_count = filtered_nodes.len();
+        let node_names: Vec<String> = filtered_nodes.iter().map(|p| p.name.clone()).collect();
 
         // 创建 Clash 配置格式然后转换
         let clash_config = ClashConfig {
             proxies: filtered_nodes,
-            proxy_groups: vec![
-                ClashProxyGroup {
-                    name: "auto".to_string(),
-                    group_type: ClashProxyGroupType::UrlTest,
-                    proxies: (0..node_count).map(|i| format!("node-{}", i + 1)).collect(),
-                    url: Some("http://www.gstatic.com/generate_204".to_string()),
-                    interval: Some(300),
-                    strategy: None,
-                }
-            ],
-            rules: vec![
-                ClashRule::Match { target: "auto".to_string() },
-            ],
+            proxy_groups: vec![ClashProxyGroup {
+                name: "auto".to_string(),
+                group_type: ClashProxyGroupType::UrlTest,
+                proxies: node_names,
+                url: Some("http://www.gstatic.com/generate_204".to_string()),
+                interval: Some(300),
+                strategy: None,
+            }],
+            rules: vec![ClashRule::Match {
+                target: "auto".to_string(),
+            }],
             dns: None,
             mixed_port: None,
             allow_lan: false,
@@ -455,7 +467,9 @@ impl SubscriptionConverter {
         };
 
         // 使用 Clash 转换器
-        let seep_config = self.clash_converter.convert_to_seep(&clash_config)
+        let seep_config = self
+            .clash_converter
+            .convert_to_seep(&clash_config)
             .context("转换 V2Ray 配置为 Seep 配置失败")?;
 
         let original_lines = content.lines().count();
@@ -473,7 +487,9 @@ impl SubscriptionConverter {
                 duplicate_nodes: 0,
                 converted_groups: seep_config.routing.groups.len(),
                 converted_rules: seep_config.routing.rules.len(),
-                converted_size_bytes: serde_yaml::to_string(&seep_config).unwrap_or_default().len(),
+                converted_size_bytes: serde_yaml::to_string(&seep_config)
+                    .unwrap_or_default()
+                    .len(),
                 conversion_duration_ms: 0,
             },
         };
@@ -499,71 +515,493 @@ impl SubscriptionConverter {
     fn looks_like_base64(&self, content: &str) -> bool {
         let trimmed = content.trim();
         // A conservative heuristic:
-        // - Base64 strings are typically padded and length is a multiple of 4
+        // - accept both padded and unpadded Base64 strings
         // - allow URL-safe alphabet as well
         trimmed.len() >= 8
-            && trimmed.len() % 4 == 0
-            && trimmed.chars().all(|c| {
-                c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')
-            })
+            && trimmed.len() % 4 != 1
+            && trimmed
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_'))
     }
 
     /// 解析 V2Ray 链接
-    fn parse_v2ray_link(&self, link: &str) -> Option<ClashProxy> {
-        // 这里应该实现完整的 V2Ray 链接解析
-        // 包括 vmess://, vless://, trojan://, ss:// 等格式
-
-        // 简化实现，只识别类型并创建基本代理
-        if link.starts_with("vmess://") {
-            Some(ClashProxy {
-                name: format!("vmess-{}", link.len() % 1000),
-                proxy_type: ClashProxyType::Vmess,
-                server: "vmess.example.com".to_string(),
-                port: 443,
-                uuid: Some("00000000-0000-0000-0000-000000000000".to_string()),
-                network: Some("ws".to_string()),
-                tls: true,
-                ..Default::default()
-            })
-        } else if link.starts_with("vless://") {
-            Some(ClashProxy {
-                name: format!("vless-{}", link.len() % 1000),
-                proxy_type: ClashProxyType::Vless,
-                server: "vless.example.com".to_string(),
-                port: 443,
-                uuid: Some("00000000-0000-0000-0000-000000000000".to_string()),
-                network: Some("ws".to_string()),
-                tls: true,
-                ..Default::default()
-            })
-        } else if link.starts_with("trojan://") {
-            Some(ClashProxy {
-                name: format!("trojan-{}", link.len() % 1000),
-                proxy_type: ClashProxyType::Trojan,
-                server: "trojan.example.com".to_string(),
-                port: 443,
-                password: Some("password".to_string()),
-                network: Some("ws".to_string()),
-                tls: true,
-                ..Default::default()
-            })
-        } else if link.starts_with("ss://") {
-            Some(ClashProxy {
-                name: format!("ss-{}", link.len() % 1000),
-                proxy_type: ClashProxyType::Ss,
-                server: "ss.example.com".to_string(),
-                port: 8388,
-                cipher: Some("aes-256-gcm".to_string()),
-                password: Some("password".to_string()),
-                ..Default::default()
-            })
-        } else {
-            None
+    fn parse_v2ray_link(&self, link: &str) -> Result<ClashProxy> {
+        let link = link.trim();
+        if link.is_empty() {
+            return Err(anyhow!("空链接"));
         }
+
+        if let Some(rest) = link.strip_prefix("vmess://") {
+            return self.parse_vmess(rest);
+        }
+        if link.starts_with("socks5://") || link.starts_with("socks://") {
+            return self.parse_socks5(link);
+        }
+        if link.starts_with("http://") || link.starts_with("https://") {
+            return self.parse_http_proxy(link);
+        }
+        if link.starts_with("vless://") {
+            return self.parse_vless(link);
+        }
+        if link.starts_with("trojan://") {
+            return self.parse_trojan(link);
+        }
+        if link.starts_with("ss://") {
+            return self.parse_ss(link);
+        }
+        if link.starts_with("hysteria2://") || link.starts_with("hy2://") {
+            return self.parse_hysteria2(link);
+        }
+
+        Err(anyhow!("不支持的协议"))
+    }
+
+    fn expand_v2ray_payload(&self, content: &str, warnings: &mut Vec<String>) -> Vec<String> {
+        let cleaned = content.trim();
+        if cleaned.is_empty() {
+            return vec![];
+        }
+
+        // Many V2Ray subscriptions are a single base64 blob that decodes into newline-separated links.
+        if self.looks_like_base64(cleaned) && !cleaned.contains("://") {
+            match self.decode_base64_to_string(cleaned) {
+                Ok(decoded) => return decoded.lines().map(|s| s.trim().to_string()).collect(),
+                Err(e) => warnings.push(format!("订阅内容看似 Base64，但解码失败：{e}")),
+            }
+        }
+
+        let mut out = Vec::new();
+        for line in cleaned.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Some providers encode each line as base64.
+            if self.looks_like_base64(line) && !line.contains("://") {
+                match self.decode_base64_to_string(line) {
+                    Ok(decoded) => out.extend(decoded.lines().map(|s| s.trim().to_string())),
+                    Err(_) => out.push(line.to_string()),
+                }
+            } else {
+                out.push(line.to_string());
+            }
+        }
+
+        out
+    }
+
+    fn decode_base64_to_string(&self, input: &str) -> Result<String> {
+        let bytes = self.decode_base64_bytes(input)?;
+        String::from_utf8(bytes).context("Base64 解码成功但不是有效的 UTF-8")
+    }
+
+    fn decode_base64_bytes(&self, input: &str) -> Result<Vec<u8>> {
+        let s = input.trim();
+        if s.is_empty() {
+            return Err(anyhow!("空 Base64 字符串"));
+        }
+
+        if let Ok(v) = BASE64.decode(s) {
+            return Ok(v);
+        }
+        if let Ok(v) = URL_SAFE.decode(s) {
+            return Ok(v);
+        }
+        if let Ok(v) = STANDARD_NO_PAD.decode(s) {
+            return Ok(v);
+        }
+        if let Ok(v) = URL_SAFE_NO_PAD.decode(s) {
+            return Ok(v);
+        }
+
+        // Try adding padding if the input looks unpadded.
+        let mut padded = s.to_string();
+        let rem = padded.len() % 4;
+        if rem != 0 {
+            padded.extend(std::iter::repeat('=').take(4 - rem));
+            if let Ok(v) = BASE64.decode(&padded) {
+                return Ok(v);
+            }
+            if let Ok(v) = URL_SAFE.decode(&padded) {
+                return Ok(v);
+            }
+        }
+
+        Err(anyhow!("Base64 解码失败"))
+    }
+
+    fn parse_vmess(&self, base64_payload: &str) -> Result<ClashProxy> {
+        let payload = base64_payload.trim().trim_start_matches("//").trim();
+        let decoded = self
+            .decode_base64_to_string(payload)
+            .context("VMess Base64 解码失败")?;
+
+        let v: serde_json::Value = serde_json::from_str(&decoded).context("VMess JSON 解析失败")?;
+        let get_str = |k: &str| {
+            v.get(k)
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+        };
+
+        let name = get_str("ps")
+            .or_else(|| get_str("remark"))
+            .unwrap_or("vmess")
+            .to_string();
+
+        let server = get_str("add")
+            .or_else(|| get_str("server"))
+            .ok_or_else(|| anyhow!("VMess 缺少 server/add"))?
+            .to_string();
+
+        let port: u16 = get_str("port")
+            .ok_or_else(|| anyhow!("VMess 缺少 port"))?
+            .parse()
+            .context("VMess port 非法")?;
+
+        let uuid = get_str("id")
+            .or_else(|| get_str("uuid"))
+            .ok_or_else(|| anyhow!("VMess 缺少 id/uuid"))?
+            .to_string();
+
+        let network = get_str("net").map(|s| s.to_string());
+        let path = get_str("path").map(|s| s.to_string());
+        let host = get_str("host").map(|s| s.to_string());
+        let encrypt = get_str("scy")
+            .or_else(|| get_str("security"))
+            .or_else(|| get_str("cipher"))
+            .map(|s| s.to_string());
+
+        let tls_val = get_str("tls").unwrap_or("");
+        let tls = !tls_val.is_empty() && tls_val != "none";
+
+        let servername = get_str("sni")
+            .or_else(|| get_str("servername"))
+            .map(|s| s.to_string());
+
+        let allow_insecure = get_str("allowInsecure")
+            .or_else(|| get_str("allowinsecure"))
+            .or_else(|| get_str("insecure"))
+            .unwrap_or("0");
+        let skip_cert_verify = matches!(allow_insecure, "1" | "true" | "True" | "TRUE");
+
+        let alpn = get_str("alpn").map(parse_alpn).unwrap_or_default();
+
+        Ok(ClashProxy {
+            name,
+            proxy_type: ClashProxyType::Vmess,
+            server,
+            port,
+            uuid: Some(uuid),
+            encrypt,
+            network,
+            path,
+            host,
+            tls,
+            skip_cert_verify,
+            alpn,
+            servername,
+            fingerprint: get_str("fp").map(|s| s.to_string()),
+            ..Default::default()
+        })
+    }
+
+    fn parse_socks5(&self, link: &str) -> Result<ClashProxy> {
+        let (base, name) = split_fragment(link);
+        let url = Url::parse(base).context("SOCKS5 URL 解析失败")?;
+        let server = url
+            .host_str()
+            .ok_or_else(|| anyhow!("SOCKS5 缺少 host"))?
+            .to_string();
+        let port = url.port().unwrap_or(1080);
+
+        let username = (!url.username().is_empty()).then(|| url.username().to_string());
+        let password = url.password().map(|s| s.to_string());
+
+        Ok(ClashProxy {
+            name: name.unwrap_or_else(|| "socks5".to_string()),
+            proxy_type: ClashProxyType::Socks5,
+            server,
+            port,
+            username,
+            password,
+            ..Default::default()
+        })
+    }
+
+    fn parse_http_proxy(&self, link: &str) -> Result<ClashProxy> {
+        let (base, name) = split_fragment(link);
+        let url = Url::parse(base).context("HTTP 代理 URL 解析失败")?;
+        let server = url
+            .host_str()
+            .ok_or_else(|| anyhow!("HTTP 代理缺少 host"))?
+            .to_string();
+        let scheme = url.scheme();
+        let tls = scheme == "https";
+        let port = url.port().unwrap_or(if tls { 443 } else { 80 });
+
+        let username = (!url.username().is_empty()).then(|| url.username().to_string());
+        let password = url.password().map(|s| s.to_string());
+
+        Ok(ClashProxy {
+            name: name.unwrap_or_else(|| if tls { "https" } else { "http" }.to_string()),
+            proxy_type: if tls {
+                ClashProxyType::Https
+            } else {
+                ClashProxyType::Http
+            },
+            server,
+            port,
+            username,
+            password,
+            tls,
+            ..Default::default()
+        })
+    }
+
+    fn parse_vless(&self, link: &str) -> Result<ClashProxy> {
+        let (base, name) = split_fragment(link);
+        let url = Url::parse(base).context("VLESS URL 解析失败")?;
+        let server = url
+            .host_str()
+            .ok_or_else(|| anyhow!("VLESS 缺少 host"))?
+            .to_string();
+        let port = url.port().unwrap_or(443);
+        let uuid = url.username();
+        if uuid.is_empty() {
+            return Err(anyhow!("VLESS 缺少 uuid"));
+        }
+
+        let q = query_map(&url);
+        let network = q.get("type").or_else(|| q.get("network")).cloned();
+        let path = q.get("path").cloned();
+        let host = q.get("host").cloned();
+
+        let security = q
+            .get("security")
+            .or_else(|| q.get("tls"))
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let tls =
+            !security.is_empty() && security != "none" && security != "0" && security != "false";
+
+        let servername = q
+            .get("sni")
+            .or_else(|| q.get("peer"))
+            .or_else(|| q.get("servername"))
+            .cloned();
+
+        let skip_cert_verify = q
+            .get("allowInsecure")
+            .or_else(|| q.get("allowinsecure"))
+            .or_else(|| q.get("insecure"))
+            .map(|s| matches!(s.as_str(), "1" | "true" | "True" | "TRUE"))
+            .unwrap_or(false);
+
+        let alpn = q.get("alpn").map(|s| parse_alpn(s)).unwrap_or_default();
+
+        Ok(ClashProxy {
+            name: name.unwrap_or_else(|| "vless".to_string()),
+            proxy_type: ClashProxyType::Vless,
+            server,
+            port,
+            uuid: Some(uuid.to_string()),
+            network,
+            path,
+            host,
+            tls,
+            skip_cert_verify,
+            alpn,
+            servername,
+            fingerprint: q.get("fp").cloned(),
+            ..Default::default()
+        })
+    }
+
+    fn parse_trojan(&self, link: &str) -> Result<ClashProxy> {
+        let (base, name) = split_fragment(link);
+        let url = Url::parse(base).context("Trojan URL 解析失败")?;
+        let server = url
+            .host_str()
+            .ok_or_else(|| anyhow!("Trojan 缺少 host"))?
+            .to_string();
+        let port = url.port().unwrap_or(443);
+
+        // trojan://password@host:port
+        let password = if !url.username().is_empty() {
+            url.username().to_string()
+        } else if let Some(p) = url.password() {
+            p.to_string()
+        } else {
+            return Err(anyhow!("Trojan 缺少密码"));
+        };
+
+        let q = query_map(&url);
+        let network = q.get("type").or_else(|| q.get("network")).cloned();
+        let path = q.get("path").cloned();
+        let host = q.get("host").cloned();
+
+        let servername = q
+            .get("sni")
+            .or_else(|| q.get("peer"))
+            .or_else(|| q.get("servername"))
+            .cloned();
+
+        let skip_cert_verify = q
+            .get("allowInsecure")
+            .or_else(|| q.get("allowinsecure"))
+            .or_else(|| q.get("insecure"))
+            .map(|s| matches!(s.as_str(), "1" | "true" | "True" | "TRUE"))
+            .unwrap_or(false);
+
+        let alpn = q.get("alpn").map(|s| parse_alpn(s)).unwrap_or_default();
+
+        Ok(ClashProxy {
+            name: name.unwrap_or_else(|| "trojan".to_string()),
+            proxy_type: ClashProxyType::Trojan,
+            server,
+            port,
+            password: Some(password),
+            network,
+            path,
+            host,
+            tls: true,
+            skip_cert_verify,
+            alpn,
+            servername,
+            fingerprint: q.get("fp").cloned(),
+            ..Default::default()
+        })
+    }
+
+    fn parse_hysteria2(&self, link: &str) -> Result<ClashProxy> {
+        let (base, name) = split_fragment(link);
+        let url = Url::parse(base).context("Hysteria2 URL 解析失败")?;
+        let server = url
+            .host_str()
+            .ok_or_else(|| anyhow!("Hysteria2 缺少 host"))?
+            .to_string();
+        let port = url.port().unwrap_or(443);
+
+        let q = query_map(&url);
+        let password = q
+            .get("auth")
+            .or_else(|| q.get("password"))
+            .cloned()
+            .or_else(|| (!url.username().is_empty()).then(|| url.username().to_string()))
+            .ok_or_else(|| anyhow!("Hysteria2 缺少 auth/password"))?;
+
+        let mport = q
+            .get("mport")
+            .or_else(|| q.get("ports"))
+            .or_else(|| q.get("port-range"))
+            .or_else(|| q.get("ports-range"))
+            .cloned();
+
+        let servername = q
+            .get("sni")
+            .or_else(|| q.get("peer"))
+            .or_else(|| q.get("servername"))
+            .cloned();
+
+        let skip_cert_verify = q
+            .get("insecure")
+            .or_else(|| q.get("allowInsecure"))
+            .or_else(|| q.get("allowinsecure"))
+            .map(|s| matches!(s.as_str(), "1" | "true" | "True" | "TRUE"))
+            .unwrap_or(false);
+
+        let alpn = q.get("alpn").map(|s| parse_alpn(s)).unwrap_or_default();
+
+        Ok(ClashProxy {
+            name: name.unwrap_or_else(|| "hysteria2".to_string()),
+            proxy_type: ClashProxyType::Hysteria2,
+            server,
+            port,
+            password: Some(password),
+            mport,
+            obfs: q.get("obfs").cloned(),
+            obfs_param: q
+                .get("obfs-param")
+                .or_else(|| q.get("obfs_param"))
+                .or_else(|| q.get("obfs-password"))
+                .or_else(|| q.get("obfs_password"))
+                .cloned(),
+            servername,
+            skip_cert_verify,
+            alpn,
+            ..Default::default()
+        })
+    }
+
+    fn parse_ss(&self, link: &str) -> Result<ClashProxy> {
+        // ss://[userinfo@]host:port[#name]
+        // userinfo can be:
+        // - method:password (SIP002)
+        // - base64(method:password) (SIP002, URL-safe)
+        // or the whole payload can be base64(method:password@host:port) (legacy).
+
+        let (without_frag, name_opt) = split_fragment(link);
+        let (without_query, _query_opt) = split_query(without_frag);
+        let mut rest = without_query
+            .strip_prefix("ss://")
+            .ok_or_else(|| anyhow!("SS 链接必须以 ss:// 开头"))?
+            .trim()
+            .trim_start_matches("//")
+            .trim()
+            .to_string();
+
+        if rest.is_empty() {
+            return Err(anyhow!("SS 链接缺少内容"));
+        }
+
+        // If no '@' exists, treat as legacy base64 of "method:pass@host:port".
+        if !rest.contains('@') {
+            let decoded = self
+                .decode_base64_to_string(&rest)
+                .context("SS Base64 解码失败")?;
+            rest = decoded.trim().to_string();
+        }
+
+        let (userinfo, server_part) = rest
+            .rsplit_once('@')
+            .ok_or_else(|| anyhow!("SS 链接格式错误（缺少 @ 或 Base64 解码失败）"))?;
+
+        let (cipher, password) = if userinfo.contains(':') {
+            let (c, p) = userinfo
+                .split_once(':')
+                .ok_or_else(|| anyhow!("SS userinfo 格式错误"))?;
+            (percent_decode(c), percent_decode(p))
+        } else {
+            let decoded = self
+                .decode_base64_to_string(userinfo)
+                .context("SS userinfo Base64 解码失败")?;
+            let (c, p) = decoded
+                .split_once(':')
+                .ok_or_else(|| anyhow!("SS userinfo Base64 解码后格式错误"))?;
+            (c.trim().to_string(), p.trim().to_string())
+        };
+
+        let (server, port) = parse_host_port(server_part).context("SS host:port 解析失败")?;
+
+        Ok(ClashProxy {
+            name: name_opt.unwrap_or_else(|| "ss".to_string()),
+            proxy_type: ClashProxyType::Ss,
+            server,
+            port,
+            cipher: Some(cipher),
+            password: Some(password),
+            ..Default::default()
+        })
     }
 
     /// 过滤和去重 Clash 代理
-    fn filter_and_dedup_proxies(&self, proxies: &[ClashProxy], warnings: &mut Vec<String>) -> Vec<ClashProxy> {
+    fn filter_and_dedup_proxies(
+        &self,
+        proxies: &[ClashProxy],
+        warnings: &mut Vec<String>,
+    ) -> Vec<ClashProxy> {
         let mut filtered = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
@@ -591,7 +1029,8 @@ impl SubscriptionConverter {
             }
 
             // 应用前缀
-            normalized_proxy.name = format!("{}{}", self.options.node_name_prefix, normalized_proxy.name);
+            normalized_proxy.name =
+                format!("{}{}", self.options.node_name_prefix, normalized_proxy.name);
 
             filtered.push(normalized_proxy);
 
@@ -608,7 +1047,11 @@ impl SubscriptionConverter {
     }
 
     /// 过滤和去重 Seep 节点
-    fn filter_and_dedup_seep_nodes(&self, nodes: &[crate::seep_dsl::SeepNode], warnings: &mut Vec<String>) -> Vec<crate::seep_dsl::SeepNode> {
+    fn filter_and_dedup_seep_nodes(
+        &self,
+        nodes: &[crate::seep_dsl::SeepNode],
+        warnings: &mut Vec<String>,
+    ) -> Vec<crate::seep_dsl::SeepNode> {
         let mut filtered = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
@@ -619,7 +1062,8 @@ impl SubscriptionConverter {
             }
 
             // 生成唯一键
-            let key = format!("{}:{}",
+            let key = format!(
+                "{}:{}",
                 node.server.as_deref().unwrap_or(""),
                 node.port.unwrap_or(0)
             );
@@ -639,7 +1083,8 @@ impl SubscriptionConverter {
             }
 
             // 应用前缀
-            normalized_node.name = format!("{}{}", self.options.node_name_prefix, normalized_node.name);
+            normalized_node.name =
+                format!("{}{}", self.options.node_name_prefix, normalized_node.name);
 
             filtered.push(normalized_node);
 
@@ -656,7 +1101,11 @@ impl SubscriptionConverter {
     }
 
     /// 过滤和去重 V2Ray 节点
-    fn filter_and_dedup_v2ray_nodes(&self, nodes: Vec<ClashProxy>, warnings: &mut Vec<String>) -> Vec<ClashProxy> {
+    fn filter_and_dedup_v2ray_nodes(
+        &self,
+        nodes: Vec<ClashProxy>,
+        warnings: &mut Vec<String>,
+    ) -> Vec<ClashProxy> {
         // 重用 Clash 代理的过滤逻辑
         self.filter_and_dedup_proxies(&nodes, warnings)
     }
@@ -670,7 +1119,13 @@ impl SubscriptionConverter {
         // 移除特殊字符，替换为下划线
         let normalized = name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>()
             .trim_matches('_')
             .to_string();
@@ -748,7 +1203,8 @@ impl SubscriptionConverter {
             total_duration_ms: total_duration,
             average_conversion_duration_ms: average_duration,
             total_warnings,
-            performance_grade: self.calculate_performance_grade(compression_ratio, average_duration),
+            performance_grade: self
+                .calculate_performance_grade(compression_ratio, average_duration),
         }
     }
 
@@ -772,6 +1228,96 @@ impl SubscriptionConverter {
             _ => 'F',
         }
     }
+}
+
+fn split_fragment(input: &str) -> (&str, Option<String>) {
+    match input.split_once('#') {
+        Some((base, frag)) => (base, Some(percent_decode(frag))),
+        None => (input, None),
+    }
+}
+
+fn split_query(input: &str) -> (&str, Option<&str>) {
+    match input.split_once('?') {
+        Some((base, q)) => (base, Some(q)),
+        None => (input, None),
+    }
+}
+
+fn query_map(url: &Url) -> std::collections::HashMap<String, String> {
+    url.query_pairs()
+        .into_owned()
+        .collect::<std::collections::HashMap<_, _>>()
+}
+
+fn parse_alpn(val: &str) -> Vec<String> {
+    val.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = from_hex(bytes[i + 1]);
+                let lo = from_hex(bytes[i + 2]);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                    continue;
+                }
+                out.push(bytes[i]);
+                i += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + (b - b'a')),
+        b'A'..=b'F' => Some(10 + (b - b'A')),
+        _ => None,
+    }
+}
+
+fn parse_host_port(input: &str) -> Result<(String, u16)> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err(anyhow!("空 host:port"));
+    }
+
+    // Strip query if present (ss links sometimes carry plugin params).
+    let (s, _q) = split_query(s);
+
+    if let Some(rest) = s.strip_prefix('[') {
+        let (host, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| anyhow!("IPv6 地址缺少 ]"))?;
+        let tail = tail.strip_prefix(':').ok_or_else(|| anyhow!("缺少端口"))?;
+        let port: u16 = tail.parse().context("端口非法")?;
+        return Ok((host.to_string(), port));
+    }
+
+    let (host, port_str) = s.rsplit_once(':').ok_or_else(|| anyhow!("缺少端口"))?;
+    let port: u16 = port_str.parse().context("端口非法")?;
+    Ok((host.to_string(), port))
 }
 
 /// 性能报告
@@ -826,7 +1372,10 @@ proxy-groups:
 rules:
   - MATCH,auto
         "#;
-        assert_eq!(converter.detect_subscription_type(clash_content), SubscriptionType::Clash);
+        assert_eq!(
+            converter.detect_subscription_type(clash_content),
+            SubscriptionType::Clash
+        );
 
         // Seep DSL
         let seep_content = r#"
@@ -838,18 +1387,181 @@ rules:
   - type: match
     target: direct
         "#;
-        assert_eq!(converter.detect_subscription_type(seep_content), SubscriptionType::Seep);
+        assert_eq!(
+            converter.detect_subscription_type(seep_content),
+            SubscriptionType::Seep
+        );
 
         // V2Ray 订阅
         let v2ray_content = r#"
 vmess://eyJ2IjogIjIiLCAicHMiOiAiIn0=
 vless://eyJ2IjogIjIiLCAicHMiOiAiIn0=
         "#;
-        assert_eq!(converter.detect_subscription_type(v2ray_content), SubscriptionType::V2Ray);
+        assert_eq!(
+            converter.detect_subscription_type(v2ray_content),
+            SubscriptionType::V2Ray
+        );
 
         // 自定义
         let custom_content = r#"Just some random text"#;
-        assert_eq!(converter.detect_subscription_type(custom_content), SubscriptionType::Custom);
+        assert_eq!(
+            converter.detect_subscription_type(custom_content),
+            SubscriptionType::Custom
+        );
+    }
+
+    #[test]
+    fn test_parse_v2ray_links() {
+        use base64::{
+            engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+            Engine,
+        };
+
+        let converter = SubscriptionConverter::new();
+
+        // SS (userinfo: method:password)
+        let ss1 = "ss://aes-256-gcm:pass@example.com:8388#ss-plain";
+        let p = converter.parse_v2ray_link(ss1).unwrap();
+        assert_eq!(p.proxy_type, ClashProxyType::Ss);
+        assert_eq!(p.server, "example.com");
+        assert_eq!(p.port, 8388);
+        assert_eq!(p.cipher.as_deref(), Some("aes-256-gcm"));
+        assert_eq!(p.password.as_deref(), Some("pass"));
+        assert_eq!(p.name, "ss-plain");
+
+        // SS (userinfo: base64(method:password))
+        let ui = URL_SAFE_NO_PAD.encode("aes-256-gcm:pass");
+        let ss2 = format!("ss://{}@example.com:8388#ss-b64", ui);
+        let p = converter.parse_v2ray_link(&ss2).unwrap();
+        assert_eq!(p.proxy_type, ClashProxyType::Ss);
+        assert_eq!(p.server, "example.com");
+        assert_eq!(p.port, 8388);
+        assert_eq!(p.cipher.as_deref(), Some("aes-256-gcm"));
+        assert_eq!(p.password.as_deref(), Some("pass"));
+        assert_eq!(p.name, "ss-b64");
+
+        // SS (legacy: base64(method:password@host:port))
+        let legacy = STANDARD_NO_PAD.encode("aes-256-gcm:pass@example.com:8388");
+        let ss3 = format!("ss://{}#ss-legacy", legacy);
+        let p = converter.parse_v2ray_link(&ss3).unwrap();
+        assert_eq!(p.proxy_type, ClashProxyType::Ss);
+        assert_eq!(p.server, "example.com");
+        assert_eq!(p.port, 8388);
+        assert_eq!(p.cipher.as_deref(), Some("aes-256-gcm"));
+        assert_eq!(p.password.as_deref(), Some("pass"));
+        assert_eq!(p.name, "ss-legacy");
+
+        // SOCKS5
+        let socks5 = "socks5://user:pass@example.com:1080#socks5";
+        let p = converter.parse_v2ray_link(socks5).unwrap();
+        assert_eq!(p.proxy_type, ClashProxyType::Socks5);
+        assert_eq!(p.server, "example.com");
+        assert_eq!(p.port, 1080);
+        assert_eq!(p.username.as_deref(), Some("user"));
+        assert_eq!(p.password.as_deref(), Some("pass"));
+        assert_eq!(p.name, "socks5");
+
+        // HTTP/HTTPS
+        let http = "http://user:pass@example.com:3128#http";
+        let p = converter.parse_v2ray_link(http).unwrap();
+        assert_eq!(p.proxy_type, ClashProxyType::Http);
+        assert_eq!(p.server, "example.com");
+        assert_eq!(p.port, 3128);
+        assert_eq!(p.username.as_deref(), Some("user"));
+        assert_eq!(p.password.as_deref(), Some("pass"));
+        assert!(!p.tls);
+
+        let https = "https://user:pass@example.com:443#https";
+        let p = converter.parse_v2ray_link(https).unwrap();
+        assert_eq!(p.proxy_type, ClashProxyType::Https);
+        assert_eq!(p.server, "example.com");
+        assert_eq!(p.port, 443);
+        assert_eq!(p.username.as_deref(), Some("user"));
+        assert_eq!(p.password.as_deref(), Some("pass"));
+        assert!(p.tls);
+
+        // Trojan
+        let trojan = "trojan://pass@example.com:443?sni=sni.example.com&allowInsecure=1&type=ws&path=%2Fws&host=cdn.example.com&alpn=h2,http/1.1#trojan";
+        let p = converter.parse_v2ray_link(trojan).unwrap();
+        assert_eq!(p.proxy_type, ClashProxyType::Trojan);
+        assert_eq!(p.server, "example.com");
+        assert_eq!(p.port, 443);
+        assert_eq!(p.password.as_deref(), Some("pass"));
+        assert_eq!(p.network.as_deref(), Some("ws"));
+        assert_eq!(p.path.as_deref(), Some("/ws"));
+        assert_eq!(p.host.as_deref(), Some("cdn.example.com"));
+        assert_eq!(p.servername.as_deref(), Some("sni.example.com"));
+        assert!(p.skip_cert_verify);
+        assert!(p.alpn.contains(&"h2".to_string()));
+        assert!(p.tls);
+
+        // VLESS
+        let uuid = "11111111-2222-3333-4444-555555555555";
+        let vless = format!(
+            "vless://{}@example.com:443?security=tls&type=ws&path=%2Fvless&host=cdn.example.com&sni=sni.example.com&alpn=h2,http/1.1&allowInsecure=true#vless",
+            uuid
+        );
+        let p = converter.parse_v2ray_link(&vless).unwrap();
+        assert_eq!(p.proxy_type, ClashProxyType::Vless);
+        assert_eq!(p.server, "example.com");
+        assert_eq!(p.port, 443);
+        assert_eq!(p.uuid.as_deref(), Some(uuid));
+        assert_eq!(p.network.as_deref(), Some("ws"));
+        assert_eq!(p.path.as_deref(), Some("/vless"));
+        assert_eq!(p.host.as_deref(), Some("cdn.example.com"));
+        assert_eq!(p.servername.as_deref(), Some("sni.example.com"));
+        assert!(p.tls);
+        assert!(p.skip_cert_verify);
+
+        // VMess
+        let vmess_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let vmess_json = format!(
+            "{{\"v\":\"2\",\"ps\":\"vmess\",\"add\":\"example.com\",\"port\":\"443\",\"id\":\"{}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"host\":\"cdn.example.com\",\"path\":\"/ws\",\"tls\":\"tls\",\"sni\":\"sni.example.com\",\"alpn\":\"h2,http/1.1\",\"allowInsecure\":\"1\"}}",
+            vmess_uuid
+        );
+        let vmess_b64 = STANDARD_NO_PAD.encode(vmess_json.as_bytes());
+        let vmess = format!("vmess://{}", vmess_b64);
+        let p = converter.parse_v2ray_link(&vmess).unwrap();
+        assert_eq!(p.proxy_type, ClashProxyType::Vmess);
+        assert_eq!(p.name, "vmess");
+        assert_eq!(p.server, "example.com");
+        assert_eq!(p.port, 443);
+        assert_eq!(p.uuid.as_deref(), Some(vmess_uuid));
+        assert_eq!(p.network.as_deref(), Some("ws"));
+        assert_eq!(p.path.as_deref(), Some("/ws"));
+        assert_eq!(p.host.as_deref(), Some("cdn.example.com"));
+        assert_eq!(p.servername.as_deref(), Some("sni.example.com"));
+        assert!(p.skip_cert_verify);
+        assert!(p.tls);
+
+        // Hysteria2
+        let hy2 = "hysteria2://pass@example.com:443?insecure=1&sni=sni.example.com&mport=20000-30000&obfs=salamander&obfs-password=ob&alpn=h3#hy2";
+        let p = converter.parse_v2ray_link(hy2).unwrap();
+        assert_eq!(p.proxy_type, ClashProxyType::Hysteria2);
+        assert_eq!(p.server, "example.com");
+        assert_eq!(p.port, 443);
+        assert_eq!(p.password.as_deref(), Some("pass"));
+        assert_eq!(p.mport.as_deref(), Some("20000-30000"));
+        assert_eq!(p.obfs.as_deref(), Some("salamander"));
+        assert_eq!(p.obfs_param.as_deref(), Some("ob"));
+        assert_eq!(p.servername.as_deref(), Some("sni.example.com"));
+        assert!(p.skip_cert_verify);
+        assert!(p.alpn.contains(&"h3".to_string()));
+    }
+
+    #[test]
+    fn test_expand_v2ray_payload_base64_blob() {
+        use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
+
+        let converter = SubscriptionConverter::new();
+        let raw = "ss://aes-256-gcm:pass@example.com:8388#n1\ntrojan://pass@example.com:443#n2\n";
+        let blob = STANDARD_NO_PAD.encode(raw.as_bytes());
+        let mut warnings = Vec::new();
+        let lines = converter.expand_v2ray_payload(&blob, &mut warnings);
+        assert!(warnings.is_empty());
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("ss://"));
+        assert!(lines[1].starts_with("trojan://"));
     }
 
     #[test]
@@ -895,7 +1607,10 @@ proxies:
         });
 
         assert_eq!(converter.normalize_node_name("Test Node"), "Test_Node");
-        assert_eq!(converter.normalize_node_name("Test@Node#123"), "Test_Node_123");
+        assert_eq!(
+            converter.normalize_node_name("Test@Node#123"),
+            "Test_Node_123"
+        );
         assert_eq!(converter.normalize_node_name("___Test___"), "Test");
         assert_eq!(converter.normalize_node_name(""), "node");
 
@@ -904,7 +1619,10 @@ proxies:
             ..Default::default()
         });
 
-        assert_eq!(preserve_converter.normalize_node_name("Test@Node"), "Test@Node");
+        assert_eq!(
+            preserve_converter.normalize_node_name("Test@Node"),
+            "Test@Node"
+        );
     }
 
     #[test]

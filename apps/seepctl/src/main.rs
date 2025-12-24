@@ -3,10 +3,8 @@ use std::fs;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use reqwest::blocking::Client;
-use seep_config::{
-    ControlConfig, EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor,
-    MatchCondition, PolicyGroup, GroupMember, RouteRule, RoutingConfig, SeepConfig, Strategy, TelemetryConfig,
-};
+use seep_config::{EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor, SeepConfig};
+use seep_subscription::ClashConverter;
 use serde::Deserialize;
 
 #[derive(Parser)]
@@ -79,13 +77,9 @@ enum ChainCommand {
         session_id: Option<String>,
     },
     /// 获取链路详情
-    Get {
-        chain_id: String,
-    },
+    Get { chain_id: String },
     /// 终止链路
-    Terminate {
-        chain_id: String,
-    },
+    Terminate { chain_id: String },
     /// 获取链路统计
     Stats,
 }
@@ -113,9 +107,7 @@ enum SubscriptionCommand {
         user_agent: Option<String>,
     },
     /// 移除订阅
-    Remove {
-        name: String,
-    },
+    Remove { name: String },
     /// 刷新订阅（并尝试合并到 runtime）
     Refresh {
         /// 不指定则刷新全部
@@ -145,9 +137,7 @@ fn main() -> Result<()> {
             if let Some(token) = &config.control.admin_token {
                 req = req.header("x-admin-token", token);
             }
-            let resp = req
-                .send()
-                .with_context(|| format!("无法访问 {target}"))?;
+            let resp = req.send().with_context(|| format!("无法访问 {target}"))?;
             if !resp.status().is_success() {
                 anyhow::bail!("控制面返回错误: {}", resp.status());
             }
@@ -173,9 +163,7 @@ fn main() -> Result<()> {
             if let Some(token) = &config.control.admin_token {
                 req = req.header("x-admin-token", token);
             }
-            let resp = req
-                .send()
-                .with_context(|| format!("无法访问 {target}"))?;
+            let resp = req.send().with_context(|| format!("无法访问 {target}"))?;
             if !resp.status().is_success() {
                 anyhow::bail!("控制面返回错误: {}", resp.status());
             }
@@ -210,28 +198,42 @@ fn main() -> Result<()> {
                 fs::read_to_string(&source).with_context(|| format!("无法读取文件 {source}"))?
             };
 
-            let doc: serde_yaml::Value =
-                serde_yaml::from_str(&raw).context("无法解析 Clash YAML")?;
-            let proxies = doc
-                .get("proxies")
-                .and_then(|v| v.as_sequence())
-                .map(|seq| seq.len())
-                .unwrap_or(0);
-            let proxy_groups = doc
-                .get("proxy-groups")
-                .and_then(|v| v.as_sequence())
-                .map(|seq| seq.len())
-                .unwrap_or(0);
-            let rules = doc
-                .get("rules")
-                .and_then(|v| v.as_sequence())
-                .map(|seq| seq.len())
-                .unwrap_or(0);
-
+            let converter = ClashConverter::new().with_filtering(true);
+            let clash = converter.parse(&raw).context("无法解析 Clash YAML")?;
             println!(
-                "Clash 订阅解析完成: proxies={proxies}, proxy-groups={proxy_groups}, rules={rules}"
+                "Clash 订阅解析完成: proxies={}, proxy-groups={}, rules={}",
+                clash.proxies.len(),
+                clash.proxy_groups.len(),
+                clash.rules.len()
             );
-            let converted = clash_to_seep_config(&doc)?;
+
+            let mut converted = converter
+                .convert_to_seep(&clash)
+                .context("Clash 转换失败")?;
+            converted.ingress = vec![build_ingress_from_clash(&clash)];
+
+            // external-controller -> control.api_bind
+            if let Some(external) = clash.external_controller.clone() {
+                // external-controller sometimes contains a full URL; keep only the host:port part.
+                let bind = external
+                    .trim()
+                    .trim_start_matches("http://")
+                    .trim_start_matches("https://")
+                    .trim_end_matches('/')
+                    .to_string();
+                if !bind.is_empty() {
+                    converted.control.api_bind = bind;
+                }
+            }
+
+            if converted.egress.is_empty() {
+                converted.egress.push(EgressDescriptor {
+                    name: "direct-main".into(),
+                    spec: EgressConfig::Direct,
+                });
+                converted.routing.default_node = "direct-main".into();
+            }
+
             let rendered = serde_yaml::to_string(&converted)?;
             fs::write(&output, rendered)?;
             println!("已转换为 Seep 配置并保存至 {output}");
@@ -263,7 +265,11 @@ fn main() -> Result<()> {
                     let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 }
-                ChainCommand::Create { source, target, session_id } => {
+                ChainCommand::Create {
+                    source,
+                    target,
+                    session_id,
+                } => {
                     let url = format!("{base}/chains");
                     let mut obj = serde_json::Map::new();
                     obj.insert("source".into(), serde_json::Value::String(source));
@@ -355,7 +361,8 @@ fn main() -> Result<()> {
                     let mut headers_map = serde_json::Map::new();
                     for kv in headers {
                         if let Some((k, v)) = kv.split_once('=') {
-                            headers_map.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+                            headers_map
+                                .insert(k.to_string(), serde_json::Value::String(v.to_string()));
                         }
                     }
                     let body = serde_json::json!({
@@ -435,162 +442,20 @@ struct CapabilityDto {
     tags: Vec<String>,
 }
 
-fn clash_to_seep_config(doc: &serde_yaml::Value) -> Result<SeepConfig> {
-    let mut config = SeepConfig {
-        control: ControlConfig {
-            api_bind: "127.0.0.1:9090".into(),
-            uds_path: None,
-            admin_token: None,
-        },
-        telemetry: TelemetryConfig {
-            log_level: "info".into(),
-            enable_metrics: true,
-            enable_tracing: false,
-        },
-        ingress: vec![IngressDescriptor {
-            name: "socks-in".into(),
-            spec: IngressConfig::Socks5 {
-                bind: "0.0.0.0:7890".into(),
-                auth: None,
-            },
-        }],
-        egress: parse_clash_proxies(doc),
-        routing: RoutingConfig {
-            default_node: String::new(),
-            groups: Vec::new(),
-            rules: Vec::new(),
-        },
+fn build_ingress_from_clash(clash: &seep_subscription::ClashConfig) -> IngressDescriptor {
+    let port = clash.mixed_port.unwrap_or(7890);
+    let bind_ip = if let Some(bind) = &clash.bind_address {
+        bind.clone()
+    } else if clash.allow_lan {
+        "0.0.0.0".to_string()
+    } else {
+        "127.0.0.1".to_string()
     };
 
-    if config.egress.is_empty() {
-        config.egress.push(EgressDescriptor {
-            name: "direct-main".into(),
-            spec: EgressConfig::Direct,
-        });
-    }
-
-    config.routing.default_node = config.egress[0].name.clone();
-    config.routing.groups = vec![PolicyGroup {
-        name: "auto".into(),
-        strategy: Strategy::Fixed,
-        members: config.egress.iter().map(|e| GroupMember::Node { name: e.name.clone() }).collect(),
-    }];
-    config.routing.rules = parse_clash_rules(doc);
-    Ok(config)
-}
-
-fn parse_clash_proxies(doc: &serde_yaml::Value) -> Vec<EgressDescriptor> {
-    let mut result = Vec::new();
-    let proxies = doc
-        .get("proxies")
-        .and_then(|v| v.as_sequence())
-        .cloned()
-        .unwrap_or_default();
-    for proxy in proxies {
-        let name = match proxy.get("name").and_then(|v| v.as_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let proxy_type = proxy
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let spec = match proxy_type.as_str() {
-            "direct" => Some(EgressConfig::Direct),
-            "trojan" => {
-                let (Some(server), Some(port), Some(password)) = (
-                    proxy.get("server").and_then(|v| v.as_str()),
-                    proxy.get("port").and_then(|v| v.as_i64()),
-                    proxy.get("password").and_then(|v| v.as_str()),
-                ) else {
-                    continue;
-                };
-                Some(EgressConfig::Trojan {
-                    server: server.into(),
-                    port: port as u16,
-                    password: password.into(),
-                    network: "tcp".into(),
-                    path: None,
-                    host: None,
-                    tls: true,
-                    skip_cert_verify: false,
-                    sni: None,
-                    alpn: None,
-                })
-            }
-            "ss" | "shadowsocks" => {
-                let (Some(server), Some(port), Some(password)) = (
-                    proxy.get("server").and_then(|v| v.as_str()),
-                    proxy.get("port").and_then(|v| v.as_i64()),
-                    proxy.get("password").and_then(|v| v.as_str()),
-                ) else {
-                    continue;
-                };
-                let Some(method) = proxy
-                    .get("cipher")
-                    .or_else(|| proxy.get("method"))
-                    .and_then(|v| v.as_str())
-                else {
-                    continue;
-                };
-                Some(EgressConfig::Shadowsocks {
-                    server: server.into(),
-                    port: port as u16,
-                    method: method.into(),
-                    password: password.into(),
-                })
-            }
-            _ => None,
-        };
-
-        if let Some(spec) = spec {
-            result.push(EgressDescriptor { name, spec });
-        } else {
-            println!("跳过暂不支持的代理类型: {}", proxy_type);
-        }
-    }
-    result
-}
-
-fn parse_clash_rules(doc: &serde_yaml::Value) -> Vec<RouteRule> {
-    let rules = doc
-        .get("rules")
-        .and_then(|v| v.as_sequence())
-        .cloned()
-        .unwrap_or_default();
-    let mut result = Vec::new();
-    for (idx, rule) in rules.iter().enumerate() {
-        if let Some(rule_str) = rule.as_str() {
-            let parts: Vec<&str> = rule_str.split(',').map(|s| s.trim()).collect();
-            if parts.len() >= 3 {
-                if let Some(condition) = convert_clash_match(parts[0], parts[1]) {
-                    result.push(RouteRule {
-                        name: format!("clash-rule-{idx}"),
-                        matches: vec![condition],
-                        target: parts[2].to_string(),
-                    });
-                }
-            }
-        }
-    }
-    result
-}
-
-fn convert_clash_match(kind: &str, value: &str) -> Option<MatchCondition> {
-    match kind {
-        "DOMAIN-SUFFIX" => Some(MatchCondition::DomainSuffix {
-            values: vec![value.to_string()],
-        }),
-        "DOMAIN-KEYWORD" => Some(MatchCondition::DomainKeyword {
-            values: vec![value.to_string()],
-        }),
-        "GEOIP" => Some(MatchCondition::Geoip {
-            country: value.to_string(),
-        }),
-        "IP-CIDR" => Some(MatchCondition::Network {
-            cidrs: vec![value.to_string()],
-        }),
-        _ => None,
+    IngressDescriptor {
+        name: "mixed-in".into(),
+        spec: IngressConfig::Mixed {
+            bind: format!("{bind_ip}:{port}"),
+        },
     }
 }
