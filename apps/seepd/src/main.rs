@@ -13,7 +13,19 @@ async fn main() -> Result<()> {
     let config_path = env::var("SEEP_CONFIG").unwrap_or_else(|_| "config/seep.yaml".to_string());
     let config = SeepConfig::load_from_path(&config_path)?;
 
-    seep_telemetry::init(TelemetryOptions::default()).await?;
+    if config.telemetry.enable_tracing {
+        let capture_logs = env::var("SEEP_CAPTURE_LOGS")
+            .ok()
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        seep_telemetry::init(TelemetryOptions {
+            level: config.telemetry.log_level.clone(),
+            enable_json: false,
+            capture_logs,
+            capture_max_lines: 2000,
+        })
+        .await?;
+    }
     info!(target: "seep::boot", path = %config_path, "配置加载完成");
 
     // For seepd, enable control-plane-relevant capabilities by default.
@@ -32,7 +44,11 @@ async fn main() -> Result<()> {
 
     let bind: SocketAddr = config.control.api_bind.parse()?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let cp = control_plane::ControlPlane::new(runtime.clone(), config.control.admin_token.clone());
+    let cp = control_plane::ControlPlane::new(
+        runtime.clone(),
+        config.control.admin_token.clone(),
+        config.telemetry.enable_metrics,
+    );
     let cp_task = tokio::spawn(async move { cp.serve(bind, shutdown_rx).await });
 
     // Start runtime background tasks.

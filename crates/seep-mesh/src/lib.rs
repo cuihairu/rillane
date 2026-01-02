@@ -209,10 +209,32 @@ pub struct MeshRegistry {
     sessions: DashMap<SessionId, MeshSession>,
     /// 链路状态
     link_states: DashMap<(NodeId, NodeId), LinkState>,
+    /// 链路流量统计（按方向）
+    link_traffic: DashMap<(NodeId, NodeId), LinkTrafficStats>,
     /// 网络拓扑
     topology: RwLock<MeshTopology>,
     /// 统计信息
     stats: RwLock<MeshStats>,
+}
+
+/// 链路流量统计
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LinkTrafficStats {
+    pub bytes_total: u64,
+    pub connections_total: u64,
+    pub errors_total: u64,
+    /// 最后更新时间（Unix epoch seconds）
+    pub last_updated_epoch_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkTrafficSnapshot {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub bytes_total: u64,
+    pub connections_total: u64,
+    pub errors_total: u64,
+    pub age_seconds: u64,
 }
 
 /// Mesh 会话信息
@@ -254,6 +276,7 @@ impl MeshRegistry {
             nodes: RwLock::new(HashMap::new()),
             sessions: DashMap::new(),
             link_states: DashMap::new(),
+            link_traffic: DashMap::new(),
             topology: RwLock::new(Graph::new()),
             stats: RwLock::new(MeshStats::default()),
         }
@@ -399,6 +422,89 @@ impl MeshRegistry {
             .expect("mesh registry poisoned")
             .get(node_id)
             .map(|r| r.addr)
+    }
+
+    /// 获取节点记录（快照）
+    pub fn get_node(&self, node_id: &NodeId) -> Option<NodeRecord> {
+        self.nodes
+            .read()
+            .expect("mesh registry poisoned")
+            .get(node_id)
+            .cloned()
+    }
+
+    /// 记录链路连接
+    pub fn record_link_connection(&self, from: &NodeId, to: &NodeId) {
+        let now = current_epoch_seconds();
+        let key = (from.clone(), to.clone());
+        self.link_traffic
+            .entry(key)
+            .and_modify(|s| {
+                s.connections_total = s.connections_total.saturating_add(1);
+                s.last_updated_epoch_seconds = now;
+            })
+            .or_insert_with(|| LinkTrafficStats {
+                connections_total: 1,
+                last_updated_epoch_seconds: now,
+                ..LinkTrafficStats::default()
+            });
+    }
+
+    /// 记录链路流量（字节）
+    pub fn record_link_bytes(&self, from: &NodeId, to: &NodeId, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let now = current_epoch_seconds();
+        let key = (from.clone(), to.clone());
+        self.link_traffic
+            .entry(key)
+            .and_modify(|s| {
+                s.bytes_total = s.bytes_total.saturating_add(bytes);
+                s.last_updated_epoch_seconds = now;
+            })
+            .or_insert_with(|| LinkTrafficStats {
+                bytes_total: bytes,
+                last_updated_epoch_seconds: now,
+                ..LinkTrafficStats::default()
+            });
+    }
+
+    /// 记录链路错误
+    pub fn record_link_error(&self, from: &NodeId, to: &NodeId) {
+        let now = current_epoch_seconds();
+        let key = (from.clone(), to.clone());
+        self.link_traffic
+            .entry(key)
+            .and_modify(|s| {
+                s.errors_total = s.errors_total.saturating_add(1);
+                s.last_updated_epoch_seconds = now;
+            })
+            .or_insert_with(|| LinkTrafficStats {
+                errors_total: 1,
+                last_updated_epoch_seconds: now,
+                ..LinkTrafficStats::default()
+            });
+    }
+
+    /// 获取全部链路流量统计（快照）
+    pub fn get_all_link_traffic(&self) -> Vec<LinkTrafficSnapshot> {
+        let now = current_epoch_seconds();
+        self.link_traffic
+            .iter()
+            .map(|e| {
+                let (from, to) = e.key();
+                let v = e.value();
+                LinkTrafficSnapshot {
+                    from: from.clone(),
+                    to: to.clone(),
+                    bytes_total: v.bytes_total,
+                    connections_total: v.connections_total,
+                    errors_total: v.errors_total,
+                    age_seconds: now.saturating_sub(v.last_updated_epoch_seconds),
+                }
+            })
+            .collect()
     }
 
     /// 按角色获取节点
@@ -549,6 +655,13 @@ impl MeshRegistry {
     }
 }
 
+fn current_epoch_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// 节点快照结构
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeRecordSnapshot {
@@ -672,15 +785,18 @@ impl MeshRegistry {
 
     /// 标记节点为离线
     pub fn mark_node_offline(&self, node_id: &NodeId) -> Result<()> {
-        let mut nodes = self.nodes.write().expect("mesh registry poisoned");
-        if let Some(record) = nodes.get_mut(node_id) {
-            record.online = false;
-            self.rebuild_topology();
-            info!(target: "seep::mesh", node = %node_id, "节点标记为离线");
-            Ok(())
-        } else {
-            Err(MeshError::NotFound(node_id.clone()).into())
+        {
+            let mut nodes = self.nodes.write().expect("mesh registry poisoned");
+            if let Some(record) = nodes.get_mut(node_id) {
+                record.online = false;
+            } else {
+                return Err(MeshError::NotFound(node_id.clone()).into());
+            }
         }
+
+        self.rebuild_topology();
+        info!(target: "seep::mesh", node = %node_id, "节点标记为离线");
+        Ok(())
     }
 
     /// 检查配额限制
@@ -807,5 +923,187 @@ pub async fn spawn_topology_updater(registry: Arc<MeshRegistry>, interval: Durat
         ticker.tick().await;
         registry.update_stats();
         debug!(target: "seep::mesh", "拓扑统计信息已更新");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr() -> SocketAddr {
+        "127.0.0.1:0".parse().unwrap()
+    }
+
+    #[test]
+    fn register_node_rejects_invalid_quota() {
+        let registry = MeshRegistry::new();
+        let mut record = NodeRecord::new("n1".into(), NodeRole::Client, addr());
+        record.quota.daily_bandwidth_gb = Some(0);
+        assert!(registry.register_node(record).is_err());
+    }
+
+    #[test]
+    fn register_node_rejects_invalid_acl_cidr() {
+        let registry = MeshRegistry::new();
+        let mut record = NodeRecord::new("n1".into(), NodeRole::Client, addr());
+        record.acl.allowed_client_cidrs = vec!["not-a-cidr".into()];
+        assert!(registry.register_node(record).is_err());
+    }
+
+    #[test]
+    fn create_session_validates_path_and_node_state() {
+        let registry = MeshRegistry::new();
+        registry
+            .register_node(NodeRecord::new("client1".into(), NodeRole::Client, addr()))
+            .unwrap();
+        registry
+            .register_node(NodeRecord::new("exit1".into(), NodeRole::Exit, addr()))
+            .unwrap();
+
+        let target_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        assert!(registry
+            .create_session("client1".into(), vec![], target_addr)
+            .is_err());
+        assert!(registry
+            .create_session("client1".into(), vec!["missing".to_string()], target_addr)
+            .is_err());
+
+        registry.mark_node_offline(&"exit1".to_string()).unwrap();
+        assert!(registry
+            .create_session("client1".into(), vec!["exit1".to_string()], target_addr)
+            .is_err());
+    }
+
+    #[test]
+    fn session_stats_update_and_termination() {
+        let registry = MeshRegistry::new();
+        registry
+            .register_node(NodeRecord::new("client1".into(), NodeRole::Client, addr()))
+            .unwrap();
+        registry
+            .register_node(NodeRecord::new("exit1".into(), NodeRole::Exit, addr()))
+            .unwrap();
+
+        let target_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let sid = registry
+            .create_session("client1".into(), vec!["exit1".to_string()], target_addr)
+            .unwrap();
+
+        registry.update_session_stats(sid, 10, 20).unwrap();
+        let snap = registry
+            .get_session_snapshot(sid)
+            .expect("session snapshot");
+        assert_eq!(snap.bytes_up, 10);
+        assert_eq!(snap.bytes_down, 20);
+
+        registry.terminate_session(sid).unwrap();
+        assert!(registry.terminate_session(sid).is_err());
+        assert!(registry.update_session_stats(sid, 1, 1).is_err());
+    }
+
+    #[test]
+    fn link_traffic_recording_and_snapshots() {
+        let registry = MeshRegistry::new();
+        let from = "n1".to_string();
+        let to = "n2".to_string();
+
+        registry.record_link_bytes(&from, &to, 0);
+        assert!(registry.get_all_link_traffic().is_empty());
+
+        registry.record_link_connection(&from, &to);
+        registry.record_link_bytes(&from, &to, 100);
+        registry.record_link_error(&from, &to);
+
+        let snaps = registry.get_all_link_traffic();
+        assert_eq!(snaps.len(), 1);
+        let s = &snaps[0];
+        assert_eq!(s.from, from);
+        assert_eq!(s.to, to);
+        assert_eq!(s.bytes_total, 100);
+        assert_eq!(s.connections_total, 1);
+        assert_eq!(s.errors_total, 1);
+    }
+
+    #[test]
+    fn check_quota_enforces_bytes_and_concurrency_limits() {
+        let registry = MeshRegistry::new();
+        let mut n1 = NodeRecord::new("client1".into(), NodeRole::Client, addr());
+        n1.quota.daily_bandwidth_gb = Some(1);
+        registry.register_node(n1).unwrap();
+
+        {
+            let mut nodes = registry.nodes.write().unwrap();
+            let record = nodes.get_mut("client1").unwrap();
+            record.total_bytes_transferred = 1024 * 1024 * 1024 - 10;
+        }
+        assert!(registry.check_quota(&"client1".to_string(), 20).is_err());
+
+        let mut n2 = NodeRecord::new("client2".into(), NodeRole::Client, addr());
+        n2.quota.max_concurrent_connections = Some(1);
+        registry.register_node(n2).unwrap();
+        registry
+            .register_node(NodeRecord::new("exit1".into(), NodeRole::Exit, addr()))
+            .unwrap();
+        let _sid = registry
+            .create_session(
+                "client2".into(),
+                vec!["exit1".to_string()],
+                "127.0.0.1:443".parse().unwrap(),
+            )
+            .unwrap();
+        assert!(registry.check_quota(&"client2".to_string(), 0).is_err());
+    }
+
+    #[test]
+    fn check_acl_denied_and_allowed_ports() {
+        let registry = MeshRegistry::new();
+        let mut record = NodeRecord::new("client1".into(), NodeRole::Client, addr());
+        record.acl.denied_target_ports = vec![(80, 80)];
+        registry.register_node(record).unwrap();
+
+        assert!(registry
+            .check_acl(&"client1".to_string(), &"127.0.0.1:80".parse().unwrap())
+            .is_err());
+
+        let mut record = NodeRecord::new("client2".into(), NodeRole::Client, addr());
+        record.acl.allowed_target_ports = vec![(443, 443)];
+        registry.register_node(record).unwrap();
+
+        assert!(registry
+            .check_acl(&"client2".to_string(), &"127.0.0.1:80".parse().unwrap())
+            .is_err());
+        registry
+            .check_acl(&"client2".to_string(), &"127.0.0.1:443".parse().unwrap())
+            .unwrap();
+    }
+
+    #[test]
+    fn find_optimal_path_returns_target_only() {
+        let registry = MeshRegistry::new();
+        let p = registry
+            .find_optimal_path(&"client1".to_string(), &"exit1".to_string())
+            .unwrap();
+        assert_eq!(p, vec!["exit1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn health_checker_marks_stale_nodes_offline() {
+        let registry = Arc::new(MeshRegistry::new());
+        registry
+            .register_node(NodeRecord::new("n1".into(), NodeRole::Client, addr()))
+            .unwrap();
+        {
+            let mut nodes = registry.nodes.write().unwrap();
+            let record = nodes.get_mut("n1").unwrap();
+            record.last_seen = Instant::now() - Duration::from_millis(250);
+        }
+
+        let handle = tokio::spawn(spawn_health_checker(
+            registry.clone(),
+            Duration::from_millis(200),
+        ));
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(!registry.get_node(&"n1".to_string()).unwrap().online);
+        handle.abort();
     }
 }

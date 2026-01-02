@@ -17,9 +17,13 @@ platforms/   # 各平台集成脚手架 (Android/iOS/OpenWrt/desktop)
 cargo run -p seepd
 cargo run -p seepctl -- --help
 cargo run -p seepctl -- stats
+cargo run -p seepctl -- diagnose
+cargo run -p seepctl -- mtls --help
 cargo run -p seepctl -- import-clash https://example.com/clash.yaml
 cargo run -p seepctl -- nodes
 ```
+
+可选：在 `seepd` 进程环境中设置 `SEEP_CAPTURE_LOGS=1`，控制面会额外提供 `GET /logs`（用于 `seepctl diagnose` 抓取最近日志）。
 
 当前可用能力：提供 Socks5 / HTTP CONNECT / Mixed 入站 + Direct / Socks5 / HTTP CONNECT / Shadowsocks / Trojan / Hysteria2 / VLESS / WireGuard 出站的数据通道，可通过 `config/seep.yaml` 配置监听端口、认证信息与路由策略。
 后台控制接口默认监听 `control.api_bind`，可访问 `http://127.0.0.1:9090/flows` 查看入口/出口之间的累计流量统计（或 `seepctl stats`），访问 `http://127.0.0.1:9090/nodes` 或 `seepctl nodes` 查看 mesh 节点注册信息。

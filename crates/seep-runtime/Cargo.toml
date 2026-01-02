@@ -29,3 +29,7 @@ whoami.workspace = true
 num_cpus.workspace = true
 regex.workspace = true
 chrono.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+x509-parser.workspace = true

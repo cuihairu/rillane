@@ -13,6 +13,7 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{broadcast, Mutex},
@@ -37,7 +38,7 @@ use seep_subscription::SubscriptionConverter;
 use seep_subscription::SubscriptionManager;
 
 use crate::chain::{ChainBuilder, ChainConfig, ChainConstraints, ChainManager};
-use crate::mesh_transport::{MeshDataPlane, MeshEnvelope};
+use crate::mesh_transport::{MeshDataPlane, MeshEnvelope, MeshTlsConfig};
 
 /// 运行时构建器
 pub struct RuntimeBuilder {
@@ -135,7 +136,44 @@ impl RuntimeBuilder {
             if self.runtime_config.mesh_config.is_none() {
                 self.runtime_config.mesh_config = Some(MeshConfig::default());
             }
-            let mesh_cfg = self.runtime_config.mesh_config.clone().unwrap_or_default();
+            let mut mesh_cfg = self.runtime_config.mesh_config.clone().unwrap_or_default();
+            // Enforce mesh data-plane mTLS when explicitly enabled via env.
+            if MeshTlsConfig::enabled_by_env() {
+                let tls = MeshTlsConfig::from_env_strict()?
+                    .ok_or_else(|| anyhow!("mesh mTLS is enabled but config is missing"))?;
+                mesh_cfg.data_plane_tls = Some(tls);
+                self.runtime_config.mesh_config = Some(mesh_cfg.clone());
+            }
+            // Enforce secure-by-default mesh data-plane when chain is enabled.
+            if self.runtime_config.enable_chain {
+                let allow_plaintext = mesh_cfg.allow_plaintext_data_plane
+                    || std::env::var("SEEP_MESH_ALLOW_PLAINTEXT")
+                        .ok()
+                        .map(|v| {
+                            matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+                        })
+                        .unwrap_or(false);
+                let allow_no_client_auth = mesh_cfg.allow_no_client_auth
+                    || std::env::var("SEEP_MESH_ALLOW_NO_CLIENT_AUTH")
+                        .ok()
+                        .map(|v| {
+                            matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+                        })
+                        .unwrap_or(false);
+
+                if !allow_plaintext {
+                    let tls = mesh_cfg.data_plane_tls.as_ref().ok_or_else(|| {
+                        anyhow!(
+                            "链路功能已启用，mesh data-plane 需要启用 mTLS：请设置 SEEP_MESH_MTLS=1，并提供 SEEP_MESH_MTLS_CA/SEEP_MESH_MTLS_CERT/SEEP_MESH_MTLS_KEY（开发环境可设置 SEEP_MESH_ALLOW_PLAINTEXT=1 绕过）"
+                        )
+                    })?;
+                    if !tls.require_client_auth && !allow_no_client_auth {
+                        return Err(anyhow!(
+                            "链路功能已启用，mesh data-plane 必须开启客户端证书校验：请设置 SEEP_MESH_MTLS_REQUIRE_CLIENT_AUTH=1（开发环境可设置 SEEP_MESH_ALLOW_NO_CLIENT_AUTH=1 绕过）"
+                        ));
+                    }
+                }
+            }
             let node_id = mesh_cfg.node_id.clone();
             let _registry = register_local_mesh_node(mesh_cfg)?;
             Some((node_id, _registry))
@@ -185,6 +223,7 @@ impl RuntimeBuilder {
             ingress_endpoints: self.ingress_endpoints,
             flow_outputs: Arc::new(RwLock::new(self.flow_outputs)),
             egress_connectors: Arc::new(RwLock::new(self.egress_connectors)),
+            flow_stats: Arc::new(DashMap::new()),
             mesh_registry,
             chain_manager,
             network_manager,
@@ -260,6 +299,15 @@ pub struct MeshConfig {
     pub node_id: String,
     pub role: String,
     pub listen_address: SocketAddr,
+    /// Mesh data-plane mTLS（用于 hop-by-hop 转发加密与认证）
+    #[serde(default)]
+    pub data_plane_tls: Option<MeshTlsConfig>,
+    /// Dev-only: allow plaintext mesh data-plane even when chain is enabled.
+    #[serde(default)]
+    pub allow_plaintext_data_plane: bool,
+    /// Dev-only: allow TLS without client auth even when chain is enabled.
+    #[serde(default)]
+    pub allow_no_client_auth: bool,
     pub topology_update_interval: Duration,
     pub health_check_interval: Duration,
     pub max_sessions: Option<usize>,
@@ -272,6 +320,9 @@ impl Default for MeshConfig {
             node_id: whoami::fallible::hostname().unwrap_or_else(|_| "seep-node".to_string()),
             role: "client".into(),
             listen_address: "0.0.0.0:9091".parse().unwrap(),
+            data_plane_tls: MeshTlsConfig::from_env(),
+            allow_plaintext_data_plane: false,
+            allow_no_client_auth: false,
             topology_update_interval: Duration::from_secs(30),
             health_check_interval: Duration::from_secs(60),
             max_sessions: Some(10_000),
@@ -353,6 +404,7 @@ pub enum SubscriptionEventType {
 /// 运行时统计
 #[derive(Debug, Clone)]
 pub struct RuntimeStats {
+    pub started_at: Instant,
     pub uptime_seconds: u64,
     pub total_connections: u64,
     pub active_connections: u64,
@@ -370,6 +422,7 @@ pub struct RuntimeStats {
 impl RuntimeStats {
     pub fn new() -> Self {
         Self {
+            started_at: Instant::now(),
             uptime_seconds: 0,
             total_connections: 0,
             active_connections: 0,
@@ -386,6 +439,7 @@ impl RuntimeStats {
     }
 
     pub fn update(&mut self) {
+        self.uptime_seconds = self.started_at.elapsed().as_secs();
         self.last_updated = Instant::now();
     }
 }
@@ -407,6 +461,7 @@ pub struct Runtime {
     ingress_endpoints: HashMap<String, Arc<dyn IngressEndpoint>>,
     flow_outputs: Arc<RwLock<HashMap<String, Arc<dyn FlowOutput>>>>,
     egress_connectors: Arc<RwLock<HashMap<String, Arc<dyn EgressConnector>>>>,
+    flow_stats: Arc<DashMap<(String, String), FlowStatCounter>>,
     mesh_registry: Option<Arc<MeshRegistry>>,
     /// 链路管理器（多跳链路支持）
     chain_manager: Option<Arc<ChainManager>>,
@@ -439,11 +494,18 @@ impl Runtime {
         *self.running.write().expect("running lock poisoned") = true;
 
         // 创建流量输出路由器（支持多跳链路）
+        let mesh_tls = self
+            .runtime_config
+            .mesh_config
+            .as_ref()
+            .and_then(|c| c.data_plane_tls.clone());
         let output_router = Arc::new(FlowOutputRouter::new(
             self.flow_outputs.clone(),
             self.chain_manager.clone(),
             self.mesh_registry.clone(),
             self.local_node_id.clone(),
+            mesh_tls,
+            self.event_tx.clone(),
         ));
 
         // Spawn mesh data-plane listener (TCP) for multi-hop transport (requires chain feature).
@@ -453,14 +515,33 @@ impl Runtime {
                 self.local_node_id.clone(),
                 self.runtime_config.mesh_config.clone(),
             ) {
-                let plane = MeshDataPlane::new(local_id, mesh);
-                tasks.push(plane.spawn(mesh_cfg.listen_address));
+                use seep_mesh::NodeRole;
+
+                let local_role = mesh
+                    .get_node(&local_id)
+                    .map(|r| r.role)
+                    .unwrap_or(NodeRole::Client);
+                if local_role != NodeRole::Client {
+                    let plane = MeshDataPlane::new(local_id, mesh)
+                        .with_tls(mesh_cfg.data_plane_tls.clone())?;
+                    tasks.push(plane.spawn(mesh_cfg.listen_address));
+                } else {
+                    tracing::info!(
+                        target: "seep::mesh::transport",
+                        node = %local_id,
+                        "mesh chain is enabled but local role is client; skip data-plane listener"
+                    );
+                }
             }
         }
 
         for (name, endpoint) in self.ingress_endpoints.iter() {
             let router = self.flow_router();
-            let output = output_router.clone();
+            let output: Arc<dyn FlowOutput> = Arc::new(StatsFlowOutput::new(
+                name.clone(),
+                output_router.clone(),
+                self.flow_stats.clone(),
+            ));
             let ingress = endpoint.clone();
             let label = name.clone();
             tasks.push(tokio::spawn(async move {
@@ -666,6 +747,12 @@ impl Runtime {
 
         let stats = self.stats.clone();
         let tx = self.event_tx.clone();
+        let flow_stats = self.flow_stats.clone();
+        let config = self.config.clone();
+        let mesh_registry = self.mesh_registry.clone();
+        let subscription_manager = self.subscription_manager.clone();
+        let network_manager = self.network_manager.clone();
+        let running = self.running.clone();
         let stats_interval = self
             .runtime_config
             .stats_interval
@@ -674,7 +761,57 @@ impl Runtime {
             let mut ticker = time::interval(stats_interval);
             loop {
                 ticker.tick().await;
+
+                if !*running.read().expect("running lock poisoned") {
+                    break;
+                }
+
+                let mut total_connections: u64 = 0;
+                let mut bytes_uploaded: u64 = 0;
+                let mut bytes_downloaded: u64 = 0;
+                for entry in flow_stats.iter() {
+                    total_connections = total_connections.saturating_add(entry.value().flows);
+                    bytes_uploaded = bytes_uploaded.saturating_add(entry.value().upstream);
+                    bytes_downloaded = bytes_downloaded.saturating_add(entry.value().downstream);
+                }
+                let total_bytes_transferred = bytes_uploaded.saturating_add(bytes_downloaded);
+
+                let (mesh_nodes, mesh_sessions) = match mesh_registry.as_ref() {
+                    Some(mesh) => {
+                        let s = mesh.get_stats();
+                        (s.total_nodes, s.active_sessions)
+                    }
+                    None => (0, 0),
+                };
+
+                let subscription_nodes = match subscription_manager.as_ref() {
+                    // 当前实现没有区分“订阅带来的节点”和静态配置节点：先暴露为当前 egress 总数，便于观测规模。
+                    Some(_) => config.read().expect("config lock poisoned").egress.len(),
+                    None => 0,
+                };
+
+                let network_interfaces = match network_manager.as_ref() {
+                    Some(mgr) => {
+                        let guard = mgr.lock().await;
+                        if guard.is_running().await {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    None => 0,
+                };
+
                 let mut guard = stats.write().expect("stats lock poisoned");
+                guard.total_connections = total_connections;
+                guard.active_connections = 0;
+                guard.bytes_uploaded = bytes_uploaded;
+                guard.bytes_downloaded = bytes_downloaded;
+                guard.total_bytes_transferred = total_bytes_transferred;
+                guard.mesh_nodes = mesh_nodes;
+                guard.mesh_sessions = mesh_sessions;
+                guard.network_interfaces = network_interfaces;
+                guard.subscription_nodes = subscription_nodes;
                 guard.update();
                 let snapshot = guard.clone();
                 drop(guard);
@@ -683,7 +820,44 @@ impl Runtime {
                     value: snapshot.uptime_seconds as f64,
                     tags: HashMap::new(),
                 });
+                let _ = tx.send(RuntimeEvent::TelemetryEvent {
+                    metric_name: "runtime_total_connections".into(),
+                    value: snapshot.total_connections as f64,
+                    tags: HashMap::new(),
+                });
+                let _ = tx.send(RuntimeEvent::TelemetryEvent {
+                    metric_name: "runtime_bytes_uploaded".into(),
+                    value: snapshot.bytes_uploaded as f64,
+                    tags: HashMap::new(),
+                });
+                let _ = tx.send(RuntimeEvent::TelemetryEvent {
+                    metric_name: "runtime_bytes_downloaded".into(),
+                    value: snapshot.bytes_downloaded as f64,
+                    tags: HashMap::new(),
+                });
+                let _ = tx.send(RuntimeEvent::TelemetryEvent {
+                    metric_name: "runtime_mesh_nodes".into(),
+                    value: snapshot.mesh_nodes as f64,
+                    tags: HashMap::new(),
+                });
+                let _ = tx.send(RuntimeEvent::TelemetryEvent {
+                    metric_name: "runtime_mesh_sessions".into(),
+                    value: snapshot.mesh_sessions as f64,
+                    tags: HashMap::new(),
+                });
+                let _ = tx.send(RuntimeEvent::TelemetryEvent {
+                    metric_name: "runtime_network_interfaces".into(),
+                    value: snapshot.network_interfaces as f64,
+                    tags: HashMap::new(),
+                });
+                let _ = tx.send(RuntimeEvent::TelemetryEvent {
+                    metric_name: "runtime_subscription_nodes".into(),
+                    value: snapshot.subscription_nodes as f64,
+                    tags: HashMap::new(),
+                });
             }
+
+            Ok::<(), anyhow::Error>(())
         }));
 
         Ok(tasks)
@@ -770,6 +944,20 @@ impl Runtime {
             .read()
             .expect("egress_connectors lock poisoned")
             .clone()
+    }
+
+    /// 获取入口 -> 出口的累计流量统计快照
+    pub fn get_flow_stats(&self) -> Vec<FlowStatItem> {
+        self.flow_stats
+            .iter()
+            .map(|e| FlowStatItem {
+                ingress: e.key().0.clone(),
+                egress: e.key().1.clone(),
+                flows: e.value().flows,
+                upstream: e.value().upstream,
+                downstream: e.value().downstream,
+            })
+            .collect()
     }
 
     /// 获取订阅管理器
@@ -925,14 +1113,82 @@ impl FlowRouter for RuntimeFlowRouter {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct FlowStatCounter {
+    flows: u64,
+    upstream: u64,
+    downstream: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowStatItem {
+    pub ingress: String,
+    pub egress: String,
+    pub flows: u64,
+    pub upstream: u64,
+    pub downstream: u64,
+}
+
+struct StatsFlowOutput {
+    ingress: String,
+    inner: Arc<dyn FlowOutput>,
+    stats: Arc<DashMap<(String, String), FlowStatCounter>>,
+}
+
+impl StatsFlowOutput {
+    fn new(
+        ingress: String,
+        inner: Arc<dyn FlowOutput>,
+        stats: Arc<DashMap<(String, String), FlowStatCounter>>,
+    ) -> Self {
+        Self {
+            ingress,
+            inner,
+            stats,
+        }
+    }
+
+    fn normalize_egress(decision: &RouteDecision) -> String {
+        let mut target = decision.final_node();
+        if let Some(stripped) = target.strip_prefix("egress.") {
+            target = stripped.to_string();
+        }
+        target
+    }
+}
+
+#[async_trait]
+impl FlowOutput for StatsFlowOutput {
+    async fn forward(&self, decision: RouteDecision, flow: Flow) -> Result<FlowReport> {
+        let egress = Self::normalize_egress(&decision);
+        let report = self.inner.forward(decision, flow).await?;
+
+        self.stats
+            .entry((self.ingress.clone(), egress))
+            .and_modify(|v| {
+                v.flows += 1;
+                v.upstream += report.upstream;
+                v.downstream += report.downstream;
+            })
+            .or_insert_with(|| FlowStatCounter {
+                flows: 1,
+                upstream: report.upstream,
+                downstream: report.downstream,
+            });
+
+        Ok(report)
+    }
+}
+
 /// 派发路由决策到具体出口（支持多跳链路）
 struct FlowOutputRouter {
     outputs: Arc<RwLock<HashMap<String, Arc<dyn FlowOutput>>>>,
     /// 链路管理器（预留用于故障转移）
-    #[allow(dead_code)]
     chain_manager: Option<Arc<ChainManager>>,
     mesh_registry: Option<Arc<MeshRegistry>>,
     local_node_id: Option<NodeId>,
+    mesh_tls: Option<MeshTlsConfig>,
+    event_tx: broadcast::Sender<RuntimeEvent>,
 }
 
 impl FlowOutputRouter {
@@ -941,12 +1197,16 @@ impl FlowOutputRouter {
         chain_manager: Option<Arc<ChainManager>>,
         mesh_registry: Option<Arc<MeshRegistry>>,
         local_node_id: Option<NodeId>,
+        mesh_tls: Option<MeshTlsConfig>,
+        event_tx: broadcast::Sender<RuntimeEvent>,
     ) -> Self {
         Self {
             outputs,
             chain_manager,
             mesh_registry,
             local_node_id,
+            mesh_tls,
+            event_tx,
         }
     }
 }
@@ -1025,18 +1285,110 @@ impl FlowOutputRouter {
                         "使用 mesh data-plane 转发链路流量"
                     );
 
-                    let plane = MeshDataPlane::new(local_id.clone(), mesh);
+                    let plane = MeshDataPlane::new(local_id.clone(), mesh)
+                        .with_tls(self.mesh_tls.clone())?;
+                    let mesh_path: Vec<String> =
+                        hops.iter().skip(1).map(|h| h.node.clone()).collect();
+                    if mesh_path.is_empty() {
+                        return Err(anyhow!("mesh chain path is empty"));
+                    }
                     let env = MeshEnvelope::new(
                         flow.id.as_uuid().to_string(),
                         flow.target.host.clone(),
                         flow.target.port,
-                        hops.iter().map(|h| h.node.clone()).collect(),
+                        mesh_path.clone(),
                     );
 
-                    plane
-                        .dial_and_tunnel(&next_hop, &env, &mut *flow.io)
-                        .await?;
-                    return Ok(FlowReport::default());
+                    match plane.dial_and_tunnel(&next_hop, &env, &mut *flow.io).await {
+                        Ok(()) => return Ok(FlowReport::default()),
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "seep::mesh::transport",
+                                next = %next_hop,
+                                error = %e,
+                                "mesh data-plane 转发失败，尝试故障转移"
+                            );
+
+                            let session_id = flow.id.as_uuid();
+                            if let Some(chain_mgr) = &self.chain_manager {
+                                if let Some(chain_ctx) =
+                                    chain_mgr.get_chain_for_session(&session_id)
+                                {
+                                    let chain_id = chain_ctx.chain_id.clone();
+                                    if let Ok(Some(new_ctx)) = chain_mgr
+                                        .handle_chain_failure(&chain_id, &format!("{e}"))
+                                        .await
+                                    {
+                                        let new_decision = chain_mgr.build_route_decision(&new_ctx);
+                                        if let RoutePath::Chain { hops: new_hops } =
+                                            new_decision.path
+                                        {
+                                            let new_nodes: Vec<String> =
+                                                new_hops.iter().map(|h| h.node.clone()).collect();
+                                            if let Ok(prev) =
+                                                serde_json::to_string(&decision.all_nodes())
+                                            {
+                                                flow.metadata.annotations.insert(
+                                                    "seep.chain.prev_path".to_string(),
+                                                    prev,
+                                                );
+                                            }
+                                            if let Ok(nextv) = serde_json::to_string(&new_nodes) {
+                                                flow.metadata.annotations.insert(
+                                                    "seep.chain.next_path".to_string(),
+                                                    nextv,
+                                                );
+                                            }
+                                            flow.metadata.annotations.insert(
+                                                "seep.chain.failover".to_string(),
+                                                "1".to_string(),
+                                            );
+
+                                            let _ = self.event_tx.send(RuntimeEvent::MeshEvent {
+                                                session_id,
+                                                event: MeshEventType::PathUpdated {
+                                                    session_id,
+                                                    path: new_nodes.clone(),
+                                                },
+                                            });
+
+                                            if new_hops.len() >= 2 {
+                                                let new_next = new_hops[1].node.clone();
+                                                if let Some(mesh2) = self.mesh_registry.clone() {
+                                                    if mesh2.get_node_addr(&new_next).is_some() {
+                                                        let plane = MeshDataPlane::new(
+                                                            local_id.clone(),
+                                                            mesh2,
+                                                        )
+                                                        .with_tls(self.mesh_tls.clone())?;
+                                                        let mesh_path: Vec<String> = new_hops
+                                                            .iter()
+                                                            .skip(1)
+                                                            .map(|h| h.node.clone())
+                                                            .collect();
+                                                        let env = MeshEnvelope::new(
+                                                            flow.id.as_uuid().to_string(),
+                                                            flow.target.host.clone(),
+                                                            flow.target.port,
+                                                            mesh_path,
+                                                        );
+                                                        plane
+                                                            .dial_and_tunnel(
+                                                                &new_next,
+                                                                &env,
+                                                                &mut *flow.io,
+                                                            )
+                                                            .await?;
+                                                        return Ok(FlowReport::default());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1372,6 +1724,9 @@ fn register_local_mesh_node(mesh_cfg: MeshConfig) -> Result<Arc<MeshRegistry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seep_config::{
+        GroupMember, MatchCondition, PolicyGroup, RouteRule, RoutingConfig, Strategy,
+    };
     use std::{
         pin::Pin,
         task::{Context, Poll},
@@ -1432,7 +1787,9 @@ mod tests {
                 annotations: annotations.clone(),
             }),
         );
-        let router = FlowOutputRouter::new(Arc::new(RwLock::new(outputs)), None, None, None);
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let router =
+            FlowOutputRouter::new(Arc::new(RwLock::new(outputs)), None, None, None, None, tx);
 
         let decision = {
             let hops = vec![
@@ -1469,6 +1826,55 @@ mod tests {
             map.get("seep.route.reason").map(|s| s.as_str()),
             Some("test")
         );
+    }
+
+    struct FixedReportOutput {
+        report: FlowReport,
+    }
+
+    #[async_trait]
+    impl FlowOutput for FixedReportOutput {
+        async fn forward(&self, _decision: RouteDecision, _flow: Flow) -> Result<FlowReport> {
+            Ok(self.report)
+        }
+    }
+
+    #[tokio::test]
+    async fn stats_flow_output_accumulates_reports() {
+        let stats = Arc::new(DashMap::new());
+        let inner: Arc<dyn FlowOutput> = Arc::new(FixedReportOutput {
+            report: FlowReport {
+                upstream: 10,
+                downstream: 20,
+            },
+        });
+        let out: Arc<dyn FlowOutput> = Arc::new(StatsFlowOutput::new(
+            "in1".to_string(),
+            inner,
+            stats.clone(),
+        ));
+
+        let decision = RouteDecision::direct("egress.direct-main".to_string());
+        let flow = Flow {
+            id: seep_core::FlowId::new(),
+            target: seep_core::FlowTarget {
+                host: "example.com".to_string(),
+                port: 443,
+                proto: seep_core::TargetProto::Tcp,
+            },
+            io: Box::new(DummyIo::default()),
+            metadata: seep_core::FlowMetadata::default(),
+        };
+
+        let report = out.forward(decision, flow).await.unwrap();
+        assert_eq!(report.upstream, 10);
+        assert_eq!(report.downstream, 20);
+
+        let key = ("in1".to_string(), "direct-main".to_string());
+        let v = stats.get(&key).expect("stats exists");
+        assert_eq!(v.flows, 1);
+        assert_eq!(v.upstream, 10);
+        assert_eq!(v.downstream, 20);
     }
 
     #[test]
@@ -1573,5 +1979,134 @@ mod tests {
 
         let connectors = runtime.get_egress_connectors();
         assert_eq!(connectors.get("p1").expect("p1 connector").name(), "socks5");
+    }
+
+    #[test]
+    fn merge_config_delta_in_place_dedupes_egress_and_groups() {
+        let mut target = SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![],
+            egress: vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            routing: RoutingConfig {
+                default_node: "direct".to_string(),
+                groups: vec![PolicyGroup {
+                    name: "g1".to_string(),
+                    strategy: Strategy::Random,
+                    members: vec![GroupMember::Node {
+                        name: "direct".to_string(),
+                    }],
+                }],
+                rules: vec![],
+            },
+        };
+
+        let delta = SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![],
+            egress: vec![
+                EgressDescriptor {
+                    name: "direct".to_string(),
+                    spec: EgressConfig::Direct,
+                },
+                EgressDescriptor {
+                    name: "p1".to_string(),
+                    spec: EgressConfig::Socks5 {
+                        server: "127.0.0.1".to_string(),
+                        port: 1080,
+                        username: None,
+                        password: None,
+                    },
+                },
+            ],
+            routing: RoutingConfig {
+                default_node: "direct".to_string(),
+                groups: vec![
+                    PolicyGroup {
+                        name: "g1".to_string(),
+                        strategy: Strategy::Random,
+                        members: vec![GroupMember::Node {
+                            name: "direct".to_string(),
+                        }],
+                    },
+                    PolicyGroup {
+                        name: "g2".to_string(),
+                        strategy: Strategy::Random,
+                        members: vec![GroupMember::Node {
+                            name: "p1".to_string(),
+                        }],
+                    },
+                ],
+                rules: vec![
+                    RouteRule {
+                        name: "r1".to_string(),
+                        matches: vec![MatchCondition::Port { values: vec![80] }],
+                        target: "direct".to_string(),
+                    },
+                    RouteRule {
+                        name: "r2".to_string(),
+                        matches: vec![MatchCondition::DomainSuffix {
+                            values: vec!["example.com".to_string()],
+                        }],
+                        target: "p1".to_string(),
+                    },
+                ],
+            },
+        };
+
+        let stats = merge_config_delta_in_place(&mut target, &delta);
+        assert_eq!(stats.nodes_added, 1);
+        assert_eq!(stats.groups_added, 1);
+        assert_eq!(stats.rules_added, 2);
+
+        assert_eq!(
+            target.egress.iter().filter(|e| e.name == "direct").count(),
+            1
+        );
+        assert!(target.egress.iter().any(|e| e.name == "p1"));
+        assert_eq!(
+            target
+                .routing
+                .groups
+                .iter()
+                .filter(|g| g.name == "g1")
+                .count(),
+            1
+        );
+        assert!(target.routing.groups.iter().any(|g| g.name == "g2"));
+        assert_eq!(target.routing.rules.len(), 2);
+    }
+
+    #[test]
+    fn parse_mesh_target_supports_mesh_prefix_variants() {
+        assert_eq!(
+            RuntimeFlowRouter::parse_mesh_target("mesh.exit1"),
+            Some("exit1")
+        );
+        assert_eq!(
+            RuntimeFlowRouter::parse_mesh_target("mesh:exit1"),
+            Some("exit1")
+        );
+        assert_eq!(RuntimeFlowRouter::parse_mesh_target("direct"), None);
     }
 }

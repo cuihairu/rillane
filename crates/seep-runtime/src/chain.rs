@@ -23,6 +23,13 @@ use uuid::Uuid;
 use seep_core::{ChainContext, ChainStatus, HopType, RouteDecision, RouteHop, RouteType};
 use seep_mesh::{LinkState, MeshRegistry, NodeId, NodeRecord, NodeRole, SessionId};
 
+fn current_epoch_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// 链路构建配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainConfig {
@@ -776,6 +783,7 @@ impl ChainManager {
             {
                 let mut stats = self.stats.write().await;
                 stats.failover_count += 1;
+                stats.last_failover_epoch_seconds = Some(current_epoch_seconds());
             }
 
             Ok(Some(chain.clone()))
@@ -936,6 +944,8 @@ pub struct ChainManagerStats {
     pub average_hop_count: f32,
     /// 平均链路存活时间 (秒)
     pub average_chain_lifetime_seconds: f32,
+    /// 最近一次故障转移时间（Unix epoch seconds）
+    pub last_failover_epoch_seconds: Option<u64>,
 }
 
 #[cfg(test)]

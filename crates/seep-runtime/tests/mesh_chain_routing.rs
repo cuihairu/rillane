@@ -45,6 +45,7 @@ async fn mesh_target_routes_to_chain_decision() {
             node_id: "client1".into(),
             role: "client".into(),
             listen_address: "127.0.0.1:10001".parse().unwrap(),
+            allow_plaintext_data_plane: true,
             ..MeshConfig::default()
         }),
         ..RuntimeConfig::default()

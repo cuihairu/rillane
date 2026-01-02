@@ -22,8 +22,8 @@ pub use chain::{
 pub use hot_reload::{HotReloadConfig, HotReloadManager, ReloadEvent, ReloadStats};
 pub use mesh_transport::{MeshDataPlane, MeshEnvelope};
 pub use runtime_builder::{
-    ConfigMergeStats, MeshConfig, NetworkEventType, Runtime, RuntimeBuilder, RuntimeConfig,
-    RuntimeEvent, RuntimeStats, SubscriptionEventType,
+    ConfigMergeStats, FlowStatItem, MeshConfig, MeshEventType, NetworkEventType, Runtime,
+    RuntimeBuilder, RuntimeConfig, RuntimeEvent, RuntimeStats, SubscriptionEventType,
 };
 
 use seep_config::EgressDescriptor;

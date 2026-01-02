@@ -1,22 +1,165 @@
 //! Minimal mesh data-plane transport (TCP only).
 //!
 //! This implements a simple "hop-by-hop" forwarding protocol between Seep nodes.
-//! It is intentionally minimal and currently has no authentication/encryption.
+//! It is intentionally minimal, but supports optional mTLS for encryption/authentication.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{fs::File, io::BufReader, net::SocketAddr, path::PathBuf, sync::Arc, time::SystemTime};
 
 use anyhow::{anyhow, Result};
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt},
     net::{lookup_host, TcpListener, TcpStream},
     task::JoinHandle,
 };
+use tokio_rustls::{TlsAcceptor, TlsConnector};
+use x509_parser::prelude::parse_x509_certificate;
 
 use seep_core::IoStream;
-use seep_mesh::{MeshRegistry, NodeId};
+use seep_mesh::{MeshRegistry, NodeId, NodeRole};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
+
+trait MeshStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T> MeshStream for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshTlsConfig {
+    pub ca_cert_path: PathBuf,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    #[serde(default = "default_server_name")]
+    pub server_name: String,
+    #[serde(default = "default_require_client_auth")]
+    pub require_client_auth: bool,
+    /// Whether to extract the peer node id from the client certificate CN.
+    #[serde(default = "default_verify_peer_node_id")]
+    pub verify_peer_node_id: bool,
+    /// Allow peers not present in the local mesh registry (dev/bootstrapping only).
+    #[serde(default)]
+    pub allow_unknown_peers: bool,
+    /// Comma-separated revoked node ids (CN) from `SEEP_MESH_MTLS_REVOKED_NODES`.
+    #[serde(default)]
+    pub revoked_node_ids: Vec<NodeId>,
+    /// Optional revoked node list file path from `SEEP_MESH_MTLS_REVOKED_NODES_FILE`.
+    #[serde(default)]
+    pub revoked_nodes_path: Option<PathBuf>,
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(default)
+}
+
+fn parse_csv_env(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_path_env(name: &str) -> Option<PathBuf> {
+    std::env::var(name).ok().map(PathBuf::from)
+}
+
+fn default_server_name() -> String {
+    "seep".to_string()
+}
+
+fn default_require_client_auth() -> bool {
+    true
+}
+
+fn default_verify_peer_node_id() -> bool {
+    true
+}
+
+impl MeshTlsConfig {
+    /// Read mesh mTLS settings from environment variables.
+    ///
+    /// - `SEEP_MESH_MTLS=1|true` enables it.
+    /// - `SEEP_MESH_MTLS_CA`, `SEEP_MESH_MTLS_CERT`, `SEEP_MESH_MTLS_KEY` must be set.
+    /// - Optional: `SEEP_MESH_MTLS_SERVER_NAME` (default: "seep")
+    /// - Optional: `SEEP_MESH_MTLS_REQUIRE_CLIENT_AUTH` (default: true)
+    pub fn from_env() -> Option<Self> {
+        let enabled = env_flag("SEEP_MESH_MTLS", false);
+        if !enabled {
+            return None;
+        }
+
+        let ca_cert_path = PathBuf::from(std::env::var("SEEP_MESH_MTLS_CA").ok()?);
+        let cert_path = PathBuf::from(std::env::var("SEEP_MESH_MTLS_CERT").ok()?);
+        let key_path = PathBuf::from(std::env::var("SEEP_MESH_MTLS_KEY").ok()?);
+        let server_name =
+            std::env::var("SEEP_MESH_MTLS_SERVER_NAME").unwrap_or_else(|_| "seep".to_string());
+        let require_client_auth = env_flag("SEEP_MESH_MTLS_REQUIRE_CLIENT_AUTH", true);
+        let verify_peer_node_id = env_flag("SEEP_MESH_MTLS_VERIFY_PEER_NODE_ID", true);
+        let allow_unknown_peers = env_flag("SEEP_MESH_MTLS_ALLOW_UNKNOWN_PEERS", false);
+        let revoked_node_ids = parse_csv_env("SEEP_MESH_MTLS_REVOKED_NODES");
+        let revoked_nodes_path = parse_path_env("SEEP_MESH_MTLS_REVOKED_NODES_FILE");
+
+        Some(Self {
+            ca_cert_path,
+            cert_path,
+            key_path,
+            server_name,
+            require_client_auth,
+            verify_peer_node_id,
+            allow_unknown_peers,
+            revoked_node_ids,
+            revoked_nodes_path,
+        })
+    }
+
+    pub fn enabled_by_env() -> bool {
+        env_flag("SEEP_MESH_MTLS", false)
+    }
+
+    /// Strict parsing: if `SEEP_MESH_MTLS=1|true|...` is set but required variables are missing,
+    /// return an error instead of silently disabling mTLS.
+    pub fn from_env_strict() -> Result<Option<Self>> {
+        if !Self::enabled_by_env() {
+            return Ok(None);
+        }
+        let ca_cert_path = PathBuf::from(std::env::var("SEEP_MESH_MTLS_CA").map_err(|_| {
+            anyhow!("SEEP_MESH_MTLS_CA is required when SEEP_MESH_MTLS is enabled")
+        })?);
+        let cert_path = PathBuf::from(std::env::var("SEEP_MESH_MTLS_CERT").map_err(|_| {
+            anyhow!("SEEP_MESH_MTLS_CERT is required when SEEP_MESH_MTLS is enabled")
+        })?);
+        let key_path = PathBuf::from(std::env::var("SEEP_MESH_MTLS_KEY").map_err(|_| {
+            anyhow!("SEEP_MESH_MTLS_KEY is required when SEEP_MESH_MTLS is enabled")
+        })?);
+        let server_name =
+            std::env::var("SEEP_MESH_MTLS_SERVER_NAME").unwrap_or_else(|_| "seep".to_string());
+        let require_client_auth = env_flag("SEEP_MESH_MTLS_REQUIRE_CLIENT_AUTH", true);
+        let verify_peer_node_id = env_flag("SEEP_MESH_MTLS_VERIFY_PEER_NODE_ID", true);
+        let allow_unknown_peers = env_flag("SEEP_MESH_MTLS_ALLOW_UNKNOWN_PEERS", false);
+        let revoked_node_ids = parse_csv_env("SEEP_MESH_MTLS_REVOKED_NODES");
+        let revoked_nodes_path = parse_path_env("SEEP_MESH_MTLS_REVOKED_NODES_FILE");
+
+        Ok(Some(Self {
+            ca_cert_path,
+            cert_path,
+            key_path,
+            server_name,
+            require_client_auth,
+            verify_peer_node_id,
+            allow_unknown_peers,
+            revoked_node_ids,
+            revoked_nodes_path,
+        }))
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshEnvelope {
@@ -42,15 +185,35 @@ impl MeshEnvelope {
 
 pub struct MeshDataPlane {
     local_node_id: NodeId,
+    local_role: NodeRole,
     registry: Arc<MeshRegistry>,
+    tls: Option<Arc<MeshTls>>,
 }
 
 impl MeshDataPlane {
     pub fn new(local_node_id: NodeId, registry: Arc<MeshRegistry>) -> Self {
+        let local_role = registry
+            .get_node(&local_node_id)
+            .map(|r| r.role)
+            .unwrap_or(NodeRole::Client);
         Self {
             local_node_id,
+            local_role,
             registry,
+            tls: None,
         }
+    }
+
+    pub async fn handle(&self, inbound: TcpStream) -> Result<()> {
+        self.handle_tcp(inbound).await
+    }
+
+    pub fn with_tls(mut self, cfg: Option<MeshTlsConfig>) -> Result<Self> {
+        self.tls = match cfg {
+            Some(c) => Some(Arc::new(MeshTls::from_config(&c)?)),
+            None => None,
+        };
+        Ok(self)
     }
 
     pub fn spawn(self, bind: SocketAddr) -> JoinHandle<Result<()>> {
@@ -59,21 +222,54 @@ impl MeshDataPlane {
 
     async fn serve(self, bind: SocketAddr) -> Result<()> {
         let listener = TcpListener::bind(bind).await?;
+        let tls = self.tls.clone();
         loop {
             let (stream, _peer) = listener.accept().await?;
             let this = Self {
                 local_node_id: self.local_node_id.clone(),
+                local_role: self.local_role,
                 registry: self.registry.clone(),
+                tls: tls.clone(),
             };
             tokio::spawn(async move {
-                if let Err(e) = this.handle(stream).await {
+                if let Err(e) = this.handle_tcp(stream).await {
                     tracing::debug!(target: "seep::mesh::transport", error = %e, "mesh transport connection closed");
                 }
             });
         }
     }
 
-    async fn handle(&self, mut inbound: TcpStream) -> Result<()> {
+    async fn handle_tcp(&self, inbound: TcpStream) -> Result<()> {
+        if let Some(tls) = &self.tls {
+            let inbound = tls.accept(inbound).await?;
+            let peer_node_id = if tls.cfg().require_client_auth && tls.cfg().verify_peer_node_id {
+                Some(peer_node_id_from_server_tls_stream(&inbound)?)
+            } else {
+                None
+            };
+
+            if tls.cfg().require_client_auth && tls.cfg().verify_peer_node_id {
+                let peer = peer_node_id
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("missing peer node id"))?;
+                if tls.is_revoked(peer).await? {
+                    return Err(anyhow!("revoked mesh peer node: {peer}"));
+                }
+                if !tls.cfg().allow_unknown_peers && self.registry.get_node(peer).is_none() {
+                    return Err(anyhow!("unregistered mesh peer node: {peer}"));
+                }
+            }
+
+            self.handle_stream(inbound, peer_node_id).await
+        } else {
+            self.handle_stream(inbound, None).await
+        }
+    }
+
+    async fn handle_stream<S>(&self, mut inbound: S, peer_node_id: Option<NodeId>) -> Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         let env = read_envelope(&mut inbound).await?;
         if env.version != 1 {
             return Err(anyhow!("unsupported mesh envelope version {}", env.version));
@@ -82,31 +278,98 @@ impl MeshDataPlane {
             return Err(anyhow!("empty mesh path"));
         }
 
-        // Best-effort validation (don't hard fail on mismatch to keep MVP resilient).
-        if env.path[0] != self.local_node_id {
+        if let Some(peer) = &peer_node_id {
             tracing::debug!(
                 target: "seep::mesh::transport",
-                expected = %self.local_node_id,
-                got = %env.path[0],
-                "mesh envelope path[0] does not match local node id"
+                peer = %peer,
+                local = %self.local_node_id,
+                "mesh data-plane accepted connection"
             );
         }
 
+        if env.path[0] != self.local_node_id {
+            return Err(anyhow!(
+                "mesh envelope path[0] mismatch: expected {}, got {}",
+                self.local_node_id,
+                env.path[0]
+            ));
+        }
+
         if env.path.len() == 1 {
+            if !matches!(self.local_role, NodeRole::Exit | NodeRole::Hybrid) {
+                return Err(anyhow!(
+                    "node role {} cannot act as exit (target hop)",
+                    self.local_role
+                ));
+            }
+            if let Some(peer) = &peer_node_id {
+                self.registry
+                    .record_link_connection(peer, &self.local_node_id);
+            }
             // Final hop: connect to the real target.
-            let mut out = connect_target(&env.target_host, env.target_port).await?;
-            let _ = copy_bidirectional(&mut inbound, &mut out).await?;
+            let mut out = match connect_target(&env.target_host, env.target_port).await {
+                Ok(v) => v,
+                Err(e) => {
+                    if let Some(peer) = &peer_node_id {
+                        self.registry.record_link_error(peer, &self.local_node_id);
+                    }
+                    return Err(e);
+                }
+            };
+            let (up, down) = match copy_bidirectional(&mut inbound, &mut out).await {
+                Ok(v) => v,
+                Err(e) => {
+                    if let Some(peer) = &peer_node_id {
+                        self.registry.record_link_error(peer, &self.local_node_id);
+                        self.registry.record_link_error(&self.local_node_id, peer);
+                    }
+                    return Err(e.into());
+                }
+            };
+            if let Some(peer) = &peer_node_id {
+                self.registry
+                    .record_link_bytes(peer, &self.local_node_id, up);
+                self.registry
+                    .record_link_bytes(&self.local_node_id, peer, down);
+            }
             return Ok(());
+        }
+
+        if !matches!(self.local_role, NodeRole::Relay | NodeRole::Hybrid) {
+            return Err(anyhow!(
+                "node role {} cannot act as relay (forward hop)",
+                self.local_role
+            ));
         }
 
         // Relay hop: forward to next node.
         let next = env.path[1].clone();
+        if let Some(next_rec) = self.registry.get_node(&next) {
+            if next_rec.role == NodeRole::Client {
+                return Err(anyhow!("invalid next hop role client: {next}"));
+            }
+        }
+        if let Some(peer) = &peer_node_id {
+            self.registry
+                .record_link_connection(peer, &self.local_node_id);
+        }
+        self.registry
+            .record_link_connection(&self.local_node_id, &next);
         let next_addr = self
             .registry
             .get_node_addr(&next)
             .ok_or_else(|| anyhow!("next hop {next} not found in registry"))?;
 
-        let mut outbound = TcpStream::connect(next_addr).await?;
+        let mut outbound = match self.connect_next(next_addr).await {
+            Ok(v) => v,
+            Err(e) => {
+                self.registry.record_link_error(&self.local_node_id, &next);
+                if let Some(peer) = &peer_node_id {
+                    self.registry.record_link_error(peer, &self.local_node_id);
+                }
+                return Err(e);
+            }
+        };
         let fwd = MeshEnvelope::new(
             env.flow_id,
             env.target_host,
@@ -115,8 +378,39 @@ impl MeshDataPlane {
         );
         write_envelope(&mut outbound, &fwd).await?;
 
-        let _ = copy_bidirectional(&mut inbound, &mut outbound).await?;
+        let (up, down) = match copy_bidirectional(&mut inbound, &mut outbound).await {
+            Ok(v) => v,
+            Err(e) => {
+                self.registry.record_link_error(&self.local_node_id, &next);
+                self.registry.record_link_error(&next, &self.local_node_id);
+                if let Some(peer) = &peer_node_id {
+                    self.registry.record_link_error(peer, &self.local_node_id);
+                    self.registry.record_link_error(&self.local_node_id, peer);
+                }
+                return Err(e.into());
+            }
+        };
+        self.registry
+            .record_link_bytes(&self.local_node_id, &next, up);
+        self.registry
+            .record_link_bytes(&next, &self.local_node_id, down);
+        if let Some(peer) = &peer_node_id {
+            self.registry
+                .record_link_bytes(peer, &self.local_node_id, up);
+            self.registry
+                .record_link_bytes(&self.local_node_id, peer, down);
+        }
         Ok(())
+    }
+
+    async fn connect_next(&self, addr: SocketAddr) -> Result<Box<dyn MeshStream>> {
+        let stream = TcpStream::connect(addr).await?;
+        if let Some(tls) = &self.tls {
+            let s = tls.connect(stream).await?;
+            Ok(Box::new(s))
+        } else {
+            Ok(Box::new(stream))
+        }
     }
 
     pub async fn dial_and_tunnel(
@@ -129,9 +423,31 @@ impl MeshDataPlane {
             .registry
             .get_node_addr(next_hop)
             .ok_or_else(|| anyhow!("next hop {next_hop} not found in registry"))?;
-        let mut stream = TcpStream::connect(addr).await?;
+        self.registry
+            .record_link_connection(&self.local_node_id, next_hop);
+        let mut stream = match self.connect_next(addr).await {
+            Ok(v) => v,
+            Err(e) => {
+                self.registry
+                    .record_link_error(&self.local_node_id, next_hop);
+                return Err(e);
+            }
+        };
         write_envelope(&mut stream, envelope).await?;
-        let _ = copy_bidirectional(io, &mut stream).await?;
+        let (up, down) = match copy_bidirectional(io, &mut stream).await {
+            Ok(v) => v,
+            Err(e) => {
+                self.registry
+                    .record_link_error(&self.local_node_id, next_hop);
+                self.registry
+                    .record_link_error(next_hop, &self.local_node_id);
+                return Err(e.into());
+            }
+        };
+        self.registry
+            .record_link_bytes(&self.local_node_id, next_hop, up);
+        self.registry
+            .record_link_bytes(next_hop, &self.local_node_id, down);
         Ok(())
     }
 }
@@ -145,7 +461,10 @@ async fn connect_target(host: &str, port: u16) -> Result<TcpStream> {
     Ok(TcpStream::connect(addr).await?)
 }
 
-async fn read_envelope(stream: &mut TcpStream) -> Result<MeshEnvelope> {
+async fn read_envelope<R>(stream: &mut R) -> Result<MeshEnvelope>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let len = stream.read_u32().await? as usize;
     if len == 0 || len > MAX_HEADER_BYTES {
         return Err(anyhow!("invalid mesh header length {}", len));
@@ -155,7 +474,10 @@ async fn read_envelope(stream: &mut TcpStream) -> Result<MeshEnvelope> {
     Ok(serde_json::from_slice(&buf)?)
 }
 
-async fn write_envelope(stream: &mut TcpStream, env: &MeshEnvelope) -> Result<()> {
+async fn write_envelope<W>(stream: &mut W, env: &MeshEnvelope) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let buf = serde_json::to_vec(env)?;
     if buf.len() > MAX_HEADER_BYTES {
         return Err(anyhow!("mesh header too large: {} bytes", buf.len()));
@@ -165,10 +487,279 @@ async fn write_envelope(stream: &mut TcpStream, env: &MeshEnvelope) -> Result<()
     Ok(())
 }
 
+fn peer_node_id_from_server_tls_stream(
+    stream: &tokio_rustls::server::TlsStream<TcpStream>,
+) -> Result<NodeId> {
+    let conn = stream.get_ref().1;
+    let certs = conn.peer_certificates().ok_or_else(|| {
+        anyhow!("mTLS client auth required but peer did not present a certificate")
+    })?;
+    let leaf = certs
+        .first()
+        .ok_or_else(|| anyhow!("peer certificate chain is empty"))?;
+    let (_, cert) = parse_x509_certificate(leaf.as_ref())
+        .map_err(|e| anyhow!("invalid peer certificate: {e}"))?;
+    let cn = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .ok_or_else(|| anyhow!("peer certificate missing CommonName (CN)"))?
+        .as_str()
+        .map_err(|_| anyhow!("peer certificate CN is not valid UTF-8"))?;
+    Ok(cn.to_string())
+}
+
+struct MeshTls {
+    cfg: MeshTlsConfig,
+    inner: tokio::sync::RwLock<MeshTlsInner>,
+}
+
+#[derive(Clone)]
+struct MeshTlsInner {
+    acceptor: TlsAcceptor,
+    connector: TlsConnector,
+    server_name: rustls::pki_types::ServerName<'static>,
+    fingerprint: MeshTlsFingerprint,
+    revoked_node_ids: Vec<NodeId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MeshTlsFingerprint {
+    ca_mtime: Option<SystemTime>,
+    cert_mtime: Option<SystemTime>,
+    key_mtime: Option<SystemTime>,
+    revoked_mtime: Option<SystemTime>,
+}
+
+impl MeshTls {
+    fn from_config(cfg: &MeshTlsConfig) -> Result<Self> {
+        let inner = MeshTlsInner::load(cfg)?;
+        Ok(Self {
+            cfg: cfg.clone(),
+            inner: tokio::sync::RwLock::new(inner),
+        })
+    }
+
+    fn cfg(&self) -> &MeshTlsConfig {
+        &self.cfg
+    }
+
+    async fn accept(
+        &self,
+        inbound: TcpStream,
+    ) -> Result<tokio_rustls::server::TlsStream<TcpStream>> {
+        self.maybe_reload().await?;
+        let acceptor = { self.inner.read().await.acceptor.clone() };
+        Ok(acceptor.accept(inbound).await?)
+    }
+
+    async fn connect(
+        &self,
+        stream: TcpStream,
+    ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+        self.maybe_reload().await?;
+        let (connector, server_name) = {
+            let guard = self.inner.read().await;
+            (guard.connector.clone(), guard.server_name.clone())
+        };
+        Ok(connector.connect(server_name, stream).await?)
+    }
+
+    async fn maybe_reload(&self) -> Result<()> {
+        let current = fingerprint_paths(&self.cfg);
+        let needs_reload = {
+            let guard = self.inner.read().await;
+            guard.fingerprint != current
+        };
+        if !needs_reload {
+            return Ok(());
+        }
+        let mut guard = self.inner.write().await;
+        // Double-check under write lock.
+        let current2 = fingerprint_paths(&self.cfg);
+        if guard.fingerprint == current2 {
+            return Ok(());
+        }
+        *guard = MeshTlsInner::load(&self.cfg)?;
+        Ok(())
+    }
+
+    async fn is_revoked(&self, node_id: &str) -> Result<bool> {
+        self.maybe_reload().await?;
+        if self.cfg.revoked_node_ids.iter().any(|n| n == node_id) {
+            return Ok(true);
+        }
+        let guard = self.inner.read().await;
+        Ok(guard.revoked_node_ids.iter().any(|n| n == node_id))
+    }
+}
+
+impl MeshTlsInner {
+    fn load(cfg: &MeshTlsConfig) -> Result<Self> {
+        let root = load_root_store(&cfg.ca_cert_path)?;
+        let certs = load_cert_chain(&cfg.cert_path)?;
+        let key = load_private_key(&cfg.key_path)?;
+        let revoked_node_ids = match &cfg.revoked_nodes_path {
+            Some(p) => load_revoked_nodes(p)?,
+            None => Vec::new(),
+        };
+
+        let client = ClientConfig::builder()
+            .with_root_certificates(root.clone())
+            .with_client_auth_cert(certs.clone(), key.clone_key())?;
+
+        let server = if cfg.require_client_auth {
+            let verifier = rustls::server::WebPkiClientVerifier::builder(root.into()).build()?;
+            ServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(certs, key)?
+        } else {
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)?
+        };
+
+        let server_name = rustls::pki_types::ServerName::try_from(cfg.server_name.as_str())
+            .map_err(|_| anyhow!("invalid mesh tls server_name: {}", cfg.server_name))?
+            .to_owned();
+
+        Ok(Self {
+            acceptor: TlsAcceptor::from(Arc::new(server)),
+            connector: TlsConnector::from(Arc::new(client)),
+            server_name,
+            fingerprint: fingerprint_paths(cfg),
+            revoked_node_ids,
+        })
+    }
+}
+
+fn fingerprint_paths(cfg: &MeshTlsConfig) -> MeshTlsFingerprint {
+    let mtime = |p: &PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let revoked_mtime = cfg
+        .revoked_nodes_path
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    MeshTlsFingerprint {
+        ca_mtime: mtime(&cfg.ca_cert_path),
+        cert_mtime: mtime(&cfg.cert_path),
+        key_mtime: mtime(&cfg.key_path),
+        revoked_mtime,
+    }
+}
+
+fn load_revoked_nodes(path: &PathBuf) -> Result<Vec<NodeId>> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow!("failed to read revoked node list {}: {}", path.display(), e))?;
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        for part in line.split(',') {
+            let v = part.trim();
+            if !v.is_empty() {
+                out.push(v.to_string());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+fn load_cert_chain(path: &PathBuf) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let f = File::open(path)?;
+    let mut r = BufReader::new(f);
+    let certs = rustls_pemfile::certs(&mut r).collect::<Result<Vec<_>, _>>()?;
+    if certs.is_empty() {
+        return Err(anyhow!("no certificates found in {}", path.display()));
+    }
+    Ok(certs)
+}
+
+fn load_private_key(path: &PathBuf) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    let f = File::open(path)?;
+    let mut r = BufReader::new(f);
+    let key = rustls_pemfile::private_key(&mut r)?
+        .ok_or_else(|| anyhow!("no private key found in {}", path.display()))?;
+    Ok(key)
+}
+
+fn load_root_store(path: &PathBuf) -> Result<RootCertStore> {
+    let certs = load_cert_chain(path)?;
+    let mut root = RootCertStore::empty();
+    for c in certs {
+        root.add(c)?;
+    }
+    Ok(root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use seep_mesh::{MeshRegistry, NodeRecord, NodeRole};
+
+    #[test]
+    fn from_env_strict_requires_paths_when_enabled() {
+        std::env::set_var("SEEP_MESH_MTLS", "1");
+        std::env::remove_var("SEEP_MESH_MTLS_CA");
+        std::env::remove_var("SEEP_MESH_MTLS_CERT");
+        std::env::remove_var("SEEP_MESH_MTLS_KEY");
+
+        let r = MeshTlsConfig::from_env_strict();
+        assert!(r.is_err());
+
+        std::env::remove_var("SEEP_MESH_MTLS");
+    }
+
+    #[test]
+    fn env_helpers_parse_flags_csv_and_paths() {
+        std::env::set_var("SEEP_TEST_FLAG", "yes");
+        assert!(env_flag("SEEP_TEST_FLAG", false));
+        assert!(!env_flag("SEEP_TEST_MISSING", false));
+        assert!(env_flag("SEEP_TEST_MISSING", true));
+        std::env::remove_var("SEEP_TEST_FLAG");
+
+        std::env::set_var("SEEP_TEST_CSV", " a, b ,,c , ");
+        assert_eq!(
+            parse_csv_env("SEEP_TEST_CSV"),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        std::env::remove_var("SEEP_TEST_CSV");
+
+        std::env::set_var("SEEP_TEST_PATH", "/tmp/seep-test-path");
+        assert_eq!(
+            parse_path_env("SEEP_TEST_PATH").unwrap(),
+            PathBuf::from("/tmp/seep-test-path")
+        );
+        std::env::remove_var("SEEP_TEST_PATH");
+    }
+
+    #[test]
+    fn load_revoked_nodes_parses_and_dedupes() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "seep_revoked_nodes_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "# comment\n\nnode3,node2\n node1 \nnode2\n").unwrap();
+
+        let out = load_revoked_nodes(&path).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                "node1".to_string(),
+                "node2".to_string(),
+                "node3".to_string()
+            ]
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[tokio::test]
     async fn relay_to_exit_to_target_roundtrip() {
@@ -193,19 +784,29 @@ mod tests {
         let exit_plane = MeshDataPlane::new("exit1".into(), exit_registry);
         let exit_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let exit_addr = exit_listener.local_addr().unwrap();
+        let exit_registry_for_handler = Arc::new(MeshRegistry::new());
+        exit_registry_for_handler
+            .register_node(NodeRecord::new("exit1".into(), NodeRole::Exit, exit_addr))
+            .unwrap();
         tokio::spawn(async move {
             loop {
                 let (stream, _) = exit_listener.accept().await.unwrap();
-                // Handler does not require registry at final hop.
-                let plane = MeshDataPlane::new("exit1".into(), Arc::new(MeshRegistry::new()));
+                let plane = MeshDataPlane::new("exit1".into(), exit_registry_for_handler.clone());
                 tokio::spawn(async move {
-                    let _ = plane.handle(stream).await;
+                    let _ = plane.handle_tcp(stream).await;
                 });
             }
         });
 
         // Relay node data-plane (knows how to reach exit1).
         let relay_registry = Arc::new(MeshRegistry::new());
+        relay_registry
+            .register_node(NodeRecord::new(
+                "relay1".into(),
+                NodeRole::Relay,
+                "127.0.0.1:0".parse().unwrap(),
+            ))
+            .unwrap();
         relay_registry
             .register_node(NodeRecord::new("exit1".into(), NodeRole::Exit, exit_addr))
             .unwrap();
@@ -217,7 +818,7 @@ mod tests {
                 let (stream, _) = relay_listener.accept().await.unwrap();
                 let this = MeshDataPlane::new("relay1".into(), relay_registry.clone());
                 tokio::spawn(async move {
-                    let _ = this.handle(stream).await;
+                    let _ = this.handle_tcp(stream).await;
                 });
             }
         });

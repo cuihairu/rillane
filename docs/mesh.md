@@ -9,7 +9,7 @@ This document describes the current MVP-level mesh control plane and chain (mult
 - `link-state`: directed edge metrics between two nodes (latency/bandwidth/loss).
 - `chain`: a computed path from a source node to a target node. In the current MVP, Seep can *compute*
   chains and attach path metadata to flows. TCP flows can also be forwarded hop-by-hop via the mesh
-  data-plane listener (no encryption/auth yet).
+  data-plane listener (supports optional mTLS for encryption/authentication).
 
 ## Control Plane (seepd)
 
@@ -51,6 +51,44 @@ upgraded to a `RouteDecision::Chain` via the `ChainManager`. The computed path w
 
 When `mesh` + `chain` are enabled, each node also listens on `MeshConfig.listen_address` (default
 `0.0.0.0:9091`) for hop-by-hop forwarding.
+
+### mTLS (Recommended / Secure-by-default for chain)
+
+- Enable mesh data-plane mTLS via env:
+  - `SEEP_MESH_MTLS=1`
+  - `SEEP_MESH_MTLS_CA=/path/to/ca.cert.pem`
+  - `SEEP_MESH_MTLS_CERT=/path/to/<node>.cert.pem`
+  - `SEEP_MESH_MTLS_KEY=/path/to/<node>.key.pem`
+  - Optional: `SEEP_MESH_MTLS_SERVER_NAME=seep`
+- When `chain` is enabled, seepd requires mTLS by default. For dev-only plaintext you can set:
+  - `SEEP_MESH_ALLOW_PLAINTEXT=1`
+
+#### CA Rotation (Bundle / 双信任窗口)
+
+Seep 支持把 `SEEP_MESH_MTLS_CA` 指向一个包含 **多个 CA cert** 的 PEM 文件（bundle）。推荐轮换流程：
+
+1. 生成新 CA + bundle（旧+新）：
+   - `seepctl mtls rotate-ca --old-ca-cert ca.cert.pem --out-dir ./mtls`
+2. 将 `./mtls/ca.bundle.pem` 下发到所有节点并设置 `SEEP_MESH_MTLS_CA`，重启/滚动更新，进入双信任窗口
+3. 逐个节点用新 CA 重签证书（`seepctl mtls rotate ... --ca-cert ./mtls/ca.next.cert.pem --ca-key ./mtls/ca.next.key.pem`）
+4. 全量切换完成后，将 `SEEP_MESH_MTLS_CA` 从 bundle 收敛为仅新 CA
+
+#### Revocation (最小实现)
+
+- `SEEP_MESH_MTLS_REVOKED_NODES=nodeA,nodeB`：按证书 CN（node_id）拒绝指定节点的 mTLS 连接（需重启生效）。
+- `SEEP_MESH_MTLS_REVOKED_NODES_FILE=/path/to/revoked.txt`：从文件加载撤销列表，支持热加载（文件 mtime 变化会触发 reload）。
+
+辅助命令（编辑撤销列表文件）：
+- `seepctl mtls revoke add --file revoked.txt --node-id nodeA`
+- `seepctl mtls revoke remove --file revoked.txt --node-id nodeA`
+- `seepctl mtls revoke list --file revoked.txt`
+
+### Metrics
+
+When `GET /metrics` is enabled, seepd exposes per-link counters (labels: `from`, `to`):
+- `seep_mesh_link_bytes_total`
+- `seep_mesh_link_connections_total`
+- `seep_mesh_link_errors_total`
 
 ### Wire Format
 
@@ -105,11 +143,16 @@ Client → Relay (path=[relay1, exit1]) → Exit (path=[exit1]) → Target
 
 ```rust
 use seep_runtime::{MeshDataPlane, MeshEnvelope};
-use seep_mesh::MeshRegistry;
+use seep_mesh::{MeshRegistry, NodeRecord, NodeRole};
 use std::sync::Arc;
 
 // Create data plane
 let registry = Arc::new(MeshRegistry::new());
+registry.register_node(NodeRecord::new(
+    "my-node".into(),
+    NodeRole::Hybrid,
+    "0.0.0.0:9091".parse().unwrap(),
+)).unwrap();
 let plane = MeshDataPlane::new("my-node".into(), registry);
 
 // Spawn listener
@@ -170,12 +213,11 @@ seepctl -c config/seep.yaml chain stats
 
 ## Security Notes (MVP Limitations)
 
-⚠️ **Current MVP does NOT include:**
+Current MVP includes hop-by-hop TLS via optional mTLS, but still does NOT include:
 
-- TLS/encryption for data-plane connections
-- Node authentication/authorization
-- Message authentication codes (MAC)
-- Replay protection
+- End-to-end (multi-hop) authenticated headers (MAC) / replay protection
+- Fine-grained ACL enforcement on each hop (beyond basic role checks)
+- Automatic CA rotation / revocation (CRL/OCSP)
 
 These features are planned for future releases. The current implementation is suitable for:
 - Development and testing

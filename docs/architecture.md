@@ -63,9 +63,9 @@ seep/
 - `seepctl subscription` 管理订阅源，支持 add/remove/list/refresh，守护进程可定时拉取并热更新路由。
 
 ## 安全与观测
-- Mesh 节点通信默认启用 mTLS/Noise，加密所有链路，配合证书/密钥轮换工具。
-- Telemetry/metrics 包含 per-node/per-link 流量、延迟、丢包、重试次数，方便控制面统计“谁使用了谁的流量”与 SLA。当前 MVP 已在 `FlowStats` 中记录入口与出口之间的累计字节，并通过 `tracing` 输出；后续会暴露为 API/Prometheus 指标。
-- 控制面接口：`control.api_bind` 默认提供 HTTP 接口，现阶段可通过 `GET /flows` 获取入口→出口流量统计，通过 `GET /nodes` 获取 mesh 节点快照，未来会扩展为完整的 REST/gRPC API。
+- Mesh 节点通信支持 data-plane mTLS（可选），用于 hop-by-hop 转发加密与认证；证书可通过 `seepctl mtls` 生成（CA/节点证书），并通过环境变量 `SEEP_MESH_MTLS_*` 注入运行时（MVP：可选启用，强制策略与轮换后续补齐）。
+- Telemetry/metrics 包含 per-node/per-link 流量、延迟、丢包、重试次数，方便控制面统计“谁使用了谁的流量”与 SLA。当前 `seepd` 在 `telemetry.enable_metrics=true` 时暴露 `GET /metrics`（Prometheus 文本格式），提供 mesh/chain/subscription 的基础指标；更细粒度的 per-link 流量与重试统计后续补齐。
+- 控制面接口：`control.api_bind` 默认提供 HTTP 接口，现阶段可通过 `GET /flows` 获取入口→出口流量统计，通过 `GET /nodes` 获取 mesh 节点快照，通过 `GET /metrics` 拉取 Prometheus 指标，未来会扩展为完整的 REST/gRPC API。
   - 链路相关：`POST /chains/dry-run`、`POST /chains`、`GET /chains/{chain_id}`、`GET /chains/stats` 等接口用于多跳链路预检与管理（MVP：计算路径与附加元数据，数据面多跳转发后续实现）。
 
 ## 当前状态与路线
