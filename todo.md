@@ -2,7 +2,7 @@
 
 > **定位**：一个代理内核，三种场景 —— 通用代理 / 游戏加速 / 网页加速。三者共享同一条数据通路（ingress → routing → egress/transport），混淆是横切层：加速 = 优化路由 + 流量伪装绕过 QoS/DPI，混淆 = 让流量渗过识别。
 >
-> **设计文档**：[docs/design/positioning.md](docs/design/positioning.md)（定位与底座拆解）· [docs/design/roadmap.md](docs/design/roadmap.md)（S0–S4 阶段规划）· [docs/architecture.md](docs/architecture.md) · [docs/mesh.md](docs/mesh.md) · [docs/PROTOCOLS.md](docs/PROTOCOLS.md)
+> **设计文档**：[docs/design/positioning.md](docs/design/positioning.md)（定位与底座拆解）· [docs/design/roadmap.md](docs/design/roadmap.md)（S0–S4 阶段规划）· [docs/design/udp-dataplane.md](docs/design/udp-dataplane.md)（S1 UDP 全链路设计稿）· [docs/architecture.md](docs/architecture.md) · [docs/mesh.md](docs/mesh.md) · [docs/PROTOCOLS.md](docs/PROTOCOLS.md)
 >
 > **优先级映射**：P0 → roadmap S1（UDP 全链路）；P1 → S2 + S3 前半（TUN / 混淆 MVP / 连接池）；P2 → S3 后半 + S4（调度闭环 / 安全 / profile）；P3 → 收尾（文档 / 插件 / 打包）。2026-09 对照代码核实后重排。
 
@@ -40,6 +40,7 @@
 ## P0 — UDP 全链路（roadmap S1 · 游戏加速地基）
 
 > 游戏流量以 UDP 为主，当前 `seep-protocols` 无任何 UDP 转发路径，这是三场景定位下最高杠杆的缺口。
+> 设计稿：[docs/design/udp-dataplane.md](docs/design/udp-dataplane.md)（各条技术方案、复用/新增清单与风险编号 R*/V*/O* 均在该稿）。
 
 - [ ] **P0-1 `seep-core` UDP 会话语义**：NAT 式 UDP 会话表（映射、超时回收、会话粘滞键=进程/五元组），与 `FlowSession` 打通。
   验收：会话创建/查询/超时回收有单测；同一粘滞键复用映射不重建。
