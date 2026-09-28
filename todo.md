@@ -43,6 +43,7 @@
 > 设计稿：[docs/design/udp-dataplane.md](docs/design/udp-dataplane.md)（各条技术方案、复用/新增清单与风险编号 R*/V*/O* 均在该稿）。
 
 - [ ] **P0-1 `seep-core` UDP 会话语义**：NAT 式 UDP 会话表（映射、超时回收、会话粘滞键=进程/五元组），与 `FlowSession` 打通。
+  实现级设计：[docs/design/udp-session-table.md](docs/design/udp-session-table.md)（两级映射/粘滞键优先级/回收状态机/集成映射表）。
   验收：会话创建/查询/超时回收有单测；同一粘滞键复用映射不重建。
 - [ ] **P0-2 SOCKS5 UDP ASSOCIATE 入站**：按 RFC 1928 实现 UDP 中继，接入 FlowRouter。
   验收：标准客户端经 socks5 入站 + direct 出站完成 DNS UDP 查询往返；`seepctl stats` 可见 UDP 会话。

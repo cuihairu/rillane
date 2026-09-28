@@ -51,6 +51,8 @@
 
 ## 1. UDP 会话表与粘滞键（P0-1）
 
+> 实现级展开：[udp-session-table.md](udp-session-table.md)（两级映射结构、粘滞键优先级与决策失效、回收状态机、FlowSession 逐字段集成与测试清单）。
+
 ### 1.1 复用
 
 | 现有资产 | 用途 |
