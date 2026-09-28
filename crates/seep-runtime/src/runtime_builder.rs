@@ -107,9 +107,36 @@ impl RuntimeBuilder {
         // 创建路由引擎
         let router = Arc::new(RoutingEngine::new(config_snapshot.routing.clone()));
 
+        // UDP 数据面（P0-2，udp-relay-path.md §2）：udp.enabled 时构建共享
+        // 会话表 + direct 出站连接器；路由决策用基础 RoutingEngine（mesh-chain
+        // 包装的 UDP 接线属 P0-4）。周期回收任务随首个 ASSOCIATE 拉起。
+        let udp_service = if config_snapshot.udp.enabled {
+            let table = seep_core::udp::UdpSessionTable::new(
+                seep_core::udp::UdpSessionConfig {
+                    session_idle: std::time::Duration::from_secs(
+                        config_snapshot.udp.session_idle_secs,
+                    ),
+                    mapping_idle: std::time::Duration::from_secs(
+                        config_snapshot.udp.mapping_idle_secs,
+                    ),
+                    max_sessions: config_snapshot.udp.max_sessions,
+                    ..Default::default()
+                },
+                Arc::clone(&router) as Arc<dyn FlowRouter>,
+                seep_core::udp::RealClock::new(),
+            )?;
+            Some(seep_core::udp::UdpAssociateService::new(
+                table,
+                Arc::new(seep_core::udp::DirectUdpConnector),
+                config_snapshot.udp.strict_udp_source,
+            ))
+        } else {
+            None
+        };
+
         // 入口/出口默认实现
         if self.ingress_endpoints.is_empty() {
-            self.ingress_endpoints = build_ingress_endpoints(&config_snapshot.ingress)?;
+            self.ingress_endpoints = build_ingress_endpoints(&config_snapshot.ingress, udp_service)?;
         }
         if self.flow_outputs.is_empty() {
             let (outputs, connectors) = build_egress_outputs(&config_snapshot.egress)?;
@@ -1444,6 +1471,7 @@ impl FlowOutput for ConnectorFlowOutput {
 
 fn build_ingress_endpoints(
     descriptors: &[IngressDescriptor],
+    udp: Option<Arc<seep_core::udp::UdpAssociateService>>,
 ) -> Result<HashMap<String, Arc<dyn IngressEndpoint>>> {
     let mut map = HashMap::new();
     for desc in descriptors {
@@ -1452,12 +1480,13 @@ fn build_ingress_endpoints(
                 desc.name.clone(),
                 bind.clone(),
                 auth.clone().unwrap_or_default(),
+                udp.clone(),
             )),
             IngressConfig::Http { bind } => {
                 Arc::new(HttpIngress::new(desc.name.clone(), bind.clone()))
             }
             IngressConfig::Mixed { bind } => {
-                Arc::new(MixedIngress::new(desc.name.clone(), bind.clone()))
+                Arc::new(MixedIngress::new(desc.name.clone(), bind.clone(), udp.clone()))
             }
         };
         map.insert(desc.name.clone(), endpoint);
@@ -1931,6 +1960,7 @@ mod tests {
                 groups: vec![],
                 rules: vec![],
             },
+            udp: seep_config::UdpConfig::default(),
         };
 
         let runtime = RuntimeBuilder::new(cfg)
@@ -1969,6 +1999,7 @@ mod tests {
                 groups: vec![],
                 rules: vec![],
             },
+            udp: seep_config::UdpConfig::default(),
         };
 
         let stats = runtime
@@ -2010,6 +2041,7 @@ mod tests {
                 }],
                 rules: vec![],
             },
+            udp: seep_config::UdpConfig::default(),
         };
 
         let delta = SeepConfig {
@@ -2072,6 +2104,7 @@ mod tests {
                     },
                 ],
             },
+            udp: seep_config::UdpConfig::default(),
         };
 
         let stats = merge_config_delta_in_place(&mut target, &delta);

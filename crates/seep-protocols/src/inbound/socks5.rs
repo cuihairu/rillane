@@ -5,6 +5,7 @@ use std::{net::Ipv6Addr, sync::Arc};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use seep_config::Credential;
+use seep_core::udp::UdpAssociateService;
 use seep_core::{
     BoxedIo, Flow, FlowId, FlowMetadata, FlowOutput, FlowRouter, FlowTarget, IngressEndpoint,
     TargetProto,
@@ -20,6 +21,7 @@ pub(crate) async fn handle_socks5_stream(
     mut stream: TcpStream,
     router: Arc<dyn FlowRouter>,
     output: Arc<dyn FlowOutput>,
+    udp: Option<Arc<UdpAssociateService>>,
 ) -> Result<()> {
     let client_addr = stream.peer_addr().ok();
     let auth_required = !credentials.is_empty();
@@ -27,16 +29,54 @@ pub(crate) async fn handle_socks5_stream(
     // 协商认证方法
     negotiate_method(&mut stream, auth_required).await?;
 
-    // 执行认证
-    if auth_required {
-        perform_auth(&mut stream, credentials).await?;
+    // 执行认证（用户名用于 UDP 粘滞键 user 维度，udp-session-table.md §3.1）
+    let username = if auth_required {
+        Some(perform_auth(&mut stream, credentials).await?)
+    } else {
+        None
+    };
+
+    // 解析请求（命令分派：0x01 CONNECT / 0x03 UDP ASSOCIATE，其余 0x07）
+    let (cmd, target_host, target_port) = parse_request_cmd(&mut stream).await?;
+    match cmd {
+        0x01 => {
+            send_success(&mut stream).await?;
+            forward_tcp(
+                ingress_node_name,
+                client_addr,
+                stream,
+                router,
+                output,
+                target_host,
+                target_port,
+            )
+            .await
+        }
+        0x03 => match udp {
+            // udp_enabled=false → 0x07（udp-relay-path.md §2.1）
+            None => {
+                send_error(&mut stream, 0x07).await?;
+                bail!("UDP ASSOCIATE 未启用（udp.enabled=false）");
+            }
+            Some(svc) => svc.serve(&mut stream, username).await,
+        },
+        _ => {
+            send_error(&mut stream, 0x07).await?;
+            bail!("不支持的 SOCKS5 命令: {cmd}");
+        }
     }
+}
 
-    // 解析请求
-    let (target_host, target_port) = parse_request(&mut stream).await?;
-    send_success(&mut stream).await?;
-
-    // 构建 Flow
+/// CONNECT 既有路径：构建 Flow 流式转发（行为不变）
+async fn forward_tcp(
+    ingress_node_name: &str,
+    client_addr: Option<std::net::SocketAddr>,
+    stream: TcpStream,
+    router: Arc<dyn FlowRouter>,
+    output: Arc<dyn FlowOutput>,
+    target_host: String,
+    target_port: u16,
+) -> Result<()> {
     let mut metadata = FlowMetadata::default();
     metadata.tags = vec![
         "ingress:socks5".into(),
@@ -62,7 +102,6 @@ pub(crate) async fn handle_socks5_stream(
         metadata,
     };
 
-    // 路由并转发
     let ctx = flow.context();
     let decision = router.route(ctx).await.context("路由计算失败")?;
     output
@@ -78,14 +117,22 @@ pub struct Socks5Ingress {
     name: String,
     bind: String,
     credentials: Vec<Credential>,
+    /// UDP ASSOCIATE 服务（None = udp.enabled=false → 0x03 应 0x07）
+    udp: Option<Arc<UdpAssociateService>>,
 }
 
 impl Socks5Ingress {
-    pub fn new(name: String, bind: String, credentials: Vec<Credential>) -> Self {
+    pub fn new(
+        name: String,
+        bind: String,
+        credentials: Vec<Credential>,
+        udp: Option<Arc<UdpAssociateService>>,
+    ) -> Self {
         Self {
             name,
             bind,
             credentials,
+            udp,
         }
     }
 
@@ -101,6 +148,7 @@ impl Socks5Ingress {
             stream,
             router,
             output,
+            self.udp.clone(),
         )
         .await
     }
@@ -173,8 +221,8 @@ where
     Ok(())
 }
 
-/// 执行用户名密码认证
-async fn perform_auth<S>(stream: &mut S, users: &[Credential]) -> Result<()>
+/// 执行用户名密码认证，成功返回用户名（UDP 粘滞键 user 维度）
+async fn perform_auth<S>(stream: &mut S, users: &[Credential]) -> Result<String>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -204,15 +252,16 @@ where
 
     if valid {
         stream.write_all(&[0x01, 0x00]).await?;
-        Ok(())
+        Ok(username)
     } else {
         stream.write_all(&[0x01, 0x01]).await?;
         bail!("认证失败")
     }
 }
 
-/// 解析 SOCKS5 请求
-async fn parse_request<S>(stream: &mut S) -> Result<(String, u16)>
+/// 解析 SOCKS5 请求头，返回 (命令, 目标地址, 端口)。命令分派由调用方处理
+/// （0x01 CONNECT / 0x03 UDP ASSOCIATE；其余由调用方应 0x07）
+async fn parse_request_cmd<S>(stream: &mut S) -> Result<(u8, String, u16)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -222,12 +271,7 @@ where
     if header[0] != 0x05 {
         bail!("SOCKS5 请求版本错误");
     }
-
-    // 仅支持 CONNECT 命令
-    if header[1] != 0x01 {
-        send_error(stream, 0x07).await?; // Command not supported
-        bail!("仅支持 CONNECT 命令");
-    }
+    let cmd = header[1];
 
     // 解析地址
     let host = match header[3] {
@@ -257,7 +301,7 @@ where
     };
 
     let port = read_u16(stream).await?;
-    Ok((host, port))
+    Ok((cmd, host, port))
 }
 
 /// 发送成功响应

@@ -36,6 +36,7 @@ async fn mesh_target_routes_to_chain_decision() {
             groups: vec![],
             rules: vec![],
         },
+    udp: seep_config::UdpConfig::default(),
     };
 
     let rt_cfg = RuntimeConfig {

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use seep_core::udp::UdpAssociateService;
 use seep_core::{FlowOutput, FlowRouter, IngressEndpoint};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -13,11 +14,13 @@ use super::{http::handle_http_connect_stream, socks5::handle_socks5_stream};
 pub struct MixedIngress {
     name: String,
     bind: String,
+    /// UDP ASSOCIATE 服务（socks5 分支共享；None = 未启用）
+    udp: Option<Arc<UdpAssociateService>>,
 }
 
 impl MixedIngress {
-    pub fn new(name: String, bind: String) -> Self {
-        Self { name, bind }
+    pub fn new(name: String, bind: String, udp: Option<Arc<UdpAssociateService>>) -> Self {
+        Self { name, bind, udp }
     }
 
     async fn handle_client(
@@ -33,7 +36,7 @@ impl MixedIngress {
         }
 
         if first[0] == 0x05 {
-            handle_socks5_stream(self.name.as_str(), &[], stream, router, output).await
+            handle_socks5_stream(self.name.as_str(), &[], stream, router, output, self.udp.clone()).await
         } else {
             handle_http_connect_stream(self.name.as_str(), stream, router, output).await
         }

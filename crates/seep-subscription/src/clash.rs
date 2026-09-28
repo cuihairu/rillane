@@ -629,6 +629,7 @@ impl ClashConverter {
             ingress: vec![], // Clash 配置不包含入口配置
             egress,
             routing,
+            udp: seep_config::UdpConfig::default(),
         };
 
         debug!(

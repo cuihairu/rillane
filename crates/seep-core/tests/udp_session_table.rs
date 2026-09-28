@@ -450,21 +450,92 @@ async fn shutdown_drops_uplink_and_rejects_resolve() {
 // ---------- 发送失败与下行满载 ----------
 
 #[tokio::test]
-async fn send_failure_revokes_mapping_and_classifies_error() {
+async fn route_failure_revokes_mapping_and_clears_decision() {
+    // §3.6：路由不可达 → 映射关闭 + 决策缓存清除（触发重路由）
     let c = make_table(|_| {}).await;
     let key = UdpSessionKey::new(addr(54000));
     let t = udp_target("sf.test", 1);
     let sref = c.table.resolve(&key, &t).await.unwrap();
     let (r, _x) = MockUdpRelay::new(t.clone());
-    r.fail_sends(true);
+    r.fail_route(true);
     sref.bind_mapping(&t, r).await.unwrap();
+    assert!(sref.decision().is_some());
 
     let res = sref.send_up(&t, Bytes::from_static(b"x")).await;
     assert_eq!(res, seep_core::udp::UpResult::Dropped { reason: DropReason::SendFailed });
     wait_until(|| !sref.has_mapping(&t)).await;
+    assert!(sref.decision().is_none());
     assert_eq!(c.table.snapshot().dropped.get("send_failed"), Some(&1));
-    // 错误分类："mock send failure" → Connection
+    // 错误分类："mock route failure" → Route 记账（Failed）
     wait_until(|| sref.ledger().status() == SessionStatus::Failed).await;
+}
+
+#[tokio::test]
+async fn timeout_failure_keeps_mapping() {
+    // §3.6：目标超时/不可达 → record_failure，映射保留待空闲回收
+    //（游戏服务器"不回首个包"探测不被立即拆映射）
+    let c = make_table(|_| {}).await;
+    let key = UdpSessionKey::new(addr(54100));
+    let t = udp_target("to.test", 1);
+    let sref = c.table.resolve(&key, &t).await.unwrap();
+    let (r, _x) = MockUdpRelay::new(t.clone());
+    r.fail_timeout(true);
+    sref.bind_mapping(&t, r.clone()).await.unwrap();
+
+    for _ in 0..3 {
+        let res = sref.send_up(&t, Bytes::from_static(b"x")).await;
+        assert_eq!(res, seep_core::udp::UpResult::Dropped { reason: DropReason::SendFailed });
+    }
+    sleep(Duration::from_millis(50)).await;
+    assert!(sref.has_mapping(&t), "timeout 类失败不应拆映射");
+    assert_eq!(c.table.snapshot().dropped.get("send_failed"), Some(&3));
+    // 恢复后同一映射继续可用
+    r.clear_failures();
+    assert_eq!(sref.send_up(&t, Bytes::from_static(b"ok")).await, seep_core::udp::UpResult::Sent);
+}
+
+#[tokio::test]
+async fn connection_failures_rebuild_mapping_after_three() {
+    // §3.6：传输 IO 错误连续 ≥3 次触发映射重建；成功归零计数
+    let c = make_table(|_| {}).await;
+    let key = UdpSessionKey::new(addr(54200));
+    let t = udp_target("cn.test", 1);
+    let sref = c.table.resolve(&key, &t).await.unwrap();
+    let (r, _x) = MockUdpRelay::new(t.clone());
+    r.fail_sends(true);
+    sref.bind_mapping(&t, r).await.unwrap();
+
+    for i in 1..=2 {
+        let _ = sref.send_up(&t, Bytes::from_static(b"x")).await;
+        sleep(Duration::from_millis(30)).await;
+        assert!(sref.has_mapping(&t), "第 {i} 次连接类失败不应拆映射");
+    }
+    let _ = sref.send_up(&t, Bytes::from_static(b"x")).await; // 第 3 次
+    wait_until(|| !sref.has_mapping(&t)).await;
+}
+
+#[tokio::test]
+async fn success_resets_consecutive_error_count() {
+    let c = make_table(|_| {}).await;
+    let key = UdpSessionKey::new(addr(54300));
+    let t = udp_target("rs.test", 1);
+    let sref = c.table.resolve(&key, &t).await.unwrap();
+    let (r, _x) = MockUdpRelay::new(t.clone());
+    r.fail_sends(true);
+    sref.bind_mapping(&t, r.clone()).await.unwrap();
+
+    let _ = sref.send_up(&t, Bytes::from_static(b"x")).await;
+    let _ = sref.send_up(&t, Bytes::from_static(b"x")).await;
+    r.clear_failures();
+    assert_eq!(sref.send_up(&t, Bytes::from_static(b"ok")).await, seep_core::udp::UpResult::Sent);
+    // 成功归零：再连挂 2 次仍不拆，第 3 次才拆
+    r.fail_sends(true);
+    let _ = sref.send_up(&t, Bytes::from_static(b"x")).await;
+    let _ = sref.send_up(&t, Bytes::from_static(b"x")).await;
+    sleep(Duration::from_millis(30)).await;
+    assert!(sref.has_mapping(&t));
+    let _ = sref.send_up(&t, Bytes::from_static(b"x")).await;
+    wait_until(|| !sref.has_mapping(&t)).await;
 }
 
 #[tokio::test]

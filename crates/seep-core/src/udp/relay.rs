@@ -59,6 +59,21 @@ pub(crate) async fn resolve_first(host: &str, port: u16) -> Result<SocketAddr> {
     Ok(addr)
 }
 
+/// direct 出站连接器（udp-relay-path.md §3.2）：每目标独立本地 UDP socket，
+/// send 错误含 ConnectionRefused 归类 Timeout（§3.6），映射保留由空闲回收。
+pub struct DirectUdpConnector;
+
+#[async_trait]
+impl EgressUdpConnector for DirectUdpConnector {
+    fn name(&self) -> &str {
+        "direct"
+    }
+
+    async fn associate(&self, ctx: FlowContext) -> Result<Arc<dyn UdpRelay>> {
+        Ok(Arc::new(LocalRelay::connect(&ctx.target).await?))
+    }
+}
+
 #[async_trait]
 impl UdpRelay for LocalRelay {
     async fn send_to(&self, _target: &FlowTarget, buf: &[u8]) -> Result<()> {
@@ -88,7 +103,8 @@ pub struct MockUdpRelay {
 
 struct MockState {
     sends: Vec<(FlowTarget, Vec<u8>)>,
-    fail_sends: bool,
+    /// Some(消息) = 注入发送失败；消息措辞决定 classify_failure 的分类
+    fail_msg: Option<&'static str>,
 }
 
 impl MockUdpRelay {
@@ -96,14 +112,30 @@ impl MockUdpRelay {
         let (tx, rx) = mpsc::channel(16);
         let relay = Arc::new(Self {
             target,
-            state: Mutex::new(MockState { sends: Vec::new(), fail_sends: false }),
+            state: Mutex::new(MockState { sends: Vec::new(), fail_msg: None }),
             rx: AsyncMutex::new(rx),
         });
         (relay, tx)
     }
 
+    /// 注入 Connection 类失败（默认）
     pub fn fail_sends(&self, on: bool) {
-        self.state.lock().unwrap().fail_sends = on;
+        self.state.lock().unwrap().fail_msg =
+            on.then_some("mock send failure");
+    }
+
+    /// 注入 Route 类失败（消息含 "route"）
+    pub fn fail_route(&self, on: bool) {
+        self.state.lock().unwrap().fail_msg = on.then_some("mock route failure");
+    }
+
+    /// 注入 Timeout 类失败（消息含 "timeout"）
+    pub fn fail_timeout(&self, on: bool) {
+        self.state.lock().unwrap().fail_msg = on.then_some("mock timeout failure");
+    }
+
+    pub fn clear_failures(&self) {
+        self.state.lock().unwrap().fail_msg = None;
     }
 
     pub fn send_count(&self) -> usize {
@@ -115,8 +147,8 @@ impl MockUdpRelay {
 impl UdpRelay for MockUdpRelay {
     async fn send_to(&self, target: &FlowTarget, buf: &[u8]) -> Result<()> {
         let mut s = self.state.lock().unwrap();
-        if s.fail_sends {
-            anyhow::bail!("mock send failure");
+        if let Some(msg) = s.fail_msg {
+            anyhow::bail!("{msg}");
         }
         s.sends.push((target.clone(), buf.to_vec()));
         Ok(())
@@ -152,5 +184,6 @@ pub trait EgressUdpConnector: Send + Sync {
     fn udp_capable(&self) -> bool {
         true
     }
-    async fn associate(&self, ctx: FlowContext) -> Result<Box<dyn UdpRelay>>;
+    /// 返回 Arc：forwarder task 与发送路径共享所有权（api 文档 §9 注记 #3 同口径）
+    async fn associate(&self, ctx: FlowContext) -> Result<Arc<dyn UdpRelay>>;
 }

@@ -35,6 +35,8 @@ pub struct MappingShared {
     pub pkts_down: AtomicU64,
     /// 关闭信号：teardown 置 true，forwarder 退出（锁外 IO 原则，api 文档 §5.1）
     pub close_tx: watch::Sender<bool>,
+    /// 连续发送失败计数（§3.6：Connection 类 ≥3 次触发映射重建；成功归零）
+    pub consecutive_errors: AtomicU64,
 }
 
 impl MappingShared {

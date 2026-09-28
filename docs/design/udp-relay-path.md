@@ -151,3 +151,21 @@ IPv4: [20B IP 头（src=WG address 配置, dst=target, proto=17, 校验和）| 8
 | O9 | 同键并发 ASSOCIATE 拒绝策略（§2.6）是否放宽为 fan-out | 有真实客户端需求再议 |
 | V1 | hy2 crate 能力核查 = P0-3 第一工单（§3.4 四检查点） | 决定验收口径是否降级 |
 | R3/R7/R8 | BND 地址多宿主 / ss 防滥用（本文 §3.3 已落地结构保证）/ WG MTU | 见 udp-dataplane.md §7 汇总 |
+
+## 6. 实施注记（P0-2 落地裁决，2026-09）
+
+代码：`seep-core/src/udp/associate.rs`（服务与准入）、`seep-protocols/src/inbound/socks5.rs`（命令分派）、`seep-runtime/src/runtime_builder.rs`（接线）、`seep-config`（`udp:` 块）。测试：`seep-core/tests/udp_associate.rs`（11 项）+ `udp_session_table.rs` §3.6 分级 teardown 4 项。
+
+| # | 草案 | 实施 | 裁决理由 |
+|---|------|------|---------|
+| 1 | §2.4 下行满 `dropped{reason="no_mapping"}` | `DropReason::DownlinkFull`（表侧语义命名） | "映射存在但通道满"与"无映射"是两种事件，混称误导 |
+| 2 | SOCKS5 UDP 帧编解码归属未定 | `seep-core::udp::associate`（`parse_udp_header`/`encode_udp_header` 纯函数） | 服务循环每包编解码需与表同侧；protocols→core 依赖方向顺从 |
+| 3 | §2.6 并发门键 | 控制连接对端 (ip, port)；数据报源以实测入粘滞键 | ASSOCIATE 时刻数据报源未知；同键判定在门层、会话键在表层，两层各自成立 |
+| 4 | §3.6 落地口径 | 发送侧分级 teardown：Route→拆映射+清决策缓存；Timeout→保留映射（计数归零）；Connection→连续 ≥3 拆（成功归零）；recv 侧错误（forwarder）直接退映射 | recv 错误即 relay 已死无恢复路径；send 侧按 §3.6 表逐行实现并有测试钉住 |
+| 5 | 回收任务启动时机未定 | 首个 ASSOCIATE 的 `Once` 拉起 `spawn_reclaimer` | build 阶段无 tokio 上下文；会话不可能先于 ASSOCIATE 存在 |
+| 6 | P0-2 路由面 | 基础 `RoutingEngine` 实现 `FlowRouter`；mesh-chain 感知的 UDP 路由归 P0-4 | 单跳范围（本文 §1）；RuntimeFlowRouter 包装依赖 mesh 组件，P0-4 一起接 |
+| 7 | `EgressUdpConnector::associate` 返回类型 | `Arc<dyn UdpRelay>`（非 Box，与 api 文档 §9 #3 同口径） | forwarder 与发送路径共享所有权 |
+| 8 | mixed 入口未提 | `MixedIngress` 同享 ASSOCIATE（同一服务实例透传） | socks5 分支复用同一条处理路径，无额外成本 |
+| 9 | `perform_auth` 无返回 | 返回认证用户名 → 粘滞键 `user` 维度 | udp-session-table.md §3.1 的 user 维度接线点 |
+
+**验收状态（§2.7）**：DNS 式 UDP 往返（真 socket、strict 源校验开、direct 出站、下行封帧）已由 `dns_style_roundtrip_via_associate_and_direct` 钉住；FRAG≠0 / 截断头 / 伪造源（127.0.0.2）/ 并发 ASSOCIATE 拒绝各有独立测试。"标准 CLI 客户端（curl/dig）+ `seepctl stats` 可见"的联调归 P0-5（观测接线后）。

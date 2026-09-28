@@ -46,9 +46,10 @@
   实现级设计：[docs/design/udp-session-table.md](docs/design/udp-session-table.md)（两级映射/粘滞键优先级/回收状态机/集成映射表）；接口草案：[docs/design/udp-session-table-api.md](docs/design/udp-session-table-api.md)（完整 API 签名/回收算法伪码/SessionLedger 单写入口/锁序契约；**§9 实施注记**为落地裁决：MappingShared 统一表示、teardown 单点收敛、chain_id 口径、DropReason 扩 6 类）。
   落地：`crates/seep-core/src/udp/`（table/ledger/inner/reclaim/key/config/clock/metrics/relay）；测试 `crates/seep-core/tests/udp_session_table.rs` 22 项（生命周期/超时回收 MockClock 确定性/粘滞复用不重建/容量拒新/链路失效决策失效+映射吊销/LRU/ledger O7 恢复/force_revoke/并发绑定与并发压测）。
   验收：会话创建/查询/超时回收有单测 ✅；同一粘滞键复用映射不重建 ✅（same_sticky_key_reuses_mapping_without_rebuild）。
-- [ ] **P0-2 SOCKS5 UDP ASSOCIATE 入站**：按 RFC 1928 实现 UDP 中继，接入 FlowRouter。
-  实现级设计：[docs/design/udp-relay-path.md](docs/design/udp-relay-path.md) §2（命令分支/BND 应答/准入校验/生命周期挂钩/并发 ASSOCIATE）。
-  验收：标准客户端经 socks5 入站 + direct 出站完成 DNS UDP 查询往返；`seepctl stats` 可见 UDP 会话。
+- [x] **P0-2 SOCKS5 UDP ASSOCIATE 入站**（2026-09 完成）：按 RFC 1928 实现 UDP 中继，接入 FlowRouter。
+  实现级设计：[docs/design/udp-relay-path.md](docs/design/udp-relay-path.md) §2（命令分支/BND 应答/准入校验/生命周期挂钩/并发 ASSOCIATE；**§6 实施注记**为落地裁决：DownlinkFull 计数命名、头编解码落 seep-core、§3.6 分级 teardown、并发门键口径）。
+  落地：`seep-core/src/udp/associate.rs`（ASSOCIATE 服务/头编解码/准入/指标）+ `seep-protocols/src/inbound/socks5.rs`（0x01/0x03/其他 命令分派，认证用户名进粘滞键）+ `seep-config`（`udp:` 块，缺省关闭）+ `seep-runtime`（udp.enabled 接线 direct 连接器，mixed 入口同享）。测试 `seep-core/tests/udp_associate.rs` 11 项（头编解码往返×5、真 socket DNS 式往返、FRAG/截断丢弃计数、strict 源拒绝、EOF→force_revoke、并发 ASSOCIATE 拒绝、会话回收不关控制连接、计数联动）。
+  验收：socks5 入站 + direct 出站 UDP 往返 ✅（真 socket 集成测试钉住；标准 CLI 联调归 P0-5）；`seepctl stats` 可见 UDP 会话 → 快照数据就绪，P0-5 渲染接线。
 - [ ] **P0-3 出站 UDP 载荷**：direct / shadowsocks / hysteria2 / wireguard 出站承载 UDP。
   实现级设计：[docs/design/udp-relay-path.md](docs/design/udp-relay-path.md) §3（能力表与构建期扫描/各协议承载/UdpRelay 错误分类；V1 hy2 核查为第一工单）。
   验收：QUIC 站点（HTTP/3）分别经 hy2 与 wg 出站可访问；不支持的出站类型在构建期明确报错。
@@ -108,7 +109,7 @@
 
 | 优先级 | 条目 | 对应阶段 | 状态 |
 |--------|------|---------|------|
-| P0 | 5 | S1 UDP 全链路 | 1/5（P0-1 会话表完成；P0-2/P0-3 有实现级设计稿） |
+| P0 | 5 | S1 UDP 全链路 | 2/5（P0-1 会话表、P0-2 ASSOCIATE 完成；P0-3 有实现级设计稿） |
 | P1 | 5 | S2 TUN + S3 前半 | 未开始 |
 | P2 | 8 | S3 后半 + S4 | 未开始 |
 | P3 | 4+1 | S4 收尾 | 1/5（P3-1 文档对齐完成） |

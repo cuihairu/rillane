@@ -1648,6 +1648,7 @@ proxies:
                     groups: vec![],
                     rules: vec![],
                 },
+                udp: seep_config::UdpConfig::default(),
             },
             stats: ConversionStats {
                 input: InputStats {

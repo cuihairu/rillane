@@ -424,6 +424,7 @@ impl SeepDslConverter {
             ingress: vec![], // Seep DSL 不包含入口配置
             egress,
             routing,
+            udp: seep_config::UdpConfig::default(),
         };
 
         debug!(

@@ -62,10 +62,11 @@ pub struct UdpSessionTable {
     pub(crate) shutdown_rx: watch::Receiver<bool>,
 }
 
-/// 错误分类（udp-relay-path.md §3.6）：发送失败 → FailureType 记账
+/// 错误分类（udp-relay-path.md §3.6）：发送失败 → FailureType 记账。
+/// ConnectionRefused → Timeout（§3.2：目标端口未开，映射保留待空闲回收）。
 pub fn classify_failure(e: &anyhow::Error) -> FailureType {
     let s = format!("{e:#}").to_lowercase();
-    if s.contains("timeout") || s.contains("timed out") {
+    if s.contains("timeout") || s.contains("timed out") || s.contains("refused") {
         FailureType::Timeout
     } else if s.contains("route")
         || s.contains("unreachable")
@@ -342,14 +343,33 @@ pub(crate) async fn send_via_mapping(
     match mapping.relay.send_to(target, &data).await {
         Ok(()) => {
             mapping.count_up(data.len());
+            mapping.consecutive_errors.store(0, Ordering::Relaxed);
             UpResult::Sent
         }
         Err(e) => {
-            // 发送失败：记账 + 请求 forwarder 退出（teardown 唯一路径在
-            // forwarder：摘映射 + 扣计数，下一包重新关联，设计 §5.1）
-            inner.ledger.on_error(classify_failure(&e));
+            // 错误分类契约（udp-relay-path.md §3.6）：分类记账 + 分级 teardown
+            let ft = classify_failure(&e);
+            match &ft {
+                FailureType::Route => {
+                    // 路由不可达：映射关闭 + 决策缓存清除（触发重路由）
+                    mapping.close();
+                    *inner.decision.write().unwrap() = None;
+                }
+                FailureType::Timeout => {
+                    // 目标不可达/超时：映射保留待空闲回收（游戏服务器
+                    // "不回首个包"的探测不被 ICMP 立即拆映射）
+                    mapping.consecutive_errors.store(0, Ordering::Relaxed);
+                }
+                FailureType::Connection => {
+                    // 传输 IO 错误：连续 ≥3 次触发映射重建
+                    let n = mapping.consecutive_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n >= 3 {
+                        mapping.close();
+                    }
+                }
+            }
+            inner.ledger.on_error(ft);
             metrics.drop_inc(DropReason::SendFailed);
-            mapping.close();
             UpResult::Dropped { reason: DropReason::SendFailed }
         }
     }
@@ -444,6 +464,7 @@ impl SessionRef {
             pkts_up: AtomicU64::new(0),
             pkts_down: AtomicU64::new(0),
             close_tx,
+            consecutive_errors: AtomicU64::new(0),
         });
 
         let mut map = self.inner.mappings.lock().unwrap();

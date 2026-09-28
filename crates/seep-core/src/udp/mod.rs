@@ -12,6 +12,7 @@
 //! - 映射统一为 `Arc<MappingShared>`（含关闭用 watch），替代 `UdpBinding` 枚举的内部表示；
 //! - 新增 `SessionRef::{bind_mapping, send_up, has_mapping, take_downlink_rx}`（中继路径接线所需）。
 
+pub mod associate;
 pub mod clock;
 pub mod config;
 pub mod key;
@@ -23,6 +24,9 @@ pub mod table;
 mod inner;
 mod reclaim;
 
+pub use associate::{
+    encode_udp_header, parse_udp_header, UdpAssociateService, UdpHeaderError, UdpIngressMetrics,
+};
 pub use clock::{Clock, MockClock, RealClock};
 pub use config::UdpSessionConfig;
 pub use inner::{FlowTargetKey, MappingShared, UdpSessionInner};
@@ -31,7 +35,7 @@ pub use ledger::SessionLedger;
 pub use metrics::{Dir, DropReason, ExpireReason, SessionSnapshot, TableMetrics, TableSnapshot};
 pub use reclaim::{sweep_once, SweepStats};
 pub use relay::{
-    EgressUdpConnector, LocalRelay, MockUdpRelay, DownlinkPacket, UdpRelay,
+    DirectUdpConnector, DownlinkPacket, EgressUdpConnector, LocalRelay, MockUdpRelay, UdpRelay,
 };
 pub use table::{BindOutcome, ResolveError, SessionRef, UpResult, UdpSessionTable};
 

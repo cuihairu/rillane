@@ -15,6 +15,55 @@ pub struct SeepConfig {
     pub ingress: Vec<IngressDescriptor>,
     pub egress: Vec<EgressDescriptor>,
     pub routing: RoutingConfig,
+    /// UDP 数据面（P0-2；缺省整块关闭，兼容既有配置）
+    #[serde(default)]
+    pub udp: UdpConfig,
+}
+
+/// UDP 数据面配置（udp-dataplane.md §5.2 / udp-relay-path.md §2）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct UdpConfig {
+    /// 总开关：false 时 socks5 ASSOCIATE 应答 0x07（udp-relay-path.md §2.1）
+    #[serde(default)]
+    pub enabled: bool,
+    /// 数据报源 IP 校验（防中继借用，§2.3 步骤 3；默认开）
+    #[serde(default = "default_true")]
+    pub strict_udp_source: bool,
+    /// 会话空闲上限（秒）
+    #[serde(default = "default_udp_session_idle")]
+    pub session_idle_secs: u64,
+    /// 目标映射空闲上限（秒）
+    #[serde(default = "default_udp_mapping_idle")]
+    pub mapping_idle_secs: u64,
+    /// 全局并发会话上界（满员拒新）
+    #[serde(default = "default_udp_max_sessions")]
+    pub max_sessions: usize,
+}
+
+impl Default for UdpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            strict_udp_source: true,
+            session_idle_secs: 180,
+            mapping_idle_secs: 60,
+            max_sessions: 4096,
+        }
+    }
+}
+
+const fn default_true() -> bool {
+    true
+}
+const fn default_udp_session_idle() -> u64 {
+    180
+}
+const fn default_udp_mapping_idle() -> u64 {
+    60
+}
+const fn default_udp_max_sessions() -> usize {
+    4096
 }
 
 impl SeepConfig {
