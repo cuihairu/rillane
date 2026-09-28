@@ -46,8 +46,10 @@
   实现级设计：[docs/design/udp-session-table.md](docs/design/udp-session-table.md)（两级映射/粘滞键优先级/回收状态机/集成映射表）。
   验收：会话创建/查询/超时回收有单测；同一粘滞键复用映射不重建。
 - [ ] **P0-2 SOCKS5 UDP ASSOCIATE 入站**：按 RFC 1928 实现 UDP 中继，接入 FlowRouter。
+  实现级设计：[docs/design/udp-relay-path.md](docs/design/udp-relay-path.md) §2（命令分支/BND 应答/准入校验/生命周期挂钩/并发 ASSOCIATE）。
   验收：标准客户端经 socks5 入站 + direct 出站完成 DNS UDP 查询往返；`seepctl stats` 可见 UDP 会话。
 - [ ] **P0-3 出站 UDP 载荷**：direct / shadowsocks / hysteria2 / wireguard 出站承载 UDP。
+  实现级设计：[docs/design/udp-relay-path.md](docs/design/udp-relay-path.md) §3（能力表与构建期扫描/各协议承载/UdpRelay 错误分类；V1 hy2 核查为第一工单）。
   验收：QUIC 站点（HTTP/3）分别经 hy2 与 wg 出站可访问；不支持的出站类型在构建期明确报错。
 - [ ] **P0-4 mesh data-plane UDP 转发**：多跳 UDP（envelope over UDP/QUIC 数据报），与现有 TCP 面共存。
   验收：两跳链路（client → relay → exit）UDP 双向转发；对端不可达时按超时回收。
@@ -105,9 +107,9 @@
 
 | 优先级 | 条目 | 对应阶段 | 状态 |
 |--------|------|---------|------|
-| P0 | 5 | S1 UDP 全链路 | 未开始 |
+| P0 | 5 | S1 UDP 全链路 | 未实现（设计就绪：P0-1/P0-2/P0-3 有实现级设计稿） |
 | P1 | 5 | S2 TUN + S3 前半 | 未开始 |
 | P2 | 8 | S3 后半 + S4 | 未开始 |
-| P3 | 4+1 | S4 收尾 | 未开始 |
+| P3 | 4+1 | S4 收尾 | 1/5（P3-1 文档对齐完成） |
 
 已完成底座（S0）9 大项见上文归档清单；原 19 条清单中 10 项核实为真实完成、3 项勘误重开、其余并入 P0–P3 对应条目。
