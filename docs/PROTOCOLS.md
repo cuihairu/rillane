@@ -2,9 +2,26 @@
 
 Seep 是一个高性能的网络路由代理系统，支持多种主流的网络协议。
 
+> **实现状态标注（2026-09 对照代码核实）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
+>
+> | 能力 | 状态 | 落地去向 |
+> |------|------|---------|
+> | 入站 socks5 (CONNECT) / http (CONNECT) / mixed | 已实现（TCP） | — |
+> | 入站 socks5 UDP ASSOCIATE | 未实现 | P0-2（[udp-dataplane.md](design/udp-dataplane.md) §2） |
+> | 出站 direct/socks5/http/shadowsocks/trojan/hysteria2/vless/wireguard（TCP） | 已实现 | — |
+> | 出站 UDP 承载（direct/ss/hy2/wg） | 未实现 | P0-3（udp-dataplane.md §3） |
+> | 出站 vmess 连接器 | 未实现（配置 schema 与订阅转换已支持，运行时构建期报错） | todo「VMess 出站」条目 |
+> | hysteria v1 | 未实现 | 无计划（仅 hy2） |
+> | 出站连接池 / TLS 会话恢复 | 未实现 | P1-5 |
+> | 混淆插件（obfs/salamander）/ TLS 指纹 | 未实现 | P1-4 / P2-4 / P2-5（[positioning.md](design/positioning.md) §2.4） |
+>
+> 各节标注中的「超前」指：本文保留了设计目标描述，但当前代码不包含对应实现。
+
 ## 入口协议 (Ingress Protocols)
 
 ### SOCKS5 代理
+> 状态：已实现 CONNECT（含用户名/密码认证，`IngressConfig::Socks5`）；**UDP ASSOCIATE 未实现**——当前仅接受 cmd=0x01，其余命令回 0x07，落地见 todo P0-2 与 [udp-dataplane.md](design/udp-dataplane.md) §2。
+
 - **协议版本**: SOCKS5 (RFC 1928)
 - **认证方式**:
   - 无认证
@@ -15,6 +32,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 - **TLS 支持**: 支持通过 SOCKS5 建立 TLS 连接
 
 ### HTTP 代理
+> 状态：已实现 CONNECT 隧道（非 CONNECT 请求返回 405）。下列「支持方法」矩阵、Basic/Bearer 认证、请求/响应头修改、压缩均为**超前描述**——`IngressConfig::Http` 仅有 `bind` 字段，无认证与头处理逻辑。
+
 - **协议版本**: HTTP/1.1
 - **支持方法**: GET, POST, PUT, DELETE, HEAD, OPTIONS, PATCH
 - **认证方式**:
@@ -26,6 +45,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 支持压缩 (gzip, deflate)
 
 ### 混合代理 (Mixed)
+> 状态：已实现协议自动识别与端口共享；认证未接入（`IngressConfig::Mixed` 无 auth 字段，认证列表为超前描述）。
+
 - **描述**: 同时支持 SOCKS5 和 HTTP 协议
 - **自动检测**: 根据请求特征自动识别协议类型
 - **端口共享**: 在同一端口提供多种协议支持
@@ -33,6 +54,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 ## 出口协议 (Egress Protocols)
 
 ### 直连 (Direct)
+> 状态：已实现 TCP 直连；**UDP 未实现**（P0-3）；「自动 IP 版本选择 / Happy Eyeballs」未实现（现状为直接 `TcpStream::connect`）——超前描述。
+
 - **描述**: 直接连接目标服务器，不经过代理
 - **支持协议**: TCP, UDP
 - **特性**:
@@ -41,6 +64,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 支持 Happy Eyeballs 算法
 
 ### SOCKS5 出口
+> 状态：已实现 TCP 转发与用户名/密码认证；「UDP 中继」**未实现**且不在 S1 范围（见 [udp-dataplane.md](design/udp-dataplane.md) §3.5）——超前描述。
+
 - **用途**: 通过外部 SOCKS5 代理转发流量
 - **支持认证**:
   - 无认证
@@ -50,6 +75,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 支持 UDP 中继
 
 ### HTTP 代理出口
+> 状态：已实现 CONNECT 隧道、Basic 认证、TLS+SNI（`EgressConfig::Http`）；「代理链」未作为 egress 参数实现——多跳经 mesh chain 表达（见 [mesh.md](mesh.md)）。
+
 - **用途**: 通过外部 HTTP 代理转发流量
 - **支持版本**: HTTP/1.1, HTTP/1.0
 - **认证方式**:
@@ -60,6 +87,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 自动处理隧道 (CONNECT)
 
 ### Shadowsocks
+> 状态：已实现 TCP（AEAD 加密由 `shadowsocks` crate 承载，可用方法以 crate 1.21 为准，`method` 为自由字符串、非法值在运行时报错）；**UDP 未实现**（P0-3）；插件系统（v2ray-plugin/obfs）与动态端口分配**未实现**——超前描述。
+
 - **加密算法**:
   - AES-256-GCM
   - AES-128-GCM
@@ -72,6 +101,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 混淆和伪装
 
 ### VMess (V2Ray)
+> 状态：**未实现出站连接器**。配置 schema（`EgressConfig::Vmess`）与订阅转换已支持，运行时构建期报错提示（见 todo「VMess 出站」条目）；下列传输层细节（ws/h2/gRPC、SNI、ALPN）为规划口径，随该条目落地后更新。
+
 - **版本**: VMess (V2Ray Protocol)
 - **安全**: AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305
 - **传输层**:
@@ -88,6 +119,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - ALPN 协商
 
 ### VLESS
+> 状态：部分实现——uuid 认证 + TCP 直连 / WebSocket 传输（可叠 TLS/SNI/ALPN，`network: ws`）；**flow（如 xtls-rprx-vision）显式拒绝**（配置携带 flow 即报错）。「自动选择最优加密算法」「QoS 集成」「VLESS-Vision」系列与 H2/gRPC 传输为**超前描述**。
+
 - **特点**: 轻量级协议，无状态加密
 - **加密**: 自动选择最优加密算法
 - **Flow 控制:
@@ -99,6 +132,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 更好的 QoS 集成
 
 ### Trojan
+> 状态：部分实现——TCP 原生 + 完整 TLS（SNI/证书校验/`skip_cert_verify`），「流量看起来像标准 HTTPS」的目标由 TLS 形态达成；WebSocket/gRPC 传输**未实现**——超前描述。
+
 - **协议**: 基于 TLS 伪装的代理协议
 - **TLS 特性**:
   - 完整 TLS 1.3 握手
@@ -113,6 +148,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - DPI 抗审查能力强
 
 ### Hysteria
+> 状态：**v1 未实现**（配置 schema、订阅转换与出站连接器均不支持），本节保留为背景资料。
+
 - **协议**: 基于 QUIC 的高性能代理
 - **版本**: Hysteria v1/v2
 - **拥塞控制:
@@ -128,6 +165,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 低延迟传输
 
 ### Hysteria2
+> 状态：部分实现——TCP over QUIC、密码认证、`mport`/`server_name`/`alpn`/`skip_cert_verify` 配置生效（`hysteria2` crate 承载）；拥塞控制算法选择、**UDP 中继/首包优化未实现**（P0-3，依赖 crate 能力核查，见 [udp-dataplane.md](design/udp-dataplane.md) §3.3 未决项 V1）；salamander 混淆未实现（配置无该字段，混淆层见 todo P1-4/P2-4）。
+
 - **协议**: Hysteria 的改进版本
 - **改进**:
   - 更简单的协议设计
@@ -141,6 +180,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 支持混淆 (salamander)
 
 ### WireGuard
+> 状态：部分实现——TCP 流量经系统 WireGuard 接口转发（`address`/`allowed_ips`/`preshared_key`/`persistent_keepalive`/`mtu`/`dns` 配置生效，需系统 WG 接口与相应权限）；「内核级实现」指依赖系统 WG，seep 自身不做加解密；**UDP 原生承载未实现**（P0-3，见 udp-dataplane.md §3.4）。
+
 - **协议**: 快速现代 VPN
 - **加密**:
   - ChaCha20-Poly1305
@@ -185,6 +226,8 @@ impl EgressConnector for MyProtocol {
 
 ## 性能优化
 
+> 状态：零拷贝与批量处理未实现（描述为设计口径）；**连接池未实现**（P1-5，网页加速核心项）；「智能选择/故障转移」部分成立——组策略选路（7 种策略）与 mesh chain 故障回退已实现，「会话保持」待 UDP 粘滞会话落地（P0-1）。
+
 ### 协议层优化
 - **零拷贝**: 使用 Rust 的所有权系统避免不必要的内存拷贝
 - **连接池**: 复用 TCP 连接减少握手开销
@@ -197,6 +240,8 @@ impl EgressConnector for MyProtocol {
 - **故障转移**: 自动检测故障并切换备用路径
 
 ## 安全特性
+
+> 状态：mesh 层 CA 轮换/双信任窗口/最小撤销列表已实现（[mesh.md](mesh.md)）；「自动定期更新密钥」「多因素认证」「JWT/Token 管理」**未实现**——超前描述；「TLS 伪装」中 Trojan/VLESS+TLS 形态已实现，「协议混淆/域前置」待混淆横切层（[positioning.md](design/positioning.md) §2.4、todo P1-4/P2-4/P2-5）。
 
 ### 加密支持
 - **端到端加密**: 所有协议支持强加密
@@ -272,4 +317,4 @@ Seep 与主流代理客户端完全兼容：
 - [ ] WebAssembly 协议插件
 - [ ] 自适应协议选择
 
-更多信息请参考 [配置文档](CONFIGURATION.md) 和 [开发指南](DEVELOPMENT.md)。
+更多信息请参考 [架构总览](architecture.md)、[订阅指南](subscription.md)、[系统路由](networking.md)、[Mesh 指南](mesh.md) 与 [设计文档](design/positioning.md)。

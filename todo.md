@@ -87,8 +87,8 @@
 
 ## P3 — 文档、插件与平台发布（roadmap S4 收尾）
 
-- [ ] **P3-1 文档对齐实现**（原 §6）：更新 `architecture.md`（Mesh/TUN/订阅/协作安全章节）；回填 `PROTOCOLS.md` 超前描述（UDP ASSOCIATE、VMess、连接池以 P0/P1 落地为准）；补 `docs/subscription.md`、`docs/networking.md`（mesh.md 已有）。
-  验收：文档中每项能力声明能在代码中找到对应实现或 todo 条目。
+- [x] **P3-1 文档对齐实现**（原 §6，2026-09 完成）：`architecture.md` 四章节（Mesh/TUN/订阅/协作安全）改写为现状+边界口径并刷新过期路线节；`PROTOCOLS.md` 顶部新增实现状态总表 + 15 处就地状态标注（UDP ASSOCIATE→P0-2、出站 UDP→P0-3、VMess 构建期报错→遗留条目、连接池→P1-5、混淆→P1-4/P2-4/P2-5 等），修复底部失效链接；新增 `docs/subscription.md`（拉取/ETag/缓存/DSL/热更新实读）与 `docs/networking.md`（TUN 模型已建、实现未落地逐条对照 P1-1..P1-3）。
+  待回填：P0/P1 落地后更新 PROTOCOLS.md 各节状态标注与顶部总表对应行、networking.md §2 现状节、udp-dataplane.md §0.2 状态表；VMess 出站落地后删除其超前标注。
 - [ ] **P2/P3 原遗留——VMess 出站**：PROTOCOLS.md 已承诺，Clash 订阅转换会产出 vmess 节点，当前构建期报错。
   验收：vmess（ws+tls）出站可用；`import-clash` 转换的 vmess 节点可直连使用。
 - [ ] **P3-2 插件动态加载**（勘误降级）：WASM/动态库 `FlowMiddleware` 加载器 + 限速/内容过滤示例。

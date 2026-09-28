@@ -46,29 +46,35 @@ seep/
 - 支持热更新：`seepctl reload` -> 守护进程 watch 配置 -> `RuntimeBuilder` reload。
 - 文档及 ADR 集中在 `docs/`，重要决策使用 ADR 记录。
 
-## Mesh / 协作加速 / 节点组
-- Seep 将把每个安装节点视作一个网元，可注册为 `client` / `relay` / `exit`，支持互联互通。Mesh 控制面负责登记节点元数据（地区、ISP、带宽、健康状态）、拓扑与 ACL。
-- 当前 `seep-mesh` crate 内提供 `MeshRegistry` 和后台心跳清理逻辑，`seep-runtime` 会默认注册本地节点并启动离线检测。
-- `RoutingConfig` 将扩展 `GroupDescriptor` 与 `chains`：路由规则先定位逻辑组，再由组策略（latency/bandwidth/random/weighted）选出具体节点，可表达链路如 `client -> relay -> exit`。组可以嵌套，方便按地区/游戏类型组织。
-- `FlowMetadata` / `ChainContext` 携带链路信息，egress/relay 会根据这些数据记录“哪个节点使用了哪个节点的流量”，便于统计与策略调度。
-- 游戏加速场景：结合虚拟网卡/Tun，针对特定端口/进程劫持流量，经由附近的 relay 与最优出口出国，实现跨运营商加速、低延迟路径与自动故障切换。
+## Mesh / 协作加速 / 节点组（现状）
 
-## 系统路由与虚拟网卡
-- `seep-platform` 将新增 `network` 模块，提供 `TunProvider`/`RouteManager` trait，并针对 Linux/OpenWrt（TUN+policy routing）、Windows（Wintun/WFP）、macOS（utun/NE）、Android（VpnService）、iOS（NEPacketTunnel）实现具体能力。
-- `seep-runtime` 里会加入 `TunIngress`/`TunEgress`，直接处理 L3/L4 包，并与 FlowRouter 结合，实现“全局/指定流量”接管。
-- 配置层会新增 `network` 区域，指定模式（tun/redir）、分流规则（bypass/include）、进程/应用过滤等；CLI/控制面提供路由应用/撤销命令。
+- 每个安装节点视作一个网元，注册为 `client` / `relay` / `exit` / `hybrid`。`seep-mesh::MeshRegistry` 维护节点元数据、后台心跳清理与离线检测；`seep-runtime` 默认注册本地节点。
+- 组与链路：`RoutingConfig.groups`（`PolicyGroup`）成员可为 `Node` / `Group`（嵌套） / `WeightedNode` / `WeightedGroup`，组策略含 latency/bandwidth/weighted/random/consistent_hash/round_robin/fixed；路由目标 `mesh.<node>` 会被 `ChainManager` 升级为 `RouteDecision::Chain`（源 → relay → exit）。
+- 链路能力：构建（`ChainBuilder`，含约束与链路权重打分）、Dry Run 预检、健康检查任务、故障回退（`ChainContext` 备选路径切换）。控制面端点与数据面 wire format 见 [mesh.md](mesh.md)。
+- 数据面：mesh data-plane 已实现 **TCP** hop-by-hop 转发（envelope 携带路径，逐跳剥离）；UDP 多跳为设计稿（见 [design/udp-dataplane.md](design/udp-dataplane.md) §4）。
+- 边界（当前不做）：UDP 数据面、端到端多跳 MAC/防重放、自动 CA 撤销分发（CRL/OCSP）——见下「协作节点安全」与 todo P2-7。
 
-## 订阅与配置编译
-- 将兼容 Clash 订阅（proxies/proxy-groups/rules）并自动转换为 SeepConfig；另行设计 Seep DSL（version/meta/nodes/chains/rulesets）以表达多节点 mesh、链路特性。
-- `seepctl subscription` 管理订阅源，支持 add/remove/list/refresh，守护进程可定时拉取并热更新路由。
+## 系统路由与虚拟网卡（现状：模型已建，实现未落地）
 
-## 安全与观测
-- Mesh 节点通信支持 data-plane mTLS（可选），用于 hop-by-hop 转发加密与认证；证书可通过 `seepctl mtls` 生成（CA/节点证书），并通过环境变量 `SEEP_MESH_MTLS_*` 注入运行时（MVP：可选启用，强制策略与轮换后续补齐）。
-- Telemetry/metrics 包含 per-node/per-link 流量、延迟、丢包、重试次数，方便控制面统计“谁使用了谁的流量”与 SLA。当前 `seepd` 在 `telemetry.enable_metrics=true` 时暴露 `GET /metrics`（Prometheus 文本格式），提供 mesh/chain/subscription 的基础指标；更细粒度的 per-link 流量与重试统计后续补齐。
-- 控制面接口：`control.api_bind` 默认提供 HTTP 接口，现阶段可通过 `GET /flows` 获取入口→出口流量统计，通过 `GET /nodes` 获取 mesh 节点快照，通过 `GET /metrics` 拉取 Prometheus 指标，未来会扩展为完整的 REST/gRPC API。
-  - 链路相关：`POST /chains/dry-run`、`POST /chains`、`GET /chains/{chain_id}`、`GET /chains/stats` 等接口用于多跳链路预检与管理（MVP：计算路径与附加元数据，数据面多跳转发后续实现）。
+- `seep-platform::network` 已建立完整 trait 与数据模型：`TunProvider`/`TunConfig`/`TunInterface`、`RouteManager`/`RouteRule`、`PacketFilter`/`FilteringConfig`（进程/端口/IP/域名规则）、`DnsHandler`，共五个子模块（tun/route/filter/dns/platform）。
+- **未落地**（如实标注，详见 [networking.md](networking.md)）：各平台 Provider 均为占位实现（构造即告警、收发返回"未实现"）；`seep-runtime` 尚无 `TunIngress` 接线；`SeepConfig` 尚无顶层 `network` 区块；`seepctl` 尚无 `route apply/clear` 子命令。对应 todo P1-1..P1-3。
+- 当前唯一可用的相关能力：`seepctl diagnose` 采集本机路由/DNS/接口快照（只读）。
+
+## 订阅与配置编译（现状：全链路已实现）
+
+- Clash 订阅（proxies/proxy-groups/rules）与分享链接（vmess/vless/trojan/hysteria2/ss，含 base64 整体编码）均可转换为 `SeepConfig`；类型自动识别（`detect_type`）。转换中产出暂未实现的出站类型（如 vmess）会在运行时构建期报错提示。
+- 自有 Seep DSL（version/meta/nodes/groups/rulesets，含认证/传输层/TLS/地理位置字段）支持导入导出与校验。
+- 拉取器支持超时/UA/自定义头/代理与 ETag/Last-Modified 条件请求；缓存为 TTL+LRU；按订阅与全局两级刷新间隔定时刷新，内容哈希无变化时跳过重载；控制面提供订阅 CRUD 与手动/全量刷新端点，配置文件变更经文件监视热更新。
+- 完整说明见 [subscription.md](subscription.md)。
+
+## 协作节点安全（现状）与观测
+
+- Mesh data-plane mTLS：chain 启用时**默认强制**（dev 可 `SEEP_MESH_ALLOW_PLAINTEXT=1` 豁免）；证书由 `seepctl mtls` 生成（CA/节点证书/轮换/CA bundle 双信任窗口），经 `SEEP_MESH_MTLS_*` 环境变量注入；撤销采用最小实现（按节点 CN 的撤销列表，文件 mtime 热加载）。详见 [mesh.md](mesh.md)。
+- ACL 与配额：`NodeACL`（允许的 client CIDR、角色限制）与 `NodeQuota`（日/月带宽、并发连接数）在 registry 层强制，超限返回 `QuotaExceeded`。
+- 边界：CRL/OCSP 自动撤销分发、多跳端到端 MAC/防重放未实现（todo P2-7）。
+- 观测：`telemetry.enable_metrics=true` 时 `GET /metrics` 暴露 Prometheus 文本（mesh per-link 计数、chain、subscription 事件等）；`GET /flows` 提供入口→出口流量统计；`GET /nodes` 提供节点快照。per-link 时延分布/切换原因等细粒度指标见 todo P2-1。
 
 ## 当前状态与路线
-1. **MVP**（已完成）：Socks5 入站 + Direct 出站，完成基础 Flow/Router/Output 管线。
-2. **下一阶段**：实现更多协议（Trojan/Reality/UDP 等）、节点组与 mesh 控制面雏形；补齐 Tun/系统路由支持，为游戏加速奠定基础。
-3. **进阶阶段**：完成订阅 DSL、插件化中间件、自动链路自愈、Grafana/Prometheus 模板等，并在多平台发布。
+
+- **已完成底座**（roadmap S0）：socks5/http/mixed 入站 + direct/ss/trojan/hysteria2/vless/wireguard/socks/http TCP 出站；组策略路由；mesh 控制面 + TCP 数据面 + mTLS；订阅全链路；控制面与 seepctl；基础 Prometheus 指标。协议实现边界见 [PROTOCOLS.md](PROTOCOLS.md) 状态标注。
+- **进行中/规划**（见 [design/roadmap.md](design/roadmap.md)）：S1 UDP 全链路（[设计稿](design/udp-dataplane.md)）→ S2 TUN 系统接管 → S3 混淆横切层与连接复用 → S4 调度闭环与发布。可执行条目见根目录 [todo.md](../todo.md)。
