@@ -12,6 +12,8 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
+pub mod udp;
+
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.
 pub trait IoStream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {}
 impl<T> IoStream for T where T: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {}
@@ -32,7 +34,7 @@ impl FlowId {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetProto {
     Tcp,
     Udp,

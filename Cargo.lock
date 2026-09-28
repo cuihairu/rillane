@@ -2843,6 +2843,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
+ "dashmap 6.1.0",
  "serde",
  "thiserror 1.0.69",
  "tokio",

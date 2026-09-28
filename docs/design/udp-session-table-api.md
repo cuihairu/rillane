@@ -271,3 +271,24 @@ forwarder task 持 `Arc<Inner>` + 自己的 `UdpBinding` 一半；teardown 先 `
 - 本稿为 **P0-1 单条目接口草案**；`UdpRelay`/`EgressUdpConnector` 的出站侧契约、SOCKS5 入站解析在 [udp-relay-path.md](udp-relay-path.md)；mesh 跳间 flow 缓存复用本表 `last_activity` 常量但**不共用表实例**（relay 侧无路由决策，独立轻表，P0-4 实施时给出）；
 - 实施若发现签名不适配（如 `forward_up` 同步化不可行——`Relay` 出站需要 async send），允许放宽为 `async fn forward_up`，但 §5 锁序与锁外 IO 原则不可让步；
 - 本文完成后 P0-1 的三份文档链：总设计（udp-dataplane.md §1）→ 设计依据（udp-session-table.md）→ **接口草案（本稿）**。
+
+## 9. 实施注记（P0-1 落地裁决，代码位于 `crates/seep-core/src/udp/`）
+
+实施时与草案的偏差与澄清，均已按 §8 的放宽许可裁决，锁序与锁外 IO 未动：
+
+| # | 草案 | 实施 | 裁决理由 |
+|---|------|------|---------|
+| 1 | `forward_up` 同步 | `async fn forward_up`（§8 已预留） | `UdpRelay::send_to` 为 async；慢路径照旧 |
+| 2 | `UdpBinding` 枚举（Bound/Ephemeral） | 统一 `Arc<MappingShared>`（含关闭 watch + 四原子计数） | 草案两态的"无 relay 临时态"在实施中不存在：映射创建必须先有 relay，枚举退化 |
+| 3 | `MappingShared.relay: Box<dyn UdpRelay>` | `Arc<dyn UdpRelay>` | forwarder task 与发送路径共享所有权，Box 需额外注册表回收 |
+| 4 | 新增 `SessionRef::{bind_mapping, send_up, has_mapping, take_downlink_rx}` | 同名落地 | 快路径 `Miss` 后的慢路径接线所需（socks5 handler / egress 关联） |
+| 5 | 新增 `UdpSessionTable::get/get_shared` | `get(&key) -> Option<Arc<UdpSessionInner>>`（不创建） | 隐式创建收口到 `resolve` 的容量门，`forward_up` 严格只读 |
+| 6 | `DropReason` 4 类 | 增 `SendFailed`/`DownlinkFull` 共 6 类 | 上行发送失败（映射吊销 + 重新关联）与下行通道满（UDP 无背压）需独立计数 |
+| 7 | teardown 双路径（发送失败就地摘除 / forwarder 退出摘除） | **单点收敛**：发送失败只 `close()` 信号，摘除+扣计数统一在 forwarder 退出路径（`Arc::ptr_eq` 防误删替换后的新映射） | 消除双路径计数漂移与"删掉替换映射"竞态（实施中发现） |
+| 8 | `reroutes` 口径未定 | 会话内非首次决策计数（`Inner.decisions` 原子） | 首次路由不算重路由；链路失效后的重路由 +1 |
+| 9 | 链 ID 口径 | `chain_id_of(decision)`：`direct:{node}` / `group:{group}` / `chain:{hops.join("->")}` | runtime 侧 ChainManager 须映射到同一字符串（P0-2 接线点） |
+| 10 | `sweep` 边界未定 | 严格大于（`idle > limit`，边界值存活） | MockClock 边界单测钉死（sweep_session_idle_expiry_boundary） |
+| 11 | `TargetProto` derive | 补 `Copy + PartialEq + Eq + Hash`（lib.rs 既有类型） | `FlowTargetKey` 需作 HashMap 键；纯 derive 扩展，无语义变更 |
+| 12 | DashMap entry 内做容量判定 | 容量判定移到 `entry()` 之前 | entry 持分片写锁期间调 `len()` 有同 map 死锁风险（实施中发现）；并发窗口允许极小超卖（软门语义） |
+
+测试锚点：`crates/seep-core/tests/udp_session_table.rs`（22 项：生命周期 2、快路径与映射复用 3、超时回收 4、容量与 LRU 2、决策失效与重路由 2、吊销/关停 2、失败与下行满载 2、并发契约 2、ledger 直测 2、chain_id 口径 1）。
