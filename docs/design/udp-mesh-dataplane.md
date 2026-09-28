@@ -178,9 +178,47 @@ impl MeshUdpGate { fn ensure_usable(&self, tls: Option<&MeshTlsConfig>) -> Resul
 
 ## 9. RuntimeBuilder / seepd 接线
 
-- `build()`：udp.enabled 且 enable_chain 时，UDP 表的 `FlowRouter` 从基础 engine 换成 `RuntimeFlowRouter::new(engine, registry, chain_manager, local_id)`；
+### 9.1 build() 阶段时序调整：UDP 块下移（本节为实施前提）
+
+**现状（P0-3 落地后 `RuntimeBuilder::build()` 的阶段顺序）**：
+
+| 阶段 | 内容 | 产物 |
+|-----|------|------|
+| ① | `validate()` + config snapshot + `RoutingEngine` 构造 | `router` |
+| ② | **UDP 块**：`build_udp_connectors` → `scan_udp_capability` → `RoutingUdpConnector` → `UdpSessionTable`（FlowRouter = ① 的基础 engine）→ `UdpAssociateService` | `udp_service` |
+| ③ | 入口/出口默认实现（`build_ingress_endpoints` 是 **udp_service 的唯一消费点**；egress 默认构建与之独立） | ingress_endpoints / flow_outputs |
+| ④ | network_manager | – |
+| ⑤ | mesh 配置完备化：mTLS env 强制、secure-by-default 明文检查、`register_local_mesh_node` | `local_node_id` / `mesh_registry` |
+| ⑥ | `ChainManager` 初始化（依赖 ⑤ 的 registry） | `chain_manager` |
+| ⑦ | `Ok(Runtime)` | – |
+
+**冲突**：§5/§8 要求 UDP 表的 FlowRouter 换成 `RuntimeFlowRouter::new(engine, mesh_registry, chain_manager, local_node_id)`，其三个 mesh 参数是 ⑤/⑥ 的产物——而 UDP 块在 ② 已构造完成，时序倒挂。
+
+**方案（裁决）：UDP 块整体下移到 ⑥ 之后**，新顺序 ①③④⑤⑥②′⑦；原 ② 位置留一行注释指向新位置。连带调整一处：`build_ingress_endpoints` 调用（udp_service 唯一消费点）随之顺延到 ②′ 之后。
+
+**理由**：
+- `UdpSessionTable::new` 的 FlowRouter 参数在构造即固化，且会话粘滞决策缓存、ledger chain 绑定都指向该实例——"早构造晚替换"不可行（换实例即丢运行期状态）；
+- 备选方案"chain/mesh 块提前到 ② 之前"被否：⑤ 的 mTLS 强制与 secure-by-default 检查属于 mesh 配置完备化阶段，提前会改变 validate→build 的错误报告顺序（如 mTLS 缺失报错将先于 UDP 能力扫描报错出现），改动波及面大于 UDP 块自身下移；
+- UDP 是可选面（udp.enabled=false 时 ②′ 直接跳过），下移不影响默认构建路径；
+- `Runtime` 结构体字段与构造点不变（udp_service 在 ⑦ 前就绪）。
+
+**影响面**：
+- `runtime_builder.rs::build()` 内部块顺序调整；无函数签名变化、无 `Runtime` 字段变化；
+- `build_ingress_endpoints` 调用点顺延（签名/参数不变）；
+- `scan_udp_capability` 的报错时机随 ②′ 顺延到 mTLS/chain 检查之后——错误信息不变；
+- 能力扫描等单测直调 helper 函数、不经过 `build()` 时序，零影响。
+
+**验收口径**：
+1. `udp.enabled=true + enable_chain=true`（mesh 配置齐全）：`build()` 成功，UDP 表持 `RuntimeFlowRouter`——chain 决策在 UDP 面可达（§10 #7 分派测试钉住，时序正确性由 Arc 所有权流转在编译期保证）；
+2. `udp.enabled=true + enable_chain=false`：与 P0-3 行为等价（基础 engine 路由，非 chain 分派走 `RoutingUdpConnector`）；
+3. `udp.enabled=false`：构建路径与本条目之前零差异；
+4. 全仓测试基线（P0-3 时点 118 项）全绿。
+
+### 9.2 serve 与出站接线
+
+- `build()`：udp.enabled 且 enable_chain 时，UDP 表的 `FlowRouter` 从基础 engine 换成 `RuntimeFlowRouter::new(engine, registry, chain_manager, local_id)`（经 9.1 时序调整后可行）；
 - 出站连接器：`UdpChainRouter::new(RoutingUdpConnector, MeshUdpBridge::new(...))` 替换裸 RoutingUdpConnector（§3.1 能力扫描只针对非 chain 节点——chain 决策的 hop 是 mesh 节点，能力表扫描的 `mesh.` 豁免已就位）；
-- mesh UDP 面 serve：现有 `plane.spawn(bind)` 旁并列 `Arc::clone(&plane).spawn_udp(bind)`（双栈同端口）；gate 检查先于两个 spawn；
+- mesh UDP 面 serve：现有 `plane.spawn(bind)` 旁并列 `Arc::clone(&plane).spawn_udp(bind)`（双栈同端口）；gate 检查（§6）先于两个 spawn；
 - hy2 UDP（P0-3 移入的验收）仍不在本条目——载具是 quinn（V2），与 mesh UDP 解耦推进。
 
 ## 10. 测试计划（验收对齐 todo P0-4 / 上游 §4.6）
