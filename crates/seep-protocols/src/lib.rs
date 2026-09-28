@@ -22,6 +22,7 @@ mod tls;
 pub use inbound::{HttpIngress, MixedIngress, Socks5Ingress};
 pub use middleware::LatencyProbe;
 pub use outbound::{
-    DirectConnector, HttpConnector, Hysteria2Connector, ShadowsocksConnector, Socks5Connector,
-    TrojanConnector, VlessConnector, WireguardConnector,
+    DirectConnector, HttpConnector, Hysteria2Connector, ShadowsocksConnector,
+    ShadowsocksUdpConnector, Socks5Connector, TrojanConnector, VlessConnector, WireguardConnector,
+    WireguardUdpConnector,
 };

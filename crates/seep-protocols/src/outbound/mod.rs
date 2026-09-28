@@ -14,11 +14,11 @@ mod wireguard;
 pub use direct::DirectConnector;
 pub use http::HttpConnector;
 pub use hysteria2::Hysteria2Connector;
-pub use shadowsocks::ShadowsocksConnector;
+pub use shadowsocks::{ShadowsocksConnector, ShadowsocksUdpConnector};
 pub use socks5::Socks5Connector;
 pub use trojan::TrojanConnector;
 pub use vless::VlessConnector;
-pub use wireguard::WireguardConnector;
+pub use wireguard::{WireguardConnector, WireguardUdpConnector};
 
 use std::sync::Arc;
 

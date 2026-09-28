@@ -47,7 +47,10 @@ impl SessionLedger {
     /// 粘滞决策重建时回写路由（沿用 FlowSession 的 route_history 语义）
     pub fn on_route_changed(&self, decision: &RouteDecision) {
         let mut s = self.session.write().unwrap();
-        s.update_route(decision.all_nodes(), decision.reason.clone().unwrap_or_default());
+        s.update_route(
+            decision.all_nodes(),
+            decision.reason.clone().unwrap_or_default(),
+        );
     }
 
     /// 记录会话当前所在链（决策变更时由表调用）

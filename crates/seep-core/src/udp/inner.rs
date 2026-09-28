@@ -21,7 +21,11 @@ pub struct FlowTargetKey {
 
 impl FlowTargetKey {
     pub fn of(target: &FlowTarget) -> Self {
-        Self { host: target.host.to_lowercase(), port: target.port, proto: target.proto }
+        Self {
+            host: target.host.to_lowercase(),
+            port: target.port,
+            proto: target.proto,
+        }
     }
 }
 

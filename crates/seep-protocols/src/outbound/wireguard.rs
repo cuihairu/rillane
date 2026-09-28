@@ -4,7 +4,7 @@
 //! - 该实现会创建/配置 WireGuard 接口并注入路由（wg-quick 风格），依赖系统权限。
 //! - 转发阶段仍使用常规 `TcpStream::connect`，由系统路由将流量导入 WireGuard 接口。
 
-use std::{net::IpAddr, str::FromStr};
+use std::{net::IpAddr, str::FromStr, sync::Arc};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -12,7 +12,9 @@ use defguard_wireguard_rs::{
     host::Peer, key::Key, net::IpAddrMask, InterfaceConfiguration, Userspace, WGApi,
     WireguardInterfaceApi,
 };
-use seep_core::{EgressConnector, Flow, FlowReport, TargetProto};
+use seep_core::{
+    EgressConnector, Flow, FlowContext, FlowReport, FlowTarget, RouteDecision, TargetProto,
+};
 use sha1::{Digest, Sha1};
 use tokio::{net::TcpStream, sync::OnceCell};
 
@@ -267,4 +269,140 @@ fn hex8(bytes: &[u8; 8]) -> String {
         out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+/// WireGuard UDP 出站连接器（udp-relay-path.md §3.5 注记）。
+///
+/// 与 TCP 面同一架构：本实现是系统接口（wg-quick 风格），UDP 面不手工构造
+/// IP 包 —— 本地 UDP socket `connect` 目标，由内核路由导入 wg 接口。
+/// - `allowed_ips` 预检：目标 IP 不在任何网段 → Route 类错误（§3.6：关映射+清决策）；
+///   网段在构建期解析，配置错误启动即报。
+/// - MTU 上限：wg 封装开销按 80B 预留（IPv6 最坏值），超限包丢弃（R8），
+///   错误归类 Timeout（映射保留待空闲回收，丢弃计入 send_failed）。
+pub struct WireguardUdpConnector {
+    allowed_ips: Vec<IpAddrMask>,
+    mtu_cap: usize,
+}
+
+impl WireguardUdpConnector {
+    pub fn new(allowed_ips: Option<Vec<String>>, mtu: Option<u16>) -> Result<Self> {
+        let mut parsed = Vec::new();
+        if let Some(ips) = &allowed_ips {
+            for s in ips {
+                let m = IpAddrMask::from_str(s.trim())
+                    .map_err(|_| anyhow!("无效的 WireGuard allowed_ips: {s}"))?;
+                parsed.push(m);
+            }
+        }
+        // 界面 MTU 减去 wg 封装开销（最坏 80B）；未配置用保守 1400
+        let mtu_cap = match mtu {
+            Some(m) if m >= 100 => (m as usize) - 80,
+            Some(m) => return Err(anyhow!("WireGuard mtu 过小: {m}")),
+            None => 1400,
+        };
+        Ok(Self {
+            allowed_ips: parsed,
+            mtu_cap,
+        })
+    }
+
+    async fn resolve_target(&self, target: &FlowTarget) -> Result<std::net::SocketAddr> {
+        let addr = tokio::net::lookup_host((target.host.as_str(), target.port))
+            .await
+            .with_context(|| format!("目标解析失败: {}:{}", target.host, target.port))?
+            .next()
+            .ok_or_else(|| anyhow!("目标解析失败: {}:{}", target.host, target.port))?;
+        Ok(addr)
+    }
+
+    fn allowed_ips_contain(&self, ip: std::net::IpAddr) -> bool {
+        if self.allowed_ips.is_empty() {
+            return true; // 未配置网段：不预检，交内核路由判定
+        }
+        self.allowed_ips.iter().any(|m| cidr_contains(m, ip))
+    }
+}
+
+struct WgUdpRelay {
+    socket: tokio::net::UdpSocket,
+    target: FlowTarget,
+    mtu_cap: usize,
+}
+
+#[async_trait]
+impl seep_core::udp::EgressUdpConnector for WireguardUdpConnector {
+    fn name(&self) -> &str {
+        "wireguard"
+    }
+
+    async fn associate(
+        &self,
+        ctx: FlowContext,
+        _decision: &RouteDecision,
+    ) -> Result<Arc<dyn seep_core::udp::UdpRelay>> {
+        let addr = self.resolve_target(&ctx.target).await?;
+        if !self.allowed_ips_contain(addr.ip()) {
+            return Err(anyhow!(
+                "路由不可达: 目标 {addr} 不在 wireguard allowed_ips 网段内"
+            ));
+        }
+        let bind = if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let socket = tokio::net::UdpSocket::bind(bind).await?;
+        socket.connect(addr).await?;
+        Ok(Arc::new(WgUdpRelay {
+            socket,
+            target: ctx.target,
+            mtu_cap: self.mtu_cap,
+        }))
+    }
+}
+
+#[async_trait]
+impl seep_core::udp::UdpRelay for WgUdpRelay {
+    async fn send_to(&self, _target: &FlowTarget, buf: &[u8]) -> Result<()> {
+        if buf.len() > self.mtu_cap {
+            return Err(anyhow!(
+                "wireguard MTU 超限: {} 字节 > 上限 {}（超出部分按 R8 丢弃）",
+                buf.len(),
+                self.mtu_cap
+            ));
+        }
+        // 已 connect：内核路由导入 wg 接口（target 参数与构造时一致）
+        Ok(self.socket.send(buf).await.map(|_| ())?)
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> Result<(FlowTarget, usize)> {
+        let n = self.socket.recv(buf).await?;
+        Ok((self.target.clone(), n))
+    }
+}
+
+/// CIDR 网段包含判定（defguard_wireguard_rs 0.8 的 IpAddrMask 无 contains）。
+/// 地址族不匹配视为不包含（v4 网段不含 v6 目标，反之亦然）。
+fn cidr_contains(m: &IpAddrMask, ip: std::net::IpAddr) -> bool {
+    match (m.address, ip) {
+        (IpAddr::V4(net), IpAddr::V4(a)) => {
+            let cidr = m.cidr.min(32);
+            let mask = if cidr == 0 {
+                0
+            } else {
+                u32::MAX << (32 - cidr)
+            };
+            (u32::from(net) & mask) == (u32::from(a) & mask)
+        }
+        (IpAddr::V6(net), IpAddr::V6(a)) => {
+            let cidr = m.cidr.min(128);
+            let mask = if cidr == 0 {
+                0
+            } else {
+                u128::MAX << (128 - cidr)
+            };
+            (u128::from(net) & mask) == (u128::from(a) & mask)
+        }
+        _ => false,
+    }
 }

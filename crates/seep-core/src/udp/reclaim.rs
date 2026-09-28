@@ -3,9 +3,9 @@
 //! 判定边界为严格大于（`idle > limit`），回收顺序与 force_revoke 一致
 //! （关下行 → 摘映射 → 计数）。
 
+use crate::udp::key::UdpSessionKey;
 use crate::udp::metrics::ExpireReason;
 use crate::udp::table::UdpSessionTable;
-use crate::udp::key::UdpSessionKey;
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -37,7 +37,10 @@ pub fn sweep_once(table: &UdpSessionTable) -> SweepStats {
                     m.close();
                     stats.mappings_expired += 1;
                     table.metrics.expired_inc(ExpireReason::Idle);
-                    table.metrics.mappings_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    table
+                        .metrics
+                        .mappings_active
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -48,7 +51,11 @@ pub fn sweep_once(table: &UdpSessionTable) -> SweepStats {
             .map(|l| inner.age_secs(now) > l.as_secs())
             .unwrap_or(false);
         if inner.idle_secs(now) > idle_limit || lifetime_exceeded {
-            let reason = if lifetime_exceeded { ExpireReason::Lifetime } else { ExpireReason::Idle };
+            let reason = if lifetime_exceeded {
+                ExpireReason::Lifetime
+            } else {
+                ExpireReason::Idle
+            };
             expired_sessions.push((inner.key.clone(), reason));
         }
     }
@@ -62,10 +69,16 @@ pub fn sweep_once(table: &UdpSessionTable) -> SweepStats {
             }
             drop(map);
             if remaining > 0 {
-                table.metrics.mappings_active.fetch_sub(remaining as i64, std::sync::atomic::Ordering::Relaxed);
+                table
+                    .metrics
+                    .mappings_active
+                    .fetch_sub(remaining as i64, std::sync::atomic::Ordering::Relaxed);
             }
             table.metrics.expired_inc(reason);
-            table.metrics.sessions_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            table
+                .metrics
+                .sessions_active
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             stats.sessions_expired += 1;
         }
     }

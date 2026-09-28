@@ -1,10 +1,11 @@
 //! UDP 中继契约：出站侧交付字节级 `UdpRelay`，会话表侧统一收口收发/指标/错误分类
 //! （udp-relay-path.md §4：forwarder 归属表侧，出站保持"纯管道"）。
 
-use crate::{FlowContext, FlowTarget};
+use crate::{FlowContext, FlowTarget, RouteDecision};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
+use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,60 @@ pub trait UdpRelay: Send + Sync {
     async fn recv_from(&self, buf: &mut [u8]) -> Result<(FlowTarget, usize)>;
 }
 
+/// 出站 UDP 连接器按粘滞路由决策选载体（udp-relay-path.md §3.4）：
+/// 决策的最终节点决定用哪个出站连接器，保证同会话粘滞在同一出口。
+pub struct RoutingUdpConnector {
+    by_node: Mutex<HashMap<String, Arc<dyn EgressUdpConnector>>>,
+}
+
+impl RoutingUdpConnector {
+    pub fn new() -> Self {
+        Self {
+            by_node: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 注册节点 → 连接器（构建期一次性填入，运行期只读）
+    pub fn register(&self, node: String, connector: Arc<dyn EgressUdpConnector>) {
+        self.by_node.lock().unwrap().insert(node, connector);
+    }
+
+    pub fn registered_nodes(&self) -> Vec<String> {
+        self.by_node.lock().unwrap().keys().cloned().collect()
+    }
+}
+
+impl Default for RoutingUdpConnector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl EgressUdpConnector for RoutingUdpConnector {
+    fn name(&self) -> &str {
+        "routing"
+    }
+
+    async fn associate(
+        &self,
+        ctx: FlowContext,
+        decision: &RouteDecision,
+    ) -> Result<Arc<dyn UdpRelay>> {
+        let node = decision.final_node();
+        let connector = self
+            .by_node
+            .lock()
+            .unwrap()
+            .get(&node)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("节点 {node} 未注册 UDP 出站连接器（能力表扫描应在构建期拦截）")
+            })?;
+        connector.associate(ctx, decision).await
+    }
+}
+
 /// direct 出站的本地已连接 socket 实现（udp-relay-path.md §3.2）。
 pub struct LocalRelay {
     socket: Arc<UdpSocket>,
@@ -36,10 +91,17 @@ impl LocalRelay {
     /// 解析目标并 connect（域名取首个解析地址）
     pub async fn connect(target: &FlowTarget) -> Result<Self> {
         let addr = resolve_first(&target.host, target.port).await?;
-        let bind_addr = if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        let bind_addr = if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
         let socket = UdpSocket::bind(bind_addr).await?;
         socket.connect(addr).await?;
-        Ok(Self { socket: Arc::new(socket), target: target.clone() })
+        Ok(Self {
+            socket: Arc::new(socket),
+            target: target.clone(),
+        })
     }
 
     pub fn from_connected(socket: Arc<UdpSocket>, target: FlowTarget) -> Self {
@@ -69,7 +131,11 @@ impl EgressUdpConnector for DirectUdpConnector {
         "direct"
     }
 
-    async fn associate(&self, ctx: FlowContext) -> Result<Arc<dyn UdpRelay>> {
+    async fn associate(
+        &self,
+        ctx: FlowContext,
+        _decision: &RouteDecision,
+    ) -> Result<Arc<dyn UdpRelay>> {
         Ok(Arc::new(LocalRelay::connect(&ctx.target).await?))
     }
 }
@@ -89,7 +155,9 @@ impl UdpRelay for LocalRelay {
 
 impl fmt::Debug for LocalRelay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LocalRelay").field("target", &self.target).finish()
+        f.debug_struct("LocalRelay")
+            .field("target", &self.target)
+            .finish()
     }
 }
 
@@ -104,7 +172,7 @@ pub struct MockUdpRelay {
 struct MockState {
     sends: Vec<(FlowTarget, Vec<u8>)>,
     /// Some(消息) = 注入发送失败；消息措辞决定 classify_failure 的分类
-    fail_msg: Option<&'static str>,
+    fail_msg: Option<String>,
 }
 
 impl MockUdpRelay {
@@ -112,7 +180,10 @@ impl MockUdpRelay {
         let (tx, rx) = mpsc::channel(16);
         let relay = Arc::new(Self {
             target,
-            state: Mutex::new(MockState { sends: Vec::new(), fail_msg: None }),
+            state: Mutex::new(MockState {
+                sends: Vec::new(),
+                fail_msg: None,
+            }),
             rx: AsyncMutex::new(rx),
         });
         (relay, tx)
@@ -120,18 +191,23 @@ impl MockUdpRelay {
 
     /// 注入 Connection 类失败（默认）
     pub fn fail_sends(&self, on: bool) {
-        self.state.lock().unwrap().fail_msg =
-            on.then_some("mock send failure");
+        self.fail_with(on.then(|| "mock send failure".to_string()));
     }
 
     /// 注入 Route 类失败（消息含 "route"）
     pub fn fail_route(&self, on: bool) {
-        self.state.lock().unwrap().fail_msg = on.then_some("mock route failure");
+        self.fail_with(on.then(|| "mock route failure".to_string()));
     }
 
     /// 注入 Timeout 类失败（消息含 "timeout"）
     pub fn fail_timeout(&self, on: bool) {
-        self.state.lock().unwrap().fail_msg = on.then_some("mock timeout failure");
+        self.fail_with(on.then(|| "mock timeout failure".to_string()));
+    }
+
+    /// 注入任意失败消息（措辞决定 classify_failure 的分类，如 wg 的
+    /// "MTU 超限"/"allowed_ips" 关键词）
+    pub fn fail_with(&self, msg: Option<String>) {
+        self.state.lock().unwrap().fail_msg = msg;
     }
 
     pub fn clear_failures(&self) {
@@ -147,7 +223,7 @@ impl MockUdpRelay {
 impl UdpRelay for MockUdpRelay {
     async fn send_to(&self, target: &FlowTarget, buf: &[u8]) -> Result<()> {
         let mut s = self.state.lock().unwrap();
-        if let Some(msg) = s.fail_msg {
+        if let Some(msg) = s.fail_msg.clone() {
             anyhow::bail!("{msg}");
         }
         s.sends.push((target.clone(), buf.to_vec()));
@@ -171,7 +247,9 @@ impl UdpRelay for MockUdpRelay {
 
 impl fmt::Debug for MockUdpRelay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MockUdpRelay").field("target", &self.target).finish()
+        f.debug_struct("MockUdpRelay")
+            .field("target", &self.target)
+            .finish()
     }
 }
 
@@ -184,6 +262,11 @@ pub trait EgressUdpConnector: Send + Sync {
     fn udp_capable(&self) -> bool {
         true
     }
-    /// 返回 Arc：forwarder task 与发送路径共享所有权（api 文档 §9 注记 #3 同口径）
-    async fn associate(&self, ctx: FlowContext) -> Result<Arc<dyn UdpRelay>>;
+    /// 关联一个出站 relay；`decision` 为会话的粘滞路由决策（relay-path §3.4），
+    /// 实现方按其最终节点选承载，不重新路由（粘滞语义）
+    async fn associate(
+        &self,
+        ctx: FlowContext,
+        decision: &RouteDecision,
+    ) -> Result<Arc<dyn UdpRelay>>;
 }

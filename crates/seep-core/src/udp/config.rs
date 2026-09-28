@@ -38,12 +38,18 @@ impl UdpSessionConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(self.mapping_idle.as_secs() >= 1, "mapping_idle 必须 ≥ 1s");
         anyhow::ensure!(self.session_idle.as_secs() >= 1, "session_idle 必须 ≥ 1s");
-        anyhow::ensure!(self.sweep_interval.as_millis() >= 1, "sweep_interval 必须 ≥ 1ms");
+        anyhow::ensure!(
+            self.sweep_interval.as_millis() >= 1,
+            "sweep_interval 必须 ≥ 1ms"
+        );
         anyhow::ensure!(self.max_sessions >= 1, "max_sessions 必须 ≥ 1");
         anyhow::ensure!(self.max_mappings >= 1, "max_mappings 必须 ≥ 1");
         anyhow::ensure!(self.downlink_capacity >= 1, "downlink_capacity 必须 ≥ 1");
         if let Some(life) = self.session_max_lifetime {
-            anyhow::ensure!(life >= self.session_idle, "session_max_lifetime 不应小于 session_idle");
+            anyhow::ensure!(
+                life >= self.session_idle,
+                "session_max_lifetime 不应小于 session_idle"
+            );
         }
         Ok(())
     }

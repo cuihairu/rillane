@@ -35,9 +35,10 @@ pub use ledger::SessionLedger;
 pub use metrics::{Dir, DropReason, ExpireReason, SessionSnapshot, TableMetrics, TableSnapshot};
 pub use reclaim::{sweep_once, SweepStats};
 pub use relay::{
-    DirectUdpConnector, DownlinkPacket, EgressUdpConnector, LocalRelay, MockUdpRelay, UdpRelay,
+    DirectUdpConnector, DownlinkPacket, EgressUdpConnector, LocalRelay, MockUdpRelay,
+    RoutingUdpConnector, UdpRelay,
 };
-pub use table::{BindOutcome, ResolveError, SessionRef, UpResult, UdpSessionTable};
+pub use table::{BindOutcome, ResolveError, SessionRef, UdpSessionTable, UpResult};
 
 /// 链路故障事件（由 runtime 从 `ChainManager` 故障处理映射而来，驱动决策缓存失效）。
 #[derive(Debug, Clone)]

@@ -8,7 +8,7 @@
 use crate::udp::key::UdpSessionKey;
 use crate::udp::metrics::DropReason;
 use crate::udp::relay::{DownlinkPacket, EgressUdpConnector};
-use crate::udp::table::{UpResult, UdpSessionTable};
+use crate::udp::table::{UdpSessionTable, UpResult};
 use crate::{FlowContext, FlowMetadata, FlowTarget, TargetProto};
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -42,14 +42,20 @@ pub fn parse_udp_header(buf: &[u8]) -> Result<(FlowTarget, usize), UdpHeaderErro
             if buf.len() < 10 {
                 return Err(UdpHeaderError::TooShort);
             }
-            (Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]).to_string(), 10)
+            (
+                Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]).to_string(),
+                10,
+            )
         }
         0x03 => {
             let l = buf[4] as usize;
             if buf.len() < 5 + l + 2 {
                 return Err(UdpHeaderError::TooShort);
             }
-            (String::from_utf8_lossy(&buf[5..5 + l]).into_owned(), 5 + l + 2)
+            (
+                String::from_utf8_lossy(&buf[5..5 + l]).into_owned(),
+                5 + l + 2,
+            )
         }
         0x04 => {
             if buf.len() < 22 {
@@ -62,7 +68,14 @@ pub fn parse_udp_header(buf: &[u8]) -> Result<(FlowTarget, usize), UdpHeaderErro
         a => return Err(UdpHeaderError::BadAtyp(a)),
     };
     let port = u16::from_be_bytes([buf[hlen - 2], buf[hlen - 1]]);
-    Ok((FlowTarget { host, port, proto: TargetProto::Udp }, hlen))
+    Ok((
+        FlowTarget {
+            host,
+            port,
+            proto: TargetProto::Udp,
+        },
+        hlen,
+    ))
 }
 
 /// 编码 SOCKS5 UDP 帧头（FRAG 恒 0，MVP 不做分片重组，上游 O2）。
@@ -179,13 +192,17 @@ impl UdpAssociateService {
             anyhow::bail!("并发 ASSOCIATE 被拒绝: {peer}");
         }
         UdpIngressMetrics::inc(&self.metrics.associates_total);
-        self.metrics.associates_active.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .associates_active
+            .fetch_add(1, Ordering::Relaxed);
         self.reclaimer_once.call_once(|| {
             self.table.spawn_reclaimer();
         });
         let result = self.serve_inner(control, peer, local, user).await;
         self.active.lock().unwrap().remove(&peer);
-        self.metrics.associates_active.fetch_sub(1, Ordering::Relaxed);
+        self.metrics
+            .associates_active
+            .fetch_sub(1, Ordering::Relaxed);
         result
     }
 
@@ -259,7 +276,18 @@ impl UdpAssociateService {
 
 /// SOCKS5 控制面应答（VER REP RSV ATYP BND.ADDR BND.PORT）
 async fn write_reply<S: AsyncWrite + Unpin>(s: &mut S, rep: u8, port: u16) -> Result<()> {
-    let resp = [0x05, rep, 0x00, 0x01, 0, 0, 0, 0, (port >> 8) as u8, port as u8];
+    let resp = [
+        0x05,
+        rep,
+        0x00,
+        0x01,
+        0,
+        0,
+        0,
+        0,
+        (port >> 8) as u8,
+        port as u8,
+    ];
     s.write_all(&resp).await?;
     s.flush().await?;
     Ok(())
@@ -312,9 +340,16 @@ async fn uplink_loop(mut u: UdpUplink) {
         u.keys.lock().unwrap().insert(key.clone());
 
         // 快路径（步骤 4-5）：命中映射直接发
-        match u.service.table.forward_up(&key, &target, data.clone()).await {
+        match u
+            .service
+            .table
+            .forward_up(&key, &target, data.clone())
+            .await
+        {
             UpResult::Sent => continue,
-            UpResult::Dropped { reason: DropReason::ShuttingDown } => break,
+            UpResult::Dropped {
+                reason: DropReason::ShuttingDown,
+            } => break,
             _ => {}
         }
         // 慢路径：resolve（容量/路由门）→ associate → bind → 下行任务 → 发送
@@ -347,10 +382,14 @@ impl UdpUplink {
                 target: target.clone(),
                 metadata: FlowMetadata::default(),
             };
+            // 粘滞决策：resolve→ensure_decision 已产出并缓存于会话（relay-path §3.4）
+            let decision = sref
+                .decision()
+                .ok_or_else(|| anyhow::anyhow!("会话缺少路由决策（resolve 应已产出）"))?;
             let relay = self
                 .service
                 .connector
-                .associate(ctx)
+                .associate(ctx, &decision)
                 .await
                 .context("出站 UDP 关联失败")?;
             sref.bind_mapping(target, relay).await?;

@@ -50,9 +50,11 @@
   实现级设计：[docs/design/udp-relay-path.md](docs/design/udp-relay-path.md) §2（命令分支/BND 应答/准入校验/生命周期挂钩/并发 ASSOCIATE；**§6 实施注记**为落地裁决：DownlinkFull 计数命名、头编解码落 seep-core、§3.6 分级 teardown、并发门键口径）。
   落地：`seep-core/src/udp/associate.rs`（ASSOCIATE 服务/头编解码/准入/指标）+ `seep-protocols/src/inbound/socks5.rs`（0x01/0x03/其他 命令分派，认证用户名进粘滞键）+ `seep-config`（`udp:` 块，缺省关闭）+ `seep-runtime`（udp.enabled 接线 direct 连接器，mixed 入口同享）。测试 `seep-core/tests/udp_associate.rs` 11 项（头编解码往返×5、真 socket DNS 式往返、FRAG/截断丢弃计数、strict 源拒绝、EOF→force_revoke、并发 ASSOCIATE 拒绝、会话回收不关控制连接、计数联动）。
   验收：socks5 入站 + direct 出站 UDP 往返 ✅（真 socket 集成测试钉住；标准 CLI 联调归 P0-5）；`seepctl stats` 可见 UDP 会话 → 快照数据就绪，P0-5 渲染接线。
-- [ ] **P0-3 出站 UDP 载荷**：direct / shadowsocks / hysteria2 / wireguard 出站承载 UDP。
-  实现级设计：[docs/design/udp-relay-path.md](docs/design/udp-relay-path.md) §3（能力表与构建期扫描/各协议承载/UdpRelay 错误分类；V1 hy2 核查为第一工单）。
-  验收：QUIC 站点（HTTP/3）分别经 hy2 与 wg 出站可访问；不支持的出站类型在构建期明确报错。
+- [x] **P0-3 出站 UDP 载荷**（2026-09 完成）：direct / shadowsocks / wireguard 出站承载 UDP；**hysteria2 按设计 §3.4 分支 (c) 移 P0-4**（V1 核查结论：hysteria2 0.1.6 公开 API 仅 connect/tcp_connect，`quic_connection` 为 pub(crate)，无 UDP 出口——非静默缩水，验收显式改写）。
+  实现级设计：[docs/design/udp-relay-path.md](docs/design/udp-relay-path.md) §3（能力表与构建期扫描/各协议承载/UdpRelay 错误分类；**§7 实施注记**为落地裁决：associate 签名带粘滞决策、RoutingUdpConnector 按最终节点分发、wg 走内核路由的机制偏差、MTU/allowed_ips 错误分类关键词、ProxySocket connect/bind 之辨、扫描范围含 mesh 目标豁免）。
+  落地：`seep-core/src/udp/relay.rs`（RoutingUdpConnector + trait 扩展）+ `associate.rs`（传会话粘滞决策）+ `table.rs` classify_failure（`mtu`→Timeout 保映射 / `allowed_ips`→Route 拆映射，§3.6）+ `seep-protocols`（ShadowsocksUdpConnector：方法校验提前构建期、目标固定 R7；WireguardUdpConnector：allowed_ips 预检 + MTU 上限 mtu-80）+ `seep-runtime`（§3.1 能力扫描：default_node+规则目标+组成员闭包，逐个点名节点/类型/来源，socks5/http/trojan/vless/vmess/hy2 构建期报错）。
+  测试：`seep-core/tests/udp_egress_selection.rs` 3 项（选路分发/wg MTU 保映射/wg allowed_ips 拆映射+重路由）+ `seep-protocols/tests/udp_egress.rs` 7 项（方法构建期拒绝/ss 发送路径真 socket+R7 固定/wg 预检与 MTU/无效 CIDR 拒绝/域名解析后预检）+ runtime 能力扫描 4 项；全仓 118 通过。
+  验收：不支持的出站类型在构建期明确报错 ✅；direct/wg/ss 出站 UDP 可达 ✅（ss 为发送路径真 socket，完整解密往返需 shadowsocks-service 服务端、归 P0-5 联调）；"QUIC 站点经 hy2 出站可达"→ **P0-4**（与 mesh UDP 载荷同批落地）。
 - [ ] **P0-4 mesh data-plane UDP 转发**：多跳 UDP（envelope over UDP/QUIC 数据报），与现有 TCP 面共存。
   验收：两跳链路（client → relay → exit）UDP 双向转发；对端不可达时按超时回收。
 - [ ] **P0-5 UDP 观测与配置**：ingress/egress UDP 开关与超时配置；`/metrics` 增加 UDP 会话数/字节数。
@@ -109,7 +111,7 @@
 
 | 优先级 | 条目 | 对应阶段 | 状态 |
 |--------|------|---------|------|
-| P0 | 5 | S1 UDP 全链路 | 2/5（P0-1 会话表、P0-2 ASSOCIATE 完成；P0-3 有实现级设计稿） |
+| P0 | 5 | S1 UDP 全链路 | 3/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷完成；P0-4 含 hy2 UDP 补课） |
 | P1 | 5 | S2 TUN + S3 前半 | 未开始 |
 | P2 | 8 | S3 后半 + S4 | 未开始 |
 | P3 | 4+1 | S4 收尾 | 1/5（P3-1 文档对齐完成） |

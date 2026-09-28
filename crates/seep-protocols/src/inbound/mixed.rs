@@ -36,7 +36,15 @@ impl MixedIngress {
         }
 
         if first[0] == 0x05 {
-            handle_socks5_stream(self.name.as_str(), &[], stream, router, output, self.udp.clone()).await
+            handle_socks5_stream(
+                self.name.as_str(),
+                &[],
+                stream,
+                router,
+                output,
+                self.udp.clone(),
+            )
+            .await
         } else {
             handle_http_connect_stream(self.name.as_str(), stream, router, output).await
         }

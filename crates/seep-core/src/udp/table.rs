@@ -15,7 +15,9 @@ use crate::udp::metrics::{
 };
 use crate::udp::relay::{DownlinkPacket, UdpRelay};
 use crate::udp::ChainFailureEvent;
-use crate::{FailureType, FlowContext, FlowId, FlowMetadata, FlowRouter, FlowTarget, RouteDecision};
+use crate::{
+    FailureType, FlowContext, FlowId, FlowMetadata, FlowRouter, FlowTarget, RouteDecision,
+};
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::collections::BTreeMap;
@@ -68,10 +70,14 @@ pub fn classify_failure(e: &anyhow::Error) -> FailureType {
     let s = format!("{e:#}").to_lowercase();
     if s.contains("timeout") || s.contains("timed out") || s.contains("refused") {
         FailureType::Timeout
+    } else if s.contains("mtu") {
+        // wg MTU 超限：包本身丢弃（R8），映射保留待空闲回收（§3.6 Timeout 行）
+        FailureType::Timeout
     } else if s.contains("route")
         || s.contains("unreachable")
         || s.contains("dns")
         || s.contains("resolve")
+        || s.contains("allowed_ips")
         || s.contains("解析")
     {
         FailureType::Route
@@ -88,7 +94,10 @@ pub fn chain_id_of(decision: &RouteDecision) -> String {
         crate::RoutePath::ThroughGroup { group, .. } => format!("group:{group}"),
         crate::RoutePath::Chain { hops } => format!(
             "chain:{}",
-            hops.iter().map(|h| h.node.as_str()).collect::<Vec<_>>().join("->")
+            hops.iter()
+                .map(|h| h.node.as_str())
+                .collect::<Vec<_>>()
+                .join("->")
         ),
     }
 }
@@ -152,13 +161,19 @@ impl UdpSessionTable {
             Some(e) => Arc::clone(e.value()),
             None => self.create_session(key)?,
         };
-        let r = SessionRef { table: Arc::clone(self), inner };
+        let r = SessionRef {
+            table: Arc::clone(self),
+            inner,
+        };
         // 粘滞决策：缓存命中直接用；失效（链路故障置 None）则重路由
         r.ensure_decision(target).await?;
         Ok(r)
     }
 
-    fn create_session(self: &Arc<Self>, key: &UdpSessionKey) -> Result<Arc<UdpSessionInner>, ResolveError> {
+    fn create_session(
+        self: &Arc<Self>,
+        key: &UdpSessionKey,
+    ) -> Result<Arc<UdpSessionInner>, ResolveError> {
         use dashmap::mapref::entry::Entry;
         // 容量门在 entry 之前：entry 持分片写锁期间不得调 len()/iter()（DashMap 死锁）
         // 并发窗口下允许极小超卖（分片 map 的软门语义）
@@ -201,7 +216,9 @@ impl UdpSessionTable {
     ) -> UpResult {
         if self.is_shutdown() {
             self.metrics.drop_inc(DropReason::ShuttingDown);
-            return UpResult::Dropped { reason: DropReason::ShuttingDown };
+            return UpResult::Dropped {
+                reason: DropReason::ShuttingDown,
+            };
         }
         let inner = match self.sessions.get(key) {
             Some(e) => Arc::clone(e.value()),
@@ -225,7 +242,9 @@ impl UdpSessionTable {
         match self.sessions.remove(key) {
             Some((_, inner)) => {
                 let removed = close_all_mappings(&inner);
-                self.metrics.mappings_active.fetch_sub(removed as i64, Ordering::Relaxed);
+                self.metrics
+                    .mappings_active
+                    .fetch_sub(removed as i64, Ordering::Relaxed);
                 self.metrics.expired_inc(ExpireReason::Revoked);
                 self.metrics.sessions_active.fetch_sub(1, Ordering::Relaxed);
                 true
@@ -248,7 +267,10 @@ impl UdpSessionTable {
             if invalidated {
                 *inner.decision.write().unwrap() = None;
             }
-            if let Some(_failed_nodes) = inner.ledger.on_link_failure(&event.chain_id, &event.failed_nodes) {
+            if let Some(_failed_nodes) = inner
+                .ledger
+                .on_link_failure(&event.chain_id, &event.failed_nodes)
+            {
                 // 会话粘滞单链：链故障即吊销该会话全部映射（设计 R2；
                 // 未受影响会话由 ledger 的链绑定门禁隔离）
                 let mut map = inner.mappings.lock().unwrap();
@@ -258,7 +280,9 @@ impl UdpSessionTable {
                 }
                 drop(map);
                 if revoked > 0 {
-                    self.metrics.mappings_active.fetch_sub(revoked as i64, Ordering::Relaxed);
+                    self.metrics
+                        .mappings_active
+                        .fetch_sub(revoked as i64, Ordering::Relaxed);
                     revoked_total += revoked;
                 }
             }
@@ -370,7 +394,9 @@ pub(crate) async fn send_via_mapping(
             }
             inner.ledger.on_error(ft);
             metrics.drop_inc(DropReason::SendFailed);
-            UpResult::Dropped { reason: DropReason::SendFailed }
+            UpResult::Dropped {
+                reason: DropReason::SendFailed,
+            }
         }
     }
 }
@@ -425,7 +451,13 @@ impl SessionRef {
             target: target.clone(),
             metadata: FlowMetadata::default(),
         };
-        let decision = Arc::new(self.table.router.route(ctx).await.map_err(ResolveError::Route)?);
+        let decision = Arc::new(
+            self.table
+                .router
+                .route(ctx)
+                .await
+                .map_err(ResolveError::Route)?,
+        );
         let prev_decisions = self.inner.decisions.fetch_add(1, Ordering::Relaxed);
         if prev_decisions > 0 {
             // 非首次决策 = 链路失效后的重路由（指标口径：udp_reroutes_total）
@@ -482,13 +514,19 @@ impl SessionRef {
             if let Some(vk) = victim {
                 if let Some(vm) = map.remove(&vk) {
                     vm.close();
-                    self.table.metrics.mappings_active.fetch_sub(1, Ordering::Relaxed);
+                    self.table
+                        .metrics
+                        .mappings_active
+                        .fetch_sub(1, Ordering::Relaxed);
                 }
             }
         }
         map.insert(fkey, Arc::clone(&mapping));
         drop(map);
-        self.table.metrics.mappings_active.fetch_add(1, Ordering::Relaxed);
+        self.table
+            .metrics
+            .mappings_active
+            .fetch_add(1, Ordering::Relaxed);
 
         // forwarder task（表侧持有，udp-relay-path.md §4）
         let fwd = ForwarderTask {
@@ -513,7 +551,9 @@ impl SessionRef {
     pub async fn send_up(&self, target: &FlowTarget, data: Bytes) -> UpResult {
         if self.table.is_shutdown() {
             self.table.metrics.drop_inc(DropReason::ShuttingDown);
-            return UpResult::Dropped { reason: DropReason::ShuttingDown };
+            return UpResult::Dropped {
+                reason: DropReason::ShuttingDown,
+            };
         }
         let fkey = FlowTargetKey::of(target);
         let mapping = { self.inner.mappings.lock().unwrap().get(&fkey).cloned() };
@@ -534,9 +574,7 @@ impl SessionRef {
     }
 
     /// 取走下行接收端（入站 handler 一次性持有；None = 已被取走）
-    pub async fn take_downlink_rx(
-        &self,
-    ) -> Option<mpsc::Receiver<DownlinkPacket>> {
+    pub async fn take_downlink_rx(&self) -> Option<mpsc::Receiver<DownlinkPacket>> {
         self.inner.downlink_rx.lock().await.take()
     }
 }

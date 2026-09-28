@@ -17,7 +17,11 @@ pub struct UdpSessionKey {
 
 impl UdpSessionKey {
     pub fn new(client: SocketAddr) -> Self {
-        Self { client, user: None, process: None }
+        Self {
+            client,
+            user: None,
+            process: None,
+        }
     }
 
     pub fn with_user(mut self, user: Option<String>) -> Self {

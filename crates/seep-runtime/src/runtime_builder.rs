@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context as _, Result};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,11 @@ use tokio::{
     time,
 };
 
-use seep_config::{EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor, SeepConfig};
+use seep_config::{
+    EgressConfig, EgressDescriptor, GroupMember, IngressConfig, IngressDescriptor, PolicyGroup,
+    RoutingConfig, SeepConfig,
+};
+use seep_core::udp::EgressUdpConnector;
 use seep_core::{
     EgressConnector, Flow, FlowContext, FlowOutput, FlowReport, FlowRouter, IngressEndpoint,
     RouteDecision, RoutePath,
@@ -30,8 +34,8 @@ use seep_mesh::{MeshRegistry, MeshSession, NodeId, SessionId};
 use seep_platform::network::{NetworkConfig, NetworkManager};
 use seep_protocols::{
     DirectConnector, HttpConnector, HttpIngress, Hysteria2Connector, MixedIngress,
-    ShadowsocksConnector, Socks5Connector, Socks5Ingress, TrojanConnector, VlessConnector,
-    WireguardConnector,
+    ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress, TrojanConnector,
+    VlessConnector, WireguardConnector, WireguardUdpConnector,
 };
 use seep_routing::RoutingEngine;
 use seep_subscription::SubscriptionConverter;
@@ -107,10 +111,21 @@ impl RuntimeBuilder {
         // 创建路由引擎
         let router = Arc::new(RoutingEngine::new(config_snapshot.routing.clone()));
 
-        // UDP 数据面（P0-2，udp-relay-path.md §2）：udp.enabled 时构建共享
-        // 会话表 + direct 出站连接器；路由决策用基础 RoutingEngine（mesh-chain
-        // 包装的 UDP 接线属 P0-4）。周期回收任务随首个 ASSOCIATE 拉起。
+        // UDP 数据面（P0-2/P0-3，udp-relay-path.md §2/§3）：udp.enabled 时构建
+        // 共享会话表 + 按节点能力表注册的 RoutingUdpConnector；§3.1 构建期扫描
+        // 拦截 UDP 不可达节点。路由决策用基础 RoutingEngine（mesh-chain 包装的
+        // UDP 接线属 P0-4）。周期回收任务随首个 ASSOCIATE 拉起。
         let udp_service = if config_snapshot.udp.enabled {
+            let udp_connectors = build_udp_connectors(&config_snapshot.egress)?;
+            scan_udp_capability(
+                &config_snapshot.routing,
+                &config_snapshot.egress,
+                &udp_connectors,
+            )?;
+            let routing_udp = seep_core::udp::RoutingUdpConnector::new();
+            for (node, connector) in udp_connectors {
+                routing_udp.register(node, connector);
+            }
             let table = seep_core::udp::UdpSessionTable::new(
                 seep_core::udp::UdpSessionConfig {
                     session_idle: std::time::Duration::from_secs(
@@ -127,7 +142,7 @@ impl RuntimeBuilder {
             )?;
             Some(seep_core::udp::UdpAssociateService::new(
                 table,
-                Arc::new(seep_core::udp::DirectUdpConnector),
+                Arc::new(routing_udp),
                 config_snapshot.udp.strict_udp_source,
             ))
         } else {
@@ -136,7 +151,8 @@ impl RuntimeBuilder {
 
         // 入口/出口默认实现
         if self.ingress_endpoints.is_empty() {
-            self.ingress_endpoints = build_ingress_endpoints(&config_snapshot.ingress, udp_service)?;
+            self.ingress_endpoints =
+                build_ingress_endpoints(&config_snapshot.ingress, udp_service)?;
         }
         if self.flow_outputs.is_empty() {
             let (outputs, connectors) = build_egress_outputs(&config_snapshot.egress)?;
@@ -1485,13 +1501,135 @@ fn build_ingress_endpoints(
             IngressConfig::Http { bind } => {
                 Arc::new(HttpIngress::new(desc.name.clone(), bind.clone()))
             }
-            IngressConfig::Mixed { bind } => {
-                Arc::new(MixedIngress::new(desc.name.clone(), bind.clone(), udp.clone()))
-            }
+            IngressConfig::Mixed { bind } => Arc::new(MixedIngress::new(
+                desc.name.clone(),
+                bind.clone(),
+                udp.clone(),
+            )),
         };
         map.insert(desc.name.clone(), endpoint);
     }
     Ok(map)
+}
+
+/// UDP 出站连接器表（udp-relay-path.md §3.1 能力表）：
+/// direct / shadowsocks / wireguard → 有能力；其余类型 → 判负（由
+/// `scan_udp_capability` 在构建期报错，hy2 的 V1 结论见该文档 §3.4/§6）。
+fn build_udp_connectors(
+    descriptors: &[EgressDescriptor],
+) -> Result<HashMap<String, Arc<dyn EgressUdpConnector>>> {
+    let mut connectors = HashMap::new();
+    for desc in descriptors {
+        let connector: Option<Arc<dyn EgressUdpConnector>> = match &desc.spec {
+            EgressConfig::Direct => Some(Arc::new(seep_core::udp::DirectUdpConnector)),
+            EgressConfig::Shadowsocks {
+                server,
+                port,
+                method,
+                password,
+            } => {
+                // 复用 TCP 面连接器的构建期校验（加密方法解析在 new 内完成），
+                // 保证 UDP 面与 TCP 面同一份 server_config
+                let conn = ShadowsocksConnector::new(
+                    server.clone(),
+                    *port,
+                    method.clone(),
+                    password.clone(),
+                )
+                .with_context(|| format!("节点 {} 的 shadowsocks 配置无效", desc.name))?;
+                Some(Arc::new(ShadowsocksUdpConnector::from_connector(&conn)))
+            }
+            EgressConfig::Wireguard {
+                allowed_ips, mtu, ..
+            } => Some(Arc::new(
+                WireguardUdpConnector::new(allowed_ips.clone(), *mtu)
+                    .with_context(|| format!("节点 {} 的 wireguard UDP 配置无效", desc.name))?,
+            )),
+            _ => None,
+        };
+        if let Some(c) = connector {
+            connectors.insert(desc.name.clone(), c);
+        }
+    }
+    Ok(connectors)
+}
+
+/// UDP 可达节点的构建期能力扫描（udp-relay-path.md §3.1）：
+/// default_node + 规则目标 + 组成员闭包中出现"已知出站节点但无 UDP 能力"
+/// → 启动失败，逐个列出节点名、类型与规则来源。
+/// 非节点目标（路由器自行解析的字面量）不在此扫描范围。
+fn scan_udp_capability(
+    routing: &RoutingConfig,
+    egress: &[EgressDescriptor],
+    connectors: &HashMap<String, Arc<dyn EgressUdpConnector>>,
+) -> Result<()> {
+    // 可达集：default_node、规则目标，以及这些目标作为组名时递归展开的成员
+    let groups: HashMap<&str, &PolicyGroup> = routing
+        .groups
+        .iter()
+        .map(|g| (g.name.as_str(), g))
+        .collect();
+    let mut reachable: HashMap<String, String> = HashMap::new();
+    let mut queue: Vec<(String, String)> =
+        vec![(routing.default_node.clone(), "default_node".to_string())];
+    for rule in &routing.rules {
+        queue.push((rule.target.clone(), format!("rule:{}", rule.name)));
+    }
+    while let Some((name, source)) = queue.pop() {
+        if let Some(g) = groups.get(name.as_str()) {
+            for m in &g.members {
+                let member = match m {
+                    GroupMember::Node { name }
+                    | GroupMember::Group { name }
+                    | GroupMember::WeightedNode { name, .. }
+                    | GroupMember::WeightedGroup { name, .. } => name.clone(),
+                };
+                queue.push((member, format!("group:{}", g.name)));
+            }
+            continue;
+        }
+        reachable.entry(name).or_insert(source);
+    }
+
+    let known: HashMap<&str, &EgressDescriptor> =
+        egress.iter().map(|d| (d.name.as_str(), d)).collect();
+    let mut offenders: Vec<String> = Vec::new();
+    for (node, source) in &reachable {
+        let Some(desc) = known.get(node.as_str()) else {
+            continue; // 非本配置出站节点的目标（内置字面量等）
+        };
+        if !connectors.contains_key(node) {
+            offenders.push(format!(
+                "  - 节点 {node}（{}，来源 {source}）",
+                egress_kind(&desc.spec)
+            ));
+        }
+    }
+    if !offenders.is_empty() {
+        let detail = offenders.join("\n");
+        anyhow::bail!(
+            "udp.enabled 但以下出站节点不支持 UDP 转发（udp-relay-path.md §3.1 能力表）:\n\
+             {detail}\n\
+             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard（hysteria2 待 P0-4）\n\
+             请更换这些节点的出站类型，或将 udp.enabled 关闭并移除 UDP 相关规则"
+        );
+    }
+    Ok(())
+}
+
+fn egress_kind(spec: &EgressConfig) -> &'static str {
+    match spec {
+        EgressConfig::Direct => "direct",
+        EgressConfig::Socks5 { .. } => "socks5",
+        EgressConfig::Http { .. } => "http",
+        EgressConfig::Shadowsocks { .. } => "shadowsocks",
+        EgressConfig::Vmess { .. } => "vmess",
+        EgressConfig::Vless { .. } => "vless",
+        EgressConfig::Trojan { .. } => "trojan",
+        EgressConfig::Hysteria { .. } => "hysteria",
+        EgressConfig::Hysteria2 { .. } => "hysteria2",
+        EgressConfig::Wireguard { .. } => "wireguard",
+    }
 }
 
 fn build_egress_outputs(
@@ -2141,5 +2279,163 @@ mod tests {
             Some("exit1")
         );
         assert_eq!(RuntimeFlowRouter::parse_mesh_target("direct"), None);
+    }
+
+    // ---------- P0-3 UDP 能力扫描 ----------
+
+    fn node(name: &str, spec: EgressConfig) -> EgressDescriptor {
+        EgressDescriptor {
+            name: name.to_string(),
+            spec,
+        }
+    }
+
+    fn group(name: &str, members: &[(&str, u32)]) -> PolicyGroup {
+        PolicyGroup {
+            name: name.to_string(),
+            strategy: Strategy::Weighted,
+            members: members
+                .iter()
+                .map(|(n, w)| GroupMember::WeightedNode {
+                    name: n.to_string(),
+                    weight: *w,
+                })
+                .collect(),
+        }
+    }
+
+    fn rule(name: &str, target: &str) -> RouteRule {
+        RouteRule {
+            name: name.to_string(),
+            matches: vec![MatchCondition::DomainSuffix {
+                values: vec!["test".into()],
+            }],
+            target: target.to_string(),
+        }
+    }
+
+    fn ss_spec() -> EgressConfig {
+        EgressConfig::Shadowsocks {
+            server: "127.0.0.1".into(),
+            port: 8388,
+            method: "aes-256-gcm".into(),
+            password: "pw".into(),
+        }
+    }
+
+    fn vmess_spec() -> EgressConfig {
+        EgressConfig::Vmess {
+            server: "127.0.0.1".into(),
+            port: 443,
+            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            alter_id: 0,
+            security: "auto".into(),
+            network: "tcp".into(),
+            path: None,
+            host: None,
+            tls: false,
+            skip_cert_verify: false,
+            sni: None,
+            alpn: None,
+        }
+    }
+
+    #[test]
+    fn udp_capability_scan_passes_when_all_reachable_are_capable() {
+        let egress = vec![
+            node("direct-out", EgressConfig::Direct),
+            node("ss-out", ss_spec()),
+        ];
+        let connectors = build_udp_connectors(&egress).unwrap();
+        let routing = RoutingConfig {
+            default_node: "direct-out".into(),
+            groups: vec![group("g", &[("ss-out", 1), ("direct-out", 1)])],
+            rules: vec![rule("r1", "g")],
+        };
+        assert!(scan_udp_capability(&routing, &egress, &connectors).is_ok());
+        assert_eq!(connectors.len(), 2);
+    }
+
+    #[test]
+    fn udp_capability_scan_fails_listing_offending_nodes_and_sources() {
+        // default_node=vmess（无能力）+ rule target 指向 hy2（无能力）
+        let egress = vec![
+            node("vmess-out", vmess_spec()),
+            node(
+                "hy2-out",
+                EgressConfig::Hysteria2 {
+                    server: "127.0.0.1".into(),
+                    port: 443,
+                    password: "x".into(),
+                    mport: None,
+                    obfs: None,
+                    obfs_param: None,
+                    server_name: None,
+                    skip_cert_verify: false,
+                    alpn: None,
+                },
+            ),
+        ];
+        let connectors = build_udp_connectors(&egress).unwrap();
+        assert!(connectors.is_empty(), "vmess/hy2 均不产 UDP 连接器");
+        let routing = RoutingConfig {
+            default_node: "vmess-out".into(),
+            groups: vec![group("g", &[("hy2-out", 1)])],
+            rules: vec![rule("r1", "g")],
+        };
+        let err = scan_udp_capability(&routing, &egress, &connectors)
+            .err()
+            .expect("UDP 不可达节点应使构建失败");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vmess-out"), "应点名 vmess-out: {msg}");
+        assert!(
+            msg.contains("default_node"),
+            "应标注来源 default_node: {msg}"
+        );
+        assert!(msg.contains("hy2-out"), "应点名 hy2-out: {msg}");
+        assert!(
+            msg.contains("rule:r1") || msg.contains("group:g"),
+            "应标注来源: {msg}"
+        );
+    }
+
+    #[test]
+    fn udp_capability_scan_skips_non_egress_targets() {
+        // 规则目标指向 mesh 节点（非本配置出站节点）→ 不报错
+        let egress = vec![node("ss-out", ss_spec())];
+        let connectors = build_udp_connectors(&egress).unwrap();
+        let routing = RoutingConfig {
+            default_node: "ss-out".into(),
+            groups: vec![],
+            rules: vec![rule("r1", "mesh.exit1")],
+        };
+        assert!(scan_udp_capability(&routing, &egress, &connectors).is_ok());
+    }
+
+    #[test]
+    fn udp_build_connectors_skips_unsupported_kinds() {
+        let egress = vec![
+            node("d", EgressConfig::Direct),
+            node("v", vmess_spec()),
+            node(
+                "t",
+                EgressConfig::Trojan {
+                    server: "127.0.0.1".into(),
+                    port: 443,
+                    password: "x".into(),
+                    network: "tcp".into(),
+                    path: None,
+                    host: None,
+                    tls: true,
+                    skip_cert_verify: false,
+                    sni: None,
+                    alpn: None,
+                },
+            ),
+        ];
+        let connectors = build_udp_connectors(&egress).unwrap();
+        // 只有 direct 产连接器；vmess/trojan 静默跳过（由能力扫描兜底报错）
+        assert_eq!(connectors.len(), 1);
+        assert!(connectors.contains_key("d"));
     }
 }

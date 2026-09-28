@@ -27,7 +27,10 @@ impl RealClock {
 
 impl Default for RealClock {
     fn default() -> Self {
-        Self { epoch_base: AtomicU64::new(0), instant_base: Instant::now() }
+        Self {
+            epoch_base: AtomicU64::new(0),
+            instant_base: Instant::now(),
+        }
     }
 }
 
@@ -45,7 +48,9 @@ pub struct MockClock {
 
 impl MockClock {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { now: AtomicU64::new(0) })
+        Arc::new(Self {
+            now: AtomicU64::new(0),
+        })
     }
 
     pub fn set_epoch(&self, secs: u64) {
