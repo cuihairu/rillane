@@ -211,15 +211,13 @@ seepctl -c config/seep.yaml chain create  --source client1 --target exit1
 seepctl -c config/seep.yaml chain stats
 ```
 
-## Security Notes (MVP Limitations)
+## Security Notes (current status, 2026-09)
 
-Current MVP includes hop-by-hop TLS via optional mTLS, but still does NOT include:
-
-- End-to-end (multi-hop) authenticated headers (MAC) / replay protection
-- Fine-grained ACL enforcement on each hop (beyond basic role checks)
-- Automatic CA rotation / revocation (CRL/OCSP)
-
-These features are planned for future releases. The current implementation is suitable for:
-- Development and testing
-- Trusted internal networks
-- Proof-of-concept deployments
+- mTLS on the mesh data-plane is **required by default** when `chain` is enabled
+  (`SEEP_MESH_ALLOW_PLAINTEXT=1` only for dev). CA bundle dual-trust rotation and a
+  minimal revocation list (by node cert CN, file hot-reload) are implemented — see above
+  and [architecture.md](architecture.md).
+- `NodeACL` (client CIDR / role restrictions) and `NodeQuota` (bandwidth / connection
+  limits) are enforced at the registry layer.
+- Still NOT implemented (todo P2-7): end-to-end multi-hop MAC / replay protection,
+  CRL/OCSP auto-distribution.
