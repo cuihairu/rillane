@@ -214,6 +214,65 @@ impl MeshUdpGate { fn ensure_usable(&self, tls: Option<&MeshTlsConfig>) -> Resul
 3. `udp.enabled=false`：构建路径与本条目之前零差异；
 4. 全仓测试基线（P0-3 时点 118 项）全绿。
 
+#### 9.1.1 P0-4 分步实施清单（S0–S6，可执行）
+
+**依赖顺序**：
+
+```
+S0 时序调整（纯重构）─┐
+S1 UdpEnvelope 编解码 ─┼─► S3 MeshDataPlane UDP 面 ─┐
+S2 UdpFlowCache 跳缓存 ─┘   S4 UdpChainRouter/MeshUdpRelay ─┴─► S5 接线 ─► S6 测试收口
+（S1/S2 互相独立；S3 依赖 S1+S2；S4 只依赖 S1 的解码与 P0-3 trait；
+ S5 依赖 S0+S3+S4；S6 依赖全部。每步独立可提交。）
+```
+
+**提交节奏**（沿用 P0-1..P0-3 铁律）：每步 = `cargo build` + `cargo test` 全绿 → 单条 commit（信息引用本文 §节）→ `git fetch origin main` + `git rebase origin/main` → push → 下一步；禁 tag / release / force push。全部完成后按 §10 勾选 todo.md。
+
+**S0 build() 时序调整**（本节上文裁决的落地，纯重构）
+
+- 落点：`runtime_builder.rs::build()`——UDP 块（`build_udp_connectors` → `scan_udp_capability` → `RoutingUdpConnector` → `UdpSessionTable` → `UdpAssociateService`）整体移至 `ChainManager` 初始化之后；`build_ingress_endpoints` 调用顺延；原位置留一行注释指向新位置。
+- 依赖：无。
+- 验收：`cargo build --workspace` 绿；`cargo test --workspace` 与 P0-3 基线（118 项）持平；diff 无 UDP 语义变化（此步 UDP 表的 FlowRouter 仍是基础 engine——换 RuntimeFlowRouter 属 S5）。
+
+**S1 UdpEnvelope 编解码**（§2）
+
+- 落点：`mesh_transport.rs`：`UdpDir` / `UdpPathMode` / `UdpEnvelope` + `encode_udp_envelope` / `decode_udp_envelope` 纯函数。
+- 依赖：无。
+- 实施要点：字段序与字节布局严格按 §2；`version != 1` / 保留位非 0 / domain 长度 >255 / CACHED 携带 path / 截断 → 一律解码错误。
+- 验收：§10 T1 全绿（roundtrip × FULL/CACHED × v4/v6/domain × dir 两位，5 类拒绝各有断言）。
+
+**S2 UdpFlowCache 跳缓存**（§3）
+
+- 落点：`mesh_transport.rs`：`FlowCacheEntry` / `UdpFlowCache`（DashMap + ttl/max + 驱逐计数 + `sweep_expired`）。
+- 依赖：无（与 S1 可并行使）。
+- 实施要点：上界驱逐 = 满时先扫过期、仍满逐最早 expiry（§11-6）；条目 `expiry` 字段允许测试就地改写（同文件 `#[cfg(test)]` 可达私有字段，与现有 TCP 两跳测试同位），不引入时钟抽象。
+- 验收：§10 T4（过期条目判 miss + `unknown_flow` 计数）、T5（max=2 插 3 → 最早 expiry 被逐 + 驱逐计数）、T8（`sweep_expired` 后 `len == 0`）全绿。
+
+**S3 MeshDataPlane UDP 面**（§4 + §6）
+
+- 落点：`mesh_transport.rs`：`MeshUdpGate::ensure_usable`；`MeshDataPlane` 增 `udp: Option<UdpFace>` 字段与 `with_udp(gate)` 构造子；`handle_udp_datagram` / `spawn_udp`；exit 分支的 per-flow connected socket 表 + 下行 task。
+- 依赖：S1 + S2。
+- 实施要点：转发/回包共用节点级 UDP 面 socket（§1 拓扑）；FULL→剥自身重编码、CACHED→查缓存转发（§11-4）；exit 下行从缓存读 prev（FULL 重刷新 prev 后下行随之改向）；gate 只做显式参数检查，env 读取留在调用方（§11-5）。
+- 验收：§10 T6（tls=None 且 `!allow_plaintext` → Err 信息含 `SEEP_MESH_UDP_ALLOW_PLAINTEXT`）、T3（relay 直调 `handle_udp_datagram`，第 2 包 decode 为 Cached 且 path 空）、T4 的 unknown_flow 路径；单跳（client→exit）真 socket 往返先行钉住 exit 分支。
+
+**S4 UdpChainRouter + MeshUdpRelay**（§5）
+
+- 落点：`seep-runtime` 新私有模块 `udp_chain.rs`：`UdpChainRouter`（`RoutePath::Chain{hops≥2}` → mesh，其余 → 内部 `RoutingUdpConnector`）、`MeshUdpBridge::associate`（解析 hops[1] 地址 + 本地 socket）、`MeshUdpRelay`（impl P0-1 `UdpRelay`：FULL 首包 → CACHED 后续 + 周期重发 FULL，下行只认 CACHED dir=Down 且 flow_id 匹配）。
+- 依赖：S1（解码）；P0-3 trait 面（已在仓库）。
+- 验收：§10 T7（Chain 分派命中 MeshUdpRelay / Direct 落 inner 连接器）；`MeshUdpRelay` 对桩 UDP 对端（假 relay：收 FULL 存样、回 CACHED dir=Down）完成 send/recv 单测。
+
+**S5 build() / seepd 接线**（§9.2 + §8）
+
+- 落点：`runtime_builder.rs::build()`：udp.enabled && enable_chain 时 UDP 表 FlowRouter 换 `RuntimeFlowRouter`（S0 腾出的位置）；出站连接器换 `UdpChainRouter`；非 client 角色并列 `spawn_udp`（gate 前置）；`ChainFailureEvent` 按 §8 口径桥接。
+- 依赖：S0 + S3 + S4。
+- 验收：§9.1 验收口径 1–4 逐条核对（chain+udp build 成功且 chain 决策 UDP 可达 / 无 chain 等价 P0-3 / 关 udp 零差异 / 全仓基线绿）。
+
+**S6 测试收口**（§10 全表）
+
+- 落点：`mesh_transport.rs` / `udp_chain.rs` 的 `#[cfg(test)]` 模块（与现有 TCP 两跳测试同位，可达私有字段）。
+- 依赖：S1–S5 全部。
+- 验收：§10 T2 两跳真 socket 往返（client `MeshUdpRelay` → relay plane → exit plane → 环回 echo，dir=Down 全链路回包）；§10 八项全部在库且绿；`cargo build --workspace` + `cargo test --workspace` 绿 → todo.md P0-4 勾选（引用 §10 与本清单；hy2 验收项在勾选时按 V2 实情一并裁决）。
+
 ### 9.2 serve 与出站接线
 
 - `build()`：udp.enabled 且 enable_chain 时，UDP 表的 `FlowRouter` 从基础 engine 换成 `RuntimeFlowRouter::new(engine, registry, chain_manager, local_id)`（经 9.1 时序调整后可行）；

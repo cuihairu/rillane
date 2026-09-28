@@ -56,7 +56,8 @@
   测试：`seep-core/tests/udp_egress_selection.rs` 3 项（选路分发/wg MTU 保映射/wg allowed_ips 拆映射+重路由）+ `seep-protocols/tests/udp_egress.rs` 7 项（方法构建期拒绝/ss 发送路径真 socket+R7 固定/wg 预检与 MTU/无效 CIDR 拒绝/域名解析后预检）+ runtime 能力扫描 4 项；全仓 118 通过。
   验收：不支持的出站类型在构建期明确报错 ✅；direct/wg/ss 出站 UDP 可达 ✅（ss 为发送路径真 socket，完整解密往返需 shadowsocks-service 服务端、归 P0-5 联调）；"QUIC 站点经 hy2 出站可达"→ **P0-4**（与 mesh UDP 载荷同批落地）。
 - [ ] **P0-4 mesh data-plane UDP 转发**：多跳 UDP（envelope over UDP/QUIC 数据报），与现有 TCP 面共存。
-  验收：两跳链路（client → relay → exit）UDP 双向转发；对端不可达时按超时回收。
+  实现级设计：[docs/design/udp-mesh-dataplane.md](docs/design/udp-mesh-dataplane.md)（§2 UdpEnvelope 二进制格式 / §3 跳缓存 / §4 MeshDataPlane UDP 面 / §5 UdpChainRouter / §6 明文门 / §8 chain_id 口径桥接 / §9.1 build() 时序裁决 + **分步实施清单 S0–S6**（每步含落点/依赖/验收，2026-09 设计就绪，实施未开始））。
+  验收：两跳链路（client → relay → exit）UDP 双向转发；对端不可达时按超时回收；QUIC 站点经 hy2 出站可达（P0-3 §3.4(c) 移入本条，载具 quinn=V2 未决，明文门 MVP 先行）。
 - [ ] **P0-5 UDP 观测与配置**：ingress/egress UDP 开关与超时配置；`/metrics` 增加 UDP 会话数/字节数。
   验收：示例配置含 UDP 区块；Grafana 面板可见 UDP 序列。
 
@@ -111,7 +112,7 @@
 
 | 优先级 | 条目 | 对应阶段 | 状态 |
 |--------|------|---------|------|
-| P0 | 5 | S1 UDP 全链路 | 3/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷完成；P0-4 含 hy2 UDP 补课） |
+| P0 | 5 | S1 UDP 全链路 | 3/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷完成；P0-4 实现级设计稿+分步实施清单就绪，含 hy2 UDP 补课） |
 | P1 | 5 | S2 TUN + S3 前半 | 未开始 |
 | P2 | 8 | S3 后半 + S4 | 未开始 |
 | P3 | 4+1 | S4 收尾 | 1/5（P3-1 文档对齐完成） |
