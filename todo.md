@@ -70,8 +70,9 @@
 - [ ] **P1-2 TunIngress 接线 runtime**：IP 流重组 → `FlowContext`（注入进程/端口），TUN 作为新 ingress 类型接入。
   实现级设计：[docs/design/tun-dataplane.md](docs/design/tun-dataplane.md) §2（TunFlowTable 镜像 P0-1 语义 / UDP 头编解码含 v6 强制校验和 / smoltcp TCP 面 / 进程注解 `process.*` + `MatchCondition::Process` / TunIngress 属主化不经 NetworkManager / §2.7 bypass 防环）+ §3 错误路径 + §4 测试策略 + §5 清单 **T3–T5**（**2026-09 设计稿就绪，实施未开始**）。
   验收：按进程/端口规则将指定游戏流量路由至 mesh 链路（TCP 对象 T4 即验；UDP 对象软依赖 P0-4 S5）；bypass（局域网/DNS/管理口）默认安全（auto-bypass 集 + 进程内兜底）。
-- [ ] **P1-3 network 配置区块 + `seepctl route apply/clear`**（勘误重开）：`SeepConfig` 顶层 `network` 区块（mode: tun/redir、bypass/include、进程过滤）；CLI 幂等应用/撤销系统路由。
-  验收：`apply` 后 `ip rule`/路由表符合预期，`clear` 完全还原；重复执行幂等；失败时自动回滚。
+- [ ] **P1-3 network 配置区块 + `seepctl route apply/clear`**（勘误重开）：`SeepConfig` 顶层 `network` 区块（mode: tun/transparent——命名裁决 B4；include 语义；进程过滤走 P1-2 `MatchCondition::Process`，不进本块）；CLI 幂等应用/撤销系统路由。
+  实现级设计：[docs/design/network-route.md](docs/design/network-route.md)（§1 镜像类型 schema + 转换映射表——seep-config 不加 platform 依赖；§2 seepd 派生开关 + **NetworkManager 让路裁决**（修正 build() ④ 必失败路径，audit §1.2"接线存在但不可用"就此收口）；§3 控制面三端点；§5 幂等/回滚/还原状态机（"完全还原" = 撤销 seep 所加步骤）；§8 分步清单 **R0–R4**——R0 无依赖可先行，R1 起硬依赖 P1-1 T1/T2。**2026-09 设计稿就绪待实现**）。
+  验收：`apply` 后 main 表显式路由符合预期（**口径修正**：MVP 不触碰 `ip rule`，全局接管归 V2），`clear` 完全还原；重复执行幂等；失败时自动回滚。
 - [ ] **P1-4 混淆中间件 MVP（padding）**：以 `FlowMiddleware` 形态实现包长填充策略，按 profile 开关。
   验收：开启后统计脚本显示出口包长分布偏离默认分布且可配置目标形态；关闭时零开销旁路。
 - [ ] **P1-5 出站连接池**：同出口同 SNI keep-alive 复用 + TLS 会话恢复（网页加速核心项）。
@@ -116,7 +117,7 @@
 | 优先级 | 条目 | 对应阶段 | 状态 |
 |--------|------|---------|------|
 | P0 | 5 | S1 UDP 全链路 | 3/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷完成；P0-4 实现级设计稿+分步实施清单就绪（含 hy2 UDP 补课）；P0-5 设计稿就绪待实现） |
-| P1 | 5 | S2 TUN + S3 前半 | 0/5（P1-1/P1-2 实现级设计稿就绪（tun-dataplane.md，含 T0–T5 分步清单）；实施未开始） |
+| P1 | 5 | S2 TUN + S3 前半 | 0/5（P1-1/P1-2/P1-3 实现级设计稿就绪（tun-dataplane.md T0–T5 / network-route.md R0–R4 分步清单）；实施未开始） |
 | P2 | 8 | S3 后半 + S4 | 未开始 |
 | P3 | 4+1 | S4 收尾 | 1/5（P3-1 文档对齐完成） |
 

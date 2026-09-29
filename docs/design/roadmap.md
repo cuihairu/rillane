@@ -52,7 +52,7 @@
 
 **目标**：系统级流量接管 + 进程/端口分流，游戏流量不依赖代理入站即可进入数据通路。
 
-> **进度（2026-09）**：实施未开始；P1-1/P1-2 实现级设计稿就绪——[tun-dataplane.md](tun-dataplane.md)（T0–T5 分步清单、错误路径 E1–E16、§6 假设 11 项）；P1-3（network 区块 + route CLI）/ P1-4 / P1-5 未启动（P1-4 前置 = 中间件挂载点，见 S3 注记）。
+> **进度（2026-09）**：实施未开始；P1-1/P1-2/P1-3 实现级设计稿就绪——[tun-dataplane.md](tun-dataplane.md)（T0–T5 分步清单、错误路径 E1–E16、§6 假设 11 项）、[network-route.md](network-route.md)（R0–R4 分步清单、NetworkManager 让路裁决、幂等/回滚状态机）；P1-4 / P1-5 未启动（P1-4 前置 = 中间件挂载点，见 S3 注记）。
 
 - **复用**：`seep-platform::network` 已有的 `TunProvider`/`RouteManager`/`PacketFilter` trait 与 TunConfig/规则模型（trait 与规则模型已成型——编译内约 3588 行；`platform.rs` 237 行未参与编译且仅含 macOS 草稿，见 [status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §1.2）；`seep-core` 路由决策不变——TUN 只是新增一种 ingress。
 - **新增**：

@@ -4,7 +4,7 @@
 
 ## 执行摘要
 
-系统级流量接管（TUN/redir + 进程/端口分流）是游戏加速场景的前提——代理入站抓不到不经过代理的应用流量。本模块的 trait 与数据模型已在 `seep-platform::network` 建成（五个子模块、约 3800 行），**但各平台实现均为占位，runtime 未接线，配置与 CLI 未落地**。本文如实标注现状与目标形态。
+系统级流量接管（TUN/redir + 进程/端口分流）是游戏加速场景的前提——代理入站抓不到不经过代理的应用流量。本模块的 trait 与数据模型已在 `seep-platform::network` 建成（**编译内四个子模块约 3588 行**；`platform.rs` 237 行未参与编译——`network/mod.rs:21` 注释，见 [design/status-audit-tun-network-middleware.md](design/status-audit-tun-network-middleware.md) §1.2），**但各平台实现均为占位，runtime 未接线，配置与 CLI 未落地**。本文如实标注现状与目标形态；实现级设计见 [design/tun-dataplane.md](design/tun-dataplane.md)（P1-1/P1-2）与 [design/network-route.md](design/network-route.md)（P1-3）。
 
 ## 1. 已建成（模型层）
 
@@ -14,14 +14,14 @@
 | `route.rs` | `RouteManager` trait、`RoutingConfig`/`RouteRule`/`RouteDestination`/`RouteType`（含校验与匹配逻辑） | 模型完成；无系统路由写入实现 |
 | `filter.rs` | `PacketFilter` trait、`FilteringConfig`（`ProcessRule`/`PortRule`/`IpRule`/`DomainRule`/`ProtocolRule`/`ApplicationRule`）、`FilterStats` | 模型完成；无包过滤实现 |
 | `dns.rs` | `DnsHandler` trait 与 DNS 代理/缓存/劫持/DoH 设计 | 模型完成；无运行实现（DNS 分流见 todo P2-8） |
-| `platform.rs` | Linux/OpenWrt/Windows/macOS/Android/iOS 各 Provider/RouteManager/PacketFilter/DnsHandler 骨架 | **全部占位**：构造即告警"占位实现"，`read_packet`/`write_packet` 返回"未实现" |
+| `platform.rs` | **仅 macOS 5 个占位类型**（Utun/Tap Provider、RouteManager、PacketFilter、DnsHandler 草稿）；**未参与编译**且启用即编译失败（占位大面积缺 trait 方法）——无任何 Linux/Windows/Android/iOS 骨架 | 死稿：P1-1 以新模块 `network/linux.rs` 重写接入（[design/tun-dataplane.md](design/tun-dataplane.md) §1.4），非填充此文件 |
 
 ## 2. 未落地（与代码一一对应）
 
 - **无真实 TUN 设备**：任何平台都没有打开 `/dev/net/tun`、Wintun、utun 等的代码；占位实现即 `platform.rs` 现状（P1-1 落地 Linux 真实现）。
 - **runtime 未接线**：`seep-runtime` 不存在 `TunIngress`/`TunEgress`，IP 包无法进入 `FlowRouter`（P1-2）。
-- **配置缺区块**：`SeepConfig` 顶层只有 `control/telemetry/ingress/egress/routing`，没有 `network` 区块（mode: tun/redir、bypass/include、进程过滤）；`TunConfig`/`FilteringConfig` 仅存在于 platform crate，未进配置 schema（P1-3）。
-- **CLI 缺命令**：`seepctl` 无 `route apply/clear`（P1-3）。
+- **配置缺区块**：`SeepConfig` 顶层只有 `control/telemetry/ingress/egress/routing/udp`，没有 `network` 区块（mode: tun/transparent、include；命名裁决见 [design/network-route.md](design/network-route.md) §1.3）；`TunConfig`/`FilteringConfig` 仅存在于 platform crate，未进配置 schema（P1-3，设计稿就绪）。
+- **CLI 缺命令**：`seepctl` 无 `route apply/clear`（P1-3，设计稿就绪：apply/clear/status 三动作 + 控制面三端点）。
 - **当前唯一可用能力**：`seepctl diagnose` 只读采集本机路由/DNS/接口快照，用于问题排查。
 
 ## 3. 目标形态（设计，未实现）
