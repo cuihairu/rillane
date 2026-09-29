@@ -176,6 +176,7 @@ seepctl udp-probe --socks5 127.0.0.1:1080 --host example.com --port 53 \
 | `crates/seep-core/src/udp/associate.rs` | `max_associates` 上限；metrics snapshot 结构 |
 | `crates/seep-runtime/src/runtime_builder.rs` | per-ingress udp_enabled 判定；新配置字段映射 |
 | `apps/seepd/src/control_plane.rs` | `/metrics` UDP 序列渲染；`/udp/stats` 端点 |
+| `apps/seepd/src/control_plane.rs`（P1-2 届时） | `seep_tun_*` 序列渲染（定义见 [tun-dataplane.md](tun-dataplane.md) §2.8；本条目不含，见 §9-5） |
 | `apps/seepctl/src/main.rs` | stats UDP 段；`udp-probe` 子命令 |
 | `docs/grafana/seep-dashboard.json` | §5 四行面板 |
 | 示例配置 | udp: 区块样例 |
@@ -185,3 +186,76 @@ seepctl udp-probe --socks5 127.0.0.1:1080 --host example.com --port 53 \
 - **R11（重申）**：无 target/host/用户标签；若 P2-1 需要 per-link UDP 细分，届时以 cardinality 预算另立序列，不改本文封闭枚举；
 - `seep_udp_relay_bytes_total` 的表级聚合在并发下为 relaxed 累加，与 per-mapping 快照可能有瞬时微小偏差（监控用途可接受）；
 - `udp-probe` 的 DNS 载荷由调用方给 hex（不做 DNS 编码器），保持工具最小面。
+
+## 9. 实施细节补全（第二轮复查，2026-09）
+
+> 与 P0-4 §13 同轮的缺口复查产物；P1-2（tun-dataplane.md）落地后的跨稿衔接一并收口。字段名已对照 P0-2 实现（`UdpIngressMetrics`，`seep-core/src/udp/associate.rs:106`）核实。
+
+### 9-1 `/udp/stats` 响应示例（§3.1 精确化）
+
+`ingress` 段字段即 `UdpIngressMetrics` 原子量既有名（P0-2 已钉，勿改名）；`table` 段以 `TableSnapshot` 实现字段为准（P0-1），示例按指标同名列出；`mesh` 段 = P0-4 §13-2 定稿：
+
+```json
+{
+  "table": {
+    "sessions_active": 3, "sessions_total": 128, "mappings_active": 7,
+    "reroutes": 2, "bytes_up": 1048576, "bytes_down": 2097152,
+    "dropped": {"session_limit": 0, "mapping_limit": 0, "no_binding": 0,
+                "shutting_down": 0, "send_failed": 1, "downlink_full": 0},
+    "expired": {"idle": 120, "lifetime": 0, "revoked": 1}
+  },
+  "ingress": {
+    "associates_active": 3, "associates_total": 45, "associate_rejected": 2,
+    "associate_errors": 0, "uplink_packets": 1024, "downlink_packets": 980,
+    "frag_dropped": 0, "source_dropped": 0, "malformed_dropped": 0
+  },
+  "mesh": {
+    "forwarded_up": 512, "forwarded_down": 480, "malformed": 0,
+    "unknown_flow": 3, "evicted": 0, "flows_active": 4
+  }
+}
+```
+
+（`mesh` 段仅 P0-4 面启用时出现；数字为示意。）
+
+### 9-2 `seepctl stats` UDP 段渲染样式（§3.2 精确化）
+
+```
+UDP:
+  sessions    3 active / 128 total (mappings 7 active)
+  relay       1.0 MiB up / 2.0 MiB down (1024 / 980 packets)
+  associates  3 active / 45 total (2 rejected)
+  dropped     send_failed=1
+  expired     idle=120 revoked=1
+  mesh        512 up / 480 down (flows 4, unknown_flow 3)   ← P0-4 启用时
+```
+
+零值行照打（与 §6-2 "序列不因开关消失"同口径，渲染侧无需分支）。
+
+### 9-3 `udp-probe` 退出码（§3.3 补全）
+
+| 码 | 含义 | stderr 附带 |
+|----|------|------------|
+| 0 | 往返成功（收到回包并解头） | 源地址与载荷长度 |
+| 1 | TCP 连接 / SOCKS5 握手 / 认证失败 | 阶段与 IO 错误 |
+| 2 | ASSOCIATE 被拒（REP 0x01/0x07） | REP 码与语义（0x07 = 入口未开 UDP） |
+| 3 | 超时无回包（`--timeout`，默认 3s） | 已发出字节数 |
+| 4 | 回包包头解析失败 | 解码错误 |
+
+非 0 即失败，便于脚本化钉验收 #6。
+
+### 9-4 per-ingress `udp_enabled` 判定伪码（§1.3 钉死）
+
+```rust
+fn resolve_udp_enabled(global_enabled: bool, per_ingress: Option<bool>) -> bool {
+    per_ingress.unwrap_or(global_enabled)
+}
+```
+
+- 求值点：`build_ingress_endpoints` 逐入口调一次（`UdpAssociateService` 实例仍全局单例，§1.3）；
+- `Some(true)` 且全局关 → 构建期 warning（§1.3 语义）；
+- 测试三行钉住三态：None 继承 / Some(false) 关 / Some(true) 开。
+
+### 9-5 跨稿衔接：`seep_tun_*`（P1-2）
+
+tun-dataplane.md §2.8 的 `seep_tun_*` 家族渲染走本文同一 `push_counter`/`push_gauge` 管线（§2.1），**不新开端点/机制**；§7 清单已增 P1-2 衔接行。P0-5 实施时不渲染该家族（序列未定义时跳过），P1-2 T5 落地后自动出现——两侧零耦合。

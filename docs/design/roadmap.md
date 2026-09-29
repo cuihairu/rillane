@@ -1,6 +1,7 @@
 # Seep 分阶段路线图
 
 > 状态：设计文档（2026-09）· 定位依据：[positioning.md](positioning.md) · 可执行条目：[todo.md](../../todo.md)
+> 进度速览（2026-09）：S0 ✅ ｜ S1 进行中 3/5（P0-4/P0-5 实现级设计就绪）｜ S2 设计启动（P1-1/P1-2 实现级设计就绪，实施未开始）｜ S3/S4 未开始
 
 ## 执行摘要
 
@@ -37,6 +38,8 @@
 
 **目标**：让游戏流量（UDP 为主）走通「入站 → 路由 → 出站 → mesh 多跳」全程。
 
+> **进度（2026-09）**：3/5 完成——P0-1 会话表 / P0-2 UDP ASSOCIATE / P0-3 出站载荷（direct/ss/wg）已落地（细节见 todo.md 各条）；P0-4 / P0-5 实现级设计稿就绪待实现：[udp-mesh-dataplane.md](udp-mesh-dataplane.md)（S0–S6 分步实施清单 + §13 细节补全）、[udp-observability.md](udp-observability.md)（§7 文件清单 + §9 细节补全）。退出标准勘误：hy2 出站 UDP 承载经 P0-3 核查改判——hysteria2 0.1.6 公开 API 无 UDP 出口，移 P0-4 与 mesh 载荷同批（载具 quinn = V2 未决）。
+
 - **复用**：`seep-core` 的 `FlowTarget::Udp` 枚举与 `FlowSession`；`seep-routing` 不感知传输层，规则原样生效；Hysteria2/WireGuard/Shadowsocks 出站的既有握手/加密栈。
 - **新增**：
   1. `seep-core`：UDP 会话语义（NAT 式映射表、超时回收、会话粘滞键 = 进程/五元组）；
@@ -49,20 +52,22 @@
 
 **目标**：系统级流量接管 + 进程/端口分流，游戏流量不依赖代理入站即可进入数据通路。
 
-- **复用**：`seep-platform::network` 已有的 `TunProvider`/`RouteManager`/`PacketFilter` trait 与 TunConfig/规则模型（3825 行设计已成型）；`seep-core` 路由决策不变——TUN 只是新增一种 ingress。
+> **进度（2026-09）**：实施未开始；P1-1/P1-2 实现级设计稿就绪——[tun-dataplane.md](tun-dataplane.md)（T0–T5 分步清单、错误路径 E1–E16、§6 假设 11 项）；P1-3（network 区块 + route CLI）/ P1-4 / P1-5 未启动（P1-4 前置 = 中间件挂载点，见 S3 注记）。
+
+- **复用**：`seep-platform::network` 已有的 `TunProvider`/`RouteManager`/`PacketFilter` trait 与 TunConfig/规则模型（trait 与规则模型已成型——编译内约 3588 行；`platform.rs` 237 行未参与编译且仅含 macOS 草稿，见 [status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §1.2）；`seep-core` 路由决策不变——TUN 只是新增一种 ingress。
 - **新增**：
   1. Linux 真实现：`/dev/net/tun` + TUNSETIFF、policy routing（ip rule/fwmark）、redir 模式（nftables/iptables）；
   2. OpenWrt 复用 Linux 实现（musl 静态构建）；
   3. `seep-runtime`：接线 `TunIngress`（IP 包 → 流重组 → `FlowContext` 注入进程/端口信息）；
   4. `seepctl route apply/clear`（todo 勘误：此前标注完成，实际缺失）；
-  5. Windows(Wintun)/macOS(utun)/Android(VpnService)/iOS(NEPacketTunnel) 按 Linux 模式后续填空（platform.rs 占位已是该形状）。
+  5. Windows(Wintun)/macOS(utun)/Android(VpnService)/iOS(NEPacketTunnel) 按 Linux 模式后续填空（`platform.rs` 为未编译的单平台草稿，P1-1 以新模块重写接入——tun-dataplane.md §1.4）。
 - **退出标准**：Linux 上 TUN 接管后，按进程/端口规则将游戏流量路由至 mesh 链路；`seepctl route apply/clear` 幂等可用；bypass 名单（局域网/DNS/管理口）默认安全。
 
 ## S3：混淆横切层 + 网页加速（对应 P1/P2）
 
 **目标**：流量渗过识别（抗 QoS/DPI）+ 连接效率（网页场景）。
 
-- **复用**：`FlowMiddleware` trait（混淆以中间件形态挂载）；各协议既有 TLS 伪装能力（Trojan/VLESS/Reality 类）；`seep-routing` 规则分流。
+- **复用**：`FlowMiddleware` trait（混淆以中间件形态挂载——核对注记：trait 已定义但数据通路**尚无挂载点**，P1-4 须先建静态中间件链，[status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §3）；各协议既有 TLS 伪装能力（Trojan/VLESS/Reality 类）；`seep-routing` 规则分流。
 - **新增**：
   1. 混淆中间件（`seep-protocols::middleware`）：`padding`（包长分布对齐）、`timing`（微抖动）、`shaping`（流形状归一），按 profile 开关；
   2. 客户端 TLS 指纹模拟（uTLS 类能力，优先挂在 TLS 出站公共层 `tls.rs`）；
@@ -89,14 +94,14 @@
 | 阶段 | seep-core | seep-routing | seep-protocols | seep-platform | seep-runtime | seep-mesh | seep-subscription | apps |
 |------|-----------|--------------|----------------|---------------|--------------|-----------|-------------------|------|
 | S0 ✅ | 会话/链路模型 | 规则+组策略 | TCP 入/出站 | trait 层 | chain+mesh TCP 面 | 注册/ACL/配额 | Clash+DSL+热更 | 控制面+CLI |
-| S1 | UDP 会话语义 | 不变 | UDP 入/出站 | 不变 | UDP 数据面 | link-state 扩展 | 不变 | UDP 配置 |
-| S2 | 不变 | 进程匹配增强 | 不变 | Linux TUN 真实现 | TunIngress 接线 | 不变 | 不变 | route apply/clear |
+| S1（3/5） | UDP 会话语义 | 不变 | UDP 入/出站 | 不变 | UDP 数据面 | link-state 扩展 | 不变 | UDP 配置 |
+| S2（设计） | 不变 | 进程匹配增强 | 不变 | Linux TUN 真实现 | TunIngress 接线 | 不变 | 不变 | route apply/clear |
 | S3 | 中间件挂点不变 | 不变 | 混淆中间件+连接池 | 不变 | envelope 二进制化 | 不变 | DSL 混淆字段 | profile 预设 |
 | S4 | SLO 打分输入 | 策略升级 | 指标埋点 | 平台打包 | 调度闭环 | 端到端安全 | 不变 | 发布产物 |
 
 ## 风险与依赖
 
 - **S1 是 S2/S4 的前置**：没有 UDP，TUN 接管的游戏流量无处可去，SLO 调度也无对象；
-- **S2 依赖真实内核交互**，需要集成测试环境（Linux CI + NetworkNamespace 级测试），占位实现转正期间保持 trait 稳定；
+- **S2 依赖真实内核交互**，需要集成测试环境（Linux CI + NetworkNamespace 级测试）；trait 口径 = **语义稳定而非方法集冻结**（已授权裁剪：tun-dataplane.md §1.2 删 `packet_stream`/`TunPacketStream`/`TunInterface` 三项假 I/O 占位）；
 - **S3 混淆的有效性验证**依赖测量方法（统计脚本/对抗样本），先建度量再调参；
 - 协议文档 `PROTOCOLS.md` 存在超前描述（UDP ASSOCIATE、VMess、连接池等），以 todo.md 勘误与阶段退出标准为准回填。

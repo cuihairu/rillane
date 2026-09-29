@@ -114,7 +114,7 @@ send(payload) → target；下行 task: socket.recv → UdpEnvelope{dir:Down, pa
 ```
 
 - 下行 task 与 P0-1 forwarder 同构：recv Err（target 不可达/复位）→ 清 flow socket + 缓存条目 + 计数；
-- exit 侧 flow socket 空闲超时 = 缓存条目过期，由 §3 懒清扫统一回收（socket drop 即关闭）。
+- exit 侧 flow socket 空闲超时 = 缓存条目过期，由 §3 懒清扫统一回收（socket drop 即关闭）——**§13-1 修正**：下行 task 持 `Arc<UdpSocket>` 阻止 drop，回收改走 `retire_flow` 单点。
 
 下行 dir=Down（relay 收到）：查缓存 → `send_to(cache.prev)`（不重写路径字段——CACHED 无路径）；未命中 → `unknown_flow` 丢弃。
 
@@ -162,7 +162,8 @@ impl MeshUdpGate { fn ensure_usable(&self, tls: Option<&MeshTlsConfig>) -> Resul
 
 - **落点在构建期**（`RuntimeBuilder::build`）：非 client 角色拉起 UDP 面前、client 侧 UdpChainRouter::mesh 构建前各查一次；
 - serve/associate 层不再重复检查（构建期拦截后路径必然合法）；
-- 与 TCP 面"chain 默认强制 mTLS"同水位；`env_flag` 复用 mesh_transport 现有助手。
+- 与 TCP 面"chain 默认强制 mTLS"同水位；`env_flag` 复用 mesh_transport 现有助手；
+- gate 的配置合流点（`MeshConfig.udp_allow_plaintext_data_plane` ∪ env，P0-5 §1.5）定稿于 §13-6。
 
 ## 7. 记账与配额
 
@@ -310,3 +311,62 @@ S2 UdpFlowCache 跳缓存 ─┘   S4 UdpChainRouter/MeshUdpRelay ─┴─► S
 - **V2**：QUIC/quinn 载荷选型（倾向 A）；落地时 UDP 面 socket 拓扑不变，仅传输层替换；
 - **O3**：relay 回源校验后置（依赖加密层认证后重估）；
 - FULL 周期重发（§5）的频率是拍脑袋值（64 包/30s），落地后按抓包调整——不计入验收。
+
+## 13. 实施细节补全（第二轮复查，2026-09）
+
+> 对本文第一轮定稿的缺口复查产物，补齐 S0–S6 实施所需的剩余细节；本节修正 §4、补充 §2/§6/§9.2，与前文冲突处以本节为准。同轮 P0-5 侧补全见 udp-observability.md §9。
+
+### 13-1 exit 下行 task 生命周期（修正 §4）
+
+§4 原表述"懒清扫统一回收（socket drop 即关闭）"有隐含缺陷：**下行 task 持有 `Arc<UdpSocket>`，只要 task 活着引用计数就不归零**——条目被清扫移除后 socket 仍开着、task 仍在 recv。修正：
+
+- exit flow 表条目改为聚合条目：`flows: DashMap<[u8;16], ExitFlow>`，`ExitFlow { sock: Arc<UdpSocket>, task: JoinHandle<()> }`；
+- 回收单点 `retire_flow(flow_id)`（对齐 P0-1 teardown 单点收敛先例）：`task.abort()` → `flows.remove(flow_id)` → `cache.remove(flow_id)`——三步顺序固定（先停 task 再拆两表，杜绝下行 task 向已删 prev 发包）；
+- 三个触发点统一调它：① 懒清扫发现过期条目且本机为 exit（`next_hop==None`）→ 连带回收 flow；② 下行 task recv Err（target 不可达/复位）；③ FULL 重关联到**新 target**（旧 socket 对新 target 无意义，见 13-4）；
+- task 自身 Err 退出路径：先 `flows.remove` 自身再返回（`abort` 对已完成 task 是无害 no-op，双保险不必需）。
+
+### 13-2 `UdpFaceMetrics` 字段定稿（P0-5 §2.4 数据源）
+
+```rust
+pub struct UdpFaceMetrics {
+    pub forwarded_up: AtomicU64,   // 上行转发数据报（含本机发出的 FULL/CACHED）
+    pub forwarded_down: AtomicU64, // 下行回送数据报
+    pub malformed: AtomicU64,      // 解码拒绝（§2 校验失败 + §13-3 超界）
+    pub unknown_flow: AtomicU64,   // CACHED/下行未命中
+    pub evicted: AtomicU64,        // 上界驱逐（R10）
+    pub flows_active: AtomicI64,   // 缓存条目数（插 +/逐 −）
+}
+// 全 relaxed；get()/get_gauge() 拼装 Snapshot（对齐 P0-2 UdpIngressMetrics 形态）
+```
+
+- 落点：`mesh_transport.rs`，`UdpFace` 内持有；
+- `seep_udp_mesh_flows_active` 直接读 gauge（不扫 `map.len()`——sweep 时点才有偏差，监控可接受）。
+
+### 13-3 envelope 大小上界（补 §2）
+
+- `encode_udp_envelope`：总长 > **65507**（IPv4 UDP 载荷理论上限）→ `Err`；调用方丢弃 + `malformed` 计数（正常路径 payload 不会超，此为防御性断言，兼挡路由前用户态塞超长包的误用）；
+- decode 侧已有截断拒绝，不重复；
+- mesh 面自身不分片：超出口 MTU 的以太网路径靠内核 IP 分片（direct/下一跳）；QUIC 载具（V2）自带自身分片。**MVP 约束**：业务 UDP 数据报 > 1400 字节时可靠性不承诺（游戏流量典型 ≤ MTU）——文档明示，不加配置项。
+
+### 13-4 FULL 重关联与回收顺序
+
+- 上行 FULL 命中已有条目（§3 已定：刷新 prev/next/expiry）**且 exit 侧 target 变化**（同 flow_id 新 target）→ 先 `retire_flow` 再按新 target 建流（13-1 ③）；
+- relay 侧无 per-flow socket，重关联仅刷缓存；
+- 顺序总则：**先 abort task，再移除 flow 表，最后移除缓存条目**（13-1 单点内部已固化）。
+
+### 13-5 serve 层并发模型（补 §9.2）
+
+- `spawn_udp` = 单任务循环：`recv_from → handle_udp_datagram` 顺序处理，**不 per-packet spawn**——每包处理无阻塞长操作（exit 首包 connect target 是唯一 await 点，冷启动串行可接受）；
+- 高吞吐需求（V2）：`SO_REUSEPORT` 多 socket 分片（每 CPU 一个），`spawn_udp` 对外接口不变；
+- exit 下行 task（per-flow recv）独立于 serve 循环，天然并发。
+
+### 13-6 明文门配置合流（对齐 P0-5 §1.5）
+
+gate 构造参数化（§6 已定 env 只在读取层出现）；**合流点定稿**：`RuntimeBuilder::build()` UDP 块内求值一次
+
+```
+allow_plaintext = cfg.mesh.udp_allow_plaintext_data_plane /* bool, serde default false */
+                  || env_flag("SEEP_MESH_UDP_ALLOW_PLAINTEXT")
+```
+
+结果以 `MeshUdpGate { allow_plaintext: bool }` 显式传入两个消费点（非 client 的 `spawn_udp` 前 / client 的 `UdpChainRouter` mesh 臂构建前）——两处 gate 实例同源，测试传参即可覆盖两分支，不碰进程 env（§11-5 裁决不变）。
