@@ -25,6 +25,12 @@ client (MeshUdpRelay)          relay (MeshDataPlane UDP)        exit (MeshDataPl
 
 - **socket 拓扑**：每节点 UDP 面一个共享 socket（同 TCP `listen_address` 端口，双栈同端口）；relay 的转发与回包都从它发出 → 对相邻跳而言来源地址稳定（NAT 友好，下行可回流）；exit 每 flow 一个 connected socket 发往真实目标。
 - **无 TCP 化**：不经 `MeshStream` 抽象（上游 §4.3 已裁决）；编解码直写。
+- **与 TCP 面的选择边界**（按传输协议在 ingress 分流，互不越界，全部基于既有分派点）：
+  - TCP 连接（socks5 CONNECT 等）→ `Flow` → `FlowOutputRouter` → TCP 面 `MeshEnvelope`（JSON 头 + 4 字节 length 前缀，`mesh_transport.rs:165-172`/`write_envelope` 既有）——本条目零改动；
+  - UDP 数据报 → P0-1 会话表 → `UdpChainRouter`（§5）→ UDP 面二进制 envelope（§2）；
+  - QUIC 站点 = 普通 UDP（`TargetProto::Quic` 不特判）走 UDP 面；hy2 出站载荷（P0-3 §3.4(c) 移入）是**出口载体**问题，不经 mesh UDP 面；
+  - 两面仅共享 `listen_address` 端口号与 registry/记账（`record_link_bytes`）；envelope 格式、socket、生命周期完全独立——TCP 面 flow 逐连接（`MeshStream` 双向拷贝、每连接 envelope 头一次），UDP 面 flow 逐数据报无连接（每包带 envelope 头）；
+  - 加密水位差异（既有事实）：TCP 面 chain 默认强制 mTLS（`SEEP_MESH_ALLOW_PLAINTEXT` 仅 dev）；UDP 面 MVP 走 §6 明文门——V2 QUIC 载具时对齐。
 
 ## 2. UdpEnvelope 二进制格式（§4.2 精确化）
 
@@ -116,7 +122,7 @@ send(payload) → target；下行 task: socket.recv → UdpEnvelope{dir:Down, pa
 - 下行 task 与 P0-1 forwarder 同构：recv Err（target 不可达/复位）→ 清 flow socket + 缓存条目 + 计数；
 - exit 侧 flow socket 空闲超时 = 缓存条目过期，由 §3 懒清扫统一回收（socket drop 即关闭）——**§13-1 修正**：下行 task 持 `Arc<UdpSocket>` 阻止 drop，回收改走 `retire_flow` 单点。
 
-下行 dir=Down（relay 收到）：查缓存 → `send_to(cache.prev)`（不重写路径字段——CACHED 无路径）；未命中 → `unknown_flow` 丢弃。
+下行 dir=Down（relay 收到）：查缓存 → `send_to(cache.prev)`（不重写路径字段——CACHED 无 path 字段；**hop_index 仍每跳 +1 重编码**，见 §14-1）；未命中 → `unknown_flow` 丢弃。
 
 ## 5. 客户端出站：UdpChainRouter + MeshUdpRelay
 
@@ -370,3 +376,23 @@ allow_plaintext = cfg.mesh.udp_allow_plaintext_data_plane /* bool, serde default
 ```
 
 结果以 `MeshUdpGate { allow_plaintext: bool }` 显式传入两个消费点（非 client 的 `spawn_udp` 前 / client 的 `UdpChainRouter` mesh 臂构建前）——两处 gate 实例同源，测试传参即可覆盖两分支，不碰进程 env（§11-5 裁决不变）。
+
+## 14. 多跳 TTL 与去重（第三轮补全）
+
+> 缺口复查结论：§2 定义了 `hop_index` 字段但从未给语义；去重零覆盖。本节补齐——**全部基于既有字段与既有计数，不改线格式、不加新序列**。TTL/去重语义定义在 envelope 层而非 socket 层，V2 换 QUIC 载具（§12）时原样保留（quinn 连接自带的包号抗重放是另一层，互不替代）。
+
+### 14-1 hop_index 语义与 TTL 上限
+
+- 语义：**该数据报已穿越的跳数**——发送端置 0（上行 = 客户端 `MeshUdpRelay`；下行 = exit 下行 task，§4 已定 `hop_index:0`），**每经一个 relay +1**（与 FULL 剥自身 / CACHED 查缓存的转发点位同步，上/下行对称；下行的"+1 重编码"是对 §4 原文的补充修正，成本一次变长头重编码）；
+- 上限 `MAX_UDP_HOPS = 16`（常量；mesh 链路深度实际受 ChainManager 构建约束，16 为远超正常拓扑的防御值）：relay 转发前校验 `hop_index >= MAX_UDP_HOPS` → 丢弃 + `malformed` 计数（复用 §13-2 既有字段）；客户端 `recv_from` 对下行同校验；
+- **FULL 模式基本不需要 TTL**：path 每跳剥一个元素（TCP 面同构——`MeshEnvelope.path` 即 "Remaining path including the current node id as the first element"），环意味着 path 严格缩短至空或 `path[0] != local_node_id`，均被 §4-2 既有校验拒绝——FULL 环天然不可持续，hop_index 在 FULL 模式仅作观测/调试；
+- **TTL 的真实作用面是 CACHED**：无路径字段，两个节点的跳缓存互指（陈旧状态/拓扑抖动/恶意构造）可能成环——`hop_index` 是 CACHED 模式唯一的环熔断器，这就是它存在于线格式的原因；
+- exit 到达不做 hop_index 与 path 的对账校验（exit 只见剥剩的 path，无从对账原长）——上界熔断 + path 严格递减已闭环。
+
+### 14-2 去重（duplicate suppression）裁决
+
+- **不做载荷级去重**：UDP 语义本身允许重复递交（best-effort），QUIC/DNS/游戏协议在应用层自会处理；mesh 面引入 per-flow 序号/哈希窗口的代价（每跳状态、乱序误杀、跨跳不一致）大于收益——MVP 明确不做，此为裁决而非遗漏；
+- **FULL 周期重发是"重复包"的唯一正常形态**：命中已有缓存 = 刷新条目（§3 已定），幂等无副作用，无需去重；
+- **陈旧/错位包**：flow 已过期/驱逐 → CACHED 未命中 → `unknown_flow` 丢弃（既有）；flow_id 不匹配缓存键同理；
+- **重放（恶意复制/延迟注入）**：MVP 明文门下无法认证来源，与 O3（relay 回源校验后置）同批归 V2——QUIC 载具连接自带 connection ID + packet number 抗重放，明文门 dev 场景不做；
+- **环**：不靠去重挡——FULL 靠 path 校验（14-1），CACHED 靠 TTL 熔断（14-1）。

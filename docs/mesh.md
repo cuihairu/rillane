@@ -52,6 +52,12 @@ upgraded to a `RouteDecision::Chain` via the `ChainManager`. The computed path w
 When `mesh` + `chain` are enabled, each node also listens on `MeshConfig.listen_address` (default
 `0.0.0.0:9091`) for hop-by-hop forwarding.
 
+> **现状注记（2026-09）**：本节协议仅覆盖 **TCP**（逐连接 `MeshStream` 双向拷贝，每连接一个 JSON `MeshEnvelope` 头）。
+> UDP 数据面（envelope over UDP 数据报、FULL/CACHED 跳缓存、明文门）**尚未实现**——实现级设计见
+> [design/udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)（todo P0-4，S0–S6 分步清单；与 TCP 面的选择边界见其 §1，
+> 多跳 TTL/去重裁决见其 §14）；UDP 侧观测与配置见 [design/udp-observability.md](design/udp-observability.md)（todo P0-5）。
+> 落地后本节标题的 "(TCP, MVP)" 限定随之移除。
+
 ### mTLS (Recommended / Secure-by-default for chain)
 
 - Enable mesh data-plane mTLS via env:
