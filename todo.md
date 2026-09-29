@@ -65,9 +65,11 @@
 ## P1 — TUN 系统接管 + 混淆 MVP（roadmap S2 + S3 前半）
 
 - [ ] **P1-1 Linux TUN 真实现**：`/dev/net/tun` + TUNSETIFF、包读写循环，替换 `platform.rs` 占位。
-  验收：Linux 集成测试中 tun 设备创建、捕获 IP 包进入 FlowRouter；OpenWrt（musl）可复用同路径编译。
+  实现级设计：[docs/design/tun-dataplane.md](docs/design/tun-dataplane.md) §1（设备生命周期/接口签名；最小 `LinuxRouteManager`＝main 表显式路由 + AppliedStep 回滚；模块接线与 `platform.rs`/`TunInterface` 占位处置——注意核对结论：该文件未编译且启用即编译失败，见 status-audit §1）；§5 清单 **T0–T2** 对应本条。
+  验收：Linux 集成测试中 tun 设备创建、捕获 IP 包进入 FlowRouter（设计 §4.2 钉子）；OpenWrt（musl）可复用同路径编译（§6 假设 #9；交叉产物验收归 P3-3）。
 - [ ] **P1-2 TunIngress 接线 runtime**：IP 流重组 → `FlowContext`（注入进程/端口），TUN 作为新 ingress 类型接入。
-  验收：按进程/端口规则将指定游戏流量路由至 mesh 链路；bypass（局域网/DNS/管理口）默认安全。
+  实现级设计：[docs/design/tun-dataplane.md](docs/design/tun-dataplane.md) §2（TunFlowTable 镜像 P0-1 语义 / UDP 头编解码含 v6 强制校验和 / smoltcp TCP 面 / 进程注解 `process.*` + `MatchCondition::Process` / TunIngress 属主化不经 NetworkManager / §2.7 bypass 防环）+ §3 错误路径 + §4 测试策略 + §5 清单 **T3–T5**（**2026-09 设计稿就绪，实施未开始**）。
+  验收：按进程/端口规则将指定游戏流量路由至 mesh 链路（TCP 对象 T4 即验；UDP 对象软依赖 P0-4 S5）；bypass（局域网/DNS/管理口）默认安全（auto-bypass 集 + 进程内兜底）。
 - [ ] **P1-3 network 配置区块 + `seepctl route apply/clear`**（勘误重开）：`SeepConfig` 顶层 `network` 区块（mode: tun/redir、bypass/include、进程过滤）；CLI 幂等应用/撤销系统路由。
   验收：`apply` 后 `ip rule`/路由表符合预期，`clear` 完全还原；重复执行幂等；失败时自动回滚。
 - [ ] **P1-4 混淆中间件 MVP（padding）**：以 `FlowMiddleware` 形态实现包长填充策略，按 profile 开关。
@@ -114,7 +116,7 @@
 | 优先级 | 条目 | 对应阶段 | 状态 |
 |--------|------|---------|------|
 | P0 | 5 | S1 UDP 全链路 | 3/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷完成；P0-4 实现级设计稿+分步实施清单就绪（含 hy2 UDP 补课）；P0-5 设计稿就绪待实现） |
-| P1 | 5 | S2 TUN + S3 前半 | 未开始 |
+| P1 | 5 | S2 TUN + S3 前半 | 0/5（P1-1/P1-2 实现级设计稿就绪（tun-dataplane.md，含 T0–T5 分步清单）；实施未开始） |
 | P2 | 8 | S3 后半 + S4 | 未开始 |
 | P3 | 4+1 | S4 收尾 | 1/5（P3-1 文档对齐完成） |
 
