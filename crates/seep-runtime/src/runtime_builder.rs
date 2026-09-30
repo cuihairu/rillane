@@ -303,6 +303,8 @@ impl RuntimeBuilder {
                 table,
                 connector,
                 config_snapshot.udp.strict_udp_source,
+                // P0-5 §1.2：S0 落地的配置字段（S1 签名变更连带接线，S2 再提纯映射）
+                config_snapshot.udp.max_associates,
             ))
         } else {
             None

@@ -31,6 +31,11 @@ impl FlowRouter for FixedRouter {
 }
 
 fn make_service(strict: bool) -> Arc<UdpAssociateService> {
+    make_service_with_limits(strict, 256)
+}
+
+/// 可调并发上限建服务（P0-5 §1.2 max_associates 测试面）
+fn make_service_with_limits(strict: bool, max_associates: usize) -> Arc<UdpAssociateService> {
     let config = UdpSessionConfig::default();
     let table = UdpSessionTable::new(
         config,
@@ -38,7 +43,7 @@ fn make_service(strict: bool) -> Arc<UdpAssociateService> {
         MockClock::new() as Arc<dyn Clock>,
     )
     .unwrap();
-    UdpAssociateService::new(table, Arc::new(DirectUdpConnector), strict)
+    UdpAssociateService::new(table, Arc::new(DirectUdpConnector), strict, max_associates)
 }
 
 /// 回声 UDP 服务器（模拟 DNS：收什么回什么，同源回送）
@@ -356,4 +361,83 @@ async fn mapping_layer_metrics_flow_through_associate() {
     let snap = svc.table().snapshot();
     assert_eq!(snap.sessions[0].packets_count, 10); // 5 up + 5 down
     assert_eq!(snap.sessions[0].bytes_uploaded, 5); // 每包载荷 1 字节
+}
+
+// ---------- P0-5 S1：max_associates 总量门 + 入站快照 ----------
+
+#[tokio::test]
+async fn max_associates_cap_rejects_and_counts() {
+    // §1.2：max=2 时两个不同 peer 注册成功、第 3 个拒（serve 路径 0x01 +
+    // associate_rejected 计数）；同 peer 重复注册维持既有拒绝语义
+    let svc = make_service_with_limits(false, 2);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen_addr = listener.local_addr().unwrap();
+
+    // 预占两个槽位（门只看 (ip,port) 集合，无需真实连接）
+    assert!(svc.try_register_associate(&"127.0.0.1:50001".parse::<SocketAddr>().unwrap()));
+    assert!(svc.try_register_associate(&"127.0.0.1:50002".parse::<SocketAddr>().unwrap()));
+    // 总量满：第 3 个不同 peer 也拒
+    assert!(!svc.try_register_associate(&"127.0.0.1:50003".parse::<SocketAddr>().unwrap()));
+    // 同 peer 重复注册语义不变（insert 返回 false）
+    assert!(!svc.try_register_associate(&"127.0.0.1:50001".parse::<SocketAddr>().unwrap()));
+
+    // 真实 serve 路径：第 3 条控制连接 → 0x01 + 计数
+    let sock = tokio::net::TcpSocket::new_v4().unwrap();
+    sock.bind("127.0.0.1:0".parse::<SocketAddr>().unwrap()).unwrap();
+    let client = sock.connect(listen_addr).await.unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+    let svc2 = Arc::clone(&svc);
+    let h = tokio::spawn(async move {
+        let mut s = server;
+        let _ = svc2.serve(&mut s, None).await;
+    });
+    let mut c = client;
+    c.write_all(&[0x05, 0x03, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0]).await.unwrap();
+    let mut reply = [0u8; 10];
+    timeout(Duration::from_secs(2), c.read_exact(&mut reply))
+        .await
+        .expect("应答超时")
+        .unwrap();
+    assert_eq!(reply[1], 0x01, "总量超限应答 0x01 general failure");
+    let _ = h.await;
+    assert_eq!(UdpIngressMetrics::get(&svc.metrics().associate_rejected), 1);
+    assert_eq!(UdpIngressMetrics::get_gauge(&svc.metrics().associates_active), 0);
+    svc.table().shutdown();
+}
+
+#[tokio::test]
+async fn ingress_snapshot_fields_complete() {
+    // §10-S1 测试 3：驱动各类事件后九字段逐一断言（含 0 值字段存在，§6-2 口径）
+    let svc = make_service(true);
+    let target_addr = spawn_echo_server().await;
+    let (mut control, relay_port, serve_handle) = associate(&svc).await;
+
+    // 一次往返 + FRAG≠0 + 截断头
+    let client_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut query = vec![0, 0, 0, 1, 127, 0, 0, 1];
+    query.extend_from_slice(&target_addr.port().to_be_bytes());
+    query.extend_from_slice(b"q");
+    client_udp.send_to(&query, format!("127.0.0.1:{relay_port}")).await.unwrap();
+    let mut rxbuf = [0u8; 2048];
+    let _ = timeout(Duration::from_secs(2), client_udp.recv_from(&mut rxbuf)).await.unwrap();
+    let mut frag = vec![0, 0, 1, 1, 8, 8, 8, 8, 0, 53, b'f'];
+    client_udp.send_to(&frag, format!("127.0.0.1:{relay_port}")).await.unwrap();
+    client_udp.send_to(&[0, 0, 0, 1, 8, 8], format!("127.0.0.1:{relay_port}")).await.unwrap();
+
+    wait_until(|| {
+        let s = svc.ingress_snapshot();
+        s.uplink_packets == 3 && s.downlink_packets == 1 && s.frag_dropped == 1 && s.malformed_dropped == 1
+    })
+    .await;
+    let snap = svc.ingress_snapshot();
+    assert_eq!(snap.associates_active, 1);
+    assert_eq!(snap.associates_total, 1);
+    assert_eq!(snap.associate_rejected, 0, "零值字段恒在（§6-2）");
+    assert_eq!(snap.associate_errors, 0);
+    assert_eq!(snap.source_dropped, 0);
+
+    // EOF 后 active 归零
+    control.shutdown().await.unwrap();
+    let _ = serve_handle.await;
+    wait_until(|| svc.ingress_snapshot().associates_active == 0).await;
 }

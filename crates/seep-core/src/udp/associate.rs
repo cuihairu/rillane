@@ -6,7 +6,7 @@
 //! 会话表侧（映射/forwarder/指标/回收）不在本模块，见 [`super::table`]。
 
 use crate::udp::key::UdpSessionKey;
-use crate::udp::metrics::DropReason;
+use crate::udp::metrics::{DropReason, UdpIngressSnapshot};
 use crate::udp::relay::{DownlinkPacket, EgressUdpConnector};
 use crate::udp::table::{UdpSessionTable, UpResult};
 use crate::{FlowContext, FlowMetadata, FlowTarget, TargetProto};
@@ -128,6 +128,21 @@ impl UdpIngressMetrics {
     pub fn get_gauge(c: &AtomicI64) -> i64 {
         c.load(Ordering::Relaxed)
     }
+
+    /// 快照拼装（P0-5 §9-1 ingress 段九字段，/udp/stats 数据源）
+    pub fn snapshot(&self) -> UdpIngressSnapshot {
+        UdpIngressSnapshot {
+            associates_active: UdpIngressMetrics::get_gauge(&self.associates_active),
+            associates_total: UdpIngressMetrics::get(&self.associates_total),
+            associate_rejected: UdpIngressMetrics::get(&self.associate_rejected),
+            associate_errors: UdpIngressMetrics::get(&self.associate_errors),
+            uplink_packets: UdpIngressMetrics::get(&self.uplink_packets),
+            downlink_packets: UdpIngressMetrics::get(&self.downlink_packets),
+            frag_dropped: UdpIngressMetrics::get(&self.frag_dropped),
+            source_dropped: UdpIngressMetrics::get(&self.source_dropped),
+            malformed_dropped: UdpIngressMetrics::get(&self.malformed_dropped),
+        }
+    }
 }
 
 // ---------- 服务 ----------
@@ -137,6 +152,9 @@ pub struct UdpAssociateService {
     connector: Arc<dyn EgressUdpConnector>,
     strict_udp_source: bool,
     metrics: Arc<UdpIngressMetrics>,
+    /// 并发 ASSOCIATE 总量上界（P0-5 §1.2 max_associates：防滥用；
+    /// 超限回 0x01 且 associate_rejected 计数——与同键并发门同一应答路径）
+    max_associates: usize,
     /// 并发 ASSOCIATE 门（§2.6）：同一控制连接对端 (ip, port) 只允许一条
     active: Mutex<HashSet<SocketAddr>>,
     /// 周期回收任务随首个 ASSOCIATE 拉起（build 阶段无 tokio 上下文；
@@ -149,12 +167,14 @@ impl UdpAssociateService {
         table: Arc<UdpSessionTable>,
         connector: Arc<dyn EgressUdpConnector>,
         strict_udp_source: bool,
+        max_associates: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             table,
             connector,
             strict_udp_source,
             metrics: Arc::new(UdpIngressMetrics::default()),
+            max_associates,
             active: Mutex::new(HashSet::new()),
             reclaimer_once: std::sync::Once::new(),
         })
@@ -172,9 +192,20 @@ impl UdpAssociateService {
         self.strict_udp_source
     }
 
-    /// 并发门登记（serve 内部使用；pub 供状态迁移/测试注入）
+    /// 并发门登记（serve 内部使用；pub 供状态迁移/测试注入）。
+    /// P0-5 §1.2：总量门 = active.len() ≥ max_associates 拒新（与同键
+    /// 二占同走 serve 的 0x01 + associate_rejected 路径）。
     pub fn try_register_associate(&self, peer: &SocketAddr) -> bool {
-        self.active.lock().unwrap().insert(*peer)
+        let mut active = self.active.lock().unwrap();
+        if active.len() >= self.max_associates {
+            return false;
+        }
+        active.insert(*peer)
+    }
+
+    /// 入站指标快照（P0-5 /udp/stats 数据源）
+    pub fn ingress_snapshot(&self) -> UdpIngressSnapshot {
+        self.metrics.snapshot()
     }
 
     /// 承载一条 ASSOCIATE 控制连接。调用前提：方法协商与认证已完成

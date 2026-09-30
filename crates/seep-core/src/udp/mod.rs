@@ -32,7 +32,9 @@ pub use config::UdpSessionConfig;
 pub use inner::{FlowTargetKey, MappingShared, UdpSessionInner};
 pub use key::{ProcessIdentity, UdpSessionKey};
 pub use ledger::SessionLedger;
-pub use metrics::{Dir, DropReason, ExpireReason, SessionSnapshot, TableMetrics, TableSnapshot};
+pub use metrics::{
+    Dir, DropReason, ExpireReason, SessionSnapshot, TableMetrics, TableSnapshot, UdpIngressSnapshot,
+};
 pub use reclaim::{sweep_once, SweepStats};
 pub use relay::{
     DirectUdpConnector, DownlinkPacket, EgressUdpConnector, LocalRelay, MockUdpRelay,

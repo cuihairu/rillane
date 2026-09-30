@@ -665,3 +665,59 @@ async fn chain_id_matches_direct_decision() {
 // 防止未使用告警（mpsc 在部分测试中仅保 type 标注）
 #[allow(dead_code)]
 fn _unused(_tx: mpsc::Sender<()>) {}
+
+// ---------- P0-5 S1：表级字节聚合 ----------
+
+#[tokio::test]
+async fn table_bytes_aggregate_tracks_mappings() {
+    // §10-S1 测试 1：单会话上下行若干包后表级 bytes_up/down == per-mapping
+    // 快照求和；并发写终值一致
+    let c = make_table(|_| {}).await;
+    let key = UdpSessionKey::new(addr(58000));
+    let t = udp_target("bytes.test", 53);
+    let sref = c.table.resolve(&key, &t).await.unwrap();
+    let (relay, tx) = MockUdpRelay::new(t.clone());
+    sref.bind_mapping(&t, relay).await.unwrap();
+
+    // 上行 5+7+9 字节
+    for payload in [Bytes::from_static(b"12345"), Bytes::from_static(b"1234567"), Bytes::from_static(b"123456789")] {
+        assert_eq!(
+            c.table.forward_up(&key, &t, payload).await,
+            seep_core::udp::UpResult::Sent
+        );
+    }
+    // 下行 4+6 字节（forwarder 异步计数）
+    tx.send(vec![1, 2, 3, 4]).await.unwrap();
+    tx.send(vec![1, 2, 3, 4, 5, 6]).await.unwrap();
+    wait_until(|| c.table.snapshot().bytes_down == 10).await;
+
+    let snap = c.table.snapshot();
+    assert_eq!(snap.bytes_up, 21, "表级上行 = per-mapping 求和");
+    assert_eq!(snap.bytes_down, 10, "表级下行 = per-mapping 求和");
+    assert_eq!(snap.sessions[0].bytes_uploaded, 21);
+    assert_eq!(snap.sessions[0].bytes_downloaded, 10);
+
+    // 并发写：8 任务 × 50 包 × 10 字节（不同粘滞键各自建会话），终值一致
+    let mut tasks = Vec::new();
+    for i in 0..8u16 {
+        let table = Arc::clone(&c.table);
+        tasks.push(tokio::spawn(async move {
+            let key = UdpSessionKey::new(addr(58100 + i));
+            let t = udp_target("conc.test", 53);
+            let sref = table.resolve(&key, &t).await.unwrap();
+            let (relay, _tx) = MockUdpRelay::new(t.clone());
+            sref.bind_mapping(&t, relay).await.unwrap();
+            for _ in 0..50 {
+                let data = vec![0u8; 10].into();
+                assert_eq!(table.forward_up(&key, &t, data).await, seep_core::udp::UpResult::Sent);
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let snap = c.table.snapshot();
+    assert_eq!(snap.bytes_up, 21 + 8 * 50 * 10, "并发终值 = 单会话 + 并发总量");
+    let per_session_sum: u64 = snap.sessions.iter().map(|s| s.bytes_uploaded).sum();
+    assert_eq!(snap.bytes_up, per_session_sum, "表级与 per-mapping 快照一致");
+}

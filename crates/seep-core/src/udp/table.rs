@@ -339,6 +339,8 @@ impl UdpSessionTable {
             sessions_total: self.metrics.sessions_total.load(Ordering::Relaxed),
             mappings_active: self.metrics.mappings_active.load(Ordering::Relaxed),
             reroutes: self.metrics.reroutes.load(Ordering::Relaxed),
+            bytes_up: self.metrics.bytes_up(),
+            bytes_down: self.metrics.bytes_down(),
             dropped: drop_names
                 .into_iter()
                 .map(|(r, n)| (n.to_string(), self.metrics.drop_count(r)))
@@ -367,6 +369,8 @@ pub(crate) async fn send_via_mapping(
     match mapping.relay.send_to(target, &data).await {
         Ok(()) => {
             mapping.count_up(data.len());
+            // P0-5 §2.5：表级字节与 per-mapping 同点顺带累加（渲染零扫描）
+            metrics.count_bytes(Dir::Up, data.len());
             mapping.consecutive_errors.store(0, Ordering::Relaxed);
             UpResult::Sent
         }
@@ -606,6 +610,8 @@ impl ForwarderTask {
                         self.inner.touch(now);
                         self.mapping.touch(now);
                         self.mapping.count_down(n);
+                        // P0-5 §2.5：表级字节与 per-mapping 同点顺带累加
+                        self.metrics.count_bytes(Dir::Down, n);
                         self.inner.ledger.on_packet(Dir::Down, n);
                         let pkt = DownlinkPacket { target: from, data: Bytes::copy_from_slice(&buf[..n]) };
                         if let Err(e) = self.downlink_tx.try_send(pkt) {
