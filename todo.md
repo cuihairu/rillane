@@ -61,7 +61,8 @@
   测试：§10 八项全绿——T1 编解码 roundtrip 矩阵+五类拒绝（S1，7 测）/ T2 两跳真 socket 往返（S6：client MeshUdpRelay→relay plane→exit plane→环回 echo，dir=Down 全链路回包 + CACHED 第二包复用 flow socket）/ T3 FULL 剥自身→CACHED（S3）/ T4 idle 过期 unknown_flow（S3）/ T5 上界驱逐（S2）/ T6 明文门（S3+S5 build 期拒绝双点）/ T7 UdpChainRouter 分派（S4）/ T8 过期清扫 len==0（S2）；另有 S2 缓存语义 6 测、S4 桩对端 send/recv+64 包重发+gate+链起点 4 测、S5 build 级口径 1-4 四测、§0.1-② 第二路径 exit 回收语义（forget_flow/retire_flow 拆两表+gauge）——P0-4 合计 27 测，全仓 145 通过（P0-3 基线 118 + 27）。
   验收：两跳链路（client → relay → exit）UDP 双向转发 ✅（§0.1-①：T2 真 socket 环回无特权，dir=Down 全链路）；对端不可达时按超时回收 ✅（§0.1-②双路径：idle 过期 T4 + exit 回收语义单测——真 ICMP 诱发 recv Err 依赖环境，单测钉住 §13-1 回收单点的两表拆除+gauge 语义）；QUIC 站点经 hy2 出站可达——**维持改判**（§0.1-③：hy2 crate 无 UDP 出口，随 V2 quinn 载具裁决；可验口径 = QUIC 即普通 UDP 不特判经两跳至 P0-3 载体可达，T2 即 direct 环回实证；明文门 MVP 先行 ✅ §0.1-④：未配置加密 chain+udp 构建期拒绝启动，S5 build 级 + T6 双点断言）。**统计口径注记（§0.2）随实现生效**：不去重（D-14）→ 重复递交为预期；FULL 周期重发计入 forwarded_up；`seep_udp_mesh_*` 观测序列族归 P0-5（S3/S4 计数器已就位：forwarded_up/down、malformed、flows_active、unknown_flow、evicted、dropped——读取点 P0-5 get()/get_gauge() 装配）。
 - [ ] **P0-5 UDP 观测与配置**：ingress/egress UDP 开关与超时配置；`/metrics` 增加 UDP 会话数/字节数。
-  实现级设计：[docs/design/udp-observability.md](docs/design/udp-observability.md)（§1 配置项清单——UdpConfig 补齐 5 字段 + per-ingress `udp_enabled` 覆盖 + mesh 明文门；§2 `/metrics` 命名与语义——`seep_udp_*` 全集/R11 封闭标签/O4 关闭裁决；§3 seepctl stats UDP 段 + `udp-probe` 联调工具；§4 与 P0-4 衔接点汇总。**2026-09 设计稿就绪待实现**；**§9 实施细节补全**：`/udp/stats` 响应示例（ingress 字段已对照 P0-2 实现核实）/ stats 渲染样式 / `udp-probe` 退出码表 / per-ingress `udp_enabled` 判定伪码 / §7 增 `seep_tun_*` 衔接行）。
+  实现级设计：[docs/design/udp-observability.md](docs/design/udp-observability.md)（§1 配置项清单——UdpConfig 补齐 5 字段 + per-ingress `udp_enabled` 覆盖 + mesh 明文门【落地核对：明文门已随 P0-4 S5 落地于 seep-runtime，本任务零新增】；§2 `/metrics` 命名与语义——`seep_udp_*` 全集/R11 封闭标签/O4 关闭裁决 + **§2.7 日志口径**（高频事件只计数、逐包路径零新增日志）+ client 侧 dropped 收编 `UdpClientMetrics`；§3 seepctl stats UDP 段 + `udp-probe` 联调工具（核心逻辑库化 udp_probe.rs）；§4 与 P0-4 衔接点汇总（Runtime 三观测接缝：get_udp_service / mesh_plane OnceLock / udp_client_metrics）。**2026-09 设计稿就绪待实现，2026-09-30 已细化到可开工**；**§9 实施细节补全**：`/udp/stats` 响应示例（ingress 字段已对照 P0-2 实现核实）/ stats 渲染样式 / `udp-probe` 退出码表 / per-ingress `udp_enabled` 判定伪码 / §7 增 `seep_tun_*` 衔接行）。
+  派工拆解（2026-09-30，设计稿 §10，每步含落点/依赖/测试计划）：**S0** 配置面（seep-config：UdpConfig +5 字段 + validate、Socks5/Mixed 增 `udp_enabled: Option<bool>`、`resolve_udp_enabled` 纯函数）→ **S1** 核心计数与上限（seep-core：TableMetrics 增表级 bytes_up/down 于 table.rs:369/608 两处顺带累加、`max_associates` 总量门、UdpIngressSnapshot）→ **S2** 运行时接线（runtime_builder：`udp_session_config` 提纯映射、per-ingress 判定进 build_ingress_endpoints、Runtime 增 getter）→ **S3** mesh 面观测装配（mesh_transport `UdpFaceSnapshot` 六字段 + `udp_snapshot()`；udp_chain `UdpClientMetrics` 收编 dropped；Runtime 持 mesh_plane——P0-4 plane Arc 现只在 start() 局部，此为补的观测接缝）→ **S4** 控制面渲染（/metrics `seep_udp_*` 恒渲染 + `/udp/stats` 端点）→ **S5** seepctl（stats UDP 段 + `udp-probe`，桩级集成测试）→ **S6** 样例与面板（config/seep.yaml udp 注释块、Grafana §5 四行、文档回填）。依赖链 S0/S1 并行→S2；S3 仅依赖 P0-4 可并行→S4→S5；S6 收尾。
   验收：示例配置含 UDP 区块；Grafana 面板可见 UDP 序列；`seepctl udp-probe` 全链路 DNS 往返（收口 P0-2 遗留联调）。
 
 ## P1 — TUN 系统接管 + 混淆 MVP（roadmap S2 + S3 前半）
@@ -122,11 +123,19 @@
 
 ---
 
+## 待派任务（杂项，未入优先级序列）
+
+- [ ] **修 CI Docker 镜像构建**（2026-09-30 登记，登记轮不做）：`.github/workflows/ci.yml` 的 docker job 现红——`Dockerfile:17` `COPY seep-routing/Cargo.toml` 起整段依赖缓存块（`COPY seep-config/… seep-core/… seep-routing/…` 与假源桩 `src/main.rs`）仍按旧扁平布局（仓库根 `seep-*/`），工作区实际已是 `crates/seep-config`、`crates/seep-core`、`crates/seep-routing` 等双层布局（`crates/` + `apps/`）。
+  修法：依赖缓存块 COPY 路径全部改 `crates/<name>/Cargo.toml`（含其余 workspace 成员清单，按根 `Cargo.toml` members 核对）；假源桩按各 crate 真实 target 类型（多数为 `src/lib.rs`）；`COPY --from=builder /app/target/release/seep` 的二进制名与产出 crate（`apps/seepd`）核对；顺带核对基础镜像 `rust:1.75` 时效（仓库 tokio 1.48，工具链可能已超 1.75）。
+  验收：CI docker job 绿（`docker build` + `docker run --rm seep:test --version` 冒烟通过）。
+
+---
+
 ## 统计
 
 | 优先级 | 条目 | 对应阶段 | 状态 |
 |--------|------|---------|------|
-| P0 | 5 | S1 UDP 全链路 | 4/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷、P0-4 mesh UDP 面完成；P0-5 设计稿就绪待实现） |
+| P0 | 5 | S1 UDP 全链路 | 4/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷、P0-4 mesh UDP 面完成；P0-5 设计稿与派工拆解 S0–S6 就绪待实现） |
 | P1 | 5 | S2 TUN + S3 前半 | 0/5（设计稿就绪 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5）；实施未开始） |
 | P2 | 8 | S3 后半 + S4 | 未开始 |
 | P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
