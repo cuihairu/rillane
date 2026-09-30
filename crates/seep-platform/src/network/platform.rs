@@ -1,7 +1,8 @@
-//! 平台特定实现（占位）
+//! 平台特定实现（占位死稿——未编译，`network/mod.rs` 中保持注释态）
 //!
-//! 这个模块包含各平台的具体实现。
-//! 目前提供占位实现，实际功能待完成。
+//! Linux 真实现已按 [tun-dataplane.md](../../../docs/design/tun-dataplane.md)
+//! §1.4 落在 `network/linux.rs`（T0 起）；本文件不参与编译，仅存早期草稿，
+//! 其 `packet_stream` 签名随 trait 裁剪（§1.2）已过时，勿据此恢复。
 
 use std::net::IpAddr;
 use std::pin::Pin;

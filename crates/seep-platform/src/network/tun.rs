@@ -6,18 +6,14 @@
 //! - 跨平台实现 (Linux, Windows, macOS, Android, iOS)
 
 use std::{
-    fmt, io,
+    fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    pin::Pin,
-    task::{Context as TaskContext, Poll},
 };
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
-use futures::Stream;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::{debug, warn};
 
 /// TUN/TAP 配置
@@ -348,6 +344,10 @@ pub struct InterfaceStats {
 }
 
 /// TUN/TAP 接口抽象
+///
+/// trait 15→14：`packet_stream`/`TunPacketStream`/`TunInterface` 占位假实现已删
+/// （tun-dataplane.md §1.2——「写成功」不可保留）；消费方统一走
+/// `read_packet`/`write_packet` 对。
 #[async_trait]
 pub trait TunProvider: Send + Sync + fmt::Debug {
     /// 获取接口名称
@@ -391,105 +391,15 @@ pub trait TunProvider: Send + Sync + fmt::Debug {
 
     /// 写入网络包
     async fn write_packet(&mut self, packet: Bytes) -> Result<()>;
-
-    /// 获取包流
-    fn packet_stream(&self) -> Pin<Box<dyn Stream<Item = Result<(Bytes, PacketInfo)>> + Send>>;
-}
-
-/// TUN 包流
-#[allow(dead_code)]
-pub struct TunPacketStream {
-    tun: Box<dyn TunProvider>,
-    buffer: BytesMut,
-}
-
-impl TunPacketStream {
-    /// 创建新的 TUN 包流
-    pub fn new(tun: Box<dyn TunProvider>) -> Self {
-        Self {
-            tun,
-            buffer: BytesMut::new(),
-        }
-    }
-}
-
-impl Stream for TunPacketStream {
-    type Item = Result<(Bytes, PacketInfo)>;
-
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        let _this = self.get_mut();
-        // 占位实现等待真实 TUN 行为
-        Poll::Pending
-    }
-}
-
-/// TUN 接口包装器，实现 AsyncRead/AsyncWrite
-#[allow(dead_code)]
-pub struct TunInterface<T: TunProvider> {
-    tun: T,
-    read_buffer: BytesMut,
-}
-
-impl<T: TunProvider> TunInterface<T> {
-    /// 创建新的 TUN 接口包装器
-    pub fn new(tun: T) -> Self {
-        Self {
-            tun,
-            read_buffer: BytesMut::new(),
-        }
-    }
-
-    /// 获取底层 TUN 提供者
-    pub fn inner(&self) -> &T {
-        &self.tun
-    }
-
-    /// 获取可变底层 TUN 提供者
-    pub fn inner_mut(&mut self) -> &mut T {
-        &mut self.tun
-    }
-}
-
-impl<T: TunProvider> AsyncRead for TunInterface<T> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        tokio::task::block_in_place(|| {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        });
-        buf.put_slice(&[]);
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl<T: TunProvider> AsyncWrite for TunInterface<T> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut TaskContext<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let _bytes = Bytes::copy_from_slice(buf);
-        tokio::task::block_in_place(|| {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        });
-        Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _x: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
 }
 
 /// 便捷函数：创建和配置 TUN 接口
+///
+/// 分派唯一事实源 = `network::create_tun_provider` 工厂（tun-dataplane.md §1.4），
+/// 本函数仅补 validate 前置与日志。
 pub async fn create_tun_interface(
     config: TunConfig,
-    _mode: super::NetworkMode,
+    mode: super::NetworkMode,
 ) -> Result<Box<dyn TunProvider>> {
     config.validate().context("验证 TUN 配置失败")?;
 
@@ -498,9 +408,7 @@ pub async fn create_tun_interface(
         mtu = config.mtu,
         "创建 TUN 接口");
 
-    // 这里应该根据平台创建具体的实现
-    // 占位符实现
-    Err(anyhow::anyhow!("平台特定的 TUN 实现未完成"))
+    super::create_tun_provider(&config, mode)
 }
 
 /// 便捷函数：解析网络包

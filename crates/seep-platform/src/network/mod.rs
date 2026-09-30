@@ -17,7 +17,10 @@ pub mod dns;
 pub mod filter;
 pub mod route;
 pub mod tun;
-// TODO: 平台特定实现待完成
+// Linux TUN 真实现（tun-dataplane.md §1.4）；其余平台待落地
+#[cfg(target_os = "linux")]
+pub mod linux;
+// TODO: 平台特定实现待完成（死稿，见 platform.rs 头部注记）
 // pub mod platform;
 
 pub use dns::{
@@ -300,26 +303,115 @@ impl NetworkManager {
     }
 }
 
-/// 创建平台特定的 TUN 提供者
-fn create_tun_provider(_config: &TunConfig, _mode: NetworkMode) -> Result<Box<dyn TunProvider>> {
-    // TODO: 平台特定实现待完成
-    Err(anyhow::anyhow!("TUN 提供者平台特定实现待完成"))
+/// 创建平台特定的 TUN 提供者（tun-dataplane.md §1.4：
+/// Linux 分派 linux.rs 真骨架；其余平台保留 Err）
+fn create_tun_provider(config: &TunConfig, mode: NetworkMode) -> Result<Box<dyn TunProvider>> {
+    #[cfg(target_os = "linux")]
+    {
+        // TUN/TAP 模式差异化（Tap 拒绝）归 T1；工厂层当前不按模式分派
+        let _ = mode;
+        Ok(Box::new(linux::LinuxTunProvider::new(config.clone())))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (config, mode);
+        Err(anyhow::anyhow!(
+            "TUN 提供者真实现仅 Linux（tun-dataplane.md）；当前平台待落地"
+        ))
+    }
 }
 
-/// 创建平台特定的路由管理器
-fn create_route_manager(_config: &RoutingConfig) -> Result<Box<dyn RouteManager>> {
-    // TODO: 路由管理器平台特定实现待完成
-    Err(anyhow::anyhow!("路由管理器平台特定实现待完成"))
+/// 创建平台特定的路由管理器（Linux 分派 linux.rs 真骨架；其余平台保留 Err）
+fn create_route_manager(config: &RoutingConfig) -> Result<Box<dyn RouteManager>> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Box::new(linux::LinuxRouteManager::new(config.clone())))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = config;
+        Err(anyhow::anyhow!(
+            "路由管理器真实现仅 Linux（tun-dataplane.md）；当前平台待落地"
+        ))
+    }
 }
 
-/// 创建平台特定的包过滤器
+/// 创建平台特定的包过滤器——恒 Err：过滤走进程内规则（tun-dataplane.md §2.7），
+/// 不落内核态
 fn create_packet_filter(_config: &FilteringConfig) -> Result<Box<dyn PacketFilter>> {
-    // TODO: 包过滤器平台特定实现待完成
-    Err(anyhow::anyhow!("包过滤器平台特定实现待完成"))
+    Err(anyhow::anyhow!(
+        "包过滤器不落内核态：filter=进程内规则（tun-dataplane.md §2.7）"
+    ))
 }
 
-/// 创建平台特定的 DNS 处理器
+/// 创建平台特定的 DNS 处理器——恒 Err：DNS 劫持归 P2-8（tun-dataplane.md §1.4）
 fn create_dns_handler(_config: &DnsConfig) -> Result<Box<dyn DnsHandler>> {
-    // TODO: DNS 处理器平台特定实现待完成
-    Err(anyhow::anyhow!("DNS 处理器平台特定实现待完成"))
+    Err(anyhow::anyhow!(
+        "DNS 处理器真实现归 P2-8（tun-dataplane.md §1.4）"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn routing_config() -> RoutingConfig {
+        RoutingConfig {
+            mode: RoutingMode::Global,
+            default_gateway: None,
+            dns_servers: vec![],
+            rules: vec![],
+            bypass_rules: vec![],
+            enabled: true,
+        }
+    }
+
+    /// T0：Linux 上 tun/route 工厂分派到 linux.rs 骨架并返回实例
+    /// （设备/路由 I/O 归 T1/T2，工厂构造即成功）
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_tun_and_route_factories_dispatch() {
+        let tun = create_tun_provider(&TunConfig::default(), NetworkMode::Tun)
+            .expect("Linux 工厂应返回 LinuxTunProvider");
+        assert_eq!(tun.mtu(), 1500);
+        assert_eq!(tun.name(), ""); // 内核分配名 TUNGETIFF 读回归 T1
+
+        let route = create_route_manager(&routing_config())
+            .expect("Linux 工厂应返回 LinuxRouteManager");
+        assert_eq!(route.config().mode, RoutingMode::Global);
+    }
+
+    /// T0：filter/dns 工厂保持 Err——错误信息指向进程内规则 / P2-8
+    #[test]
+    fn filter_and_dns_factories_stay_err() {
+        let filtering = FilteringConfig {
+            mode: FilteringMode::Blacklist,
+            applications: vec![],
+            processes: vec![],
+            protocols: vec![],
+            ports: vec![],
+            ip_addresses: vec![],
+            domains: vec![],
+            enabled: true,
+        };
+        let err = create_packet_filter(&filtering).unwrap_err();
+        assert!(
+            err.to_string().contains("进程内规则"),
+            "错误应指向进程内规则：{err}"
+        );
+
+        let dns = DnsConfig {
+            mode: dns::DnsMode::Direct,
+            servers: vec![],
+            cache: None,
+            filters: vec![],
+            enabled: true,
+            local_port: 53,
+            local_address: "127.0.0.1".parse().unwrap(),
+            timeout: std::time::Duration::from_secs(5),
+            retries: 2,
+        };
+        let err = create_dns_handler(&dns).unwrap_err();
+        assert!(err.to_string().contains("P2-8"), "错误应指向 P2-8：{err}");
+    }
 }
