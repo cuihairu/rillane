@@ -9,7 +9,9 @@ This document describes the current MVP-level mesh control plane and chain (mult
 - `link-state`: directed edge metrics between two nodes (latency/bandwidth/loss).
 - `chain`: a computed path from a source node to a target node. In the current MVP, Seep can *compute*
   chains and attach path metadata to flows. TCP flows can also be forwarded hop-by-hop via the mesh
-  data-plane listener (supports optional mTLS for encryption/authentication).
+  data-plane listener (supports optional mTLS for encryption/authentication); UDP flows are forwarded
+  hop-by-hop since P0-4 (`UdpEnvelope` over UDP datagrams, same port dual-stack — MVP plaintext gate,
+  encryption selection remains V2).
 
 ## Control Plane (seepd)
 
@@ -47,16 +49,18 @@ upgraded to a `RouteDecision::Chain` via the `ChainManager`. The computed path w
 - `seep.chain.path`: JSON array of node ids (e.g. `["client1","exit1"]`)
 - `seep.route.reason`: the routing reason string (if present)
 
-## Mesh Data-Plane Protocol (TCP, MVP)
+## Mesh Data-Plane Protocol
 
 When `mesh` + `chain` are enabled, each node also listens on `MeshConfig.listen_address` (default
 `0.0.0.0:9091`) for hop-by-hop forwarding.
 
-> **现状注记（2026-09）**：本节协议仅覆盖 **TCP**（逐连接 `MeshStream` 双向拷贝，每连接一个 JSON `MeshEnvelope` 头）。
-> UDP 数据面（envelope over UDP 数据报、FULL/CACHED 跳缓存、明文门）**尚未实现**——实现级设计见
-> [design/udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)（todo P0-4，S0–S6 分步清单；与 TCP 面的选择边界见其 §1，
-> 多跳 TTL/去重裁决见其 §14）；UDP 侧观测与配置见 [design/udp-observability.md](design/udp-observability.md)（todo P0-5）。
-> 落地后本节标题的 "(TCP, MVP)" 限定随之移除。
+> **现状注记（2026-09-30 更新）**：本节正文描述 **TCP 面**协议（逐连接 `MeshStream` 双向拷贝，每连接一个 JSON `MeshEnvelope` 头）。
+> **UDP 数据面已实现（todo P0-4，2026-09 完成）**：`UdpEnvelope` 二进制头 over UDP 数据报、FULL/CACHED 跳缓存、
+> exit per-flow socket 与下行 task、同端口双栈（`spawn_udp` 与 TCP `spawn` 并列）、明文门（env
+> `SEEP_MESH_UDP_ALLOW_PLAINTEXT` ∪ `MeshConfig.udp_allow_plaintext_data_plane`，chain+udp 未配加密时**构建期拒绝启动**）——
+> 规格与实施见 [design/udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)（与 TCP 面的选择边界见其 §1，多跳 TTL/去重裁决见其 §14）；
+> UDP 侧观测与配置见 [design/udp-observability.md](design/udp-observability.md)（todo P0-5，未落地）。
+> 按本注记原设条件，标题的 "(TCP, MVP)" 限定已随之移除。
 
 ### mTLS (Recommended / Secure-by-default for chain)
 

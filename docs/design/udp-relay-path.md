@@ -176,7 +176,7 @@ IPv4: [20B IP 头（src=WG address 配置, dst=target, proto=17, 校验和）| 8
 
 | # | 草案 | 实施 | 裁决理由 |
 |---|------|------|---------|
-| 10 | §3.4 hy2 V1 核查 | **分支 (c)：推迟 P0-4**。核查 hysteria2 0.1.6：公开 API 仅 `HysteriaClient::connect` + `tcp_connect`（open_bi）；`quic_connection` 为 `pub(crate)`，无任何 UDP/QUIC 数据报出口 | 不静默缩水：todo P0-3 验收已显式改写，"QUIC 站点经 hy2 出站可达"移入 P0-4（与 mesh UDP 载荷同批，届时换 crate 版本或直用 quinn） |
+| 10 | §3.4 hy2 V1 核查 | **分支 (c)：推迟 P0-4**。核查 hysteria2 0.1.6：公开 API 仅 `HysteriaClient::connect` + `tcp_connect`（open_bi）；`quic_connection` 为 `pub(crate)`，无任何 UDP/QUIC 数据报出口 | 不静默缩水：todo P0-3 验收已显式改写，"QUIC 站点经 hy2 出站可达"移入 P0-4（与 mesh UDP 载荷同批，届时换 crate 版本或直用 quinn）——**后记（2026-09-30）**：P0-4 完成时**维持改判**，hy2 UDP 终态 = V2（quinn 载具，todo P0-4 §0.1-③） |
 | 11 | §3.4 `associate(ctx)` 签名 | 扩为 `associate(ctx, decision: &RouteDecision)`；`RoutingUdpConnector` 按决策 `final_node()` 分发到节点连接器 | 载体选择必须用会话的**粘滞决策**（resolve 时已缓存），重新路由会破坏同会话同出口；未注册节点报错点名（能力表扫描兜底） |
 | 12 | §3.5 wg 承载机制 | 系统接口（wg-quick 风格）下 UDP 走**内核路由**：本地 UDP socket `connect` 目标，内核导入 wg 接口；不做手工 IP 构造 | 与本仓 TCP 面 wireguard 连接器同一架构；userspace 手工封装是另一条代码路径（P1 TUN 时再评估） |
 | 13 | §3.5 wg 预检 | `allowed_ips` 构建期解析 CIDR（无效即启动失败）；associate 时先解析目标（域名→IP），不在任何网段 → Route 类错误"…不在 wireguard allowed_ips 网段内"；网段为空不预检（交内核路由） | 错误信息携带 `allowed_ips` 关键词供 classify_failure 归 Route（拆映射+清决策，§3.6） |
@@ -184,4 +184,4 @@ IPv4: [20B IP 头（src=WG address 配置, dst=target, proto=17, 校验和）| 8
 | 15 | §3.3 ss | 加密方法校验提前到 `ShadowsocksConnector::new`（TCP/UDP 共用同一 `ServerConfig`，方法无效构建期报错）；客户端 socket 用 `ProxySocket::connect`（`bind` 是服务端入站监听）；目标在关联时固定（R7） | ss UDP 无连接语义、目标随包携带：固定目标即映射语义；shadowsocks 1.24.0 API 核实 |
 | 16 | §3.1 扫描范围 | 可达集 = default_node + 规则目标 + 组成员闭包（Weighted 节点/组一并展开）；**非本配置出站节点的目标（如 `mesh.exit1`）跳过**（路由器自行解析）；错误逐个列出节点名/类型/来源（`default_node` / `rule:{name}` / `group:{name}`） | mesh 节点的 UDP 能力属 P0-4 mesh data-plane，不归本扫描误报 |
 
-**测试口径（§3.7）**："QUIC 站点经 direct/wg/ss 出站可达"由发送路径真 socket 测试 + §3.6 分类全链路测试钉住（ss 完整解密往返需 `shadowsocks-service` 服务端，仓库未依赖，归 P0-5 联调）；"不支持的出站类型构建期明确报错"由 `scan_udp_capability` 系列测试钉住（点名节点、类型、规则来源）。hy2 验收按 #10 移 P0-4。
+**测试口径（§3.7）**："QUIC 站点经 direct/wg/ss 出站可达"由发送路径真 socket 测试 + §3.6 分类全链路测试钉住（ss 完整解密往返需 `shadowsocks-service` 服务端，仓库未依赖，归 P0-5 联调）；"不支持的出站类型构建期明确报错"由 `scan_udp_capability` 系列测试钉住（点名节点、类型、规则来源）。hy2 验收按 #10 移 P0-4（P0-4 已于 2026-09 完成并**维持改判**，hy2 UDP 终态 = V2——todo P0-4 §0.1-③）。

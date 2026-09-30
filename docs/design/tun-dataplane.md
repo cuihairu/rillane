@@ -95,7 +95,7 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 ### 2.3 UDP 面细节
 
 - 上行：`FlowTarget{host: dst.ip 字符串, port, proto: Udp}`（dst 为 IP 字面量，无域名解析环节）；
-- associate 走 P0-3 `RoutingUdpConnector`（direct/ss/wg）；**决策为 `RoutePath::Chain` 时**：P0-4 未接线前首包 bail（错误信息注明"UDP 经 mesh 链路待 P0-4"），P0-4 S5 落地后随 UDP 块统一换 `UdpChainRouter`，本设计零改动兼容；
+- associate 走 P0-3 `RoutingUdpConnector`（direct/ss/wg）；**决策为 `RoutePath::Chain` 时**：已随 **P0-4 S5 落地（2026-09）**统一换 `UdpChainRouter`（chain 决策 → mesh 桥，其余落 inner）——设计期所设"未接线前首包 bail"过渡态已随 S5 消失，本设计零改动兼容；
 - **下行写回**（新纯函数，seep-platform 内，单测钉住）：构造 `IP(dst=src.ip, src=dst.ip) + UDP 头 + payload`；IPv4 校验和可为 0 但 **IPv6 UDP 校验和强制**——统一实现真校验和（全量计算，约 20 行，golden vector 钉住）；IP id 自增、TTL 64、置 DF（不做分片）。
 
 ### 2.4 TCP 面：smoltcp 用户态栈

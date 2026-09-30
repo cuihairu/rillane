@@ -2,7 +2,7 @@
 
 Seep 是一个高性能的网络路由代理系统，支持多种主流的网络协议。
 
-> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-3 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
+> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
 >
 > | 能力 | 状态 | 落地去向 |
 > |------|------|---------|
@@ -10,7 +10,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 > | 入站 socks5 UDP ASSOCIATE | **已实现（2026-09，P0-2）**：RFC 1928 ASSOCIATE + 数据报中继；`udp:` 块缺省关闭 | — |
 > | 出站 direct/socks5/http/shadowsocks/trojan/hysteria2/vless/wireguard（TCP） | 已实现 | — |
 > | 出站 UDP 承载（direct/ss/wg） | **已实现（2026-09，P0-3）**；ss 完整解密往返联调归 P0-5 | — |
-> | 出站 UDP 承载（hy2） | 未实现（`hysteria2` 0.1.6 公开 API 无 UDP 出口） | P0-4（与 mesh 载荷同批，quinn=V2 未决） |
+> | mesh UDP 多跳转发（UdpEnvelope over UDP 数据报） | **已实现（2026-09，P0-4）**：FULL/CACHED 跳缓存、exit per-flow socket、同端口双栈、明文门（chain+udp 未配加密构建期拒绝） | — |
+> | 出站 UDP 承载（hy2） | 未实现（`hysteria2` 0.1.6 公开 API 无 UDP 出口；P0-4 已完成且**维持改判**） | V2（quinn 载具，未决） |
 > | 出站 vmess 连接器 | 未实现（配置 schema 与订阅转换已支持，运行时构建期报错） | todo「VMess 出站」条目 |
 > | hysteria v1 | 未实现 | 无计划（仅 hy2） |
 > | 出站连接池 / TLS 会话恢复 | 未实现 | P1-5 |
@@ -166,7 +167,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 低延迟传输
 
 ### Hysteria2
-> 状态：部分实现——TCP over QUIC、密码认证、`mport`/`server_name`/`alpn`/`skip_cert_verify` 配置生效（`hysteria2` crate 承载）；拥塞控制算法选择、**UDP 中继/首包优化未实现**——V1 核查结论（2026-09）：`hysteria2` 0.1.6 公开 API 仅 connect/tcp_connect、`quic_connection` 为 pub(crate)，无 UDP 出口，非静默缩水，改判 P0-4 与 mesh UDP 载荷同批（载具 quinn = V2 未决，见 todo.md P0-3/P0-4 条目与 [udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)）；salamander 混淆未实现（配置无该字段，混淆层见 todo P1-4/P2-4）。
+> 状态：部分实现——TCP over QUIC、密码认证、`mport`/`server_name`/`alpn`/`skip_cert_verify` 配置生效（`hysteria2` crate 承载）；拥塞控制算法选择、**UDP 中继/首包优化未实现**——V1 核查结论（2026-09）：`hysteria2` 0.1.6 公开 API 仅 connect/tcp_connect、`quic_connection` 为 pub(crate)，无 UDP 出口，非静默缩水，移 P0-4 的改判在 **P0-4 完成时维持**（2026-09，todo P0-4 §0.1-③——hy2 UDP 终态 = V2，载具 quinn 未决，见 todo.md P0-3/P0-4 条目与 [udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)）；salamander 混淆未实现（配置无该字段，混淆层见 todo P1-4/P2-4）。
 
 - **协议**: Hysteria 的改进版本
 - **改进**:

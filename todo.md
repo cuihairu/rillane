@@ -108,7 +108,7 @@
 ## P3 — 文档、插件与平台发布（roadmap S4 收尾）
 
 - [x] **P3-1 文档对齐实现**（原 §6，2026-09 完成）：`architecture.md` 四章节（Mesh/TUN/订阅/协作安全）改写为现状+边界口径并刷新过期路线节；`PROTOCOLS.md` 顶部新增实现状态总表 + 15 处就地状态标注（UDP ASSOCIATE→P0-2、出站 UDP→P0-3、VMess 构建期报错→遗留条目、连接池→P1-5、混淆→P1-4/P2-4/P2-5 等），修复底部失效链接；新增 `docs/subscription.md`（拉取/ETag/缓存/DSL/热更新实读）与 `docs/networking.md`（TUN 模型已建、实现未落地逐条对照 P1-1..P1-3）。
-  待回填（**2026-09-30 部分完成**）：PROTOCOLS.md 顶部总表与 SOCKS5 入站/直连/Shadowsocks/hysteria2/WireGuard/性能各节、udp-dataplane.md §0.2 状态表已按 P0-1..P0-3 落地实况回填（hy2 UDP 行维持未实现，待 P0-4）；networking.md §2 现状节核验为全部对应未落地的 P1 项，本轮不动，待 P1 落地后回填；VMess 出站落地后删除其超前标注。后续补：mesh.md 安全注记已与现状对齐（ACL/配额与撤销文件热加载已落地，端到端 MAC/CRL 待 P2-7）。
+  待回填（**2026-09-30 第一轮 P0-1..P0-3 实况完成；同日第二轮：P0-4 解锁项完成**）：随 P0-4 落地回填——PROTOCOLS.md（回填范围改 P0-1..P0-4、顶部总表新增 mesh UDP 多跳行、hy2 去向改「维持改判 V2」、§Hysteria2 节状态同步）；udp-dataplane.md（§0.2 banner/hy2/mesh.md/architecture 四行 + 执行摘要状态注记 + §3.3 V1 已决、§3.6 hy2 半边改判、§4 头部落地注记、§5.6/§7 O4 关闭、§6 V1 已执行、§7 R6 已决与 R9 MVP 明文门注记）；mesh.md（标题 "(TCP, MVP)" 限定按其原设条件移除 + 现状注记改写为 UDP 已实现）；roadmap.md（进度速览与 S1 注记改 4/5、退出标准 hy2 半边注记、阶段映射表 S1（4/5））；architecture.md（数据面 UDP 多跳已实现、边界行改 V2 加密、S1 路线行注 P0-5 余量）；udp-mesh-dataplane.md 头部增「已落地」状态行；tun-dataplane.md §2.3「P0-4 未接线前 bail」过渡态标注已随 S5 消失；udp-relay-path.md #10/§3.7 hy2 后记标注维持改判。**仍待**：networking.md §2 现状节核验为全部对应未落地的 P1 项，待 P1 落地后回填；VMess 出站落地后删除其超前标注。后续补：mesh.md 安全注记已与现状对齐（ACL/配额与撤销文件热加载已落地，端到端 MAC/CRL 待 P2-7）。
 - [ ] **P2/P3 原遗留——VMess 出站**：PROTOCOLS.md 已承诺，Clash 订阅转换会产出 vmess 节点，当前构建期报错。
   验收：vmess（ws+tls）出站可用；`import-clash` 转换的 vmess 节点可直连使用。
   进度（2026-09-30 文档回填轮）：PROTOCOLS.md §VMess 状态头已精确指向本条目，超前描述维持规划口径；落地后按 P3-1 待回填清单删除超前标注。

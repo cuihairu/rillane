@@ -1,7 +1,7 @@
 # Seep 分阶段路线图
 
 > 状态：设计文档（2026-09）· 定位依据：[positioning.md](positioning.md) · 可执行条目：[todo.md](../../todo.md)
-> 进度速览（2026-09）：S0 ✅ ｜ S1 进行中 3/5（P0-4/P0-5 实现级设计就绪）｜ S2 设计启动（P1-1/P1-2 实现级设计就绪，实施未开始）｜ S3/S4 未开始
+> 进度速览（2026-09-30）：S0 ✅ ｜ S1 进行中 4/5（P0-4 已完成；P0-5 实现级设计与派工拆解 S0–S6 就绪）｜ S2 设计启动（P1-1/P1-2 实现级设计就绪，实施未开始）｜ S3/S4 未开始
 
 ## 执行摘要
 
@@ -38,7 +38,7 @@
 
 **目标**：让游戏流量（UDP 为主）走通「入站 → 路由 → 出站 → mesh 多跳」全程。
 
-> **进度（2026-09）**：3/5 完成——P0-1 会话表 / P0-2 UDP ASSOCIATE / P0-3 出站载荷（direct/ss/wg）已落地（细节见 todo.md 各条）；P0-4 / P0-5 实现级设计稿就绪待实现：[udp-mesh-dataplane.md](udp-mesh-dataplane.md)（S0–S6 分步实施清单 + §13 细节补全）、[udp-observability.md](udp-observability.md)（§7 文件清单 + §9 细节补全）。退出标准勘误：hy2 出站 UDP 承载经 P0-3 核查改判——hysteria2 0.1.6 公开 API 无 UDP 出口，移 P0-4 与 mesh 载荷同批（载具 quinn = V2 未决）。
+> **进度（2026-09-30）**：4/5 完成——P0-1 会话表 / P0-2 UDP ASSOCIATE / P0-3 出站载荷（direct/ss/wg）/ **P0-4 mesh UDP 面**（[udp-mesh-dataplane.md](udp-mesh-dataplane.md) S0–S6 全部落地，27 项测试全绿）已落地（细节见 todo.md 各条）；仅余 **P0-5**——[udp-observability.md](udp-observability.md)（§7 文件清单 + §9 细节补全 + **§10 分步实施清单 S0–S6**）已细化到可开工。退出标准勘误：hy2 出站 UDP 承载经 P0-3 核查改判——hysteria2 0.1.6 公开 API 无 UDP 出口，移 P0-4；**P0-4 完成时维持改判**（终态 V2，载具 quinn 未决）。
 
 - **复用**：`seep-core` 的 `FlowTarget::Udp` 枚举与 `FlowSession`；`seep-routing` 不感知传输层，规则原样生效；Hysteria2/WireGuard/Shadowsocks 出站的既有握手/加密栈。
 - **新增**：
@@ -46,7 +46,7 @@
   2. `seep-protocols`：SOCKS5 UDP ASSOCIATE 入站；direct/ss/hy2/wg 出站的 UDP 载荷封装；
   3. `seep-runtime::mesh_transport`：UDP 数据面转发（envelope over UDP 或 QUIC 数据报），与现有 TCP 面共存；
   4. `seepd`/config：ingress/egress 的 UDP 开关与超时配置。
-- **退出标准**：SOCKS5 UDP 客户端经 direct 与 hy2 出站完成双向 UDP 代理；两跳 mesh 链路转发 UDP；会话表按超时回收； UDP 路径有独立指标。
+- **退出标准**：SOCKS5 UDP 客户端经 direct 与 hy2 出站完成双向 UDP 代理（**hy2 半边改判 V2**，见上进度注记）；两跳 mesh 链路转发 UDP（P0-4 已达成，T2 真 socket 环回实证）；会话表按超时回收（P0-1）； UDP 路径有独立指标（归 P0-5）。
 
 ## S2：TUN 与系统路由（对应 P1）
 
@@ -94,7 +94,7 @@
 | 阶段 | seep-core | seep-routing | seep-protocols | seep-platform | seep-runtime | seep-mesh | seep-subscription | apps |
 |------|-----------|--------------|----------------|---------------|--------------|-----------|-------------------|------|
 | S0 ✅ | 会话/链路模型 | 规则+组策略 | TCP 入/出站 | trait 层 | chain+mesh TCP 面 | 注册/ACL/配额 | Clash+DSL+热更 | 控制面+CLI |
-| S1（3/5） | UDP 会话语义 | 不变 | UDP 入/出站 | 不变 | UDP 数据面 | link-state 扩展 | 不变 | UDP 配置 |
+| S1（4/5） | UDP 会话语义 | 不变 | UDP 入/出站 | 不变 | UDP 数据面 | link-state 扩展 | 不变 | UDP 配置 |
 | S2（设计） | 不变 | 进程匹配增强 | 不变 | Linux TUN 真实现 | TunIngress 接线 | 不变 | 不变 | route apply/clear |
 | S3 | 中间件挂点不变 | 不变 | 混淆中间件+连接池 | 不变 | envelope 二进制化 | 不变 | DSL 混淆字段 | profile 预设 |
 | S4 | SLO 打分输入 | 策略升级 | 指标埋点 | 平台打包 | 调度闭环 | 端到端安全 | 不变 | 发布产物 |
@@ -104,4 +104,4 @@
 - **S1 是 S2/S4 的前置**：没有 UDP，TUN 接管的游戏流量无处可去，SLO 调度也无对象；
 - **S2 依赖真实内核交互**，需要集成测试环境（Linux CI + NetworkNamespace 级测试）；trait 口径 = **语义稳定而非方法集冻结**（已授权裁剪：tun-dataplane.md §1.2 删 `packet_stream`/`TunPacketStream`/`TunInterface` 三项假 I/O 占位）；
 - **S3 混淆的有效性验证**依赖测量方法（统计脚本/对抗样本），先建度量再调参；
-- 协议文档 `PROTOCOLS.md` 存在超前描述（UDP ASSOCIATE、VMess、连接池等），以 todo.md 勘误与阶段退出标准为准回填。
+- 协议文档 `PROTOCOLS.md` 存在超前描述（VMess、连接池、hy2 UDP 等；UDP ASSOCIATE 已随 P0-2 回填），以 todo.md 勘误与阶段退出标准为准回填。

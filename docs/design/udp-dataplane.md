@@ -6,6 +6,8 @@
 
 ## 执行摘要
 
+> **状态注记（2026-09-30 回填）**：下段「当前数据通路是纯 TCP」为**设计时点描述，P0-1..P0-4 落地后已过时**——入站 ASSOCIATE（P0-2）、direct/ss/wg 出站载荷（P0-3）、mesh UDP 数据面（P0-4）均已实现；落地现状以 §0.2 表为准。
+
 当前数据通路是纯 TCP：入站 socks5 显式拒绝 UDP ASSOCIATE（`inbound/socks5.rs` 仅接受 cmd=0x01），出站 hy2/wg 按 `TargetProto` 分派后对非 TCP 报错，mesh 数据面 `MeshStream` 绑定 `AsyncRead+AsyncWrite`。本稿给出不破坏 TCP 面的 UDP 平行面设计：
 
 1. **`seep-core` 新增 UDP 会话层**（NAT 式会话表 + 粘滞键 + 平行 trait `EgressUdpConnector`）——因为 `Flow.io: BoxedIo` 是流语义，UDP 无法复用；
@@ -39,17 +41,17 @@
 
 ### 0.2 交叉引用与 PROTOCOLS.md 状态标注
 
-> **2026-09-30 回填**：P0-1（会话表）/ P0-2（ASSOCIATE）/ P0-3（direct/ss/wg 出站载荷）已落地，「落地现状」列如实标注；P0-4/P0-5 未落地（实现级设计稿 [udp-mesh-dataplane.md](udp-mesh-dataplane.md) / [udp-observability.md](udp-observability.md)），相关声明维持超前/未实现口径。
+> **2026-09-30 回填（第二轮，随 P0-4 完成）**：P0-1（会话表）/ P0-2（ASSOCIATE）/ P0-3（direct/ss/wg 出站载荷）/ **P0-4（mesh UDP 面，S0–S6 全部落地，27 项新增测试全绿）**已落地，「落地现状」列如实标注；P0-5 未落地（实现级设计稿 [udp-observability.md](udp-observability.md) 已细化到可开工），相关声明维持超前/未实现口径。
 
 | 声明出处 | 状态（设计时点） | 落地现状（2026-09 回填） | 本稿处置 |
 |---------|------|------|---------|
 | PROTOCOLS.md「SOCKS5 … UDP ASSOCIATE (UDP 代理)」 | **超前描述**（代码仅 CONNECT） | ✅ 已实现（P0-2，2026-09） | §2 落地完成；PROTOCOLS.md 总表与 SOCKS5 节已改"已实现" |
 | PROTOCOLS.md「Shadowsocks … TCP, UDP」 | 部分超前（仅 TCP） | ✅ UDP 已实现（P0-3 `ShadowsocksUdpConnector`；完整解密往返联调归 P0-5） | §3.2 落地完成 |
-| PROTOCOLS.md「Hysteria … UDP 首包优化」/ hy2 小节 | 超前（仅 TCP） | ❌ 未实现——V1 核查：`hysteria2` 0.1.6 公开 API 无 UDP 出口，改判 P0-4 与 mesh 载荷同批（quinn=V2 未决） | §3.3 分支 (c) 改道 |
+| PROTOCOLS.md「Hysteria … UDP 首包优化」/ hy2 小节 | 超前（仅 TCP） | ❌ 未实现——V1 核查：`hysteria2` 0.1.6 公开 API 无 UDP 出口；移 P0-4 后 **P0-4 完成时维持改判**（todo P0-4 §0.1-③），hy2 UDP 终态 = **V2（quinn 载具，未决）** | §3.3 分支 (c) 改道 |
 | PROTOCOLS.md「WireGuard … Layer 3 (IP) 隧道」 | 与实现一致（TCP over WG 已通） | ✅ UDP 已实现（P0-3：`allowed_ips` 预检 + MTU 上限 `mtu-80`，仍走系统 WG 接口） | §3.4 扩展落地 |
 | PROTOCOLS.md「SOCKS5 出口 … UDP 中继」 | 超前 | ❌ 维持不在 S1 范围（§3.5） | 不变 |
-| mesh.md「Mesh Data-Plane Protocol (TCP, MVP)」 | 与实现一致 | 不变：UDP 面未实现（P0-4 设计稿就绪；mesh.md 已加现状注记） | §4 设计定稿（udp-mesh-dataplane.md） |
-| architecture.md「下一阶段 … UDP 等」 | 计划中 | P0-1..P0-3 已落地；P0-4/P0-5 设计就绪 | 本稿 + 实现级设计四稿 |
+| mesh.md「Mesh Data-Plane Protocol」 | 设计时点标注 (TCP, MVP) | ✅ UDP 面已实现（P0-4，2026-09）——mesh.md 现状注记按其原设条件已移除 "(TCP, MVP)" 限定并改写 | §4 落地（[udp-mesh-dataplane.md](udp-mesh-dataplane.md)） |
+| architecture.md「下一阶段 … UDP 等」 | 计划中 | P0-1..P0-4 已落地；P0-5 设计与派工拆解就绪（architecture.md 数据面/路线两处 UDP 口径已同步更正） | 本稿 + 实现级设计四稿 |
 
 ## 1. UDP 会话表与粘滞键（P0-1）
 
@@ -183,7 +185,7 @@ pub trait UdpRelay: Send {
 - 复用：现有 `Hysteria2Connector` 的 QUIC 连接建立、认证（`hysteria2` crate 0.1.6）、`TargetProto` match 骨架；
 - 新增：hy2 协议 UDP 中继通道（QUIC 数据报语义，客户端请求 connect 后按 session id 收发数据报）——**依赖 crate 是否暴露 UDP API**；
 - 共存：与 TCP 共用同一 QUIC 连接（协议设计如此），这是四个出站中唯一"TCP 面与 UDP 面共享底层连接"的，连接生命周期管理要防止 TCP 侧关闭连带断 UDP——记入实施清单；
-- **未决项 V1（实施前置）**：核查 `hysteria2 0.1.6` 是否暴露 UDP relay API。若无：a) 升级 crate；b) 基于 quinn 自实现 hy2 UDP 通道；c) S1 暂缓 hy2 UDP、验收降级为 direct/ss/wg。**倾向 a→b**，验收以 todo P0-3 原文（hy2 必须可用）为目标。
+- **已决 V1（2026-09-30 落地核对）**：核查结论 = `hysteria2 0.1.6` 公开 API 仅 `HysteriaClient::connect` + `tcp_connect`（`quic_connection` 为 `pub(crate)`），**无 UDP 出口**——**分支 (c) 已采纳**：P0-3 验收显式改写、hy2 UDP 移 P0-4（非静默缩水）；**P0-4 完成时维持改判**（todo P0-4 §0.1-③），hy2 UDP 终态 = **V2（quinn 载具）**，随 V2 选型另立工单。原三分支备选：a) 升级 crate；b) 基于 quinn 自实现 hy2 UDP 通道；c) 暂缓降级为 direct/ss/wg。
 
 ### 3.4 wireguard（`outbound/wireguard.rs`）
 
@@ -199,18 +201,20 @@ pub trait UdpRelay: Send {
 
 ### 3.6 验收标准（对齐 todo P0-3）
 
-- QUIC 站点（HTTP/3，如 `curl --http3`）分别经 **hy2 与 wg** 出站可访问；
+- QUIC 站点（HTTP/3，如 `curl --http3`）经 **wg** 出站可访问（**可验口径**：QUIC 即普通 UDP 不特判，P0-3 wg 载体可达）；经 **hy2** 的半边**维持改判 V2**（P0-4 §0.1-③，随 quinn 载具另立工单）；
 - DNS UDP 查询经 ss 出站往返成功（AEAD 每包语义验证）；
 - 将某 UDP 流量规则指向 trojan/vless 节点：seepd **启动报错**并指名冲突节点；
 - direct 出站 UDP 有独立收发计数（§5）。
 
 ### 3.7 风险与未决项
 
-- **R6 = V1**（hy2 crate 能力，见 §3.3）——S1 最大外部依赖风险；
+- **R6 = V1（已决）**（hy2 crate 能力，见 §3.3）——曾是 S1 最大外部依赖风险；核查结论已落定（分支 (c)，移 P0-4 维持改判，终态 V2）；
 - **R7 ss UDP 防滥用**：SS UDP 无认证握手语义（每包带地址），中继开放即成开放解析器风险——处置：默认仅允许路由规则命中的目标 + 会话表目标白名单化（映射只建在首包路由决策之后）；
 - **R8 WG MTU**：WG 接口 MTU（配置默认 1420）内层 UDP 包超限会静默分片/丢弃——文档标注 MTU 预算，实测填入。
 
 ## 4. mesh 多跳 UDP envelope（P0-4）
+
+> **落地注记（2026-09-30）**：本章已随 P0-4（S0–S6）**落地完成**——实现与偏差见 [udp-mesh-dataplane.md](udp-mesh-dataplane.md)（§2 线格式 / §3 跳缓存 / §4 面状态机 / §5 客户端出站 / §6 明文门 / §13–§17 实施补全），27 项测试全绿；下文保持设计时点原文，落地现状以该实现级设计稿与 todo P0-4 落地行为准。
 
 ### 4.1 复用
 
@@ -328,7 +332,7 @@ seep_udp_relay_handshake_errors_total   # mesh UDP 面（预留）
 ### 5.6 风险与未决项
 
 - **R11 指标基数**：`per-target` 维度标签基数不可控，MVP 指标不带 target 标签（会话级聚合），per-link 细分属 P2-1；
-- **O4 未决**：`/chains/stats` 是否为 UDP 链路单独分列——待 §4 实施时定。
+- **O4 已决（关闭，2026-09-30）**：`/chains/stats` **不为** UDP 分列——链路维度 UDP 流量已由 P0-4 `record_link_bytes` 进入既有 `seep_mesh_link_bytes_total` 序列，重复分列无增量信息（裁决见 [udp-observability.md](udp-observability.md) §2.6）。
 
 ## 6. 实施顺序与依赖
 
@@ -340,7 +344,7 @@ P0-1 会话表(trait+表+回收) ──► P0-2 socks5 入站 ──► P0-3 出
 
 - P0-1/P0-2 可与 P0-3 并行开发（trait 先行，mock relay 单测）；
 - P0-5 不是尾段：指标埋点随各步落地，dashboard 收口在最后；
-- V1（hy2 crate 能力核查）是 P0-3 的第一张工单，其结论决定 P0-3 验收是否按原口径执行。
+- V1（hy2 crate 能力核查）是 P0-3 的第一张工单，其结论决定 P0-3 验收是否按原口径执行——**已执行**：结论 = 无 UDP 出口，分支 (c) 采纳、P0-3 验收显式改写（§3.3），hy2 UDP 移 P0-4 后维持改判（终态 V2）。
 
 ## 7. 风险与未决项汇总
 
@@ -351,13 +355,13 @@ P0-1 会话表(trait+表+回收) ──► P0-2 socks5 入站 ──► P0-3 出
 | R3 | 风险 | 多网卡 BND.ADDR 兼容性，必要时加 `advertise_addr` | §2 |
 | R4 | 风险 | 中继下行公平性与缓冲 | §2 |
 | R5 | 风险 | WG 依赖特权接口，测试环境与 P1 TUN 合并建设 | §3.4 |
-| R6/V1 | 未决 | `hysteria2` crate UDP API 能力核查（P0-3 第一工单） | §3.3 |
+| R6/V1 | 已决（2026-09） | `hysteria2` crate **无** UDP 出口 → 分支 (c) 采纳、移 P0-4 后维持改判、终态 V2（§3.3） | §3.3 |
 | R7 | 风险 | ss UDP 开放解析器风险 → 目标白名单化 | §3.2 |
 | R8 | 风险 | WG MTU 预算标注 | §3.4 |
-| R9/V2 | 未决 | mesh UDP 加密选型（倾向 quinn/QUIC + 复用 mTLS 材质） | §4.4 |
+| R9/V2 | 未决（MVP 明文门已落地） | mesh UDP 加密选型（倾向 quinn/QUIC + 复用 mTLS 材质）——P0-4 已落 §4.4 MVP 兜底（`SEEP_MESH_UDP_ALLOW_PLAINTEXT` ∪ `MeshConfig.udp_allow_plaintext_data_plane`，未配加密时构建期拒绝），选型本身仍归 V2 | §4.4 |
 | R10 | 风险 | relay flow 缓存全局上界（默认 65536 LRU） | §4.3 |
 | R11 | 风险 | 指标基数控制（MVP 无 target 标签） | §5 |
 | O1 | 未决 | 无认证 socks5 下粘滞键退化 | §1 |
 | O2 | 未决 | SOCKS5 FRAG 分片支持时机 | §2 |
 | O3 | 未决 | relay 跳间回源校验 | §4 |
-| O4 | 未决 | `/chains/stats` UDP 分列 | §5 |
+| O4 | 已决（关闭） | `/chains/stats` 不为 UDP 分列（裁决见 [udp-observability.md](udp-observability.md) §2.6） | §5 |

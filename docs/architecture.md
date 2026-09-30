@@ -51,8 +51,8 @@ seep/
 - 每个安装节点视作一个网元，注册为 `client` / `relay` / `exit` / `hybrid`。`seep-mesh::MeshRegistry` 维护节点元数据、后台心跳清理与离线检测；`seep-runtime` 默认注册本地节点。
 - 组与链路：`RoutingConfig.groups`（`PolicyGroup`）成员可为 `Node` / `Group`（嵌套） / `WeightedNode` / `WeightedGroup`，组策略含 latency/bandwidth/weighted/random/consistent_hash/round_robin/fixed；路由目标 `mesh.<node>` 会被 `ChainManager` 升级为 `RouteDecision::Chain`（源 → relay → exit）。
 - 链路能力：构建（`ChainBuilder`，含约束与链路权重打分）、Dry Run 预检、健康检查任务、故障回退（`ChainContext` 备选路径切换）。控制面端点与数据面 wire format 见 [mesh.md](mesh.md)。
-- 数据面：mesh data-plane 已实现 **TCP** hop-by-hop 转发（envelope 携带路径，逐跳剥离）；UDP 多跳为设计稿（见 [design/udp-dataplane.md](design/udp-dataplane.md) §4）。
-- 边界（当前不做）：UDP 数据面、端到端多跳 MAC/防重放、自动 CA 撤销分发（CRL/OCSP）——见下「协作节点安全」与 todo P2-7。
+- 数据面：mesh data-plane 已实现 **TCP** hop-by-hop 转发（envelope 携带路径，逐跳剥离）与 **UDP** 多跳转发（2026-09 P0-4：`UdpEnvelope` 二进制头 over UDP 数据报、FULL/CACHED 跳缓存、同端口双栈——规格见 [design/udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)，概念稿 [design/udp-dataplane.md](design/udp-dataplane.md) §4）。
+- 边界（当前不做）：UDP 面加密（**V2** quinn 载具未决；MVP 明文门已落地——chain+udp 未配加密时构建期拒绝启动）、端到端多跳 MAC/防重放、自动 CA 撤销分发（CRL/OCSP）——见下「协作节点安全」与 todo P2-7。
 
 ## 系统路由与虚拟网卡（现状：模型已建，实现未落地）
 
@@ -77,4 +77,4 @@ seep/
 ## 当前状态与路线
 
 - **已完成底座**（roadmap S0）：socks5/http/mixed 入站 + direct/ss/trojan/hysteria2/vless/wireguard/socks/http TCP 出站；组策略路由；mesh 控制面 + TCP 数据面 + mTLS；订阅全链路；控制面与 seepctl；基础 Prometheus 指标。协议实现边界见 [PROTOCOLS.md](PROTOCOLS.md) 状态标注。
-- **进行中/规划**（见 [design/roadmap.md](design/roadmap.md)）：S1 UDP 全链路（[设计稿](design/udp-dataplane.md)）→ S2 TUN 系统接管 → S3 混淆横切层与连接复用 → S4 调度闭环与发布。可执行条目见根目录 [todo.md](../todo.md)。
+- **进行中/规划**（见 [design/roadmap.md](design/roadmap.md)）：S1 UDP 全链路（会话表/入站/出站/mesh 数据面已落地，余 P0-5 观测与配置——[设计稿](design/udp-dataplane.md)、[观测设计稿](design/udp-observability.md)）→ S2 TUN 系统接管 → S3 混淆横切层与连接复用 → S4 调度闭环与发布。可执行条目见根目录 [todo.md](../todo.md)。
