@@ -324,8 +324,11 @@ async fn test_health_check_integration() -> Result<()> {
         engine_clone.perform_health_checks().await;
     });
 
-    // 等待健康检查完成
-    sleep(Duration::from_millis(200)).await;
+    // 等待健康检查完成（轮询至截止——固定 sleep 在 CPU 饱和下漏调度会假失败）
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while engine_arc.get_health_stats().1 == 0 && std::time::Instant::now() < deadline {
+        sleep(Duration::from_millis(20)).await;
+    }
 
     // 再次获取健康统计
     let (healthy, total) = engine_arc.get_health_stats();
