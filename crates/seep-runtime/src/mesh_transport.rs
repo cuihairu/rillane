@@ -3,13 +3,14 @@
 //! This implements a simple "hop-by-hop" forwarding protocol between Seep nodes.
 //! It is intentionally minimal, but supports optional mTLS for encryption/authentication.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     fs::File,
     io::BufReader,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{anyhow, Result};
@@ -20,6 +21,7 @@ use tokio::{
     net::{lookup_host, TcpListener, TcpStream},
     task::JoinHandle,
 };
+use dashmap::DashMap;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use x509_parser::prelude::parse_x509_certificate;
 
@@ -399,6 +401,127 @@ pub fn decode_udp_envelope(buf: &[u8]) -> Result<UdpEnvelope> {
         path,
         payload,
     })
+}
+
+// ── P0-4 §3：跳缓存 UdpFlowCache（relay/exit 的 flow_id → {next, prev, expiry} 本地状态）──
+//
+// FULL 首包 insert（已有同 flow_id = 重关联，刷新 prev/next/expiry）；CACHED touch 触碰
+// expiry（惰性过期：过期条目判 miss 并移除）；上界驱逐 = 满时先扫过期、仍满逐最早
+// expiry（同 TTL 下即最久未触，语义 LRU，§11-6，O(n) 无新依赖）；过期清扫由 serve
+// 循环调用 sweep_expired（非独立任务）。expiry 字段允许测试就地改写（同文件
+// #[cfg(test)] 可达私有字段），不引入时钟抽象。
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // S2 阶段仅测试消费；S3 MeshDataPlane 接线后移除
+struct FlowCacheEntry {
+    /// None = 本机为 exit
+    next_hop: Option<(NodeId, SocketAddr)>,
+    /// 上行来源（下行回送地址）
+    prev: SocketAddr,
+    /// last_touch + ttl
+    expiry: Instant,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // S2 阶段仅测试消费；S3 MeshDataPlane 接线后移除
+struct UdpFlowCache {
+    map: DashMap<[u8; 16], FlowCacheEntry>,
+    ttl: Duration,
+    max: usize,
+    /// 上界驱逐计数（R10；过期清扫不计入）
+    evicted: AtomicU64,
+    /// CACHED/下行未命中计数（含"在表但已过期"的惰性过期 miss）
+    unknown_flow: AtomicU64,
+}
+
+#[allow(dead_code)] // S2 阶段仅测试消费；S3 MeshDataPlane 接线后移除
+impl UdpFlowCache {
+    fn new(ttl: Duration, max: usize) -> Self {
+        Self {
+            map: DashMap::new(),
+            ttl,
+            max,
+            evicted: AtomicU64::new(0),
+            unknown_flow: AtomicU64::new(0),
+        }
+    }
+
+    /// FULL 首包插入 / 重关联刷新。满时先扫过期，仍满逐最早 expiry（§11-6）。
+    fn insert(&self, flow_id: [u8; 16], entry: FlowCacheEntry) {
+        if !self.map.contains_key(&flow_id) && self.map.len() >= self.max {
+            self.sweep_expired(Instant::now());
+            while self.map.len() >= self.max {
+                let victim = self
+                    .map
+                    .iter()
+                    .min_by_key(|r| r.value().expiry)
+                    .map(|r| *r.key());
+                match victim {
+                    Some(k) => {
+                        self.map.remove(&k);
+                        self.evicted.fetch_add(1, Ordering::Relaxed);
+                    }
+                    None => break,
+                }
+            }
+        }
+        self.map.insert(flow_id, entry);
+    }
+
+    /// CACHED/下行查找：命中触碰 expiry 并返回条目克隆；未命中或已过期（惰性）
+    /// 计 unknown_flow 并清除，返回 None。
+    fn touch(&self, flow_id: &[u8; 16]) -> Option<FlowCacheEntry> {
+        let now = Instant::now();
+        let hit = if let Some(mut e) = self.map.get_mut(flow_id) {
+            if now < e.expiry {
+                e.expiry = now + self.ttl;
+                Some(e.clone())
+            } else {
+                None // 在表但已过期
+            }
+        } else {
+            None
+        };
+        if hit.is_none() {
+            self.map.remove(flow_id);
+            self.unknown_flow.fetch_add(1, Ordering::Relaxed);
+        }
+        hit
+    }
+
+    /// 移除条目（retire_flow 单点用，§13-1）。
+    fn remove(&self, flow_id: &[u8; 16]) -> Option<FlowCacheEntry> {
+        self.map.remove(flow_id).map(|(_, e)| e)
+    }
+
+    /// 过期清扫（serve 循环周期调用；时间由调用方传入，测试可显式控制）。
+    fn sweep_expired(&self, now: Instant) {
+        let expired: Vec<[u8; 16]> = self
+            .map
+            .iter()
+            .filter(|r| r.value().expiry <= now)
+            .map(|r| *r.key())
+            .collect();
+        for k in expired {
+            self.map.remove(&k);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    fn evicted_count(&self) -> u64 {
+        self.evicted.load(Ordering::Relaxed)
+    }
+
+    fn unknown_flow_count(&self) -> u64 {
+        self.unknown_flow.load(Ordering::Relaxed)
+    }
 }
 
 pub struct MeshDataPlane {
@@ -1260,5 +1383,117 @@ mod tests {
         let back = decode_udp_envelope(&encode_udp_envelope(&env).unwrap()).unwrap();
         assert_eq!(back, env);
         assert!(back.payload.is_empty());
+    }
+
+    // ── P0-4 §3 UdpFlowCache 跳缓存（S2 / §10 T4/T5/T8）──
+
+    fn udp_flow_id(seed: u8) -> [u8; 16] {
+        [seed; 16]
+    }
+
+    fn udp_cache_entry(prev_port: u16) -> FlowCacheEntry {
+        FlowCacheEntry {
+            next_hop: Some(("next-hop".into(), "127.0.0.1:9000".parse().unwrap())),
+            prev: format!("127.0.0.1:{prev_port}").parse().unwrap(),
+            expiry: Instant::now() + Duration::from_secs(60),
+        }
+    }
+
+    #[test]
+    fn udp_flow_cache_insert_touch_and_reassociate() {
+        let cache = UdpFlowCache::new(Duration::from_secs(60), 64);
+        cache.insert(udp_flow_id(1), udp_cache_entry(1111));
+        assert_eq!(cache.len(), 1);
+        let hit = cache.touch(&udp_flow_id(1)).expect("应命中");
+        assert_eq!(hit.prev.port(), 1111);
+        // FULL 重关联：同 flow_id 再 insert 刷新 prev（§3）
+        cache.insert(udp_flow_id(1), udp_cache_entry(2222));
+        let hit = cache.touch(&udp_flow_id(1)).expect("重关联后应命中");
+        assert_eq!(hit.prev.port(), 2222, "重关联应刷新 prev");
+        assert_eq!(cache.len(), 1, "重关联不新增条目");
+        assert_eq!(cache.unknown_flow_count(), 0);
+    }
+
+    /// T4：过期条目判 miss + unknown_flow 计数（惰性过期，就地改写 expiry）。
+    #[test]
+    fn udp_flow_cache_expired_touch_is_unknown() {
+        let cache = UdpFlowCache::new(Duration::from_secs(10), 64);
+        cache.insert(udp_flow_id(7), udp_cache_entry(1111));
+        // 就地改写 expiry 至过去（设计 §3：不引入时钟抽象，测试直接改私有字段）
+        if let Some(mut e) = cache.map.get_mut(&udp_flow_id(7)) {
+            e.expiry = Instant::now() - Duration::from_secs(1);
+        }
+        assert!(cache.touch(&udp_flow_id(7)).is_none(), "过期应判 miss");
+        assert_eq!(cache.unknown_flow_count(), 1);
+        assert_eq!(cache.len(), 0, "过期条目应被惰性清除");
+    }
+
+    /// T5：max=2 插 3 → 最早 expiry 被逐 + 驱逐计数（R10/§11-6）。
+    #[test]
+    fn udp_flow_cache_capacity_evicts_earliest_expiry() {
+        let cache = UdpFlowCache::new(Duration::from_secs(60), 2);
+        cache.insert(udp_flow_id(1), udp_cache_entry(1111));
+        cache.insert(udp_flow_id(2), udp_cache_entry(2222));
+        // 控制驱逐顺序：flow 1 的 expiry 最早（最久未触）
+        if let Some(mut e) = cache.map.get_mut(&udp_flow_id(1)) {
+            e.expiry = Instant::now() + Duration::from_secs(1);
+        }
+        if let Some(mut e) = cache.map.get_mut(&udp_flow_id(2)) {
+            e.expiry = Instant::now() + Duration::from_secs(3600);
+        }
+        cache.insert(udp_flow_id(3), udp_cache_entry(3333));
+        assert_eq!(cache.len(), 2, "容量守恒");
+        assert_eq!(cache.evicted_count(), 1, "最早 expiry 被逐");
+        assert!(cache.touch(&udp_flow_id(1)).is_none(), "被逐条目判 miss");
+        assert!(cache.touch(&udp_flow_id(2)).is_some());
+        assert!(cache.touch(&udp_flow_id(3)).is_some());
+    }
+
+    /// 满时插入优先扫过期腾位（不产生驱逐计数）。
+    #[test]
+    fn udp_flow_cache_full_insert_sweeps_expired_first() {
+        let cache = UdpFlowCache::new(Duration::from_secs(60), 2);
+        cache.insert(udp_flow_id(1), udp_cache_entry(1111));
+        cache.insert(udp_flow_id(2), udp_cache_entry(2222));
+        for id in [1u8, 2u8] {
+            if let Some(mut e) = cache.map.get_mut(&udp_flow_id(id)) {
+                e.expiry = Instant::now() - Duration::from_secs(1);
+            }
+        }
+        cache.insert(udp_flow_id(3), udp_cache_entry(3333));
+        assert_eq!(cache.len(), 1, "过期两条已被扫除，仅剩新插入");
+        assert_eq!(cache.evicted_count(), 0, "过期清扫不计驱逐（§13-2）");
+    }
+
+    /// T8：过期清扫后 len == 0；未过期不清。
+    #[test]
+    fn udp_flow_cache_sweep_expired_empties() {
+        let cache = UdpFlowCache::new(Duration::from_secs(60), 64);
+        for id in 1u8..=3 {
+            cache.insert(udp_flow_id(id), udp_cache_entry(1000 + id as u16));
+        }
+        for id in 1u8..=3 {
+            if let Some(mut e) = cache.map.get_mut(&udp_flow_id(id)) {
+                e.expiry = Instant::now() - Duration::from_secs(1);
+            }
+        }
+        let now = Instant::now();
+        cache.sweep_expired(now);
+        assert_eq!(cache.len(), 0, "全部过期应清空（T8）");
+        // 未到期不受影响
+        cache.insert(udp_flow_id(9), udp_cache_entry(1999));
+        cache.sweep_expired(now);
+        assert_eq!(cache.len(), 1);
+        assert!(!cache.is_empty());
+    }
+
+    /// retire_flow 单点的 remove 语义（§13-1）。
+    #[test]
+    fn udp_flow_cache_remove() {
+        let cache = UdpFlowCache::new(Duration::from_secs(60), 64);
+        cache.insert(udp_flow_id(5), udp_cache_entry(1551));
+        assert!(cache.remove(&udp_flow_id(5)).is_some());
+        assert!(cache.remove(&udp_flow_id(5)).is_none(), "重复 remove 无害");
+        assert_eq!(cache.len(), 0);
     }
 }
