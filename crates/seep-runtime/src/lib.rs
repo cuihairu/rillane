@@ -14,6 +14,7 @@ pub mod chain;
 pub mod hot_reload;
 pub mod mesh_transport;
 pub mod runtime_builder;
+mod udp_chain; // P0-4 §5 客户端出站（私有：消费点 = runtime_builder UDP 块，S5 接线）
 
 pub use chain::{
     ChainBuildResult, ChainBuilder, ChainConfig, ChainConstraints, ChainDryRunResult, ChainManager,
