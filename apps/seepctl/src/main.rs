@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -15,6 +15,8 @@ use seep_config::{EgressConfig, EgressDescriptor, IngressConfig, IngressDescript
 use seep_subscription::ClashConverter;
 use serde::Deserialize;
 use time::{Duration as TimeDuration, OffsetDateTime};
+
+mod udp_probe;
 
 #[derive(Parser)]
 #[command(author, version, about = "Seep 控制台", propagate_version = true)]
@@ -36,6 +38,30 @@ enum Command {
         /// 控制面完整 URL，如 http://127.0.0.1:9090/flows
         #[arg(long)]
         endpoint: Option<String>,
+    },
+    /// UDP ASSOCIATE 联调探测（P0-5 §3.3：最小 RFC 1928 客户端）
+    UdpProbe {
+        /// SOCKS5 入口地址，如 127.0.0.1:1080
+        #[arg(long)]
+        socks5: String,
+        /// 目标主机（域名或 IP）
+        #[arg(long)]
+        host: String,
+        /// 目标端口
+        #[arg(long)]
+        port: u16,
+        /// 查询载荷 hex（如 DNS 查询）
+        #[arg(long)]
+        payload_hex: String,
+        /// 回包等待超时（支持 s/ms/m 单位）
+        #[arg(long, default_value = "3s")]
+        timeout: String,
+        /// SOCKS5 用户名（用户名/密码法，METHOD 0x02）
+        #[arg(long)]
+        user: Option<String>,
+        /// SOCKS5 密码（与 --user 成对）
+        #[arg(long)]
+        pass: Option<String>,
     },
     /// 查看 mesh 节点
     Nodes {
@@ -279,6 +305,8 @@ fn main() -> Result<()> {
             let config = SeepConfig::load_from_path(&cli.config)?;
             let target =
                 endpoint.unwrap_or_else(|| format!("http://{}/flows", config.control.api_bind));
+            // P0-5 §3.2：UDP 段与 /flows 同 base 推导（--endpoint 覆盖仅作用于 /flows 一侧）
+            let base = url_base(&target);
             let client = Client::new();
             let mut req = client.get(&target);
             if let Some(token) = &config.control.admin_token {
@@ -298,6 +326,48 @@ fn main() -> Result<()> {
                         "{} -> {} | flows={} upstream={}B downstream={}B",
                         item.ingress, item.egress, item.flows, item.upstream, item.downstream
                     );
+                }
+            }
+            // P0-5 §3.2/§9-2：追加 UDP 段（/udp/stats 不可达/404 → 占位行，不视为失败）
+            println!();
+            match fetch_udp_stats(&client, config.control.admin_token.as_deref(), &base) {
+                Some(udp) => print!("{}", render_udp_section(&udp)),
+                None => println!("UDP:\n  (控制面无 UDP 段)"),
+            }
+        }
+        Command::UdpProbe {
+            socks5,
+            host,
+            port,
+            payload_hex,
+            timeout,
+            user,
+            pass,
+        } => {
+            let payload = decode_hex(&payload_hex)?;
+            if payload.is_empty() {
+                anyhow::bail!("--payload-hex 不能为空");
+            }
+            let timeout = parse_duration_arg(&timeout)?;
+            let auth = match (user, pass) {
+                (Some(u), Some(p)) => Some((u, p)),
+                (None, None) => None,
+                _ => anyhow::bail!("--user 与 --pass 需成对提供"),
+            };
+            let rt = tokio::runtime::Runtime::new().context("无法启动 tokio 运行时")?;
+            let auth_ref = auth.as_ref().map(|(u, p)| (u.as_str(), p.as_str()));
+            let outcome =
+                rt.block_on(udp_probe::run(&socks5, &host, port, &payload, timeout, auth_ref));
+            match outcome {
+                Ok(ok) => {
+                    println!(
+                        "udp-probe 往返成功: source={} payload_len={} rtt={:?}",
+                        ok.source, ok.payload_len, ok.rtt
+                    );
+                }
+                Err(e) => {
+                    eprintln!("udp-probe 失败（退出码 {}）: {}", e.exit_code(), e.detail());
+                    std::process::exit(e.exit_code());
                 }
             }
         }
@@ -1380,5 +1450,268 @@ fn build_ingress_from_clash(clash: &seep_subscription::ClashConfig) -> IngressDe
             bind: format!("{bind_ip}:{port}"),
             udp_enabled: None,
         },
+    }
+}
+
+// ---------- P0-5 §3.2/§9-2：stats UDP 段 ----------
+
+/// `/udp/stats` 响应（§9-1 结构的 seepctl 侧反序列化视图；BTreeMap 固定序）
+#[derive(Debug, Deserialize)]
+struct UdpStatsDto {
+    table: UdpTableDto,
+    ingress: UdpIngressDto,
+    mesh: Option<UdpMeshDto>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UdpTableDto {
+    sessions_active: u64,
+    sessions_total: u64,
+    mappings_active: i64,
+    bytes_up: u64,
+    bytes_down: u64,
+    dropped: std::collections::BTreeMap<String, u64>,
+    expired: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UdpIngressDto {
+    associates_active: i64,
+    associates_total: u64,
+    associate_rejected: u64,
+    uplink_packets: u64,
+    downlink_packets: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct UdpMeshDto {
+    forwarded_up: u64,
+    forwarded_down: u64,
+    flows_active: i64,
+    unknown_flow: u64,
+}
+
+/// GET {base}/udp/stats；不可达 / 非 2xx / 解析失败均返回 None（§3.2：
+/// 对旧版 seepd 兼容，打印占位行且不视为失败）
+fn fetch_udp_stats(client: &Client, token: Option<&str>, base: &str) -> Option<UdpStatsDto> {
+    let mut req = client.get(format!("{base}/udp/stats"));
+    if let Some(t) = token {
+        req = req.header("x-admin-token", t);
+    }
+    let resp = req.send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json::<UdpStatsDto>().ok()
+}
+
+/// 从完整 URL 提取 scheme://host 部分（§3.2：UDP 段与 /flows 同 base 推导）
+fn url_base(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => ("http", url),
+    };
+    let host = rest.split('/').next().unwrap_or(rest);
+    format!("{scheme}://{host}")
+}
+
+/// §9-2 UDP 段渲染（纯函数，测试直调）。零值行照打（与 §6-2「序列不因开关
+/// 消失」同口径，渲染侧无需分支）；dropped/expired 固定序只列非零 reason、
+/// 全零打 `(none)`；mesh 未启用打占位（与零流量对象两态可区分）。
+fn render_udp_section(s: &UdpStatsDto) -> String {
+    let mut out = String::from("UDP:\n");
+    push_udp_line(
+        &mut out,
+        "sessions",
+        format!(
+            "{} active / {} total (mappings {} active)",
+            s.table.sessions_active, s.table.sessions_total, s.table.mappings_active
+        ),
+    );
+    push_udp_line(
+        &mut out,
+        "relay",
+        format!(
+            "{} up / {} down ({} / {} packets)",
+            format_bytes(s.table.bytes_up),
+            format_bytes(s.table.bytes_down),
+            s.ingress.uplink_packets,
+            s.ingress.downlink_packets
+        ),
+    );
+    push_udp_line(
+        &mut out,
+        "associates",
+        format!(
+            "{} active / {} total ({} rejected)",
+            s.ingress.associates_active, s.ingress.associates_total, s.ingress.associate_rejected
+        ),
+    );
+    push_udp_line(&mut out, "dropped", render_reason_map(&s.table.dropped));
+    push_udp_line(&mut out, "expired", render_reason_map(&s.table.expired));
+    match &s.mesh {
+        Some(m) => push_udp_line(
+            &mut out,
+            "mesh",
+            format!(
+                "{} up / {} down (flows {}, unknown_flow {})",
+                m.forwarded_up, m.forwarded_down, m.flows_active, m.unknown_flow
+            ),
+        ),
+        None => push_udp_line(&mut out, "mesh", "(面未启用)".to_string()),
+    }
+    out
+}
+
+fn push_udp_line(out: &mut String, label: &str, rest: String) {
+    out.push_str(&format!("  {label:<12}{rest}\n"));
+}
+
+/// reason 键值渲染：固定序（BTreeMap）只列非零，全零 `(none)`
+fn render_reason_map(m: &std::collections::BTreeMap<String, u64>) -> String {
+    let parts: Vec<String> = m
+        .iter()
+        .filter(|(_, v)| **v != 0)
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    if parts.is_empty() {
+        "(none)".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut i = 0usize;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
+}
+
+/// 最小 hex 解码（P0-5 §3.3 `--payload-hex`；不引入依赖，容忍空白）
+fn decode_hex(raw: &str) -> Result<Vec<u8>> {
+    let s: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    if s.len() % 2 != 0 {
+        anyhow::bail!("--payload-hex 长度须为偶数：{s}");
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .with_context(|| format!("无效 hex：{}", &s[i..i + 2]))
+        })
+        .collect()
+}
+
+/// 时长参数解析（支持 3 / 3s / 250ms / 2m；udp-probe `--timeout` 默认 3s）
+fn parse_duration_arg(raw: &str) -> Result<Duration> {
+    let t = raw.trim();
+    let split = t.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(t.len());
+    let (num, unit) = t.split_at(split);
+    let n: f64 = num.parse().with_context(|| format!("无法解析时长数字：{raw}"))?;
+    let secs = match unit {
+        "" | "s" => n,
+        "ms" => n / 1000.0,
+        "m" => n * 60.0,
+        other => anyhow::bail!("不支持的时长单位 {other:?}（支持 s/ms/m）"),
+    };
+    Ok(Duration::from_secs_f64(secs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §9-1 响应示例原文（数字为设计稿示意）
+    const SAMPLE: &str = r#"{
+      "table": {
+        "sessions_active": 3, "sessions_total": 128, "mappings_active": 7,
+        "reroutes": 2, "bytes_up": 1048576, "bytes_down": 2097152,
+        "dropped": {"session_limit": 0, "mapping_limit": 0, "no_binding": 0,
+                    "shutting_down": 0, "send_failed": 1, "downlink_full": 0},
+        "expired": {"idle": 120, "lifetime": 0, "revoked": 1}
+      },
+      "ingress": {
+        "associates_active": 3, "associates_total": 45, "associate_rejected": 2,
+        "associate_errors": 0, "uplink_packets": 1024, "downlink_packets": 980,
+        "frag_dropped": 0, "source_dropped": 0, "malformed_dropped": 0
+      },
+      "mesh": {
+        "forwarded_up": 512, "forwarded_down": 480, "malformed": 0,
+        "unknown_flow": 3, "evicted": 0, "flows_active": 4
+      },
+      "mesh_client": {"dropped": 0}
+    }"#;
+
+    /// §10-S5 测试 4：§9-1 JSON → §9-2 文本逐行断言（纯函数，零网络）
+    #[test]
+    fn stats_udp_section_render() {
+        let stats: UdpStatsDto = serde_json::from_str(SAMPLE).unwrap();
+        let rendered = render_udp_section(&stats);
+        let expected = [
+            "UDP:",
+            "  sessions    3 active / 128 total (mappings 7 active)",
+            "  relay       1.0 MiB up / 2.0 MiB down (1024 / 980 packets)",
+            "  associates  3 active / 45 total (2 rejected)",
+            "  dropped     send_failed=1",
+            "  expired     idle=120 revoked=1",
+            "  mesh        512 up / 480 down (flows 4, unknown_flow 3)",
+        ]
+        .join("\n");
+        assert_eq!(renderled(rendered), expected);
+        // mesh_client 键不在渲染面（§9-2 无该行），反序列化仅要求可容忍多余键
+        assert!(stats.mesh.is_some());
+
+        // 全零 + mesh null：零值行照打（§9-2 注记），reason 全零 (none)、面占位
+        let zero: UdpStatsDto = serde_json::from_str(
+            r#"{"table":{"sessions_active":0,"sessions_total":0,"mappings_active":0,
+                "bytes_up":0,"bytes_down":0,
+                "dropped":{"session_limit":0,"mapping_limit":0,"no_binding":0,
+                           "shutting_down":0,"send_failed":0,"downlink_full":0},
+                "expired":{"idle":0,"lifetime":0,"revoked":0}},
+              "ingress":{"associates_active":0,"associates_total":0,"associate_rejected":0,
+                "uplink_packets":0,"downlink_packets":0},
+              "mesh":null}"#,
+        )
+        .unwrap();
+        let r2 = render_udp_section(&zero);
+        assert!(r2.contains("  sessions    0 active / 0 total (mappings 0 active)"));
+        assert!(r2.contains("  relay       0 B up / 0 B down (0 / 0 packets)"));
+        assert!(r2.contains("  dropped     (none)"));
+        assert!(r2.contains("  expired     (none)"));
+        assert!(r2.contains("  mesh        (面未启用)"));
+    }
+
+    fn renderled(s: String) -> String {
+        s.trim_end().to_string()
+    }
+
+    #[test]
+    fn url_base_strips_path() {
+        assert_eq!(url_base("http://127.0.0.1:9090/flows"), "http://127.0.0.1:9090");
+        assert_eq!(url_base("http://127.0.0.1:9090"), "http://127.0.0.1:9090");
+        assert_eq!(url_base("127.0.0.1:9090/flows"), "http://127.0.0.1:9090");
+    }
+
+    #[test]
+    fn duration_and_hex_helpers() {
+        assert_eq!(parse_duration_arg("3s").unwrap(), Duration::from_secs(3));
+        assert_eq!(parse_duration_arg("250ms").unwrap(), Duration::from_millis(250));
+        assert_eq!(parse_duration_arg("2m").unwrap(), Duration::from_secs(120));
+        assert_eq!(parse_duration_arg("5").unwrap(), Duration::from_secs(5));
+        assert!(parse_duration_arg("3x").is_err());
+        assert!(parse_duration_arg("s").is_err());
+
+        assert_eq!(decode_hex("00ff 10").unwrap(), vec![0x00, 0xff, 0x10]);
+        assert!(decode_hex("abc").is_err());
+        assert!(decode_hex("zz").is_err());
     }
 }

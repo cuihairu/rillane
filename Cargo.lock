@@ -3018,6 +3018,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "seep-config",
+ "seep-core",
  "seep-runtime",
  "seep-subscription",
  "serde",

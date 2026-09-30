@@ -9,6 +9,7 @@ anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 seep-config = { path = "../../crates/seep-config" }
+seep-core = { path = "../../crates/seep-core" }
 seep-runtime = { path = "../../crates/seep-runtime" }
 seep-subscription = { path = "../../crates/seep-subscription" }
 reqwest.workspace = true
