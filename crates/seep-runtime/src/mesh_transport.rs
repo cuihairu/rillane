@@ -528,6 +528,8 @@ impl UdpFlowCache {
 
 /// mesh UDP 面明文门。`ensure_usable` 只做显式参数检查；进程 env 的读取只发生在
 /// `from_env`（调用方 = `RuntimeBuilder::build`，§13-6 合流点：cfg ∪ env 求值一次）。
+/// Clone：§13-6 折叠值语义——client 桥（build）与非 client 面（start）消费同一合流结果的两个副本。
+#[derive(Clone)]
 pub struct MeshUdpGate {
     pub allow_plaintext: bool,
 }
@@ -563,8 +565,8 @@ impl MeshUdpGate {
 
 /// 缓存 TTL 默认 = `udp.mapping_idle_secs`（§3，60s；S5 接配置走 `with_udp_limits`）。
 const UDP_FACE_DEFAULT_TTL: Duration = Duration::from_secs(60);
-/// 缓存上界默认 = R10 的 65536（§3）。
-const UDP_FACE_DEFAULT_MAX: usize = 65536;
+/// 缓存上界默认 = R10 的 65536（§3）。pub = runtime 接线点传参（ttl 走配置、上界走本默认）。
+pub const UDP_FACE_DEFAULT_MAX: usize = 65536;
 /// §14-1 hop_index 熔断上界：CACHED 成环的唯一断路器（FULL 靠 path 严格递减防环）。
 const MAX_UDP_HOPS: u8 = 16;
 
@@ -797,11 +799,13 @@ impl MeshDataPlane {
         Ok(me)
     }
 
-    pub fn spawn(self, bind: SocketAddr) -> JoinHandle<Result<()>> {
+    /// TCP 面 serve（S5 起 `self: Arc<Self>`——与 `spawn_udp` 并列共享同一 plane 实例，
+    /// 同端口双栈；§9.2）。
+    pub fn spawn(self: Arc<Self>, bind: SocketAddr) -> JoinHandle<Result<()>> {
         tokio::spawn(async move { self.serve(bind).await })
     }
 
-    async fn serve(self, bind: SocketAddr) -> Result<()> {
+    async fn serve(&self, bind: SocketAddr) -> Result<()> {
         let listener = TcpListener::bind(bind).await?;
         let tls = self.tls.clone();
         loop {

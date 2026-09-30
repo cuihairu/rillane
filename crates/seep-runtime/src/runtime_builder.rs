@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{broadcast, Mutex},
+    sync::{broadcast, mpsc, Mutex},
     task::JoinHandle,
     time,
 };
@@ -25,7 +25,8 @@ use seep_config::{
     EgressConfig, EgressDescriptor, GroupMember, IngressConfig, IngressDescriptor, PolicyGroup,
     RoutingConfig, SeepConfig,
 };
-use seep_core::udp::EgressUdpConnector;
+use seep_core::udp::table::chain_id_of;
+use seep_core::udp::{ChainFailureEvent, EgressUdpConnector};
 use seep_core::{
     EgressConnector, Flow, FlowContext, FlowOutput, FlowReport, FlowRouter, IngressEndpoint,
     RouteDecision, RoutePath,
@@ -42,7 +43,10 @@ use seep_subscription::SubscriptionConverter;
 use seep_subscription::SubscriptionManager;
 
 use crate::chain::{ChainBuilder, ChainConfig, ChainConstraints, ChainManager};
-use crate::mesh_transport::{MeshDataPlane, MeshEnvelope, MeshTlsConfig};
+use crate::mesh_transport::{
+    MeshDataPlane, MeshEnvelope, MeshTlsConfig, MeshUdpGate, UDP_FACE_DEFAULT_MAX,
+};
+use crate::udp_chain::{MeshUdpBridge, UdpChainRouter};
 
 /// 运行时构建器
 pub struct RuntimeBuilder {
@@ -214,11 +218,16 @@ impl RuntimeBuilder {
 
         // UDP 数据面（P0-2/P0-3，udp-relay-path.md §2/§3）：udp.enabled 时构建
         // 共享会话表 + 按节点能力表注册的 RoutingUdpConnector；§3.1 构建期扫描
-        // 拦截 UDP 不可达节点。路由决策用基础 RoutingEngine（mesh-chain 包装的
-        // UDP 接线属 P0-4 S5）。周期回收任务随首个 ASSOCIATE 拉起。
+        // 拦截 UDP 不可达节点。周期回收任务随首个 ASSOCIATE 拉起。
         // —— P0-4 §9.1 时序裁决：本块自路由引擎构造之后整体下移至此（ChainManager
-        // 之后）：UDP 会话表的 FlowRouter 构造即固化，S5 将在此注入
-        // RuntimeFlowRouter（依赖上方 mesh_registry / chain_manager / local_node_id）。
+        // 之后）：UDP 会话表的 FlowRouter 构造即固化。
+        // —— P0-4 §9.2/S5 mesh-chain 接线：chain 启用时 ①UDP 表 FlowRouter 换
+        // RuntimeFlowRouter（chain 决策产生处，S0 下移腾出的位置）；②出站连接器包
+        // UdpChainRouter（Chain 决策 → MeshUdpBridge）；③UDP 明文门合流（§13-6，
+        // cfg ∪ env 求值一次——两消费点 client 桥构造 / 非 client spawn_udp 同源）；
+        // ④§8 链路故障事件通道（FlowOutputRouter 切换成功后 → 表 handle_chain_failure）。
+        let mut mesh_udp_gate: Option<MeshUdpGate> = None;
+        let mut chain_failure_tx: Option<mpsc::Sender<ChainFailureEvent>> = None;
         let udp_service = if config_snapshot.udp.enabled {
             let udp_connectors = build_udp_connectors(&config_snapshot.egress)?;
             scan_udp_capability(
@@ -230,6 +239,47 @@ impl RuntimeBuilder {
             for (node, connector) in udp_connectors {
                 routing_udp.register(node, connector);
             }
+            let chain_parts = match (&mesh_registry, &chain_manager, &local_node_id) {
+                (Some(m), Some(c), Some(l)) if self.runtime_config.enable_chain => {
+                    Some((Arc::clone(m), Arc::clone(c), l.clone()))
+                }
+                _ => None,
+            };
+            let flow_router: Arc<dyn FlowRouter> = match &chain_parts {
+                Some((mesh, chain_mgr, local_id)) => Arc::new(RuntimeFlowRouter::new(
+                    Arc::clone(&router),
+                    Arc::clone(mesh),
+                    Arc::clone(chain_mgr),
+                    local_id.clone(),
+                )),
+                None => Arc::clone(&router) as Arc<dyn FlowRouter>,
+            };
+            let chain_enabled = chain_parts.is_some();
+            let connector: Arc<dyn EgressUdpConnector> = match chain_parts {
+                Some((mesh, _chain_mgr, local_id)) => {
+                    // §13-6 合流：cfg.udp_allow_plaintext_data_plane ∪ env，build() 求值一次
+                    let env_gate = MeshUdpGate::from_env();
+                    let allow = self
+                        .runtime_config
+                        .mesh_config
+                        .as_ref()
+                        .is_some_and(|c| c.udp_allow_plaintext_data_plane)
+                        || env_gate.allow_plaintext;
+                    let gate = MeshUdpGate::new(allow);
+                    let bridge = MeshUdpBridge::new(
+                        local_id,
+                        mesh,
+                        self.runtime_config
+                            .mesh_config
+                            .as_ref()
+                            .and_then(|c| c.data_plane_tls.as_ref()),
+                        &gate,
+                    )?;
+                    mesh_udp_gate = Some(gate);
+                    Arc::new(UdpChainRouter::new(routing_udp, Some(bridge)))
+                }
+                None => Arc::new(routing_udp),
+            };
             let table = seep_core::udp::UdpSessionTable::new(
                 seep_core::udp::UdpSessionConfig {
                     session_idle: std::time::Duration::from_secs(
@@ -241,12 +291,17 @@ impl RuntimeBuilder {
                     max_sessions: config_snapshot.udp.max_sessions,
                     ..Default::default()
                 },
-                Arc::clone(&router) as Arc<dyn FlowRouter>,
+                flow_router,
                 seep_core::udp::RealClock::new(),
             )?;
+            if chain_enabled {
+                let (tx, rx) = mpsc::channel::<ChainFailureEvent>(256);
+                table.attach_chain_events(rx);
+                chain_failure_tx = Some(tx);
+            }
             Some(seep_core::udp::UdpAssociateService::new(
                 table,
-                Arc::new(routing_udp),
+                connector,
                 config_snapshot.udp.strict_udp_source,
             ))
         } else {
@@ -278,6 +333,8 @@ impl RuntimeBuilder {
             flow_stats: Arc::new(DashMap::new()),
             mesh_registry,
             chain_manager,
+            chain_failure_tx,
+            mesh_udp_gate,
             network_manager,
             subscription_manager,
             event_tx,
@@ -357,6 +414,10 @@ pub struct MeshConfig {
     /// Dev-only: allow plaintext mesh data-plane even when chain is enabled.
     #[serde(default)]
     pub allow_plaintext_data_plane: bool,
+    /// Dev-only: allow plaintext mesh UDP face（P0-4 §13-6：cfg 侧开关，与
+    /// `SEEP_MESH_UDP_ALLOW_PLAINTEXT` env 在 build() 合流求值一次）。
+    #[serde(default)]
+    pub udp_allow_plaintext_data_plane: bool,
     /// Dev-only: allow TLS without client auth even when chain is enabled.
     #[serde(default)]
     pub allow_no_client_auth: bool,
@@ -374,6 +435,7 @@ impl Default for MeshConfig {
             listen_address: "0.0.0.0:9091".parse().unwrap(),
             data_plane_tls: MeshTlsConfig::from_env(),
             allow_plaintext_data_plane: false,
+            udp_allow_plaintext_data_plane: false,
             allow_no_client_auth: false,
             topology_update_interval: Duration::from_secs(30),
             health_check_interval: Duration::from_secs(60),
@@ -517,6 +579,12 @@ pub struct Runtime {
     mesh_registry: Option<Arc<MeshRegistry>>,
     /// 链路管理器（多跳链路支持）
     chain_manager: Option<Arc<ChainManager>>,
+    /// P0-4 §8：链路故障事件 → UDP 会话表（FlowOutputRouter 故障切换成功后发送；
+    /// None = udp/chain 未同启，零接线）
+    chain_failure_tx: Option<mpsc::Sender<ChainFailureEvent>>,
+    /// P0-4 §13-6：folded UDP 明文门（chain+udp 同启时 Some；两消费点同源——
+    /// client 桥在 build() 已消费，非 client 的 spawn_udp 在 start() 消费）
+    mesh_udp_gate: Option<MeshUdpGate>,
     network_manager: Option<Arc<Mutex<NetworkManager>>>,
     subscription_manager: Option<Arc<SubscriptionManager>>,
     event_tx: broadcast::Sender<RuntimeEvent>,
@@ -558,6 +626,7 @@ impl Runtime {
             self.local_node_id.clone(),
             mesh_tls,
             self.event_tx.clone(),
+            self.chain_failure_tx.clone(),
         ));
 
         // Spawn mesh data-plane listener (TCP) for multi-hop transport (requires chain feature).
@@ -576,7 +645,27 @@ impl Runtime {
                 if local_role != NodeRole::Client {
                     let plane = MeshDataPlane::new(local_id, mesh)
                         .with_tls(mesh_cfg.data_plane_tls.clone())?;
-                    tasks.push(plane.spawn(mesh_cfg.listen_address));
+                    // P0-4 §9.2/S5：chain+udp 同启时并列 UDP 面（同端口双栈）。
+                    // gate 已在 build() 前置检查（§13-6 合流值存 mesh_udp_gate，
+                    // 此处消费同一实例）；ttl 接 udp.mapping_idle_secs（§3），上界走 R10 默认。
+                    let plane = match &self.mesh_udp_gate {
+                        Some(gate) => {
+                            let ttl = Duration::from_secs(
+                                self.config
+                                    .read()
+                                    .expect("config lock poisoned")
+                                    .udp
+                                    .mapping_idle_secs,
+                            );
+                            plane.with_udp_limits(gate.clone(), ttl, UDP_FACE_DEFAULT_MAX)?
+                        }
+                        None => plane,
+                    };
+                    let plane = Arc::new(plane);
+                    tasks.push(Arc::clone(&plane).spawn(mesh_cfg.listen_address));
+                    if self.mesh_udp_gate.is_some() {
+                        tasks.push(Arc::clone(&plane).spawn_udp(mesh_cfg.listen_address));
+                    }
                 } else {
                     tracing::info!(
                         target: "seep::mesh::transport",
@@ -1241,9 +1330,12 @@ struct FlowOutputRouter {
     local_node_id: Option<NodeId>,
     mesh_tls: Option<MeshTlsConfig>,
     event_tx: broadcast::Sender<RuntimeEvent>,
+    /// P0-4 §8：链路故障事件 → UDP 会话表（None = udp/chain 未同启）
+    chain_failure_tx: Option<mpsc::Sender<ChainFailureEvent>>,
 }
 
 impl FlowOutputRouter {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         outputs: Arc<RwLock<HashMap<String, Arc<dyn FlowOutput>>>>,
         chain_manager: Option<Arc<ChainManager>>,
@@ -1251,6 +1343,7 @@ impl FlowOutputRouter {
         local_node_id: Option<NodeId>,
         mesh_tls: Option<MeshTlsConfig>,
         event_tx: broadcast::Sender<RuntimeEvent>,
+        chain_failure_tx: Option<mpsc::Sender<ChainFailureEvent>>,
     ) -> Self {
         Self {
             outputs,
@@ -1259,6 +1352,7 @@ impl FlowOutputRouter {
             local_node_id,
             mesh_tls,
             event_tx,
+            chain_failure_tx,
         }
     }
 }
@@ -1372,6 +1466,23 @@ impl FlowOutputRouter {
                                         .await
                                     {
                                         let new_decision = chain_mgr.build_route_decision(&new_ctx);
+                                        // P0-4 §8：链路故障事件桥接——chain_id 填
+                                        // chain_id_of(切换后的新决策)（与 ChainManager 的
+                                        // UUID chain_id 不换算，口径即 P0-1 约定），
+                                        // failed_nodes 填旧链失败节点（旧 hops 去本机
+                                        // ingress 跳）；逐会话吊销/决策失效由 UDP 表
+                                        // handle_chain_failure 完成（try_send 满即丢，
+                                        // best-effort 与 event_tx 同水位）
+                                        if let Some(tx) = &self.chain_failure_tx {
+                                            let _ = tx.try_send(ChainFailureEvent {
+                                                chain_id: chain_id_of(&new_decision),
+                                                failed_nodes: hops
+                                                    .iter()
+                                                    .skip(1)
+                                                    .map(|h| h.node.clone())
+                                                    .collect(),
+                                            });
+                                        }
                                         if let RoutePath::Chain { hops: new_hops } =
                                             new_decision.path
                                         {
@@ -1964,8 +2075,15 @@ mod tests {
             }),
         );
         let (tx, _rx) = tokio::sync::broadcast::channel(16);
-        let router =
-            FlowOutputRouter::new(Arc::new(RwLock::new(outputs)), None, None, None, None, tx);
+        let router = FlowOutputRouter::new(
+            Arc::new(RwLock::new(outputs)),
+            None,
+            None,
+            None,
+            None,
+            tx,
+            None,
+        );
 
         let decision = {
             let hops = vec![
@@ -2288,6 +2406,119 @@ mod tests {
             Some("exit1")
         );
         assert_eq!(RuntimeFlowRouter::parse_mesh_target("direct"), None);
+    }
+
+    // ---------- P0-4 §9.1/S5 build() 接线验收（口径 1-4）----------
+
+    fn s5_udp_config(udp_enabled: bool) -> SeepConfig {
+        SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![IngressDescriptor {
+                name: "in1".to_string(),
+                spec: IngressConfig::Socks5 {
+                    bind: "127.0.0.1:0".to_string(),
+                    auth: None,
+                },
+            }],
+            egress: vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            routing: seep_config::RoutingConfig {
+                default_node: "direct".to_string(),
+                groups: vec![],
+                rules: vec![],
+            },
+            udp: seep_config::UdpConfig {
+                enabled: udp_enabled,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn s5_runtime_config(
+        enable_chain: bool,
+        udp_allow_plaintext: bool,
+    ) -> RuntimeConfig {
+        RuntimeConfig {
+            enable_mesh: true,
+            enable_chain,
+            enable_hot_reload: false,
+            mesh_config: Some(MeshConfig {
+                node_id: "s5-client".into(),
+                role: "client".into(),
+                listen_address: "127.0.0.1:19091".parse().unwrap(),
+                allow_plaintext_data_plane: true, // TCP 面门绕过（本组只验 UDP 门）
+                udp_allow_plaintext_data_plane: udp_allow_plaintext,
+                ..MeshConfig::default()
+            }),
+            ..RuntimeConfig::default()
+        }
+    }
+
+    /// 口径 1：chain+udp 同启 + 显式允许明文 → build 成功；mesh-chain 装配落位
+    /// （UDP 门折叠值与 §8 故障事件通道均在——chain 决策 UDP 可达的装配证据，
+    /// 端到端往返归 §10 T2/S6）。
+    #[tokio::test]
+    async fn s5_chain_udp_build_wires_mesh_bridge_and_event_channel() {
+        let runtime = RuntimeBuilder::new(s5_udp_config(true))
+            .with_runtime_config(s5_runtime_config(true, true))
+            .build()
+            .expect("chain+udp+显式明文应 build 成功");
+        assert!(
+            runtime.mesh_udp_gate.is_some(),
+            "chain+udp 同启应装配 UDP 门折叠值"
+        );
+        assert!(
+            runtime.chain_failure_tx.is_some(),
+            "chain+udp 同启应装配 §8 故障事件通道"
+        );
+    }
+
+    /// 口径 4：chain+udp 无 tls 未显式允许明文 → build 期拒绝（client 桥构造点），
+    /// 信息含开关名。
+    #[tokio::test]
+    async fn s5_chain_udp_plaintext_gate_rejects_at_build() {
+        let err = RuntimeBuilder::new(s5_udp_config(true))
+            .with_runtime_config(s5_runtime_config(true, false))
+            .build()
+            .err()
+            .expect("tls=None 且未允许明文应 build 期拒绝");
+        assert!(
+            format!("{err:#}").contains("SEEP_MESH_UDP_ALLOW_PLAINTEXT"),
+            "错误信息应含开关名: {err:#}"
+        );
+    }
+
+    /// 口径 2：无 chain → 等价 P0-3（UDP 块照常构建，mesh 接线零挂载）。
+    #[tokio::test]
+    async fn s5_udp_without_chain_matches_p03_wiring() {
+        let runtime = RuntimeBuilder::new(s5_udp_config(true))
+            .with_runtime_config(s5_runtime_config(false, false))
+            .build()
+            .expect("无 chain 的 udp 构建应等价 P0-3");
+        assert!(runtime.mesh_udp_gate.is_none());
+        assert!(runtime.chain_failure_tx.is_none());
+    }
+
+    /// 口径 3：关 udp → 零差异（chain 仅 TCP 面，门与事件通道均不装配）。
+    #[tokio::test]
+    async fn s5_chain_without_udp_is_unchanged() {
+        let runtime = RuntimeBuilder::new(s5_udp_config(false))
+            .with_runtime_config(s5_runtime_config(true, false))
+            .build()
+            .expect("关 udp 的 chain 构建应零差异");
+        assert!(runtime.mesh_udp_gate.is_none());
+        assert!(runtime.chain_failure_tx.is_none());
     }
 
     // ---------- P0-3 UDP 能力扫描 ----------

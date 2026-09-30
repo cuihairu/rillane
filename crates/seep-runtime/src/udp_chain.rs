@@ -6,11 +6,6 @@
 //! `RoutePath::Chain{hops≥2}` 走 mesh 桥，其余决策原样落 inner（按 final_node
 //! 分发，能力表扫描口径不变）。
 
-// S5（runtime_builder UDP 块接线）前本模块无生产消费点——构建期 register /
-// associate 均待 build() 装配；接线后收口为定向标注（循 S2→S3 先例）。
-#![allow(dead_code)]
-
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -43,11 +38,6 @@ pub struct UdpChainRouter {
 impl UdpChainRouter {
     pub fn new(inner: RoutingUdpConnector, mesh: Option<MeshUdpBridge>) -> Self {
         Self { inner, mesh }
-    }
-
-    /// 构建期注册节点 → 连接器（转发 inner；非 chain 决策的 final_node 分发表）
-    pub fn register(&self, node: String, connector: Arc<dyn EgressUdpConnector>) {
-        self.inner.register(node, connector);
     }
 }
 
@@ -122,11 +112,11 @@ impl MeshUdpBridge {
             "[::]:0"
         };
         let sock = UdpSocket::bind(bind_addr).await?;
-        // connect 到下一跳：内核侧按源地址过滤（下行必来自 relay 面 socket），send 免地址校验
+        // connect 到下一跳：内核侧按源地址过滤（下行必来自 relay 面 socket），send 免
+        // 逐包地址校验——下一跳由 connect 固化，relay 结构不存 next_addr（无读取点）
         sock.connect(next_addr).await?;
         Ok(Arc::new(MeshUdpRelay {
             sock: Arc::new(sock),
-            next_addr,
             path: hops[1..].iter().map(|h| h.node.clone()).collect(),
             flow_id: *ctx.id.as_uuid().as_bytes(),
             sent_full: AtomicBool::new(false),
@@ -143,8 +133,8 @@ impl MeshUdpBridge {
 /// flow_id 匹配，其余丢弃计数。
 pub struct MeshUdpRelay {
     sock: Arc<UdpSocket>,
-    next_addr: SocketAddr,
-    /// envelope FULL 路径 = hops[1..]（path[0] = 首远端跳——面侧 §4 步骤 2 对位）
+    /// envelope FULL 路径 = hops[1..]（path[0] = 首远端跳——面侧 §4 步骤 2 对位；
+    /// 下一跳地址由 associate 时的 connect 固化在 socket 上，不另存字段）
     path: Vec<NodeId>,
     flow_id: [u8; 16],
     sent_full: AtomicBool,
