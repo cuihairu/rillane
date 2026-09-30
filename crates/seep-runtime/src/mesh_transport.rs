@@ -513,12 +513,12 @@ impl UdpFlowCache {
         self.map.is_empty()
     }
 
-    #[allow(dead_code)] // 观测读取点 = P0-5 get()/get_gauge() 装配（§13-2），S3 阶段仅测试消费
+    /// P0-5 §2.4 快照读取点（`UdpFace::snapshot` 收编——计数归缓存所有，防双计）
     fn evicted_count(&self) -> u64 {
         self.evicted.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)] // 观测读取点 = P0-5 get()/get_gauge() 装配（§13-2），S3 阶段仅测试消费
+    /// P0-5 §2.4 快照读取点（同上）
     fn unknown_flow_count(&self) -> u64 {
         self.unknown_flow.load(Ordering::Relaxed)
     }
@@ -561,7 +561,7 @@ impl MeshUdpGate {
 //
 // 字段口径与 §13-2 六字段一致；偏差一处（循 S2 既有裁决）：`unknown_flow`/`evicted`
 // 不在本结构复制——归 `UdpFlowCache` 所有（S2 注记：读取时经缓存取，防双计），本结构
-// 只持有面自身计数。读取点（get()/get_gauge() 拼装）归 P0-5 观测轮。
+// 只持有面自身计数。快照读取点 = P0-5 S3 `UdpFace::snapshot()`。
 
 /// 缓存 TTL 默认 = `udp.mapping_idle_secs`（§3，60s；S5 接配置走 `with_udp_limits`）。
 const UDP_FACE_DEFAULT_TTL: Duration = Duration::from_secs(60);
@@ -570,7 +570,6 @@ pub const UDP_FACE_DEFAULT_MAX: usize = 65536;
 /// §14-1 hop_index 熔断上界：CACHED 成环的唯一断路器（FULL 靠 path 严格递减防环）。
 const MAX_UDP_HOPS: u8 = 16;
 
-#[allow(dead_code)] // 读取点 = P0-5 get()/get_gauge()（§13-2），S3 仅写入
 struct UdpFaceMetrics {
     /// 上行方向成功发出的数据报（relay 重编码发出 / exit 发往 target）
     forwarded_up: AtomicU64,
@@ -591,6 +590,20 @@ impl UdpFaceMetrics {
             flows_active: AtomicI64::new(0),
         }
     }
+}
+
+/// P0-5 §2.4：mesh UDP 面快照（`seep_udp_mesh_*` 数据源 / `/udp/stats` mesh 段）。
+/// 六字段 = `UdpFaceMetrics` 四值 + `UdpFlowCache` 收编两计数（`unknown_flow`/
+/// `evicted` 归缓存所有——防双计口径不变，§13-2 偏差注记）；`flows_active` 为
+/// gauge（缓存条目净额），其余 counter。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct UdpFaceSnapshot {
+    pub forwarded_up: u64,
+    pub forwarded_down: u64,
+    pub malformed: u64,
+    pub flows_active: i64,
+    pub unknown_flow: u64,
+    pub evicted: u64,
 }
 
 /// exit 每 flow 独立 connected socket + 下行 task（§4 / §13-1）。
@@ -692,6 +705,18 @@ impl UdpFace {
         self.metrics
             .flows_active
             .store(self.cache.len() as i64, Ordering::Relaxed);
+    }
+
+    /// P0-5 §2.4：面快照（metrics 四值 + 缓存两计数合并，relaxed 读——监控口径）。
+    fn snapshot(&self) -> UdpFaceSnapshot {
+        UdpFaceSnapshot {
+            forwarded_up: self.metrics.forwarded_up.load(Ordering::Relaxed),
+            forwarded_down: self.metrics.forwarded_down.load(Ordering::Relaxed),
+            malformed: self.metrics.malformed.load(Ordering::Relaxed),
+            flows_active: self.metrics.flows_active.load(Ordering::Relaxed),
+            unknown_flow: self.cache.unknown_flow_count(),
+            evicted: self.cache.evicted_count(),
+        }
     }
 }
 
@@ -797,6 +822,11 @@ impl MeshDataPlane {
         let mut me = self;
         me.udp = Some(Arc::new(UdpFace::with_limits(ttl, max)));
         Ok(me)
+    }
+
+    /// P0-5 §2.4：UDP 面快照（None = 纯 TCP 面——未挂 UDP 的 plane）。
+    pub fn udp_snapshot(&self) -> Option<UdpFaceSnapshot> {
+        self.udp.as_ref().map(|f| f.snapshot())
     }
 
     /// TCP 面 serve（S5 起 `self: Arc<Self>`——与 `spawn_udp` 并列共享同一 plane 实例，
@@ -2585,6 +2615,161 @@ mod tests {
             "exit 下行回封两包"
         );
         assert_eq!(exit_face.metrics.forwarded_up.load(Ordering::Relaxed), 2);
+
+        relay_serve.abort();
+        exit_serve.abort();
+    }
+
+    // ── P0-5 §10-S3 测试 1：面快照（UdpFaceSnapshot）经真 socket 往返驱动 ──
+
+    /// 两跳小流量后 relay/exit 两侧 `udp_snapshot()` 数值断言（forwarded 双向=2、
+    /// flows_active=1——跳缓存各一、unknown_flow/evicted/malformed 恒 0）；
+    /// 起始全零态同测钉住。拓扑与 T2 同构（echo + 双 plane + client 桥）。
+    #[tokio::test]
+    async fn udp_face_snapshot_after_roundtrip() {
+        use crate::udp_chain::MeshUdpBridge;
+        use seep_core::{FlowContext, FlowId, FlowMetadata, FlowTarget, RouteHop, TargetProto};
+
+        // —— 环回 echo server ——
+        let echo = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                if let Ok((n, peer)) = echo.recv_from(&mut buf).await {
+                    let _ = echo.send_to(&buf[..n], peer).await;
+                }
+            }
+        });
+
+        // 探空闲端口（spawn_udp 内部 bind；T2 同法）
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_udp_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let exit_udp_addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        // —— exit plane（path 终点：exit 分支 + 下行 task）——
+        let exit_registry = Arc::new(MeshRegistry::new());
+        exit_registry
+            .register_node(NodeRecord::new(
+                "exit1".into(),
+                NodeRole::Exit,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        let exit_plane = Arc::new(
+            MeshDataPlane::new("exit1".into(), exit_registry)
+                .with_udp(MeshUdpGate::new(true))
+                .unwrap(),
+        );
+        let exit_serve = exit_plane.spawn_udp(exit_udp_addr);
+
+        // —— relay plane（FULL 剥自身 / CACHED 查缓存 / Down 回 prev）——
+        let relay_registry = Arc::new(MeshRegistry::new());
+        relay_registry
+            .register_node(NodeRecord::new(
+                "relay1".into(),
+                NodeRole::Relay,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        relay_registry
+            .register_node(NodeRecord::new(
+                "exit1".into(),
+                NodeRole::Exit,
+                exit_udp_addr,
+            ))
+            .unwrap();
+        let relay_plane = Arc::new(
+            MeshDataPlane::new("relay1".into(), relay_registry)
+                .with_udp(MeshUdpGate::new(true))
+                .unwrap(),
+        );
+        let relay_serve = relay_plane.spawn_udp(relay_udp_addr);
+
+        // 起始态：面快照全零（挂载即有、无流量恒零——验收 #2 恒渲染口径的数据侧对位）
+        assert_eq!(
+            relay_plane.udp_snapshot(),
+            Some(UdpFaceSnapshot::default())
+        );
+        assert_eq!(exit_plane.udp_snapshot(), Some(UdpFaceSnapshot::default()));
+
+        // —— 客户端出站两跳往返（FULL + CACHED 各一包）——
+        let client_registry = Arc::new(MeshRegistry::new());
+        client_registry
+            .register_node(NodeRecord::new(
+                "client1".into(),
+                NodeRole::Client,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        client_registry
+            .register_node(NodeRecord::new(
+                "relay1".into(),
+                NodeRole::Relay,
+                relay_udp_addr,
+            ))
+            .unwrap();
+        let bridge = MeshUdpBridge::new(
+            "client1".into(),
+            client_registry,
+            None,
+            &MeshUdpGate::new(true),
+        )
+        .unwrap();
+        let target = FlowTarget {
+            host: "127.0.0.1".into(),
+            port: echo_addr.port(),
+            proto: TargetProto::Udp,
+        };
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: target.clone(),
+            metadata: FlowMetadata::default(),
+        };
+        let hops = vec![
+            RouteHop {
+                node: "client1".into(),
+                hop_type: seep_core::HopType::Ingress,
+            },
+            RouteHop {
+                node: "relay1".into(),
+                hop_type: seep_core::HopType::Relay,
+            },
+            RouteHop {
+                node: "exit1".into(),
+                hop_type: seep_core::HopType::Egress,
+            },
+        ];
+        let relay = bridge.associate(ctx, &hops).await.unwrap();
+
+        relay.send_to(&target, b"s3-ping").await.unwrap();
+        let mut buf = [0u8; 2048];
+        let (_, rn) = tokio::time::timeout(Duration::from_secs(5), relay.recv_from(&mut buf))
+            .await
+            .expect("S3：两跳往返回包超时")
+            .unwrap();
+        assert_eq!(&buf[..rn], b"s3-ping", "echo 载荷原样回送");
+        relay.send_to(&target, b"s3-second").await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), relay.recv_from(&mut buf))
+            .await
+            .expect("S3：CACHED 第二包回包超时")
+            .unwrap();
+
+        // 两包后 relay/exit 对称：上行各转发 2、下行各回送 2、跳缓存各 1、
+        // unknown_flow/evicted/malformed 恒 0
+        let expect = UdpFaceSnapshot {
+            forwarded_up: 2,
+            forwarded_down: 2,
+            malformed: 0,
+            flows_active: 1,
+            unknown_flow: 0,
+            evicted: 0,
+        };
+        assert_eq!(relay_plane.udp_snapshot(), Some(expect), "relay 面快照");
+        assert_eq!(exit_plane.udp_snapshot(), Some(expect), "exit 面快照");
 
         relay_serve.abort();
         exit_serve.abort();

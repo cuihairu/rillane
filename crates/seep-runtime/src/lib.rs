@@ -21,11 +21,13 @@ pub use chain::{
     ChainManagerStats, PathOptimizationStrategy,
 };
 pub use hot_reload::{HotReloadConfig, HotReloadManager, ReloadEvent, ReloadStats};
-pub use mesh_transport::{MeshDataPlane, MeshEnvelope};
+pub use mesh_transport::{MeshDataPlane, MeshEnvelope, UdpFaceSnapshot};
 pub use runtime_builder::{
     ConfigMergeStats, FlowStatItem, MeshConfig, MeshEventType, NetworkEventType, Runtime,
     RuntimeBuilder, RuntimeConfig, RuntimeEvent, RuntimeStats, SubscriptionEventType,
 };
+// P0-5 §2.4：client 出站侧 UDP 计数（模块私有，观测 getter 的返回类型经此公开）
+pub use udp_chain::UdpClientMetrics;
 
 use seep_config::EgressDescriptor;
 use seep_core::EgressConnector;

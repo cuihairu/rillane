@@ -7,7 +7,7 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, RwLock},
+    sync::{Arc, OnceLock, RwLock},
     time::{Duration, Instant},
 };
 
@@ -44,9 +44,9 @@ use seep_subscription::SubscriptionManager;
 
 use crate::chain::{ChainBuilder, ChainConfig, ChainConstraints, ChainManager};
 use crate::mesh_transport::{
-    MeshDataPlane, MeshEnvelope, MeshTlsConfig, MeshUdpGate, UDP_FACE_DEFAULT_MAX,
+    MeshDataPlane, MeshEnvelope, MeshTlsConfig, MeshUdpGate, UdpFaceSnapshot, UDP_FACE_DEFAULT_MAX,
 };
-use crate::udp_chain::{MeshUdpBridge, UdpChainRouter};
+use crate::udp_chain::{MeshUdpBridge, UdpChainRouter, UdpClientMetrics};
 
 /// 运行时构建器
 pub struct RuntimeBuilder {
@@ -228,6 +228,9 @@ impl RuntimeBuilder {
         // ④§8 链路故障事件通道（FlowOutputRouter 切换成功后 → 表 handle_chain_failure）。
         let mut mesh_udp_gate: Option<MeshUdpGate> = None;
         let mut chain_failure_tx: Option<mpsc::Sender<ChainFailureEvent>> = None;
+        // P0-5 §4 观测接缝③：build() 包装 UdpChainRouter 前从 bridge 抽出（None = 无
+        // chain-UDP 桥——udp/chain 未同启或本机 client 桥未构建）
+        let mut udp_client_metrics: Option<Arc<UdpClientMetrics>> = None;
         // P0-5 §1.3：per-ingress Some(true) 在全局关时仍要可用——构建条件从
         //「全局 enabled」放宽为「全局 ∨ 任一入口显式开」；服务实例仍全局单例。
         let udp_needed = config_snapshot.udp.enabled
@@ -291,6 +294,8 @@ impl RuntimeBuilder {
                             .and_then(|c| c.data_plane_tls.as_ref()),
                         &gate,
                     )?;
+                    // P0-5 §4 观测接缝③：包装 UdpChainRouter 前抽出进程级 client 计数
+                    udp_client_metrics = Some(bridge.client_metrics());
                     mesh_udp_gate = Some(gate);
                     Arc::new(UdpChainRouter::new(routing_udp, Some(bridge)))
                 }
@@ -351,6 +356,9 @@ impl RuntimeBuilder {
             // 设计稿称「Runtime.udp 字段已存在」，实况 P0-2 起即被消费进
             // ingress_endpoints、Runtime 无此字段——本字段为 S2 新增留存）
             udp_service,
+            // P0-5 §4 观测接缝②③：mesh 面 OnceLock（start 回填）+ client 计数
+            mesh_plane: OnceLock::new(),
+            udp_client_metrics,
             network_manager,
             subscription_manager,
             event_tx,
@@ -604,6 +612,11 @@ pub struct Runtime {
     /// P0-5 §4 观测接缝①：UDP 入站服务留存（控制面 /udp/stats 取数；
     /// ingress_endpoints 内共享同一 Arc 单例）
     udp_service: Option<Arc<seep_core::udp::UdpAssociateService>>,
+    /// P0-5 §4 观测接缝②：mesh UDP 面（start() 在 spawn_udp 后回填，恰好一次、
+    /// 观测只读——不引入 ArcSwap；client-only runtime 永远 None）
+    mesh_plane: OnceLock<Arc<MeshDataPlane>>,
+    /// P0-5 §4 观测接缝③：client 出站侧进程级计数（build() 从 bridge 抽出）
+    udp_client_metrics: Option<Arc<UdpClientMetrics>>,
     network_manager: Option<Arc<Mutex<NetworkManager>>>,
     subscription_manager: Option<Arc<SubscriptionManager>>,
     event_tx: broadcast::Sender<RuntimeEvent>,
@@ -684,6 +697,9 @@ impl Runtime {
                     tasks.push(Arc::clone(&plane).spawn(mesh_cfg.listen_address));
                     if self.mesh_udp_gate.is_some() {
                         tasks.push(Arc::clone(&plane).spawn_udp(mesh_cfg.listen_address));
+                        // P0-5 §4 观测接缝②：spawn_udp 后回填（恰好一次——二次
+                        // start 保持首面，观测只读；client-only 无面路径不触达此处）
+                        let _ = self.mesh_plane.set(Arc::clone(&plane));
                     }
                 } else {
                     tracing::info!(
@@ -1102,6 +1118,18 @@ impl Runtime {
     /// None = UDP 全关且无 per-ingress 显式开）
     pub fn get_udp_service(&self) -> Option<Arc<seep_core::udp::UdpAssociateService>> {
         self.udp_service.clone()
+    }
+
+    /// 获取 mesh UDP 面快照（P0-5 §4 观测接缝②：start() 在 spawn_udp 后回填；
+    /// None = 未 start / client-only / UDP 面未挂）
+    pub fn get_mesh_udp_snapshot(&self) -> Option<UdpFaceSnapshot> {
+        self.mesh_plane.get().and_then(|p| p.udp_snapshot())
+    }
+
+    /// 获取 client 出站侧 UDP 计数（P0-5 §4 观测接缝③：build() 从 bridge 抽出；
+    /// None = 无 chain-UDP 桥）
+    pub fn get_udp_client_metrics(&self) -> Option<Arc<UdpClientMetrics>> {
+        self.udp_client_metrics.clone()
     }
 
     /// 获取出口连接器
@@ -2582,6 +2610,64 @@ mod tests {
             .expect("关 udp 的 chain 构建应零差异");
         assert!(runtime.mesh_udp_gate.is_none());
         assert!(runtime.chain_failure_tx.is_none());
+    }
+
+    // ---------- P0-5 §10-S3 mesh 面观测装配 ----------
+
+    /// 测试 3：start() 于 spawn_udp 后回填 mesh_plane（relay 角色 + chain+udp+
+    /// 显式明文、listen 127.0.0.1:0）→ `get_mesh_udp_snapshot()` Some 且零流量
+    /// 全零；client-only build（无面路径，复用 s5 helper）恒 None 同测钉住。
+    #[tokio::test]
+    async fn runtime_mesh_plane_backfilled_after_start() {
+        // —— 非 client 角色：数据面监听 + UDP 面拉起 → OnceLock 回填 ——
+        let relay_rc = RuntimeConfig {
+            enable_mesh: true,
+            enable_chain: true,
+            enable_hot_reload: false,
+            mesh_config: Some(MeshConfig {
+                node_id: "s3-relay".into(),
+                role: "relay".into(),
+                listen_address: "127.0.0.1:0".parse().unwrap(),
+                allow_plaintext_data_plane: true, // TCP 面门绕过（本测只验 UDP 面回填）
+                udp_allow_plaintext_data_plane: true,
+                ..MeshConfig::default()
+            }),
+            ..RuntimeConfig::default()
+        };
+        let runtime = RuntimeBuilder::new(s5_udp_config(true))
+            .with_runtime_config(relay_rc)
+            .build()
+            .expect("chain+udp+显式明文应 build 成功");
+        assert!(
+            runtime.get_udp_client_metrics().is_some(),
+            "chain+udp 桥构建应抽出 client 计数（观测接缝③）"
+        );
+        assert_eq!(
+            runtime.get_mesh_udp_snapshot(),
+            None,
+            "start() 前 OnceLock 未回填"
+        );
+        let tasks = runtime.start().await.expect("start 应成功");
+        let snap = runtime
+            .get_mesh_udp_snapshot()
+            .expect("spawn_udp 后应回填 mesh_plane（观测接缝②）");
+        assert_eq!(snap, UdpFaceSnapshot::default(), "零流量面快照全零");
+
+        // —— client-only（s5 helper：role=client）：无数据面监听路径 → 恒 None ——
+        let client = RuntimeBuilder::new(s5_udp_config(true))
+            .with_runtime_config(s5_runtime_config(true, true))
+            .build()
+            .expect("client-only 应 build 成功");
+        let client_tasks = client.start().await.expect("start 应成功");
+        assert_eq!(
+            client.get_mesh_udp_snapshot(),
+            None,
+            "client 无 data-plane 面（拓扑：只有出站 relay）"
+        );
+
+        for t in tasks.iter().chain(client_tasks.iter()) {
+            t.abort();
+        }
     }
 
     // ---------- P0-3 UDP 能力扫描 ----------

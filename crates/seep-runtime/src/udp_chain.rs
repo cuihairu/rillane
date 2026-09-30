@@ -28,6 +28,22 @@ const FULL_RESEND_PACKETS: u64 = 64;
 /// FULL 重发间隔（§5）：距上次 FULL ≥30s 的下一包重发。
 const FULL_RESEND_INTERVAL: Duration = Duration::from_secs(30);
 
+/// P0-5 §2.4：client 出站侧进程级计数（`seep_udp_mesh_client_dropped_total` 数据源）。
+/// 收编裁决：P0-4 落在 per-relay `AtomicU64`（per-flow 实例无法聚合）→ bridge 构造
+/// 本单例 `Arc`，`associate` 把同一 Arc 传入各 `MeshUdpRelay`（fetch_add 点不变）。
+/// 面（服务端视角 `seep_udp_mesh_*`）与 client（发起端视角）两序列分立不混算（§0.2）。
+#[derive(Debug, Default)]
+pub struct UdpClientMetrics {
+    /// 下行丢弃（dir=Up / FULL / flow_id 不符 / 解码失败——recv_from 过滤点）
+    dropped: AtomicU64,
+}
+
+impl UdpClientMetrics {
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
 /// P0-3 `RoutingUdpConnector` 的 chain 感知包装（§5 草图同构）。
 pub struct UdpChainRouter {
     inner: RoutingUdpConnector,
@@ -72,6 +88,8 @@ impl EgressUdpConnector for UdpChainRouter {
 pub struct MeshUdpBridge {
     local_node_id: NodeId,
     registry: Arc<MeshRegistry>,
+    /// P0-5 §2.4：进程级 client 侧计数单例（各 relay 共享同一 Arc；观测 getter 抽取点）
+    client_metrics: Arc<UdpClientMetrics>,
 }
 
 impl MeshUdpBridge {
@@ -85,7 +103,13 @@ impl MeshUdpBridge {
         Ok(Self {
             local_node_id,
             registry,
+            client_metrics: Arc::new(UdpClientMetrics::default()),
         })
+    }
+
+    /// P0-5 §2.4：build() 包装 `UdpChainRouter` 前抽出（Runtime 观测字段）。
+    pub(crate) fn client_metrics(&self) -> Arc<UdpClientMetrics> {
+        Arc::clone(&self.client_metrics)
     }
 
     /// 解析 hops[1] 地址 + 本地 socket（§5：`Arc<MeshUdpRelay>{ sock, next_addr,
@@ -126,7 +150,8 @@ impl MeshUdpBridge {
             sent_full: AtomicBool::new(false),
             packets: AtomicU64::new(0),
             last_full: Mutex::new(Instant::now()),
-            dropped: AtomicU64::new(0),
+            // P0-5 §2.4：per-relay AtomicU64 → bridge 单例共享 Arc（fetch_add 点不变）
+            metrics: Arc::clone(&self.client_metrics),
         }))
     }
 }
@@ -146,8 +171,9 @@ pub struct MeshUdpRelay {
     packets: AtomicU64,
     /// 上次 FULL 发送时刻（重发判据 2；Instant 非整数故 Mutex 而非 Atomic）
     last_full: Mutex<Instant>,
-    /// 下行丢弃计数（dir=Up / FULL / flow_id 不符 / 解码失败）；读取点 = P0-5
-    dropped: AtomicU64,
+    /// P0-5 §2.4：下行丢弃进程级计数（dir=Up / FULL / flow_id 不符 / 解码失败）——
+    /// bridge 构造单例、同 bridge 各 relay 共享（收编裁决）
+    metrics: Arc<UdpClientMetrics>,
 }
 
 #[async_trait]
@@ -205,7 +231,7 @@ impl UdpRelay for MeshUdpRelay {
             let env = match decode_udp_envelope(&wire[..n]) {
                 Ok(v) => v,
                 Err(_) => {
-                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
             };
@@ -213,7 +239,7 @@ impl UdpRelay for MeshUdpRelay {
                 || env.path_mode != UdpPathMode::Cached
                 || env.flow_id != self.flow_id
             {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
+                self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             let target = FlowTarget {
@@ -553,5 +579,112 @@ mod tests {
             bridge.associate(ctx_for("127.0.0.1", 53), &hops).await.is_err(),
             "hops[0] 非本机应拒绝"
         );
+    }
+
+    /// P0-5 §10-S3 测试 2：同 bridge 两次 associate 的 relay 共享同一
+    /// `UdpClientMetrics`——向两 socket 各注入一个非匹配回包（dir=Up），
+    /// 进程级 dropped 跨 relay 累加（§2.4 收编语义钉住）。
+    #[tokio::test]
+    async fn udp_client_metrics_shared_across_relays() {
+        let stub_face = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let stub_addr = stub_face.local_addr().unwrap();
+
+        let registry = Arc::new(MeshRegistry::new());
+        registry
+            .register_node(NodeRecord::new(
+                "client1".into(),
+                NodeRole::Client,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        registry
+            .register_node(NodeRecord::new(
+                "relay1".into(),
+                NodeRole::Relay,
+                stub_addr,
+            ))
+            .unwrap();
+        let bridge = MeshUdpBridge::new(
+            "client1".into(),
+            registry,
+            None,
+            &MeshUdpGate::new(true),
+        )
+        .unwrap();
+        let metrics = bridge.client_metrics();
+        assert_eq!(metrics.dropped(), 0, "初始零");
+
+        let hops = vec![
+            RouteHop {
+                node: "client1".into(),
+                hop_type: seep_core::HopType::Ingress,
+            },
+            RouteHop {
+                node: "relay1".into(),
+                hop_type: seep_core::HopType::Relay,
+            },
+        ];
+        let target = FlowTarget {
+            host: "10.1.2.3".into(),
+            port: 5353,
+            proto: TargetProto::Udp,
+        };
+        let r1 = bridge.associate(ctx_for("127.0.0.1", 53), &hops).await.unwrap();
+        let r2 = bridge.associate(ctx_for("127.0.0.1", 53), &hops).await.unwrap();
+
+        // recv 任务先拉起（丢弃计数发生在 recv_from 轮询中，无 poll 者不消费）
+        let t1 = {
+            let r = Arc::clone(&r1);
+            tokio::spawn(async move {
+                let mut b = [0u8; 256];
+                r.recv_from(&mut b).await
+            })
+        };
+        let t2 = {
+            let r = Arc::clone(&r2);
+            tokio::spawn(async move {
+                let mut b = [0u8; 256];
+                r.recv_from(&mut b).await
+            })
+        };
+
+        // 各发首包 FULL，桩记录两 relay socket 的源地址
+        r1.send_to(&target, b"a").await.unwrap();
+        r2.send_to(&target, b"b").await.unwrap();
+        let mut buf = [0u8; 4096];
+        let (_, from1) = tokio::time::timeout(Duration::from_secs(2), stub_face.recv_from(&mut buf))
+            .await
+            .expect("relay1 FULL 应到达桩")
+            .unwrap();
+        let (_, from2) = tokio::time::timeout(Duration::from_secs(2), stub_face.recv_from(&mut buf))
+            .await
+            .expect("relay2 FULL 应到达桩")
+            .unwrap();
+        assert_ne!(from1, from2, "两个 relay 各持独立 socket");
+
+        // 注入非匹配回包（dir=Up，可解码但不匹配过滤条件）→ 各自丢弃、共享计数累加
+        let bad = UdpEnvelope {
+            version: UDP_ENVELOPE_VERSION,
+            dir: UdpDir::Up,
+            flow_id: [0u8; 16],
+            target_host: "10.1.2.3".into(),
+            target_port: 5353,
+            path_mode: UdpPathMode::Cached,
+            hop_index: 0,
+            path: vec![],
+            payload: b"junk".to_vec(),
+        };
+        let wire = encode_udp_envelope(&bad).unwrap();
+        stub_face.send_to(&wire, from1).await.unwrap();
+        stub_face.send_to(&wire, from2).await.unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while metrics.dropped() < 2 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(metrics.dropped(), 2, "共享 dropped 跨 relay 累加（§2.4 收编）");
+
+        t1.abort();
+        t2.abort();
     }
 }
