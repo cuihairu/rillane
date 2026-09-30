@@ -249,6 +249,7 @@ seep-config 零依赖 seep-core/platform（deps 仅 anyhow/serde 系），保持
 - P0-4 的 `UdpEnvelope`（二进制头 + payload，单包 ≤ MTU/65507）是 padding 的**理想载体**：一数据报 = 一个可控字节边界，填充直接影响 QoS/DPI 观察到的包长分布（游戏加速主场）；
 - 衔接点 = P0-4 §4 `MeshDataPlane` UDP 面的**发送路径**（envelope 编码后、`send_to` 前），与 §4.2 的 chain 点位同构；
 - 本条目**只留钩子 + spec 复用**，不实现：P0-4 落地时其 UDP 编码器读 `seep.obfs.padding` 即可，零 schema 变更（同一 `PaddingSpec`）。
+- **2026-09-30 修订（P0-4 [udp-mesh-dataplane.md](udp-mesh-dataplane.md) §17-P1-4 / D-15）**：上文"UDP 编码器读注解"隐含注解已存在——但注解生产点（§1.3 middleware 链，挂在 `FlowOutputRouter::forward`）只在 TCP Flow 路径，**UDP 会话路径（associate → `UdpRelay::send_to`）无 Flow 可挂链**。裁决：UDP 面 spec 生产改为 **associate 会话级求值**（复用 `PaddingSpec` 与策略纯函数 + §3.1 选择器，按会话 target/egress 判定），不经 `FlowMiddleware::handle`——与本节 §2.1"流签名不承载帧语义"同因的第二次出现。执行钩子（编码后 send_to 前）、`PaddingSpec` 复用与零 schema 变更口径不变；重编码侧不追加填充等实施细节见 P0-4 D-16。
 
 ### 4.5 与 P2-6 envelope 二进制化的关系
 

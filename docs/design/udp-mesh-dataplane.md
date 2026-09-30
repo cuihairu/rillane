@@ -2,6 +2,7 @@
 
 > 上游设计：[udp-dataplane.md](udp-dataplane.md) §4（P0-4 概念稿：envelope 格式/转发行为/加密三选一/验收）。
 > 本文是实现级裁决：**精确格式、类型签名、状态机、接线点、测试计划**。落地后偏差回填 §11 与上游 §6 注记。
+> 决策索引 D-1..D-16、接口接缝清单、与 P1-4/P1-5/P2-5 边界互指及验收·统计口径显式（**第四轮补全，2026-09-30**）见 §0.1、§0.2 与 §15–§17。
 > 复用基线：P0-1 会话表（`seep-core::udp`）· P0-3 出站载荷（`EgressUdpConnector` + RoutingUdpConnector）· TCP 面数据平面（`seep-runtime::mesh_transport`）。
 
 ## 0. 范围
@@ -10,6 +11,23 @@
 - UDP 面路由从基础 `RoutingEngine` 切到 `RuntimeFlowRouter`（chain 决策），链路故障复用 `ChainManager`；
 - 加密按上游 §4.4 MVP 兜底：明文仅 `SEEP_MESH_UDP_ALLOW_PLAINTEXT=1` 显式开启，未配置加密时 chain+udp **构建期拒绝启动**（V2 quinn 选型未决，不在本条目）；
 - 不含：QUIC 载荷（V2）、跨 relay 回源校验（O3）、TCP 面 envelope 二进制化（P2-6 用本文 §2 格式）。
+
+### 0.1 验收口径（显式，第四轮补全 2026-09-30）
+
+todo P0-4 验收三条逐条落可测口径（对齐 P0-3/P1-4/P1-5 显式改写做法，不静默缩水）：
+
+1. **两跳链路 UDP 双向转发** = §10 T2：client `MeshUdpRelay` → relay plane → exit plane → 环回 echo，真 socket、无特权，dir=Down 全链路回包断言；
+2. **对端不可达时按超时回收** = 双路径各有断言：idle 过期（T4，expiry 就地改写 + `unknown_flow`）与 exit 侧 recv Err（target 不可达/复位 → `retire_flow` 单点，§13-1 触发点②）——"不可达"不合成单一超时口径；
+3. **"QUIC 站点经 hy2 出站可达"维持改判**：hysteria2 crate 0.1.6 公开 API 无 UDP 出口（P0-3 V1 核查），hy2 UDP 随 V2 quinn 载具裁决（§12），本条目 MVP 不含；**可验口径 = QUIC 站点即普通 UDP**（`TargetProto::Quic` 不特判，§1）**经 mesh UDP 面（两跳）至 P0-3 已实现载体（direct/ss/wg）可达**；
+4. **明文门先行**的语义 = 未配置加密时 chain+udp 构建期拒绝启动（T6）；明文仅 `SEEP_MESH_UDP_ALLOW_PLAINTEXT=1` / 配置合流（§13-6）显式开启。
+
+### 0.2 统计口径注记
+
+- **不去重（D-14）的观测推论**：mesh UDP 面可能重复递交同一数据报（FULL 周期重发、best-effort 语义）——验收与监控**不得以"零重复"为判据**，重复是 §14-2 裁决下的预期行为；
+- `forwarded_up` 含本机发出的 FULL/CACHED 全部数据报（§13-2），FULL 周期重发（§5，64 包/30s 拍脑袋值）计入其中——评估有效载荷率时须知分母含重发开销；
+- `seep_udp_mesh_*`（P0-5 §2.4，数据报/流计数）与 TCP 面 mesh 记账（`record_link_bytes` 连接字节）**分族不混算**——同一 `listen_address` 端口上两面的流量在监控上属两个序列族；
+- `malformed` 同时涵盖解码拒绝与 TTL 熔断（§14-1 复用既有字段）——归因按日志拆"格式错误 vs 环熔断"，不拆序列；
+- `flows_active` 为 gauge 直读（§13-2），与 sweep 时点的真实表长存在瞬态偏差，监控可接受。
 
 ## 1. 总览
 
@@ -316,7 +334,8 @@ S2 UdpFlowCache 跳缓存 ─┘   S4 UdpChainRouter/MeshUdpRelay ─┴─► S
 
 - **V2**：QUIC/quinn 载荷选型（倾向 A）；落地时 UDP 面 socket 拓扑不变，仅传输层替换；
 - **O3**：relay 回源校验后置（依赖加密层认证后重估）；
-- FULL 周期重发（§5）的频率是拍脑袋值（64 包/30s），落地后按抓包调整——不计入验收。
+- FULL 周期重发（§5）的频率是拍脑袋值（64 包/30s），落地后按抓包调整——不计入验收；
+- **pad_len 线上位置未决（§17-P1-4）**：padding 落 UDP envelope 时 `pad_len` 走 §2 保留位还是新增字段、版本门取值，随 P1-4 UDP 载具落地定稿（fail-open 对齐其 §2.4），本稿不预定线格式。
 
 ## 13. 实施细节补全（第二轮复查，2026-09）
 
@@ -396,3 +415,58 @@ allow_plaintext = cfg.mesh.udp_allow_plaintext_data_plane /* bool, serde default
 - **陈旧/错位包**：flow 已过期/驱逐 → CACHED 未命中 → `unknown_flow` 丢弃（既有）；flow_id 不匹配缓存键同理；
 - **重放（恶意复制/延迟注入）**：MVP 明文门下无法认证来源，与 O3（relay 回源校验后置）同批归 V2——QUIC 载具连接自带 connection ID + packet number 抗重放，明文门 dev 场景不做；
 - **环**：不靠去重挡——FULL 靠 path 校验（14-1），CACHED 靠 TTL 熔断（14-1）。
+
+## 15. 核心裁决索引（D-x，第四轮规格对齐 2026-09-30）
+
+既有裁决编号化——内容仍在原 §节，此处仅索引不重述（双源有害，同本仓"不另立新文件"裁决纪律）；**D-15/D-16 为本轮新增**（正文落 §17-P1-4）。
+
+| # | 裁决 | 落点 |
+|---|------|------|
+| D-1 | 无 TCP 化：不经 `MeshStream` 抽象，编解码直写 | §1 |
+| D-2 | socket 拓扑：每节点一个共享 UDP 面 socket（转发/回包同源，NAT 友好）；exit 每 flow connected socket | §1 |
+| D-3 | envelope 二进制格式；flow_id 用 UUID 原始 16 字节（缓存键与线上格式，非字符串） | §2、§11-3 |
+| D-4 | 每跳 FULL 剥自身重编码、不降级 CACHED；CACHED 判定留在各跳本地 | §4、§11-4 |
+| D-5 | 缓存条目含 `prev`（下行回流地址）；FULL 命中即重关联刷新 | §3、§11-2、§13-4 |
+| D-6 | 上界驱逐 = 最早 expiry（同 TTL 即最久未触，语义 LRU），O(n) 无新依赖 | §3、§11-6 |
+| D-7 | exit 下行 task 回收单点 `retire_flow`（abort task → flow 表 → 缓存，三步顺序固定） | §13-1 |
+| D-8 | 明文门构建期拦截；gate 显式参数与 env 读取分离；配置合流 `cfg ∪ env` 于 build() 求值一次 | §6、§11-5、§13-6 |
+| D-9 | build() UDP 块整体下移至 ChainManager 之后（FlowRouter 构造即固化，早构造晚替换不可行） | §9.1 |
+| D-10 | chain_id 口径桥接：ChainFailureEvent 填 `chain_id_of(切换后新决策)` | §8、§11-7 |
+| D-11 | serve 单循环顺序处理、不 per-packet spawn；exit 下行 task 独立并发 | §13-5 |
+| D-12 | envelope 上界 65507（encode 拒绝）；>1400 字节业务报可靠性不承诺（文档明示不加配置） | §13-3 |
+| D-13 | hop_index = 已穿越跳数、每跳 +1 上下行对称；`MAX_UDP_HOPS=16` 实义面是 CACHED 环熔断（FULL 靠 path 严格递减天然防环） | §14-1 |
+| D-14 | 不做载荷级去重（UDP 语义允许重复；FULL 重发幂等）；重放防护归 V2 QUIC 载具 | §14-2 |
+| D-15 | **UDP padding spec 生产点 = associate 会话级求值**（复用 `PaddingSpec` 与策略纯函数 + obfuscation 选择器），不经 `FlowMiddleware::handle`——UDP 会话路径无 Flow，流签名不适配（P1-4 §2.1 同因） | §17-P1-4（本轮新增） |
+| D-16 | **padding 执行点 = envelope 封装侧**（client FULL 首发 / exit 下行封装，编码后 send_to 前）；中继重编码（剥自身、hop_index+1）保持 `pad_len` 不追加；CACHED 转发段无新增填充 | §17-P1-4（本轮新增） |
+
+## 16. 接口接缝（内部，既有分派点的契约清单）
+
+| 接缝 | 位置 | 契约 |
+|------|------|------|
+| ingress 分派 | socks5 入站 0x03 命令分派（`seep-protocols/src/inbound/socks5.rs`）→ `UdpAssociateService`（`seep-core/src/udp/associate.rs`） | P0-2 既有，本条目零改动；数据报自会话表进入 |
+| 会话→决策 | `UdpSessionTable`（粘滞键/ensure_decision/ledger）→ `RouteDecision` | P0-1 既有；S5 将其 FlowRouter 换 `RuntimeFlowRouter`（D-9） |
+| 决策→出站 | `UdpChainRouter` 实现 P0-3 `EgressUdpConnector`（`seep-core/src/udp/relay.rs:259`）：`Chain{hops≥2}` → `MeshUdpBridge`，其余 → 内部 `RoutingUdpConnector`（P0-3 按 final_node 分发） | §5；能力扫描 `mesh.` 豁免已就位（§9.2），chain 决策的出口能力由 exit 侧真实 connect 表达 |
+| 客户端承载 | `MeshUdpRelay` 实现 P0-1 `UdpRelay` | 会话表/§3.6 分级 teardown/forwarder 零改动复用（§5） |
+| 与 TCP 面 | 仅共享 `listen_address` 端口与 `record_link_bytes` 记账；envelope/socket/生命周期独立 | §1 选择边界（指针不重复） |
+| 故障接线 | `ChainFailureEvent`（§8 口径）；在途跳缓存自然过期、不主动拆 | §8、D-10 |
+| 观测 | `UdpFaceMetrics`（§13-2）= P0-5 §2.4 `seep_udp_mesh_*` 数据源 | 数据源契约；口径注记见 §0.2 |
+| 注解可见性 | UDP 会话的 `FlowContext.metadata.annotations`（`seep-core/src/lib.rs:85-89`/`:52-55`，`process.*` 同族承载先例）在 `associate(&ctx, &decision)`（`relay.rs:267`，decision 为粘滞决策）可达 | P1-4 padding 会话级生产的前提（D-15）；实施时核对 ingress 侧是否已写入所需注解，缺则由 ingress 在 associate 前补写（备选，非本条目范围） |
+
+## 17. 边界互指（外部条目，第四轮补全 2026-09-30）
+
+### 17-P1-4 混淆中间件（padding 载体接缝——本轮修正一处生产点缺口）
+
+- [obfuscation-middleware.md](obfuscation-middleware.md) §2.3/§4.4 已把本条的 `UdpEnvelope` 列为 padding 的**理想帧载体**（一数据报 = 一个可控字节边界）并预留执行钩子——两稿互指成立；
+- **生产点修正（D-15）**：P1-4 §4.4 原表述"UDP 编码器读 `seep.obfs.padding` 注解"隐含注解已存在——但该注解的生产点（`FlowOutputRouter::forward` ② 的 middleware 链）只在 TCP Flow 路径，**UDP 会话路径（associate → `UdpRelay::send_to`）无 Flow 可挂链**。裁决：UDP 面 padding spec 在 **associate 会话级**按 obfuscation 配置与选择器求值（复用 `PaddingSpec` 与策略纯函数，`apply_to` 语义按会话 target/egress 判定），不经 `FlowMiddleware::handle`——与 P1-4 §2.1"流签名不承载帧语义"同因的第二次出现（报文语义同样不适配流 trait）；P1-4 §4.4 已加修订注记与本节互指；
+- **执行点（D-16）**：填充产生于 envelope 封装侧两处——client FULL 首发、exit 下行封装（均为"编码后 send_to 前"，与 P1-4 §4.4 表述一致）；relay 的 FULL 剥自身与 hop_index+1 重编码**保持既有 `pad_len` 不追加**（杜绝逐跳叠加填充）；CACHED 转发段无新增填充；
+- 线格式：`pad_len` 的线上位置（§2 保留位 vs 新字段）与版本门取值随 P1-4 UDP 载具落地定稿（§12 已登记），fail-open 对齐 P1-4 §2.4——本稿不预定。
+
+### 17-P1-5 出站连接池（零交叠确认）
+
+- [egress-connection-pool.md](egress-connection-pool.md) §1.3 三层接缝表已裁：池属 TCP 传输层（到出站服务器的 TCP[+TLS] 会话），UDP 数据报无连接建立语义——`EgressUdpConnector`/`UdpSessionTable`/本条 UDP 面一律不经 `TransportPool`；
+- exit 的 per-flow connected socket（§4）是 P0-3 LocalRelay 语义（目标 socket，非"到出站服务器传输"），不挂 P1-5；若未来 UDP 面出现"预热"需求属另一模型（会话预热 ≠ 连接池），届时另议。
+
+### 17-P2-5 客户端 TLS 指纹模拟（挂点不同层，V2 汇合）
+
+- uTLS 类能力的挂点是 `tls.rs` 出站 TLS 公共层（todo P2-5 明示）——属 **TCP/TLS 出站面**，与本条 UDP 面无共挂点；
+- 本条 MVP 明文门（§6）无 TLS 握手、无指纹可言；V2 QUIC 载具（§12）将引入 QUIC ClientHello——**QUIC 指纹/伪装与 uTLS 属同类问题、不同协议**，载具选型时与 P2-5 同层统一议，本稿不预留不承诺。
