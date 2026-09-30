@@ -111,49 +111,11 @@ impl RuntimeBuilder {
         // 创建路由引擎
         let router = Arc::new(RoutingEngine::new(config_snapshot.routing.clone()));
 
-        // UDP 数据面（P0-2/P0-3，udp-relay-path.md §2/§3）：udp.enabled 时构建
-        // 共享会话表 + 按节点能力表注册的 RoutingUdpConnector；§3.1 构建期扫描
-        // 拦截 UDP 不可达节点。路由决策用基础 RoutingEngine（mesh-chain 包装的
-        // UDP 接线属 P0-4）。周期回收任务随首个 ASSOCIATE 拉起。
-        let udp_service = if config_snapshot.udp.enabled {
-            let udp_connectors = build_udp_connectors(&config_snapshot.egress)?;
-            scan_udp_capability(
-                &config_snapshot.routing,
-                &config_snapshot.egress,
-                &udp_connectors,
-            )?;
-            let routing_udp = seep_core::udp::RoutingUdpConnector::new();
-            for (node, connector) in udp_connectors {
-                routing_udp.register(node, connector);
-            }
-            let table = seep_core::udp::UdpSessionTable::new(
-                seep_core::udp::UdpSessionConfig {
-                    session_idle: std::time::Duration::from_secs(
-                        config_snapshot.udp.session_idle_secs,
-                    ),
-                    mapping_idle: std::time::Duration::from_secs(
-                        config_snapshot.udp.mapping_idle_secs,
-                    ),
-                    max_sessions: config_snapshot.udp.max_sessions,
-                    ..Default::default()
-                },
-                Arc::clone(&router) as Arc<dyn FlowRouter>,
-                seep_core::udp::RealClock::new(),
-            )?;
-            Some(seep_core::udp::UdpAssociateService::new(
-                table,
-                Arc::new(routing_udp),
-                config_snapshot.udp.strict_udp_source,
-            ))
-        } else {
-            None
-        };
+        // UDP 数据面块已整体下移至 ChainManager 初始化之后（P0-4 §9.1 时序裁决：
+        // UDP 会话表的 FlowRouter 构造即固化，S5 需把 mesh_registry/chain_manager
+        // 注入 RuntimeFlowRouter，早构造晚替换不可行——原位置即此处）。
 
-        // 入口/出口默认实现
-        if self.ingress_endpoints.is_empty() {
-            self.ingress_endpoints =
-                build_ingress_endpoints(&config_snapshot.ingress, udp_service)?;
-        }
+        // 出口默认实现（入口默认实现是 udp_service 唯一消费点，随 UDP 块顺延，见下）
         if self.flow_outputs.is_empty() {
             let (outputs, connectors) = build_egress_outputs(&config_snapshot.egress)?;
             self.flow_outputs = outputs;
@@ -249,6 +211,53 @@ impl RuntimeBuilder {
         } else {
             None
         };
+
+        // UDP 数据面（P0-2/P0-3，udp-relay-path.md §2/§3）：udp.enabled 时构建
+        // 共享会话表 + 按节点能力表注册的 RoutingUdpConnector；§3.1 构建期扫描
+        // 拦截 UDP 不可达节点。路由决策用基础 RoutingEngine（mesh-chain 包装的
+        // UDP 接线属 P0-4 S5）。周期回收任务随首个 ASSOCIATE 拉起。
+        // —— P0-4 §9.1 时序裁决：本块自路由引擎构造之后整体下移至此（ChainManager
+        // 之后）：UDP 会话表的 FlowRouter 构造即固化，S5 将在此注入
+        // RuntimeFlowRouter（依赖上方 mesh_registry / chain_manager / local_node_id）。
+        let udp_service = if config_snapshot.udp.enabled {
+            let udp_connectors = build_udp_connectors(&config_snapshot.egress)?;
+            scan_udp_capability(
+                &config_snapshot.routing,
+                &config_snapshot.egress,
+                &udp_connectors,
+            )?;
+            let routing_udp = seep_core::udp::RoutingUdpConnector::new();
+            for (node, connector) in udp_connectors {
+                routing_udp.register(node, connector);
+            }
+            let table = seep_core::udp::UdpSessionTable::new(
+                seep_core::udp::UdpSessionConfig {
+                    session_idle: std::time::Duration::from_secs(
+                        config_snapshot.udp.session_idle_secs,
+                    ),
+                    mapping_idle: std::time::Duration::from_secs(
+                        config_snapshot.udp.mapping_idle_secs,
+                    ),
+                    max_sessions: config_snapshot.udp.max_sessions,
+                    ..Default::default()
+                },
+                Arc::clone(&router) as Arc<dyn FlowRouter>,
+                seep_core::udp::RealClock::new(),
+            )?;
+            Some(seep_core::udp::UdpAssociateService::new(
+                table,
+                Arc::new(routing_udp),
+                config_snapshot.udp.strict_udp_source,
+            ))
+        } else {
+            None
+        };
+
+        // 入口默认实现（udp_service 唯一消费点，随 UDP 块顺延至此）
+        if self.ingress_endpoints.is_empty() {
+            self.ingress_endpoints =
+                build_ingress_endpoints(&config_snapshot.ingress, udp_service)?;
+        }
 
         let subscription_manager = if self.runtime_config.enable_hot_reload {
             Some(Arc::new(SubscriptionManager::new()))
