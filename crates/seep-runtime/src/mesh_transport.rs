@@ -2382,4 +2382,211 @@ mod tests {
 
         serve.abort();
     }
+
+    // ── P0-4 §10 T2（S6 收口）：两跳真 socket 往返 ──
+    // 落本模块而非 udp_chain.rs：需直读面内部状态（flows/cache/metrics）。
+
+    /// §0.1-② 第二路径：exit 侧回收语义（§13-1 触发点② 下行 task recv Err 走
+    /// `forget_flow`、触发点③ FULL 重关联/孤儿清扫走 `retire_flow`）——两路均拆
+    /// flows+cache 两表并同步 gauge（ICMP 诱发的真 recv Err 依赖环境，单测钉住
+    /// 回收单点的表语义）。
+    #[tokio::test]
+    async fn exit_flow_retire_and_forget_cleanup() {
+        let face = UdpFace::with_limits(Duration::from_secs(60), 64);
+        let flow = [0x77u8; 16];
+        let prev: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let task = tokio::spawn(async {});
+        face.flows.insert(
+            flow,
+            ExitFlow {
+                sock,
+                task,
+                target: ("127.0.0.1".into(), 53),
+            },
+        );
+        face.associate(flow, None, prev);
+        assert_eq!(face.flows.len(), 1);
+        assert!(face.contains(&flow));
+        assert_eq!(face.metrics.flows_active.load(Ordering::Relaxed), 1);
+
+        // 触发点②路径：task 自清理（不 abort 自己）
+        face.forget_flow(&flow);
+        assert_eq!(face.flows.len(), 0, "forget_flow 拆 flows");
+        assert!(!face.contains(&flow), "forget_flow 拆 cache");
+        assert_eq!(face.metrics.flows_active.load(Ordering::Relaxed), 0);
+
+        // 触发点③路径：外部回收（abort task → 两表 → gauge）
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let task = tokio::spawn(std::future::pending::<()>());
+        face.flows.insert(
+            flow,
+            ExitFlow {
+                sock,
+                task,
+                target: ("127.0.0.1".into(), 53),
+            },
+        );
+        face.associate(flow, None, prev);
+        face.retire_flow(&flow);
+        assert_eq!(face.flows.len(), 0, "retire_flow 拆 flows");
+        assert!(!face.contains(&flow), "retire_flow 拆 cache");
+        assert_eq!(face.metrics.flows_active.load(Ordering::Relaxed), 0);
+    }
+
+    /// T2：client `MeshUdpRelay` → relay plane → exit plane → 环回 echo。上行 FULL
+    /// 剥自身逐跳推进，exit 建 per-flow socket 发 echo；下行 dir=Down/CACHED 经
+    /// relay 面 prev 链路回送——客户端 recv_from 只认 dir=Down，收到回包即
+    /// "dir=down 全链路"成立。第 2 包走 CACHED 全链路并复用 exit 既有 flow socket。
+    #[tokio::test]
+    async fn t2_two_hop_real_socket_roundtrip() {
+        use crate::udp_chain::MeshUdpBridge;
+        use seep_core::{FlowContext, FlowId, FlowMetadata, FlowTarget, RouteHop, TargetProto};
+
+        // —— 环回 echo server ——
+        let echo = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                if let Ok((n, peer)) = echo.recv_from(&mut buf).await {
+                    let _ = echo.send_to(&buf[..n], peer).await;
+                }
+            }
+        });
+
+        // 探空闲端口（spawn_udp 内部 bind；同机竞争窗口可忽略——S3 同法）
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_udp_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let exit_udp_addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        // —— exit plane（path 终点：exit 分支 + 下行 task）——
+        let exit_registry = Arc::new(MeshRegistry::new());
+        exit_registry
+            .register_node(NodeRecord::new(
+                "exit1".into(),
+                NodeRole::Exit,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        let exit_plane = Arc::new(
+            MeshDataPlane::new("exit1".into(), exit_registry)
+                .with_udp(MeshUdpGate::new(true))
+                .unwrap(),
+        );
+        let exit_serve = exit_plane.spawn_udp(exit_udp_addr);
+
+        // —— relay plane（FULL 剥自身 / CACHED 查缓存 / Down 回 prev）——
+        let relay_registry = Arc::new(MeshRegistry::new());
+        relay_registry
+            .register_node(NodeRecord::new(
+                "relay1".into(),
+                NodeRole::Relay,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        relay_registry
+            .register_node(NodeRecord::new(
+                "exit1".into(),
+                NodeRole::Exit,
+                exit_udp_addr,
+            ))
+            .unwrap();
+        let relay_plane = Arc::new(
+            MeshDataPlane::new("relay1".into(), relay_registry)
+                .with_udp(MeshUdpGate::new(true))
+                .unwrap(),
+        );
+        let relay_serve = relay_plane.spawn_udp(relay_udp_addr);
+
+        // —— 客户端出站：MeshUdpBridge → MeshUdpRelay（hops = client1→relay1→exit1）——
+        let client_registry = Arc::new(MeshRegistry::new());
+        client_registry
+            .register_node(NodeRecord::new(
+                "client1".into(),
+                NodeRole::Client,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        client_registry
+            .register_node(NodeRecord::new(
+                "relay1".into(),
+                NodeRole::Relay,
+                relay_udp_addr,
+            ))
+            .unwrap();
+        let bridge = MeshUdpBridge::new(
+            "client1".into(),
+            client_registry,
+            None,
+            &MeshUdpGate::new(true),
+        )
+        .unwrap();
+        let target = FlowTarget {
+            host: "127.0.0.1".into(),
+            port: echo_addr.port(),
+            proto: TargetProto::Udp,
+        };
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: target.clone(),
+            metadata: FlowMetadata::default(),
+        };
+        let hops = vec![
+            RouteHop {
+                node: "client1".into(),
+                hop_type: seep_core::HopType::Ingress,
+            },
+            RouteHop {
+                node: "relay1".into(),
+                hop_type: seep_core::HopType::Relay,
+            },
+            RouteHop {
+                node: "exit1".into(),
+                hop_type: seep_core::HopType::Egress,
+            },
+        ];
+        let relay = bridge.associate(ctx, &hops).await.unwrap();
+
+        // —— 第 1 包：FULL 全链路 + dir=Down 回包 ——
+        relay.send_to(&target, b"t2-ping").await.unwrap();
+        let mut buf = [0u8; 2048];
+        let (rt, rn) = tokio::time::timeout(Duration::from_secs(5), relay.recv_from(&mut buf))
+            .await
+            .expect("T2：两跳往返回包超时（dir=Down 全链路）")
+            .unwrap();
+        assert_eq!(&buf[..rn], b"t2-ping", "echo 载荷原样回送");
+        assert_eq!(rt.host, "127.0.0.1");
+        assert_eq!(rt.port, echo_addr.port());
+        assert_eq!(rt.proto, TargetProto::Udp);
+
+        // —— 第 2 包：CACHED 全链路（exit 复用 per-flow socket）——
+        relay.send_to(&target, b"t2-second").await.unwrap();
+        let (rt2, rn2) = tokio::time::timeout(Duration::from_secs(5), relay.recv_from(&mut buf))
+            .await
+            .expect("T2：CACHED 第二包回包超时")
+            .unwrap();
+        assert_eq!(&buf[..rn2], b"t2-second");
+        assert_eq!(rt2.port, echo_addr.port());
+
+        // exit 单 flow 一把 per-flow socket（两包共用）；relay/exit 各一条跳缓存
+        let exit_face = exit_plane.udp.as_ref().unwrap();
+        assert_eq!(exit_face.flows.len(), 1);
+        assert_eq!(exit_face.cache.map.len(), 1, "exit 一条跳缓存");
+        let relay_face = relay_plane.udp.as_ref().unwrap();
+        assert_eq!(relay_face.cache.map.len(), 1, "relay 一条跳缓存");
+        assert_eq!(
+            exit_face.metrics.forwarded_down.load(Ordering::Relaxed),
+            2,
+            "exit 下行回封两包"
+        );
+        assert_eq!(exit_face.metrics.forwarded_up.load(Ordering::Relaxed), 2);
+
+        relay_serve.abort();
+        exit_serve.abort();
+    }
 }

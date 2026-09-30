@@ -91,7 +91,11 @@ impl MeshUdpBridge {
     /// 解析 hops[1] 地址 + 本地 socket（§5：`Arc<MeshUdpRelay>{ sock, next_addr,
     /// path: hops[1..].to_vec(), flow_id, target }`；flow_id 取 FlowId UUID 原始
     /// 16 字节——§11-3 缓存键与线上格式同源）。
-    async fn associate(&self, ctx: FlowContext, hops: &[RouteHop]) -> Result<Arc<dyn UdpRelay>> {
+    pub(crate) async fn associate(
+        &self,
+        ctx: FlowContext,
+        hops: &[RouteHop],
+    ) -> Result<Arc<dyn UdpRelay>> {
         if hops[0].node != self.local_node_id {
             anyhow::bail!(
                 "mesh chain path 起点非本机: expected {}, got {}",
