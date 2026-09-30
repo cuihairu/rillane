@@ -1612,7 +1612,7 @@ fn build_ingress_endpoints(
     let mut map = HashMap::new();
     for desc in descriptors {
         let endpoint: Arc<dyn IngressEndpoint> = match &desc.spec {
-            IngressConfig::Socks5 { bind, auth } => Arc::new(Socks5Ingress::new(
+            IngressConfig::Socks5 { bind, auth, .. } => Arc::new(Socks5Ingress::new(
                 desc.name.clone(),
                 bind.clone(),
                 auth.clone().unwrap_or_default(),
@@ -1621,7 +1621,7 @@ fn build_ingress_endpoints(
             IngressConfig::Http { bind } => {
                 Arc::new(HttpIngress::new(desc.name.clone(), bind.clone()))
             }
-            IngressConfig::Mixed { bind } => Arc::new(MixedIngress::new(
+            IngressConfig::Mixed { bind, .. } => Arc::new(MixedIngress::new(
                 desc.name.clone(),
                 bind.clone(),
                 udp.clone(),
@@ -2214,6 +2214,7 @@ mod tests {
                 spec: IngressConfig::Socks5 {
                     bind: "127.0.0.1:0".to_string(),
                     auth: None,
+                    udp_enabled: None,
                 },
             }],
             egress: vec![EgressDescriptor {
@@ -2427,6 +2428,7 @@ mod tests {
                 spec: IngressConfig::Socks5 {
                     bind: "127.0.0.1:0".to_string(),
                     auth: None,
+                    udp_enabled: None,
                 },
             }],
             egress: vec![EgressDescriptor {

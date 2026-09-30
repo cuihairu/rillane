@@ -39,6 +39,21 @@ pub struct UdpConfig {
     /// 全局并发会话上界（满员拒新）
     #[serde(default = "default_udp_max_sessions")]
     pub max_sessions: usize,
+    /// 回收扫描周期（秒；P0-5 §1.2——配置面收紧到秒粒度）
+    #[serde(default = "default_udp_sweep_interval")]
+    pub sweep_interval_secs: u64,
+    /// 会话内映射上界（溢出逐最久空闲）
+    #[serde(default = "default_udp_max_mappings")]
+    pub max_mappings: usize,
+    /// 可选会话寿命上界（秒；缺省不限——长局游戏不断流）
+    #[serde(default)]
+    pub session_lifetime_secs: Option<u64>,
+    /// 下行通道容量（满即丢 + DownlinkFull 计数，UDP 无背压）
+    #[serde(default = "default_udp_downlink_queue_depth")]
+    pub downlink_queue_depth: usize,
+    /// 并发 ASSOCIATE 上限（超限回 0x01 且计数；P0-5 §1.2 防滥用）
+    #[serde(default = "default_udp_max_associates")]
+    pub max_associates: usize,
 }
 
 impl Default for UdpConfig {
@@ -49,6 +64,11 @@ impl Default for UdpConfig {
             session_idle_secs: 180,
             mapping_idle_secs: 60,
             max_sessions: 4096,
+            sweep_interval_secs: 15,
+            max_mappings: 256,
+            session_lifetime_secs: None,
+            downlink_queue_depth: 64,
+            max_associates: 256,
         }
     }
 }
@@ -64,6 +84,45 @@ const fn default_udp_mapping_idle() -> u64 {
 }
 const fn default_udp_max_sessions() -> usize {
     4096
+}
+const fn default_udp_sweep_interval() -> u64 {
+    15
+}
+const fn default_udp_max_mappings() -> usize {
+    256
+}
+const fn default_udp_downlink_queue_depth() -> usize {
+    64
+}
+const fn default_udp_max_associates() -> usize {
+    256
+}
+
+impl UdpConfig {
+    /// P0-5 §1.6：非法值构建期报错（约束对齐 `UdpSessionConfig::validate`，
+    /// `session_lifetime_secs` 存在时须 ≥ `session_idle_secs`）。
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.sweep_interval_secs >= 1, "udp.sweep_interval_secs 必须 ≥ 1");
+        anyhow::ensure!(self.max_mappings >= 1, "udp.max_mappings 必须 ≥ 1");
+        anyhow::ensure!(
+            self.downlink_queue_depth >= 1,
+            "udp.downlink_queue_depth 必须 ≥ 1"
+        );
+        anyhow::ensure!(self.max_associates >= 1, "udp.max_associates 必须 ≥ 1");
+        if let Some(lifetime) = self.session_lifetime_secs {
+            anyhow::ensure!(
+                lifetime >= self.session_idle_secs,
+                "udp.session_lifetime_secs 不应小于 udp.session_idle_secs"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// per-ingress `udp_enabled` 判定（P0-5 §1.3/§9-4）：None 继承全局，
+/// Some 显式覆盖。求值点 = `build_ingress_endpoints` 逐入口一次。
+pub fn resolve_udp_enabled(global_enabled: bool, per_ingress: Option<bool>) -> bool {
+    per_ingress.unwrap_or(global_enabled)
 }
 
 impl SeepConfig {
@@ -129,12 +188,19 @@ pub enum IngressConfig {
     Socks5 {
         bind: String,
         auth: Option<Vec<Credential>>,
+        /// per-ingress UDP 覆盖（P0-5 §1.3）：None 继承 `udp.enabled`，
+        /// Some 显式开/关该入口的 ASSOCIATE。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_enabled: Option<bool>,
     },
     Http {
         bind: String,
     },
     Mixed {
         bind: String,
+        /// per-ingress UDP 覆盖（P0-5 §1.3），语义同 Socks5。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_enabled: Option<bool>,
     },
 }
 

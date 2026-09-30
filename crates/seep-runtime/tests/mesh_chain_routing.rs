@@ -25,6 +25,7 @@ async fn mesh_target_routes_to_chain_decision() {
             spec: IngressConfig::Socks5 {
                 bind: "127.0.0.1:0".into(),
                 auth: None,
+                udp_enabled: None,
             },
         }],
         egress: vec![EgressDescriptor {
