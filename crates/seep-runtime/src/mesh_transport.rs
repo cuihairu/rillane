@@ -3,7 +3,14 @@
 //! This implements a simple "hop-by-hop" forwarding protocol between Seep nodes.
 //! It is intentionally minimal, but supports optional mTLS for encryption/authentication.
 
-use std::{fs::File, io::BufReader, net::SocketAddr, path::PathBuf, sync::Arc, time::SystemTime};
+use std::{
+    fs::File,
+    io::BufReader,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+    time::SystemTime,
+};
 
 use anyhow::{anyhow, Result};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
@@ -181,6 +188,217 @@ impl MeshEnvelope {
             path,
         }
     }
+}
+
+// ── P0-4 §2：UDP 面二进制 envelope（与 TCP 面 JSON MeshEnvelope 同文件；纯函数，单测钉住）──
+//
+// 布局（§2）：
+//   0  magic(2)='S''U'  2 ver(1)=1  3 flags(1) bit0=dir、bit1..7 保留必须为 0
+//   4  flow_id(16)  20 atyp(1): 1=v4 4=v6 3=domain  21 addr: 4/16/len(1)+bytes
+//   … port(2,BE)  … path_mode(1): 0=FULL 1=CACHED  … hop_index(1)
+//   [FULL] hop_count(1) + node_id × hop_count（每项 len(1)+bytes）  … payload(...)
+//
+// 结构不变式：FULL 带非空路径；CACHED 恒空（线格式 CACHED 无 path 字段——"CACHED 携带
+// 路径拒绝"由编码侧强制，解码侧结构上不可能出现）。
+
+pub const UDP_ENVELOPE_VERSION: u8 = 1;
+/// IPv4 UDP 载荷理论上界（§13-3）：encode 总长超此值拒绝，调用方丢弃 + `malformed` 计数。
+pub const UDP_ENVELOPE_MAX: usize = 65507;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpDir {
+    /// 上行（client → relay → exit）
+    Up,
+    /// 下行（exit → relay → client）
+    Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpPathMode {
+    /// 首包携带完整路径
+    Full,
+    /// 后续包按各跳本地缓存转发（无路径字段）
+    Cached,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdpEnvelope {
+    /// 恒 1，其他值解码拒绝
+    pub version: u8,
+    pub dir: UdpDir,
+    /// UUID 原始字节（非字符串化——缓存键与线上格式同源，§11-3）
+    pub flow_id: [u8; 16],
+    /// domain / v4 / v6 字符串化（exit 使用）
+    pub target_host: String,
+    pub target_port: u16,
+    pub path_mode: UdpPathMode,
+    /// 已穿越跳数（§14-1：发送端置 0，每经一个 relay +1，上下行对称）
+    pub hop_index: u8,
+    /// Full 时非空；Cached 恒空（编解码双向强制）
+    pub path: Vec<NodeId>,
+    pub payload: Vec<u8>,
+}
+
+/// 从 `buf[pos..]` 取 `n` 字节并推进游标；越界 = 截断错误。
+fn udp_take<'a>(buf: &'a [u8], pos: &mut usize, n: usize, what: &str) -> Result<&'a [u8]> {
+    let end = pos
+        .checked_add(n)
+        .ok_or_else(|| anyhow!("udp envelope: 长度溢出（{what}）"))?;
+    let s = buf
+        .get(*pos..end)
+        .ok_or_else(|| anyhow!("udp envelope: 截断（{what}）"))?;
+    *pos = end;
+    Ok(s)
+}
+
+pub fn encode_udp_envelope(env: &UdpEnvelope) -> Result<Vec<u8>> {
+    if env.version != UDP_ENVELOPE_VERSION {
+        anyhow::bail!("udp envelope: 不支持的版本 {}（仅支持 1）", env.version);
+    }
+    match env.path_mode {
+        UdpPathMode::Full if env.path.is_empty() => {
+            anyhow::bail!("udp envelope: FULL 模式 path 不能为空");
+        }
+        UdpPathMode::Cached if !env.path.is_empty() => {
+            anyhow::bail!("udp envelope: CACHED 模式 path 必须为空");
+        }
+        _ => {}
+    }
+    if env.path.len() > u8::MAX as usize {
+        anyhow::bail!("udp envelope: path 节点数超上界 255");
+    }
+    for id in &env.path {
+        if id.as_bytes().len() > u8::MAX as usize {
+            anyhow::bail!("udp envelope: node_id 超长（{id}）");
+        }
+    }
+    let (atyp, addr): (u8, Vec<u8>) = if let Ok(v4) = env.target_host.parse::<Ipv4Addr>() {
+        (1, v4.octets().to_vec())
+    } else if let Ok(v6) = env.target_host.parse::<Ipv6Addr>() {
+        (4, v6.octets().to_vec())
+    } else {
+        let b = env.target_host.as_bytes();
+        if b.is_empty() || b.len() > u8::MAX as usize {
+            anyhow::bail!("udp envelope: 目标主机名长度非法（空或 >255）");
+        }
+        (3, b.to_vec())
+    };
+
+    let mut out = Vec::with_capacity(24 + addr.len() + env.path.len() * 8 + env.payload.len());
+    out.extend_from_slice(b"SU");
+    out.push(env.version);
+    out.push(match env.dir {
+        UdpDir::Up => 0u8,
+        UdpDir::Down => 1,
+    });
+    out.extend_from_slice(&env.flow_id);
+    out.push(atyp);
+    if atyp == 3 {
+        out.push(addr.len() as u8);
+    }
+    out.extend_from_slice(&addr);
+    out.extend_from_slice(&env.target_port.to_be_bytes());
+    out.push(match env.path_mode {
+        UdpPathMode::Full => 0u8,
+        UdpPathMode::Cached => 1,
+    });
+    out.push(env.hop_index);
+    if matches!(env.path_mode, UdpPathMode::Full) {
+        out.push(env.path.len() as u8);
+        for id in &env.path {
+            out.push(id.as_bytes().len() as u8);
+            out.extend_from_slice(id.as_bytes());
+        }
+    }
+    out.extend_from_slice(&env.payload);
+    if out.len() > UDP_ENVELOPE_MAX {
+        anyhow::bail!(
+            "udp envelope: 编码后 {} 字节超上界 {}（§13-3）",
+            out.len(),
+            UDP_ENVELOPE_MAX
+        );
+    }
+    Ok(out)
+}
+
+pub fn decode_udp_envelope(buf: &[u8]) -> Result<UdpEnvelope> {
+    if buf.len() < 21 {
+        anyhow::bail!("udp envelope: 截断（固定头 <21 字节）");
+    }
+    if &buf[0..2] != b"SU" {
+        anyhow::bail!("udp envelope: magic 不符");
+    }
+    let version = buf[2];
+    if version != UDP_ENVELOPE_VERSION {
+        anyhow::bail!("udp envelope: 不支持的版本 {version}");
+    }
+    let flags = buf[3];
+    if flags & 0xFE != 0 {
+        anyhow::bail!("udp envelope: 保留位非 0（flags=0x{flags:02x}）");
+    }
+    let dir = if flags & 1 == 0 { UdpDir::Up } else { UdpDir::Down };
+    let flow_id: [u8; 16] = buf[4..20].try_into().expect("长度已由固定头校验保证");
+    let atyp = buf[20];
+    let mut pos = 21usize;
+    let target_host = match atyp {
+        1 => {
+            let o: [u8; 4] = udp_take(buf, &mut pos, 4, "addr v4")?
+                .try_into()
+                .unwrap();
+            Ipv4Addr::from(o).to_string()
+        }
+        4 => {
+            let o: [u8; 16] = udp_take(buf, &mut pos, 16, "addr v6")?
+                .try_into()
+                .unwrap();
+            Ipv6Addr::from(o).to_string()
+        }
+        3 => {
+            let len = udp_take(buf, &mut pos, 1, "domain len")?[0] as usize;
+            let b = udp_take(buf, &mut pos, len, "domain")?;
+            if len == 0 {
+                anyhow::bail!("udp envelope: domain 长度为 0");
+            }
+            String::from_utf8(b.to_vec())
+                .map_err(|_| anyhow!("udp envelope: domain 非 UTF-8"))?
+        }
+        other => anyhow::bail!("udp envelope: 未知 atyp {other}"),
+    };
+    let port = u16::from_be_bytes(udp_take(buf, &mut pos, 2, "port")?.try_into().unwrap());
+    let pm = udp_take(buf, &mut pos, 1, "path_mode")?[0];
+    let path_mode = match pm {
+        0 => UdpPathMode::Full,
+        1 => UdpPathMode::Cached,
+        _ => anyhow::bail!("udp envelope: 非法 path_mode {pm}"),
+    };
+    let hop_index = udp_take(buf, &mut pos, 1, "hop_index")?[0];
+    let path = if matches!(path_mode, UdpPathMode::Full) {
+        let hop_count = udp_take(buf, &mut pos, 1, "hop_count")?[0] as usize;
+        let mut path = Vec::with_capacity(hop_count);
+        for i in 0..hop_count {
+            let len = udp_take(buf, &mut pos, 1, "node_id len")?[0] as usize;
+            let b = udp_take(buf, &mut pos, len, &format!("node_id #{i}"))?;
+            path.push(
+                String::from_utf8(b.to_vec())
+                    .map_err(|_| anyhow!("udp envelope: node_id 非 UTF-8"))?,
+            );
+        }
+        path
+    } else {
+        Vec::new()
+    };
+    let payload = buf.get(pos..).unwrap_or(&[]).to_vec();
+    Ok(UdpEnvelope {
+        version,
+        dir,
+        flow_id,
+        target_host,
+        target_port: port,
+        path_mode,
+        hop_index,
+        path,
+        payload,
+    })
 }
 
 pub struct MeshDataPlane {
@@ -923,5 +1141,124 @@ mod tests {
         let plane = MeshDataPlane::new("test-node".into(), registry);
         // Ensure the data plane is created without panic
         assert_eq!(plane.local_node_id, "test-node");
+    }
+
+    // ── P0-4 §2 UdpEnvelope 编解码（S1 / §10 T1）──
+
+    fn udp_env_sample(host: &str, mode: UdpPathMode, dir: UdpDir) -> UdpEnvelope {
+        UdpEnvelope {
+            version: UDP_ENVELOPE_VERSION,
+            dir,
+            flow_id: [0x0a; 16],
+            target_host: host.to_string(),
+            target_port: 4433,
+            path_mode: mode,
+            hop_index: 3,
+            path: match mode {
+                UdpPathMode::Full => vec!["relay-1".into(), "exit-1".into()],
+                UdpPathMode::Cached => vec![],
+            },
+            payload: vec![1, 2, 3, 0xFF],
+        }
+    }
+
+    /// T1：FULL/CACHED × v4/v6/domain × dir 两位全组合往返。
+    #[test]
+    fn udp_envelope_roundtrip_matrix() {
+        for host in ["127.0.0.1", "2001:db8::1", "example.com"] {
+            for mode in [UdpPathMode::Full, UdpPathMode::Cached] {
+                for dir in [UdpDir::Up, UdpDir::Down] {
+                    let env = udp_env_sample(host, mode, dir);
+                    let wire = encode_udp_envelope(&env).unwrap();
+                    assert_eq!(&wire[0..2], b"SU");
+                    assert_eq!(wire[2], UDP_ENVELOPE_VERSION);
+                    let back = decode_udp_envelope(&wire).unwrap();
+                    assert_eq!(back, env, "roundtrip 失败: {host} {mode:?} {dir:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn udp_envelope_atyp_encoding() {
+        let v4 = encode_udp_envelope(&udp_env_sample("10.0.0.1", UdpPathMode::Cached, UdpDir::Up))
+            .unwrap();
+        assert_eq!(v4[20], 1);
+        let v6 =
+            encode_udp_envelope(&udp_env_sample("::1", UdpPathMode::Cached, UdpDir::Up)).unwrap();
+        assert_eq!(v6[20], 4);
+        let d = encode_udp_envelope(&udp_env_sample("example.com", UdpPathMode::Cached, UdpDir::Up))
+            .unwrap();
+        assert_eq!(d[20], 3);
+        assert_eq!(d[21], b"example.com".len() as u8);
+    }
+
+    /// T1 拒绝类 1-3：坏 magic / ver / 保留位。
+    #[test]
+    fn udp_envelope_rejects_bad_magic_version_reserved() {
+        let wire = encode_udp_envelope(&udp_env_sample("example.com", UdpPathMode::Full, UdpDir::Down))
+            .unwrap();
+        let mut bad = wire.clone();
+        bad[0] = b'X';
+        assert!(decode_udp_envelope(&bad).is_err(), "magic 应拒绝");
+        let mut bad = wire.clone();
+        bad[2] = 2;
+        assert!(decode_udp_envelope(&bad).is_err(), "version 应拒绝");
+        let mut bad = wire;
+        bad[3] |= 0x02;
+        assert!(decode_udp_envelope(&bad).is_err(), "保留位应拒绝");
+    }
+
+    /// T1 拒绝类 4：结构性截断（固定头/地址/路径区）一律错误——逐字节前缀全扫结构区。
+    /// 注：payload 无长度字段（剩余字节即载荷），载荷区截断与合法空载荷不可区分；
+    /// UDP 数据报边界由 recv_from 保证，线上无"半包"，恶意构造等同空载荷交上层语义丢弃。
+    #[test]
+    fn udp_envelope_rejects_truncation_everywhere() {
+        let payload_len = 4usize;
+        for mode in [UdpPathMode::Full, UdpPathMode::Cached] {
+            let wire =
+                encode_udp_envelope(&udp_env_sample("example.com", mode, UdpDir::Up)).unwrap();
+            let structural_len = wire.len() - payload_len;
+            for cut in 1..structural_len {
+                assert!(
+                    decode_udp_envelope(&wire[..cut]).is_err(),
+                    "{mode:?} 截断至 {cut} 字节应拒绝（结构区长 {structural_len}）"
+                );
+            }
+        }
+    }
+
+    /// T1 拒绝类 5：CACHED 携带路径 / FULL 空路径（编码侧强制，结构不变式）。
+    #[test]
+    fn udp_envelope_rejects_cached_with_path_and_full_without_path() {
+        let mut env = udp_env_sample("example.com", UdpPathMode::Cached, UdpDir::Up);
+        env.path = vec!["relay-1".into()];
+        assert!(
+            encode_udp_envelope(&env).is_err(),
+            "CACHED 携带路径应拒绝（线格式无 path 字段，编码侧强制）"
+        );
+        let mut env = udp_env_sample("example.com", UdpPathMode::Full, UdpDir::Up);
+        env.path = vec![];
+        assert!(encode_udp_envelope(&env).is_err(), "FULL 空路径应拒绝");
+    }
+
+    /// §13-3：编码后总长超 65507 上界拒绝。
+    #[test]
+    fn udp_envelope_rejects_oversize() {
+        let mut env = udp_env_sample("example.com", UdpPathMode::Cached, UdpDir::Up);
+        env.payload = vec![0u8; UDP_ENVELOPE_MAX];
+        assert!(
+            encode_udp_envelope(&env).is_err(),
+            "编码后超 65507 上界应拒绝（§13-3）"
+        );
+    }
+
+    #[test]
+    fn udp_envelope_empty_payload_roundtrip() {
+        let mut env = udp_env_sample("127.0.0.1", UdpPathMode::Cached, UdpDir::Down);
+        env.payload = vec![];
+        let back = decode_udp_envelope(&encode_udp_envelope(&env).unwrap()).unwrap();
+        assert_eq!(back, env);
+        assert!(back.payload.is_empty());
     }
 }
