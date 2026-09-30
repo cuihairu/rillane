@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/public/logo.svg" width="200" alt="Seep logo" />
+</p>
+
 # Seep
 
 Rust 单词代理内核，灵感来自 sing-box / Clash / Surge，但更加模块化、跨平台特性由一套 monorepo 维护。
