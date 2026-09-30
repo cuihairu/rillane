@@ -9,8 +9,9 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 > | 入站 socks5 (CONNECT) / http (CONNECT) / mixed | 已实现（TCP） | — |
 > | 入站 socks5 UDP ASSOCIATE | **已实现（2026-09，P0-2）**：RFC 1928 ASSOCIATE + 数据报中继；`udp:` 块缺省关闭 | — |
 > | 出站 direct/socks5/http/shadowsocks/trojan/hysteria2/vless/wireguard（TCP） | 已实现 | — |
-> | 出站 UDP 承载（direct/ss/wg） | **已实现（2026-09，P0-3）**；ss 完整解密往返联调归 P0-5 | — |
+> | 出站 UDP 承载（direct/ss/wg） | **已实现（2026-09，P0-3）**；联调工具 = `seepctl udp-probe`（P0-5，退出码 0-4） | — |
 > | mesh UDP 多跳转发（UdpEnvelope over UDP 数据报） | **已实现（2026-09，P0-4）**：FULL/CACHED 跳缓存、exit per-flow socket、同端口双栈、明文门（chain+udp 未配加密构建期拒绝） | — |
+> | UDP 观测与联调（`seep_udp_*` 指标族 / `/udp/stats` / `seepctl stats` UDP 段 / `udp-probe`） | **已实现（2026-09，P0-5）**：`/metrics` 恒渲染（开关关闭全零、端点不消失）+ 入口级 `udp_enabled` 覆盖 + `udp:` 配置全字段 | — |
 > | 出站 UDP 承载（hy2） | 未实现（`hysteria2` 0.1.6 公开 API 无 UDP 出口；P0-4 已完成且**维持改判**） | V2（quinn 载具，未决） |
 > | 出站 vmess 连接器 | 未实现（配置 schema 与订阅转换已支持，运行时构建期报错） | todo「VMess 出站」条目 |
 > | hysteria v1 | 未实现 | 无计划（仅 hy2） |

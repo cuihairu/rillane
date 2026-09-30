@@ -15,12 +15,16 @@ ingress:
     auth:
       - username: demo
         password: demo
+    # 入口级 UDP 覆盖（socks5/mixed 可用）：缺省继承 udp.enabled；
+    # true/false 显式开/关该入口的 CMD 0x03（显式 true 且全局关时构建期打 WARN）
+    # udp_enabled: true
   # - name: http-in
   #   type: http
   #   bind: 0.0.0.0:7891
   # - name: mixed-in
   #   type: mixed
   #   bind: 0.0.0.0:7892
+  #   udp_enabled: true
 
 egress:
   - name: direct-main
@@ -96,3 +100,22 @@ routing:
       matches:
         - type: geoip
           country: CN
+
+# UDP 数据面（socks5/mixed 入站的 CMD 0x03 ASSOCIATE 数据报中继）。
+# 注意：本块变更重启生效（会话状态不可热迁移；订阅热更新不触碰运行期参数）。
+udp:
+  enabled: false                 # 总开关；false 时入口对 ASSOCIATE 回 0x07
+  # strict_udp_source: true      # 数据报源 IP 校验（防中继借用）
+  # session_idle_secs: 180       # 会话空闲上限（秒）
+  # mapping_idle_secs: 60        # 目标映射空闲上限（秒；mesh 跳缓存 TTL 同源）
+  # max_sessions: 4096           # 全局并发会话上界（满员拒新）
+  # sweep_interval_secs: 15      # 回收扫描间隔（秒，须 ≥1）
+  # max_mappings: 256            # 会话内目标映射上界（溢出逐最久空闲，须 ≥1）
+  # session_lifetime_secs: null  # 会话总寿命上限（秒；缺省不限，设值须 ≥ session_idle_secs）
+  # downlink_queue_depth: 64     # 下行队列深度（满即丢并计 downlink_full，须 ≥1）
+  # max_associates: 256          # 并发 ASSOCIATE 上限（超限回 0x01 并计数，须 ≥1）
+
+# mesh UDP 明文数据面门（环境变量，非 YAML 字段）：
+# chain+udp 未配置加密时需显式放行明文转发，在运行 seepd 的环境中设置：
+#   export SEEP_MESH_UDP_ALLOW_PLAINTEXT=1
+# （TCP 面对应门为 SEEP_MESH_ALLOW_PLAINTEXT；两门独立取或）
