@@ -82,7 +82,18 @@ config 字面量随 platform 枚举用 **`transparent`**，弃计划文案的 "r
 
 - build() TUN 块构造 `Arc<LinuxRouteManager>`：一份 clone 进 `TunIngress`（启动 apply + 退出 teardown 属主职责），一份进控制面状态（CLI apply/clear/status 消费）；
 - **串行化**：apply/clear/status 与启动/teardown 经 manager 内部既有 `Mutex<Vec<AppliedStep>>` 扩为**操作级互斥**（整个 apply 或 clear 持锁执行，步骤短——`ip` 子进程毫秒级）；
-- `AppliedStep`（tun-dataplane §1.3）即 status/clear 的数据源：`{argv: Vec<String>, at: SystemTime}`，clear = 逆序撤销全部已记录步骤（**"完全还原"＝还原 seep 所加的步骤，非清空系统路由表**，§9-7）。
+- `AppliedStep`（tun-dataplane §1.3）即 status/clear 的数据源：`{argv: Vec<String>, at: SystemTime}`，clear = 逆序撤销全部已记录步骤（**"完全还原"＝还原 seep 所加的步骤，非清空系统路由表**，§9-7）；
+- **RouteControl in-process 契约（2026-09-30 六要素审计补全）**：`LinuxRouteManager` 暴露以下方法供控制面（§3）直接消费（`Arc<LinuxRouteManager>` 自身即契约，**不新起 trait**——单一实现无抽象收益）：
+
+  ```rust
+  async fn apply_desired(&self, cfg: &RoutingConfig, dry_run: bool) -> Result<ApplyOutcome>;
+  async fn clear(&self) -> Result<Vec<AppliedStep>>;
+  fn status(&self) -> RouteStatus;   // 同步读，不持写锁
+  // ApplyOutcome { planned, executed, rolled_back: Vec<AppliedStep> }
+  // RouteStatus  { device, mtu, up, applied: Vec<AppliedStep> }
+  ```
+
+  三方法均经 §2.3 操作级互斥串行；`dry_run=true` 只跑 planner（构造 argv）不执行 executor、不改 `applied`——planner/executor 分离已有 §7.1 断言支撑。
 
 ## 3. 控制面端点（control_plane.rs，match 臂风格对齐 `/chains/dry-run`）
 
@@ -112,7 +123,9 @@ seepctl route status  [--endpoint URL]
 - **apply 幂等**：所有步骤 `ip addr replace`/`ip route replace` 天然幂等；重复 apply 产生的 AppliedStep 内容相同——**去重记录**（同 argv 已在册则不重复入账，status 稳定）；测试 = 连续两次 apply 后 `ip route show` 中 include 前缀唯一且属性一致；
 - **失败回滚**：apply 中某步非零退出 → 逆序撤销本批已执行步骤 → Err 响应携带 `rolled_back`（tun-dataplane E7 同机制，本条目把它暴露到 CLI 可见）；
 - **clear 还原**：逆序撤销全部在册步骤 → 清空 AppliedStep；无步骤时 Ok 空表（E8）；clear 后 TunIngress **继续运行**（数据面空转，包不再入 tun）——语义即用户所求，`status` 可见 `applied: []` + 设备 up；
-- **并发**：apply/clear 互斥串行（§2.3）；apply 后紧接 clear = 净还原。
+- **并发**：apply/clear 互斥串行（§2.3）；apply 后紧接 clear = 净还原；
+- **启动 apply ≡ CLI apply（2026-09-30 六要素审计补全）**：seepd 启动时 `TunIngress::run` 对 `apply_desired(cfg, false)` 的调用与 CLI `route apply` 走**同一方法**（幂等重放），差异仅在调用方与是否 dry_run——不存在两条路由写路径；
+- **配置文件改动需重启**：`route apply` 重放的是 seepd **内存中的** `network` 配置（启动时载入，§9-10 热更新不支持）——编辑 YAML 后不重启 seepd 直接 `route apply` **不会**反映文件改动；`route apply` 的定位是运行期重放/对账/故障恢复，不是配置热加载。
 
 ## 6. 错误路径
 

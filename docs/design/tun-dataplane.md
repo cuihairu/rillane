@@ -115,9 +115,10 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 
 ### 2.6 runtime 接线
 
-- **所有权裁决**：`TunIngress` 是 TUN 模式的属主——内部组合 `LinuxTunProvider` + `LinuxRouteManager`（创建设备/设址/起路由在 `run()` 启动时完成，退出时 teardown），**不经 `NetworkManager`**（其通用容器形状面向其他模式，P1-3 再决定是否收编）；
+- **所有权裁决**：`TunIngress` 是 TUN 模式的属主——内部组合 `LinuxTunProvider` + `LinuxRouteManager`（创建设备/设址/起路由在 `run()` 启动时完成，退出时 teardown），**不经 `NetworkManager`**（其通用容器形状面向其他模式；P1-3 [network-route.md](network-route.md) §2.2 已裁决不收编，TunIngress 属主延续）；
 - 落点：`runtime_builder::build()` 在 UDP 块旁增 TUN 块——条件 `runtime_config.enable_network_virtualization && network_config.mode == Tun`，构造 `TunIngress` 插入 `ingress_endpoints["tun"]`；依赖仅 router + egress 描述符（UDP 连接器表与 `scan_udp_capability` **与 P0-3 UDP 块共享同一次构建结果**），无 build() 时序问题（不像 P0-4 §9.1——`run()` 时才取 `flow_router()`，start() 已统一注入 RuntimeFlowRouter）；
 - `TunIngress: IngressEndpoint`：`run(self: Arc<Self>, router, output)` = 设备就绪门 → 包循环 + per-flow 任务族；与 socks5 入口同构，`start()` 的统一循环零改动。
+- **与既有 ingress 的共存与选择边界**（P0-4 §1 同款缺口补全）：TUN ingress 与 socks5/mixed ingress 在 `ingress_endpoints` 中并列共存，两者**注入同一 `FlowRouter`**（chain 启用时即 `RuntimeFlowRouter`），共享 egress 连接器表与 `scan_udp_capability` 结果；**选择边界由内核/应用配置决定、不由 seep 选择**——socks5 流量是应用显式走代理监听口，TUN 流量是系统路由把应用包导入 tun 设备，两路互不重叠（一个包不会同时进两个 ingress）；UDP 侧 TUN 流的 `Arc<dyn UdpRelay>` 归 `TunFlowEntry` 持有，**不注册进 P0-1 `UdpSessionTable`**（该表与 socks5 控制连接绑定），故 TUN 会话不计入 `seep_udp_sessions_active`，见 §2.8。
 
 ### 2.7 bypass 与防环
 
@@ -129,6 +130,16 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 ### 2.8 指标（最小集，命名入 P0-5 `seep_*` 家族）
 
 `seep_tun_packets_total{direction}`、`seep_tun_bytes_total{direction}`、`seep_tun_flows_active`、`seep_tun_bypass_dropped_total`、`seep_tun_parse_errors_total`、`seep_tun_unknown_flow_total`、`seep_tun_process_attr_miss_total`。原子量 + `/metrics` 渲染挂到 P0-5 §7 落点清单（该文档验收时一并出现）。
+- **计量边界**：TUN 流量**不进 `seep_udp_sessions_active`/`seep_udp_relay_bytes_total`**——TunFlowTable 独立于 P0-1 `UdpSessionTable`（§2.2 镜像不复用）；P0-5 `seep_udp_*` 序列仅反映 socks5 入站 UDP，TUN 的会话/字节只走本文 `seep_tun_*` 家族。操作者勿把 TUN 有流量时 `seep_udp_*` 为零误读为故障（两侧口径不同，分属两条序列族）。
+
+### 2.9 smoltcp poll 驱动与下行注入（T4 主路径补全）
+
+> 2026-09-30 六要素审计补全：R-tun1 标注 smoltcp 集成为 T4 主工作量，但 §2.4 只给了模型未给驱动机制——T4 无从下手，本节钉之。不发明 API：`Interface::poll`、phy `RxToken`/`TxToken`、tokio `Notify`/`Waker` 均为既有（假设，版本以 T4 实施时定，对齐 §6-1）。
+
+- **单 poll 驱动点**：`TunIngress::run` 包循环每读一包 → IP 层判为 TCP → 喂 smoltcp phy 的 RxToken → `Interface::poll(&mut iface, Instant::now())` 一次；poll 产出的待发 IP 包经 phy TxToken 回写 `LinuxTunProvider::write_packet`；
+- **下行注入**（egress → 应用）：egress 侧写 `SmolTcpStream`（`AsyncWrite`）→ 数据入 smoltcp socket 的 tx 缓冲 → **经 `tokio::sync::Notify` 唤醒 run 循环补一次 poll**，poll 生成含数据的 IP 段发往 tun。run 循环结构 = `select` 于 tun 读就绪 ∥ Notify；**不另起独立 poll 定时任务**（MVP——定时轮询会在空闲流上空转，读/写事件驱动已覆盖两个方向）；
+- **waker**：`SmolTcpStream` 的 `AsyncRead`/`AsyncWrite` 在 socket 不可立即满足时登记 tokio waker，poll 推进状态后唤醒对应 `IoStream` 任务——无忙轮询（对齐 §2.4 双缓冲）；
+- **背压**：smoltcp 窗口满 → `AsyncRead` 返回 Pending → egress 侧输出自然阻塞（与 socks5 TCP 流同语义，`FlowOutput` 已处理）；不启用 keep-alive（§2.4 游戏长连接敏感）。
 
 ## 3. 错误路径
 
