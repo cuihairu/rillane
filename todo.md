@@ -18,7 +18,7 @@
 | 配置新增 network 区块（mode: tun/redir；bypass/include）+ CLI `route apply/route clear` | `SeepConfig` 无顶层 network 区块；`seepctl` 无 route 子命令 | → P1 |
 | FlowMiddleware 支持 WASM/动态库加载，示例（限速、统计、内容过滤） | 仅有 `LatencyProbe` 一个实现，无动态加载机制 | → P3（降级） |
 
-另：`docs/PROTOCOLS.md` 部分描述超前于实现（SOCKS5 UDP ASSOCIATE、VMess 出站、连接池、批量收发），文档回填见 P3。
+另：`docs/PROTOCOLS.md` 部分描述超前于实现——**SOCKS5 UDP ASSOCIATE 已随 P0-2 落地并于 2026-09-30 回填状态**（总表与 SOCKS5 节均为"已实现"）；VMess 出站（归「VMess 出站」条目）、连接池（归 P1-5）、零拷贝/批量收发（2026-09-30 降级登记 **P3-5**）维持超前/未实现口径，各自落地后回填。
 
 ---
 
@@ -77,6 +77,7 @@
   验收：开启后统计脚本显示出口包长分布偏离默认分布且可配置目标形态；关闭时零开销旁路。
 - [ ] **P1-5 出站连接池**：同出口同 SNI keep-alive 复用 + TLS 会话恢复（网页加速核心项）。
   验收：重复请求同目标握手次数下降，`/metrics` 有连接复用率指标；现有配置无破坏性变更。
+  进度（2026-09-30 文档回填轮）：PROTOCOLS.md 性能节已按现状标注（连接池未实现、超前描述保留设计口径）；本条目无设计稿，实施前先补实现级设计。
 
 ## P2 — 调度闭环与高级安全（roadmap S3 后半 + S4）
 
@@ -103,12 +104,15 @@
   待回填（**2026-09-30 部分完成**）：PROTOCOLS.md 顶部总表与 SOCKS5 入站/直连/Shadowsocks/hysteria2/WireGuard/性能各节、udp-dataplane.md §0.2 状态表已按 P0-1..P0-3 落地实况回填（hy2 UDP 行维持未实现，待 P0-4）；networking.md §2 现状节核验为全部对应未落地的 P1 项，本轮不动，待 P1 落地后回填；VMess 出站落地后删除其超前标注。后续补：mesh.md 安全注记已与现状对齐（ACL/配额与撤销文件热加载已落地，端到端 MAC/CRL 待 P2-7）。
 - [ ] **P2/P3 原遗留——VMess 出站**：PROTOCOLS.md 已承诺，Clash 订阅转换会产出 vmess 节点，当前构建期报错。
   验收：vmess（ws+tls）出站可用；`import-clash` 转换的 vmess 节点可直连使用。
+  进度（2026-09-30 文档回填轮）：PROTOCOLS.md §VMess 状态头已精确指向本条目，超前描述维持规划口径；落地后按 P3-1 待回填清单删除超前标注。
 - [ ] **P3-2 插件动态加载**（勘误降级）：WASM/动态库 `FlowMiddleware` 加载器 + 限速/内容过滤示例。
   验收：外部编译的示例插件可加载并生效，崩溃/超时有隔离。
 - [ ] **P3-3 平台打包**（原 §6）：systemd / launchd / Windows Service / OpenWrt init.d 模板与脚本，`platforms/` 样板完善。
   验收：Linux/macOS/Windows 三平台产出可安装二进制；OpenWrt 出 musl 静态包。
 - [ ] **P3-4 移动端 FFI 骨架**：Android（VpnService）/ iOS（NEPacketTunnel）cdylib + C ABI 最小通路。
   验收：Android demo 通过 VpnService 建立 tun 并经内核代理一轮流量。
+- [ ] **P3-5 零拷贝/批量收发**（2026-09-30 降级登记）：PROTOCOLS.md「性能优化」节的零拷贝与批量处理描述超前于实现且无近期落地计划，自"设计口径"降级为本登记项，避免超前描述无主。
+  验收：落地时以基准测试佐证吞吐/延迟收益，并回填 PROTOCOLS.md 性能节状态（异步 I/O 已实现一行保留）。
 
 ---
 
@@ -119,6 +123,6 @@
 | P0 | 5 | S1 UDP 全链路 | 3/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷完成；P0-4 实现级设计稿+分步实施清单就绪（含 hy2 UDP 补课）；P0-5 设计稿就绪待实现） |
 | P1 | 5 | S2 TUN + S3 前半 | 0/5（P1-1/P1-2/P1-3 实现级设计稿就绪（tun-dataplane.md T0–T5 / network-route.md R0–R4 分步清单）；实施未开始） |
 | P2 | 8 | S3 后半 + S4 | 未开始 |
-| P3 | 4+1 | S4 收尾 | 1/5（P3-1 文档对齐完成） |
+| P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
 
 已完成底座（S0）9 大项见上文归档清单；原 19 条清单中 10 项核实为真实完成、3 项勘误重开、其余并入 P0–P3 对应条目。
