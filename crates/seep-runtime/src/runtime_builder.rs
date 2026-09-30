@@ -22,8 +22,8 @@ use tokio::{
 };
 
 use seep_config::{
-    EgressConfig, EgressDescriptor, GroupMember, IngressConfig, IngressDescriptor, PolicyGroup,
-    RoutingConfig, SeepConfig,
+    resolve_udp_enabled, EgressConfig, EgressDescriptor, GroupMember, IngressConfig,
+    IngressDescriptor, PolicyGroup, RoutingConfig, SeepConfig, UdpConfig,
 };
 use seep_core::udp::table::chain_id_of;
 use seep_core::udp::{ChainFailureEvent, EgressUdpConnector};
@@ -228,7 +228,23 @@ impl RuntimeBuilder {
         // ④§8 链路故障事件通道（FlowOutputRouter 切换成功后 → 表 handle_chain_failure）。
         let mut mesh_udp_gate: Option<MeshUdpGate> = None;
         let mut chain_failure_tx: Option<mpsc::Sender<ChainFailureEvent>> = None;
-        let udp_service = if config_snapshot.udp.enabled {
+        // P0-5 §1.3：per-ingress Some(true) 在全局关时仍要可用——构建条件从
+        //「全局 enabled」放宽为「全局 ∨ 任一入口显式开」；服务实例仍全局单例。
+        let udp_needed = config_snapshot.udp.enabled
+            || config_snapshot.ingress.iter().any(|d| {
+                matches!(
+                    &d.spec,
+                    IngressConfig::Socks5 {
+                        udp_enabled: Some(true),
+                        ..
+                    }
+                    | IngressConfig::Mixed {
+                        udp_enabled: Some(true),
+                        ..
+                    }
+                )
+            });
+        let udp_service = if udp_needed {
             let udp_connectors = build_udp_connectors(&config_snapshot.egress)?;
             scan_udp_capability(
                 &config_snapshot.routing,
@@ -281,16 +297,7 @@ impl RuntimeBuilder {
                 None => Arc::new(routing_udp),
             };
             let table = seep_core::udp::UdpSessionTable::new(
-                seep_core::udp::UdpSessionConfig {
-                    session_idle: std::time::Duration::from_secs(
-                        config_snapshot.udp.session_idle_secs,
-                    ),
-                    mapping_idle: std::time::Duration::from_secs(
-                        config_snapshot.udp.mapping_idle_secs,
-                    ),
-                    max_sessions: config_snapshot.udp.max_sessions,
-                    ..Default::default()
-                },
+                udp_session_config(&config_snapshot.udp),
                 flow_router,
                 seep_core::udp::RealClock::new(),
             )?;
@@ -312,8 +319,11 @@ impl RuntimeBuilder {
 
         // 入口默认实现（udp_service 唯一消费点，随 UDP 块顺延至此）
         if self.ingress_endpoints.is_empty() {
-            self.ingress_endpoints =
-                build_ingress_endpoints(&config_snapshot.ingress, udp_service)?;
+            self.ingress_endpoints = build_ingress_endpoints(
+                &config_snapshot.ingress,
+                udp_service.clone(),
+                config_snapshot.udp.enabled,
+            )?;
         }
 
         let subscription_manager = if self.runtime_config.enable_hot_reload {
@@ -337,6 +347,10 @@ impl RuntimeBuilder {
             chain_manager,
             chain_failure_tx,
             mesh_udp_gate,
+            // P0-5 §4 观测接缝①：控制面 /udp/stats 经 getter 取数（勘误：
+            // 设计稿称「Runtime.udp 字段已存在」，实况 P0-2 起即被消费进
+            // ingress_endpoints、Runtime 无此字段——本字段为 S2 新增留存）
+            udp_service,
             network_manager,
             subscription_manager,
             event_tx,
@@ -587,6 +601,9 @@ pub struct Runtime {
     /// P0-4 §13-6：folded UDP 明文门（chain+udp 同启时 Some；两消费点同源——
     /// client 桥在 build() 已消费，非 client 的 spawn_udp 在 start() 消费）
     mesh_udp_gate: Option<MeshUdpGate>,
+    /// P0-5 §4 观测接缝①：UDP 入站服务留存（控制面 /udp/stats 取数；
+    /// ingress_endpoints 内共享同一 Arc 单例）
+    udp_service: Option<Arc<seep_core::udp::UdpAssociateService>>,
     network_manager: Option<Arc<Mutex<NetworkManager>>>,
     subscription_manager: Option<Arc<SubscriptionManager>>,
     event_tx: broadcast::Sender<RuntimeEvent>,
@@ -1079,6 +1096,12 @@ impl Runtime {
     /// 获取 Mesh 注册表
     pub fn get_mesh_registry(&self) -> Option<Arc<MeshRegistry>> {
         self.mesh_registry.clone()
+    }
+
+    /// 获取 UDP 入站服务（P0-5 §4 观测接缝①：控制面 /udp/stats 取数入口；
+    /// None = UDP 全关且无 per-ingress 显式开）
+    pub fn get_udp_service(&self) -> Option<Arc<seep_core::udp::UdpAssociateService>> {
+        self.udp_service.clone()
     }
 
     /// 获取出口连接器
@@ -1610,15 +1633,37 @@ impl FlowOutput for ConnectorFlowOutput {
 fn build_ingress_endpoints(
     descriptors: &[IngressDescriptor],
     udp: Option<Arc<seep_core::udp::UdpAssociateService>>,
+    udp_enabled_global: bool,
 ) -> Result<HashMap<String, Arc<dyn IngressEndpoint>>> {
     let mut map = HashMap::new();
     for desc in descriptors {
+        // P0-5 §1.3/§9-4：per-ingress 覆盖 ∪ 全局；服务实例仍全局共享单例
+        //（会话表/指标单点）。Http 无 UDP 面，恒 None。
+        let per_ingress = match &desc.spec {
+            IngressConfig::Socks5 { udp_enabled, .. } => *udp_enabled,
+            IngressConfig::Mixed { udp_enabled, .. } => *udp_enabled,
+            IngressConfig::Http { .. } => None,
+        };
+        if per_ingress == Some(true) && !udp_enabled_global {
+            // §2.7 日志口径：构建期一次性结构性提示（非逐包路径）
+            tracing::warn!(
+                target: "seep::boot",
+                ingress = %desc.name,
+                "ingress 显式开启 UDP（udp_enabled: true）而全局 udp.enabled=false：仅该入口可用 UDP ASSOCIATE"
+            );
+        }
+        let udp_here = match udp.as_ref() {
+            Some(svc) if resolve_udp_enabled(udp_enabled_global, per_ingress) => {
+                Some(Arc::clone(svc))
+            }
+            _ => None,
+        };
         let endpoint: Arc<dyn IngressEndpoint> = match &desc.spec {
             IngressConfig::Socks5 { bind, auth, .. } => Arc::new(Socks5Ingress::new(
                 desc.name.clone(),
                 bind.clone(),
                 auth.clone().unwrap_or_default(),
-                udp.clone(),
+                udp_here,
             )),
             IngressConfig::Http { bind } => {
                 Arc::new(HttpIngress::new(desc.name.clone(), bind.clone()))
@@ -1626,12 +1671,26 @@ fn build_ingress_endpoints(
             IngressConfig::Mixed { bind, .. } => Arc::new(MixedIngress::new(
                 desc.name.clone(),
                 bind.clone(),
-                udp.clone(),
+                udp_here,
             )),
         };
         map.insert(desc.name.clone(), endpoint);
     }
     Ok(map)
+}
+
+/// P0-5 §10-S2：`UdpConfig` → `UdpSessionConfig` 显式映射（S0 十字段全覆盖，
+/// 禁 `..Default::default()` 兜底——防「字段加了没接线」；lifetime 两态映射）。
+fn udp_session_config(cfg: &UdpConfig) -> seep_core::udp::UdpSessionConfig {
+    seep_core::udp::UdpSessionConfig {
+        session_idle: Duration::from_secs(cfg.session_idle_secs),
+        mapping_idle: Duration::from_secs(cfg.mapping_idle_secs),
+        sweep_interval: Duration::from_secs(cfg.sweep_interval_secs),
+        max_sessions: cfg.max_sessions,
+        max_mappings: cfg.max_mappings,
+        session_max_lifetime: cfg.session_lifetime_secs.map(Duration::from_secs),
+        downlink_capacity: cfg.downlink_queue_depth,
+    }
 }
 
 /// UDP 出站连接器表（udp-relay-path.md §3.1 能力表）：
@@ -2682,4 +2741,221 @@ mod tests {
         assert_eq!(connectors.len(), 1);
         assert!(connectors.contains_key("d"));
     }
+
+    // ---------- P0-5 §10-S2 运行时接线 ----------
+
+    #[test]
+    fn udp_session_config_mapping() {
+        // 测试 1：纯函数逐字段断言（含 lifetime None/Some 两态），防「字段加了没接线」
+        let mut cfg = UdpConfig {
+            enabled: true,
+            strict_udp_source: false,
+            session_idle_secs: 300,
+            mapping_idle_secs: 45,
+            max_sessions: 128,
+            sweep_interval_secs: 5,
+            max_mappings: 64,
+            session_lifetime_secs: None,
+            downlink_queue_depth: 32,
+            max_associates: 16,
+        };
+        let sc = udp_session_config(&cfg);
+        assert_eq!(sc.session_idle, Duration::from_secs(300));
+        assert_eq!(sc.mapping_idle, Duration::from_secs(45));
+        assert_eq!(sc.sweep_interval, Duration::from_secs(5));
+        assert_eq!(sc.max_sessions, 128);
+        assert_eq!(sc.max_mappings, 64);
+        assert_eq!(sc.session_max_lifetime, None);
+        assert_eq!(sc.downlink_capacity, 32);
+
+        cfg.session_lifetime_secs = Some(3600);
+        assert_eq!(
+            udp_session_config(&cfg).session_max_lifetime,
+            Some(Duration::from_secs(3600))
+        );
+
+        // 缺省配置 = UdpSessionConfig::default 全字段一致（S0 缺省对齐）
+        let d = udp_session_config(&UdpConfig::default());
+        let dd = seep_core::udp::UdpSessionConfig::default();
+        assert_eq!(d.session_idle, dd.session_idle);
+        assert_eq!(d.mapping_idle, dd.mapping_idle);
+        assert_eq!(d.sweep_interval, dd.sweep_interval);
+        assert_eq!(d.max_sessions, dd.max_sessions);
+        assert_eq!(d.max_mappings, dd.max_mappings);
+        assert_eq!(d.session_max_lifetime, dd.session_max_lifetime);
+        assert_eq!(d.downlink_capacity, dd.downlink_capacity);
+    }
+
+    /// 找一个空闲端口（先绑后弃有竞态窗口，测试环境足够）
+    fn free_bind() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("127.0.0.1:{}", l.local_addr().unwrap().port())
+    }
+
+    fn s2_config(udp: UdpConfig, socks_udp_enabled: Option<bool>, mixed_udp_enabled: Option<bool>) -> SeepConfig {
+        SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![
+                IngressDescriptor {
+                    name: "s2-socks".to_string(),
+                    spec: IngressConfig::Socks5 {
+                        bind: free_bind(),
+                        auth: None,
+                        udp_enabled: socks_udp_enabled,
+                    },
+                },
+                IngressDescriptor {
+                    name: "s2-mixed".to_string(),
+                    spec: IngressConfig::Mixed {
+                        bind: free_bind(),
+                        udp_enabled: mixed_udp_enabled,
+                    },
+                },
+            ],
+            egress: vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            routing: seep_config::RoutingConfig {
+                default_node: "direct".to_string(),
+                groups: vec![],
+                rules: vec![],
+            },
+            udp,
+        }
+    }
+
+    fn s2_runtime_config() -> RuntimeConfig {
+        RuntimeConfig {
+            enable_hot_reload: false,
+            ..RuntimeConfig::default()
+        }
+    }
+
+    /// 对指定 bind 发 SOCKS5 无认证握手 + CMD 0x03，返回 REP 码
+    async fn associate_rep(bind: &str) -> u8 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // start() 内 ingress bind 异步发生——带重试等待监听就绪
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut s = None;
+        while s.is_none() {
+            match tokio::net::TcpStream::connect(bind).await {
+                Ok(stream) => s = Some(stream),
+                Err(_) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(20)).await
+                }
+                Err(e) => panic!("connect {bind} 失败: {e}"),
+            }
+        }
+        let mut s = s.unwrap();
+        s.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut method = [0u8; 2];
+        s.read_exact(&mut method).await.unwrap();
+        assert_eq!(method[0], 0x05);
+        // 请求帧：VER CMD(0x03) RSV ATYP=0x01 DST=0.0.0.0:0（全零 IPv4）
+        s.write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        let mut reply = [0u8; 10];
+        s.read_exact(&mut reply).await.unwrap();
+        reply[1]
+    }
+
+    fn socks_bind(cfg: &SeepConfig) -> String {
+        match &cfg.ingress[0].spec {
+            IngressConfig::Socks5 { bind, .. } => bind.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    fn mixed_bind(cfg: &SeepConfig) -> String {
+        match &cfg.ingress[1].spec {
+            IngressConfig::Mixed { bind, .. } => bind.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn per_ingress_override_disabled_entry_rejects_associate() {
+        // 测试 2：全局开 + socks5 显式 false → 该入口 0x07；mixed（None 继承）可受理
+        let cfg = s2_config(
+            UdpConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            Some(false),
+            None,
+        );
+        let socks = socks_bind(&cfg);
+        let mixed = mixed_bind(&cfg);
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(s2_runtime_config())
+            .build()
+            .expect("全局开 + per-ingress 覆盖应 build 成功");
+        assert!(runtime.get_udp_service().is_some());
+        let tasks = runtime.start().await.expect("start 应成功");
+
+        assert_eq!(associate_rep(&socks).await, 0x07, "显式关闭入口应回 0x07");
+        assert_eq!(associate_rep(&mixed).await, 0x00, "继承全局的 mixed 入口应受理");
+        for t in tasks {
+            t.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn per_ingress_override_true_enables_when_global_off() {
+        // 测试 3：全局关 + mixed 显式 true → 该入口可受理；socks5（None）回 0x07。
+        // 构建期 WARN 不强测（判定与装配为准）；UDP 服务因覆盖而构建。
+        let cfg = s2_config(UdpConfig::default(), None, Some(true));
+        let socks = socks_bind(&cfg);
+        let mixed = mixed_bind(&cfg);
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(s2_runtime_config())
+            .build()
+            .expect("全局关 + 显式开覆盖应 build 成功且构建 UDP 服务");
+        assert!(
+            runtime.get_udp_service().is_some(),
+            "per-ingress Some(true) 应触发 UDP 块构建"
+        );
+        let tasks = runtime.start().await.expect("start 应成功");
+
+        assert_eq!(associate_rep(&mixed).await, 0x00, "显式开启的 mixed 入口应受理");
+        assert_eq!(associate_rep(&socks).await, 0x07, "继承全局（关）的 socks5 应回 0x07");
+        for t in tasks {
+            t.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_disabled_all_ingress_closed() {
+        // 测试 4（验收 #4 构建断言半边）：全局关且无覆盖 → 全部入口 0x07、无 UDP 服务
+        let cfg = s2_config(UdpConfig::default(), None, None);
+        let socks = socks_bind(&cfg);
+        let mixed = mixed_bind(&cfg);
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(s2_runtime_config())
+            .build()
+            .expect("全局关应 build 成功");
+        assert!(
+            runtime.get_udp_service().is_none(),
+            "UDP 全关时不应构建 UdpAssociateService"
+        );
+        let tasks = runtime.start().await.expect("start 应成功");
+
+        assert_eq!(associate_rep(&socks).await, 0x07);
+        assert_eq!(associate_rep(&mixed).await, 0x07);
+        for t in tasks {
+            t.abort();
+        }
+    }
+
 }
