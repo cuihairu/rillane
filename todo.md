@@ -74,7 +74,9 @@
   实现级设计：[docs/design/network-route.md](docs/design/network-route.md)（§1 镜像类型 schema + 转换映射表——seep-config 不加 platform 依赖；§2 seepd 派生开关 + **NetworkManager 让路裁决**（修正 build() ④ 必失败路径，audit §1.2"接线存在但不可用"就此收口）；§3 控制面三端点；§5 幂等/回滚/还原状态机（"完全还原" = 撤销 seep 所加步骤）；§8 分步清单 **R0–R4**——R0 无依赖可先行，R1 起硬依赖 P1-1 T1/T2。**2026-09 设计稿就绪待实现**；2026-09-30 六要素审计补 §2.3 RouteControl in-process 契约（apply_desired/clear/status 签名钉死，不新起 trait）与 §5 启动 apply≡CLI apply 同入口、配置文件改动需重启）。
   验收：`apply` 后 main 表显式路由符合预期（**口径修正**：MVP 不触碰 `ip rule`，全局接管归 V2），`clear` 完全还原；重复执行幂等；失败时自动回滚。
 - [ ] **P1-4 混淆中间件 MVP（padding）**：以 `FlowMiddleware` 形态实现包长填充策略，按 profile 开关。
+  实现级设计：[docs/design/obfuscation-middleware.md](docs/design/obfuscation-middleware.md)（**2026-09-30 设计稿就绪，实施未开始**；§1 静态挂载点收口 C1——`FlowOutputRouter::forward` 唯一双分派口建 `MiddlewareChain`，ingress 侧不设第二挂载点；§2 策略/执行分离——`handle(Flow)` 流签名不承载帧语义，middleware 只产 `seep.obfs.padding` 注解、帧载体执行（MVP = chain 的 `MeshEnvelope` 帧，UDP 帧随 P0-4 §2，单跳 TCP 无自有帧 no-op）；§3 `obfuscation:` 区块镜像类型 + profile 容器语义（P2-3 在其上组合）；§8 清单 M0–M5）。
   验收：开启后统计脚本显示出口包长分布偏离默认分布且可配置目标形态；关闭时零开销旁路。
+  **验收口径改写（§0，对齐 P0-3 显式改判做法，非缩水）**：TCP 线上分段由内核决定，逐包长度伪装在 TCP 面不可字面达成——可测口径 = seep 自有帧（chain 的 `MeshEnvelope` 帧，真 wire 字节）；单跳 TCP no-op；UDP 数据报填充（游戏主场）随 P0-4 `UdpEnvelope` 帧载体落地，本文预留同 `PaddingSpec` 钩子。
 - [ ] **P1-5 出站连接池**：同出口同 SNI keep-alive 复用 + TLS 会话恢复（网页加速核心项）。
   验收：重复请求同目标握手次数下降，`/metrics` 有连接复用率指标；现有配置无破坏性变更。
   进度（2026-09-30 文档回填轮）：PROTOCOLS.md 性能节已按现状标注（连接池未实现、超前描述保留设计口径）；本条目无设计稿，实施前先补实现级设计。
@@ -121,7 +123,7 @@
 | 优先级 | 条目 | 对应阶段 | 状态 |
 |--------|------|---------|------|
 | P0 | 5 | S1 UDP 全链路 | 3/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷完成；P0-4 实现级设计稿+分步实施清单就绪（含 hy2 UDP 补课）；P0-5 设计稿就绪待实现） |
-| P1 | 5 | S2 TUN + S3 前半 | 0/5（P1-1/P1-2/P1-3 实现级设计稿就绪（tun-dataplane.md T0–T5 / network-route.md R0–R4 分步清单）；实施未开始） |
+| P1 | 5 | S2 TUN + S3 前半 | 0/5（设计稿就绪 4/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）；P1-5 出站连接池无设计稿；实施未开始） |
 | P2 | 8 | S3 后半 + S4 | 未开始 |
 | P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
 
