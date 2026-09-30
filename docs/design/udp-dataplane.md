@@ -39,15 +39,17 @@
 
 ### 0.2 交叉引用与 PROTOCOLS.md 状态标注
 
-| 声明出处 | 状态 | 本稿处置 |
-|---------|------|---------|
-| PROTOCOLS.md「SOCKS5 … UDP ASSOCIATE (UDP 代理)」 | **超前描述**（代码仅 CONNECT） | §2 落地；落地后状态改为"已实现" |
-| PROTOCOLS.md「Shadowsocks … TCP, UDP」 | 部分超前（仅 TCP） | §3.2 落地 |
-| PROTOCOLS.md「Hysteria … UDP 首包优化」/ hy2 小节 | 超前（仅 TCP） | §3.3 落地；依赖 `hysteria2` crate 能力，见未决项 V1 |
-| PROTOCOLS.md「WireGuard … Layer 3 (IP) 隧道」 | 与实现一致（TCP over WG 已通） | §3.4 扩展 UDP 包封装 |
-| PROTOCOLS.md「SOCKS5 出口 … UDP 中继」 | 超前 | **不在 S1 范围**，见 §3.5 |
-| mesh.md「Mesh Data-Plane Protocol (TCP, MVP)」 | 与实现一致 | §4 平行扩展 UDP 面，TCP 面契约不变 |
-| architecture.md「下一阶段 … UDP 等」 | 计划中 | 本稿即其设计 |
+> **2026-09-30 回填**：P0-1（会话表）/ P0-2（ASSOCIATE）/ P0-3（direct/ss/wg 出站载荷）已落地，「落地现状」列如实标注；P0-4/P0-5 未落地（实现级设计稿 [udp-mesh-dataplane.md](udp-mesh-dataplane.md) / [udp-observability.md](udp-observability.md)），相关声明维持超前/未实现口径。
+
+| 声明出处 | 状态（设计时点） | 落地现状（2026-09 回填） | 本稿处置 |
+|---------|------|------|---------|
+| PROTOCOLS.md「SOCKS5 … UDP ASSOCIATE (UDP 代理)」 | **超前描述**（代码仅 CONNECT） | ✅ 已实现（P0-2，2026-09） | §2 落地完成；PROTOCOLS.md 总表与 SOCKS5 节已改"已实现" |
+| PROTOCOLS.md「Shadowsocks … TCP, UDP」 | 部分超前（仅 TCP） | ✅ UDP 已实现（P0-3 `ShadowsocksUdpConnector`；完整解密往返联调归 P0-5） | §3.2 落地完成 |
+| PROTOCOLS.md「Hysteria … UDP 首包优化」/ hy2 小节 | 超前（仅 TCP） | ❌ 未实现——V1 核查：`hysteria2` 0.1.6 公开 API 无 UDP 出口，改判 P0-4 与 mesh 载荷同批（quinn=V2 未决） | §3.3 分支 (c) 改道 |
+| PROTOCOLS.md「WireGuard … Layer 3 (IP) 隧道」 | 与实现一致（TCP over WG 已通） | ✅ UDP 已实现（P0-3：`allowed_ips` 预检 + MTU 上限 `mtu-80`，仍走系统 WG 接口） | §3.4 扩展落地 |
+| PROTOCOLS.md「SOCKS5 出口 … UDP 中继」 | 超前 | ❌ 维持不在 S1 范围（§3.5） | 不变 |
+| mesh.md「Mesh Data-Plane Protocol (TCP, MVP)」 | 与实现一致 | 不变：UDP 面未实现（P0-4 设计稿就绪；mesh.md 已加现状注记） | §4 设计定稿（udp-mesh-dataplane.md） |
+| architecture.md「下一阶段 … UDP 等」 | 计划中 | P0-1..P0-3 已落地；P0-4/P0-5 设计就绪 | 本稿 + 实现级设计四稿 |
 
 ## 1. UDP 会话表与粘滞键（P0-1）
 

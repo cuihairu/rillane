@@ -2,14 +2,15 @@
 
 Seep 是一个高性能的网络路由代理系统，支持多种主流的网络协议。
 
-> **实现状态标注（2026-09 对照代码核实）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
+> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-3 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
 >
 > | 能力 | 状态 | 落地去向 |
 > |------|------|---------|
 > | 入站 socks5 (CONNECT) / http (CONNECT) / mixed | 已实现（TCP） | — |
-> | 入站 socks5 UDP ASSOCIATE | 未实现 | P0-2（[udp-dataplane.md](design/udp-dataplane.md) §2） |
+> | 入站 socks5 UDP ASSOCIATE | **已实现（2026-09，P0-2）**：RFC 1928 ASSOCIATE + 数据报中继；`udp:` 块缺省关闭 | — |
 > | 出站 direct/socks5/http/shadowsocks/trojan/hysteria2/vless/wireguard（TCP） | 已实现 | — |
-> | 出站 UDP 承载（direct/ss/hy2/wg） | 未实现 | P0-3（udp-dataplane.md §3） |
+> | 出站 UDP 承载（direct/ss/wg） | **已实现（2026-09，P0-3）**；ss 完整解密往返联调归 P0-5 | — |
+> | 出站 UDP 承载（hy2） | 未实现（`hysteria2` 0.1.6 公开 API 无 UDP 出口） | P0-4（与 mesh 载荷同批，quinn=V2 未决） |
 > | 出站 vmess 连接器 | 未实现（配置 schema 与订阅转换已支持，运行时构建期报错） | todo「VMess 出站」条目 |
 > | hysteria v1 | 未实现 | 无计划（仅 hy2） |
 > | 出站连接池 / TLS 会话恢复 | 未实现 | P1-5 |
@@ -20,7 +21,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 ## 入口协议 (Ingress Protocols)
 
 ### SOCKS5 代理
-> 状态：已实现 CONNECT（含用户名/密码认证，`IngressConfig::Socks5`）；**UDP ASSOCIATE 未实现**——当前仅接受 cmd=0x01，其余命令回 0x07，落地见 todo P0-2 与 [udp-dataplane.md](design/udp-dataplane.md) §2。
+> 状态：已实现 CONNECT（含用户名/密码认证，`IngressConfig::Socks5`）与 **UDP ASSOCIATE（2026-09，P0-2）**——cmd 0x01/0x03 分派（`seep-protocols/src/inbound/socks5.rs`），ASSOCIATE 服务/数据报头编解码/准入在 `seep-core/src/udp/associate.rs`，认证用户名进粘滞键，mixed 入口同享；`udp:` 配置块缺省关闭（关闭时 0x03 回 0x07）。详见 [udp-dataplane.md](design/udp-dataplane.md) §2 与 [udp-relay-path.md](design/udp-relay-path.md) §2。
 
 - **协议版本**: SOCKS5 (RFC 1928)
 - **认证方式**:
@@ -54,7 +55,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 ## 出口协议 (Egress Protocols)
 
 ### 直连 (Direct)
-> 状态：已实现 TCP 直连；**UDP 未实现**（P0-3）；「自动 IP 版本选择 / Happy Eyeballs」未实现（现状为直接 `TcpStream::connect`）——超前描述。
+> 状态：已实现 TCP 直连与 **UDP 承载（2026-09，P0-3，direct 载体）**；「自动 IP 版本选择 / Happy Eyeballs」未实现（现状为直接 `TcpStream::connect`）——超前描述。
 
 - **描述**: 直接连接目标服务器，不经过代理
 - **支持协议**: TCP, UDP
@@ -87,7 +88,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 自动处理隧道 (CONNECT)
 
 ### Shadowsocks
-> 状态：已实现 TCP（AEAD 加密由 `shadowsocks` crate 承载，可用方法以 crate 1.21 为准，`method` 为自由字符串、非法值在运行时报错）；**UDP 未实现**（P0-3）；插件系统（v2ray-plugin/obfs）与动态端口分配**未实现**——超前描述。
+> 状态：已实现 TCP（AEAD 加密由 `shadowsocks` crate 承载，可用方法以 crate 1.21 为准，`method` 为自由字符串、非法值在运行时报错）与 **UDP（2026-09，P0-3：`ShadowsocksUdpConnector`，方法校验提前至构建期、目标地址固定 R7 语义；完整解密往返需 shadowsocks-service 服务端联调，归 P0-5）**；插件系统（v2ray-plugin/obfs）与动态端口分配**未实现**——超前描述。
 
 - **加密算法**:
   - AES-256-GCM
@@ -165,7 +166,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 低延迟传输
 
 ### Hysteria2
-> 状态：部分实现——TCP over QUIC、密码认证、`mport`/`server_name`/`alpn`/`skip_cert_verify` 配置生效（`hysteria2` crate 承载）；拥塞控制算法选择、**UDP 中继/首包优化未实现**（P0-3，依赖 crate 能力核查，见 [udp-dataplane.md](design/udp-dataplane.md) §3.3 未决项 V1）；salamander 混淆未实现（配置无该字段，混淆层见 todo P1-4/P2-4）。
+> 状态：部分实现——TCP over QUIC、密码认证、`mport`/`server_name`/`alpn`/`skip_cert_verify` 配置生效（`hysteria2` crate 承载）；拥塞控制算法选择、**UDP 中继/首包优化未实现**——V1 核查结论（2026-09）：`hysteria2` 0.1.6 公开 API 仅 connect/tcp_connect、`quic_connection` 为 pub(crate)，无 UDP 出口，非静默缩水，改判 P0-4 与 mesh UDP 载荷同批（载具 quinn = V2 未决，见 todo.md P0-3/P0-4 条目与 [udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)）；salamander 混淆未实现（配置无该字段，混淆层见 todo P1-4/P2-4）。
 
 - **协议**: Hysteria 的改进版本
 - **改进**:
@@ -180,7 +181,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 支持混淆 (salamander)
 
 ### WireGuard
-> 状态：部分实现——TCP 流量经系统 WireGuard 接口转发（`address`/`allowed_ips`/`preshared_key`/`persistent_keepalive`/`mtu`/`dns` 配置生效，需系统 WG 接口与相应权限）；「内核级实现」指依赖系统 WG，seep 自身不做加解密；**UDP 原生承载未实现**（P0-3，见 udp-dataplane.md §3.4）。
+> 状态：部分实现——TCP 流量经系统 WireGuard 接口转发（`address`/`allowed_ips`/`preshared_key`/`persistent_keepalive`/`mtu`/`dns` 配置生效，需系统 WG 接口与相应权限）；「内核级实现」指依赖系统 WG，seep 自身不做加解密；**UDP 承载已实现（2026-09，P0-3：`WireguardUdpConnector`——`allowed_ips` 解析后预检（不在集合 → 拆映射重路由）+ MTU 上限 `mtu-80`，仍走系统 WG 接口路径）**，见 [udp-relay-path.md](design/udp-relay-path.md)。
 
 - **协议**: 快速现代 VPN
 - **加密**:
@@ -226,7 +227,7 @@ impl EgressConnector for MyProtocol {
 
 ## 性能优化
 
-> 状态：零拷贝与批量处理未实现（描述为设计口径）；**连接池未实现**（P1-5，网页加速核心项）；「智能选择/故障转移」部分成立——组策略选路（7 种策略）与 mesh chain 故障回退已实现，「会话保持」待 UDP 粘滞会话落地（P0-1）。
+> 状态：零拷贝与批量处理未实现（描述为设计口径）；**连接池未实现**（P1-5，网页加速核心项）；「智能选择/故障转移」部分成立——组策略选路（7 种策略）与 mesh chain 故障回退已实现；「会话保持」在 UDP 侧已成立（2026-09，P0-1 会话表：进程/五元组粘滞键 + 空闲/生命周期回收，`seep-core/src/udp/`），TCP 连接复用仍归 P1-5。
 
 ### 协议层优化
 - **零拷贝**: 使用 Rust 的所有权系统避免不必要的内存拷贝
