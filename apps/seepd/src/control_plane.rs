@@ -14,6 +14,7 @@ use hyper::{
 };
 use serde::{Deserialize, Serialize};
 
+use seep_core::udp::{TableSnapshot, UdpIngressMetrics, UdpIngressSnapshot};
 use seep_mesh::{LinkState, MeshRegistry, NodeCapability, NodeRecord, NodeRole};
 use seep_runtime::{ChainConstraints, ConfigMergeStats, Runtime, RuntimeEvent};
 use seep_subscription::{Subscription, SubscriptionConverter, SubscriptionType};
@@ -96,6 +97,7 @@ impl ControlPlane {
             (Method::GET, "/nodes") => self.handle_nodes().await,
             (Method::GET, "/flows") => self.handle_flows().await,
             (Method::GET, "/metrics") => self.handle_metrics().await,
+            (Method::GET, "/udp/stats") => self.handle_udp_stats().await,
             (Method::GET, "/runtime/stats") => self.handle_runtime_stats().await,
             (Method::GET, "/runtime/config") => self.handle_runtime_config().await,
             (Method::GET, "/events") => self.handle_events().await,
@@ -502,6 +504,204 @@ impl ControlPlane {
             );
         }
 
+        // ---- UDP 数据面（P0-5 §2.2–2.4，恒渲染：udp_service None / mesh 面未装配时全零，
+        // 端点不因开关消失，§6-2）----
+        let (udp_table, udp_ingress) = match self.runtime.get_udp_service() {
+            Some(svc) => (svc.table().snapshot(), svc.ingress_snapshot()),
+            None => (
+                udp_zero_table_snapshot(),
+                UdpIngressMetrics::default().snapshot(),
+            ),
+        };
+
+        // §2.2 会话表序列
+        push_gauge(
+            &mut out,
+            "seep_udp_sessions_active",
+            "Active UDP sessions.",
+            udp_table.sessions_active as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_sessions_total",
+            "Total UDP sessions created (including reclaimed).",
+            udp_table.sessions_total as f64,
+        );
+        push_gauge(
+            &mut out,
+            "seep_udp_mappings_active",
+            "Active UDP destination mappings.",
+            udp_table.mappings_active as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_reroutes_total",
+            "UDP sticky-decision rebuilds.",
+            udp_table.reroutes as f64,
+        );
+        push_metric_header(
+            &mut out,
+            "seep_udp_relay_bytes_total",
+            "UDP relay bytes between client and egress.",
+            "counter",
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_udp_relay_bytes_total",
+            &[("direction", "up")],
+            udp_table.bytes_up as f64,
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_udp_relay_bytes_total",
+            &[("direction", "down")],
+            udp_table.bytes_down as f64,
+        );
+        push_metric_header(
+            &mut out,
+            "seep_udp_relay_packets_total",
+            "UDP relay datagrams.",
+            "counter",
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_udp_relay_packets_total",
+            &[("direction", "up")],
+            udp_ingress.uplink_packets as f64,
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_udp_relay_packets_total",
+            &[("direction", "down")],
+            udp_ingress.downlink_packets as f64,
+        );
+        push_metric_header(
+            &mut out,
+            "seep_udp_dropped_total",
+            "Dropped UDP datagrams.",
+            "counter",
+        );
+        for reason in UDP_DROP_REASONS {
+            push_metric_labeled(
+                &mut out,
+                "seep_udp_dropped_total",
+                &[("reason", reason)],
+                udp_table.dropped.get(reason).copied().unwrap_or(0) as f64,
+            );
+        }
+        push_metric_header(
+            &mut out,
+            "seep_udp_expired_total",
+            "Expired UDP sessions/mappings.",
+            "counter",
+        );
+        for reason in UDP_EXPIRE_REASONS {
+            push_metric_labeled(
+                &mut out,
+                "seep_udp_expired_total",
+                &[("reason", reason)],
+                udp_table.expired.get(reason).copied().unwrap_or(0) as f64,
+            );
+        }
+
+        // §2.3 ingress / ASSOCIATE 序列
+        push_gauge(
+            &mut out,
+            "seep_udp_associates_active",
+            "Active SOCKS5 UDP ASSOCIATE control connections.",
+            udp_ingress.associates_active as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_associates_total",
+            "Total accepted SOCKS5 UDP ASSOCIATE requests.",
+            udp_ingress.associates_total as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_associates_rejected_total",
+            "Rejected SOCKS5 UDP ASSOCIATE requests.",
+            udp_ingress.associate_rejected as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_associate_errors_total",
+            "SOCKS5 UDP ASSOCIATE slow-path errors.",
+            udp_ingress.associate_errors as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_frag_dropped_total",
+            "UDP datagrams dropped for FRAG != 0.",
+            udp_ingress.frag_dropped as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_source_dropped_total",
+            "UDP datagrams dropped for mismatched source address.",
+            udp_ingress.source_dropped as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_malformed_dropped_total",
+            "UDP datagrams dropped for malformed SOCKS5 header.",
+            udp_ingress.malformed_dropped as f64,
+        );
+
+        // §2.4 mesh UDP 面序列（面未启用/未 start → 全零；client 侧分立不混入面族）
+        let udp_mesh = self.runtime.get_mesh_udp_snapshot().unwrap_or_default();
+        push_gauge(
+            &mut out,
+            "seep_udp_mesh_flows_active",
+            "Active mesh UDP flow cache entries.",
+            udp_mesh.flows_active as f64,
+        );
+        push_metric_header(
+            &mut out,
+            "seep_udp_mesh_forwarded_total",
+            "Mesh UDP datagrams forwarded between hops.",
+            "counter",
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_udp_mesh_forwarded_total",
+            &[("direction", "up")],
+            udp_mesh.forwarded_up as f64,
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_udp_mesh_forwarded_total",
+            &[("direction", "down")],
+            udp_mesh.forwarded_down as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_mesh_unknown_flow_total",
+            "Mesh UDP CACHED envelopes with no flow match.",
+            udp_mesh.unknown_flow as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_mesh_malformed_total",
+            "Mesh UDP envelopes failing to decode.",
+            udp_mesh.malformed as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_mesh_evicted_total",
+            "Mesh UDP flow cache evictions.",
+            udp_mesh.evicted as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_mesh_client_dropped_total",
+            "Client-side mesh UDP downlink drops.",
+            self.runtime
+                .get_udp_client_metrics()
+                .map(|m| m.dropped())
+                .unwrap_or(0) as f64,
+        );
+
         if let Some(subs) = self.runtime.get_subscription_manager() {
             push_gauge(
                 &mut out,
@@ -574,6 +774,29 @@ impl ControlPlane {
             .header(CONTENT_TYPE, "text/plain; version=0.0.4")
             .body(Body::from(out))
             .unwrap_or_else(|_| Response::new(Body::from("internal error")))
+    }
+
+    /// P0-5 §3.1/§9-1：UDP 观测 JSON。`table`/`ingress` 恒在（UDP 关闭时全零，
+    /// §6-2）；`mesh` 仅面启用时为对象、否则 null（两态可区分）；
+    /// `mesh_client` 仅 chain+udp client 桥装配时出现（§2.4 收编裁决：键省略）。
+    async fn handle_udp_stats(&self) -> Response<Body> {
+        let (table, ingress) = match self.runtime.get_udp_service() {
+            Some(svc) => (svc.table().snapshot(), svc.ingress_snapshot()),
+            None => (
+                udp_zero_table_snapshot(),
+                UdpIngressMetrics::default().snapshot(),
+            ),
+        };
+        let dto = UdpStatsDto {
+            table,
+            ingress,
+            mesh: self.runtime.get_mesh_udp_snapshot(),
+            mesh_client: self
+                .runtime
+                .get_udp_client_metrics()
+                .map(|m| UdpClientDroppedDto { dropped: m.dropped() }),
+        };
+        json(StatusCode::OK, &dto)
     }
 
     async fn handle_nodes(&self) -> Response<Body> {
@@ -1016,6 +1239,56 @@ impl ControlPlane {
     }
 }
 
+/// P0-5 §9-1 `/udp/stats` 响应体
+#[derive(Debug, Clone, Serialize)]
+struct UdpStatsDto {
+    table: TableSnapshot,
+    ingress: UdpIngressSnapshot,
+    /// None 序列化为 null——面未启用与零流量两态可区分（§9-1）
+    mesh: Option<seep_runtime::UdpFaceSnapshot>,
+    /// 仅 chain+udp client 桥装配时出现（§2.4 收编裁决：未装配省略该键）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mesh_client: Option<UdpClientDroppedDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UdpClientDroppedDto {
+    dropped: u64,
+}
+
+/// P0-5 §2.2 reason 封闭枚举（与 `TableSnapshot` dropped/expired 映射键同源；
+/// 渲染静态可枚举，恒渲染不依赖运行时 Map 键集）
+const UDP_DROP_REASONS: [&str; 6] = [
+    "session_limit",
+    "mapping_limit",
+    "no_binding",
+    "shutting_down",
+    "send_failed",
+    "downlink_full",
+];
+const UDP_EXPIRE_REASONS: [&str; 3] = ["idle", "lifetime", "revoked"];
+
+/// P0-5 §6-2 恒渲染：UDP 关闭时的全零表快照（reason 键齐全）
+fn udp_zero_table_snapshot() -> TableSnapshot {
+    TableSnapshot {
+        sessions_active: 0,
+        sessions_total: 0,
+        mappings_active: 0,
+        reroutes: 0,
+        bytes_up: 0,
+        bytes_down: 0,
+        dropped: UDP_DROP_REASONS
+            .iter()
+            .map(|r| (r.to_string(), 0))
+            .collect(),
+        expired: UDP_EXPIRE_REASONS
+            .iter()
+            .map(|r| (r.to_string(), 0))
+            .collect(),
+        sessions: Vec::new(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct MeshNodeDto {
     id: String,
@@ -1248,6 +1521,14 @@ fn push_gauge(out: &mut String, name: &str, help: &str, value: f64) {
     out.push_str("# TYPE ");
     out.push_str(name);
     out.push_str(" gauge\n");
+    out.push_str(name);
+    out.push(' ');
+    out.push_str(&format!("{value}\n"));
+}
+
+/// 无标签 counter 序列（P0-5 §2.1 两族之外的既有 chain 段渲染式收拢为助手）
+fn push_counter(out: &mut String, name: &str, help: &str, value: f64) {
+    push_metric_header(out, name, help, "counter");
     out.push_str(name);
     out.push(' ');
     out.push_str(&format!("{value}\n"));
@@ -1508,8 +1789,13 @@ fn sanitize_label_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seep_config::SeepConfig;
+    use seep_config::{
+        EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor, SeepConfig, UdpConfig,
+    };
     use seep_runtime::{MeshConfig, RuntimeBuilder, RuntimeConfig};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UdpSocket;
+    use tokio::time::{timeout, Duration};
 
     async fn build_runtime(mesh: bool, chain: bool) -> Arc<Runtime> {
         let cfg_path =
@@ -1713,5 +1999,351 @@ mod tests {
             .unwrap();
         let resp = cp.handle(remove).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ---------- P0-5 §10-S4 控制面渲染 ----------
+
+    /// 找一个空闲端口（先绑后弃有竞态窗口，测试环境足够——与 runtime_builder 测试同法）
+    fn free_bind() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("127.0.0.1:{}", l.local_addr().unwrap().port())
+    }
+
+    /// socks5 入口 + direct 出口 + udp.enabled 的最小配置（真 socket 往返用）
+    fn s4_udp_config() -> SeepConfig {
+        SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: true,
+                enable_tracing: false,
+            },
+            ingress: vec![IngressDescriptor {
+                name: "s4-socks".to_string(),
+                spec: IngressConfig::Socks5 {
+                    bind: free_bind(),
+                    auth: None,
+                    udp_enabled: None,
+                },
+            }],
+            egress: vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            routing: seep_config::RoutingConfig {
+                default_node: "direct".to_string(),
+                groups: vec![],
+                rules: vec![],
+            },
+            udp: UdpConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// 从 /metrics 文本取指定序列（含标签）的值
+    fn metric_value(body: &str, series: &str) -> Option<f64> {
+        for line in body.lines() {
+            if let Some(rest) = line.strip_prefix(series) {
+                if let Some(v) = rest.strip_prefix(' ') {
+                    if let Ok(n) = v.trim().parse::<f64>() {
+                        return Some(n);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    async fn get_body(cp: &ControlPlane, path: &str) -> String {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    /// 环回 UDP 回声（P0-2 集成先例同构）
+    async fn spawn_echo_server() -> SocketAddr {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            while let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let _ = sock.send_to(&buf[..n], from).await;
+            }
+        });
+        addr
+    }
+
+    /// ASSOCIATE 握手（带监听就绪重试）；控制连接随返回值存续（EOF 即吊销会话）
+    async fn associate_relay_port(bind: &str) -> (tokio::net::TcpStream, u16) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut s = None;
+        while s.is_none() {
+            match tokio::net::TcpStream::connect(bind).await {
+                Ok(stream) => s = Some(stream),
+                Err(_) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(20)).await
+                }
+                Err(e) => panic!("connect {bind} 失败: {e}"),
+            }
+        }
+        let mut s = s.unwrap();
+        s.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut method = [0u8; 2];
+        s.read_exact(&mut method).await.unwrap();
+        // 请求帧：VER CMD(0x03) RSV ATYP=0x01 DST=0.0.0.0:0（全零 IPv4）
+        s.write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        let mut reply = [0u8; 10];
+        s.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[1], 0x00, "ASSOCIATE 应成功");
+        let port = u16::from_be_bytes([reply[8], reply[9]]);
+        assert_ne!(port, 0, "BND.PORT 必须真实");
+        (s, port)
+    }
+
+    /// 测试 1：udp 关闭的默认 runtime——§2.2/§2.3/§2.4 序列名逐条命中且值为 0
+    ///（验收 #2 恒渲染：端点不因开关消失）
+    #[tokio::test]
+    async fn metrics_contains_full_udp_family() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+        let s = get_body(&cp, "/metrics").await;
+
+        let zero_series = [
+            // §2.2 会话表
+            "seep_udp_sessions_active",
+            "seep_udp_sessions_total",
+            "seep_udp_mappings_active",
+            "seep_udp_reroutes_total",
+            "seep_udp_relay_bytes_total{direction=\"up\"}",
+            "seep_udp_relay_bytes_total{direction=\"down\"}",
+            "seep_udp_relay_packets_total{direction=\"up\"}",
+            "seep_udp_relay_packets_total{direction=\"down\"}",
+            "seep_udp_dropped_total{reason=\"session_limit\"}",
+            "seep_udp_dropped_total{reason=\"mapping_limit\"}",
+            "seep_udp_dropped_total{reason=\"no_binding\"}",
+            "seep_udp_dropped_total{reason=\"shutting_down\"}",
+            "seep_udp_dropped_total{reason=\"send_failed\"}",
+            "seep_udp_dropped_total{reason=\"downlink_full\"}",
+            "seep_udp_expired_total{reason=\"idle\"}",
+            "seep_udp_expired_total{reason=\"lifetime\"}",
+            "seep_udp_expired_total{reason=\"revoked\"}",
+            // §2.3 ingress / ASSOCIATE
+            "seep_udp_associates_active",
+            "seep_udp_associates_total",
+            "seep_udp_associates_rejected_total",
+            "seep_udp_associate_errors_total",
+            "seep_udp_frag_dropped_total",
+            "seep_udp_source_dropped_total",
+            "seep_udp_malformed_dropped_total",
+            // §2.4 mesh 面 + client 侧
+            "seep_udp_mesh_flows_active",
+            "seep_udp_mesh_forwarded_total{direction=\"up\"}",
+            "seep_udp_mesh_forwarded_total{direction=\"down\"}",
+            "seep_udp_mesh_unknown_flow_total",
+            "seep_udp_mesh_malformed_total",
+            "seep_udp_mesh_evicted_total",
+            "seep_udp_mesh_client_dropped_total",
+        ];
+        for series in zero_series {
+            assert_eq!(
+                metric_value(&s, series),
+                Some(0.0),
+                "系列 {series} 应恒渲染且值为 0"
+            );
+        }
+    }
+
+    /// 测试 2：真 socket ASSOCIATE + 环回 echo 往返后 packets/bytes 序列非零
+    #[tokio::test]
+    async fn metrics_udp_counters_after_traffic() {
+        let cfg = s4_udp_config();
+        let socks_bind = match &cfg.ingress[0].spec {
+            IngressConfig::Socks5 { bind, .. } => bind.clone(),
+            _ => unreachable!(),
+        };
+        let runtime = Arc::new(
+            RuntimeBuilder::new(cfg)
+                .with_runtime_config(RuntimeConfig {
+                    enable_hot_reload: false,
+                    ..RuntimeConfig::default()
+                })
+                .build()
+                .unwrap(),
+        );
+        let tasks = runtime.start().await.unwrap();
+        let cp = ControlPlane::new(runtime, None, true);
+        let echo_addr = spawn_echo_server().await;
+
+        // 客户端 UDP socket（数据报源 = 粘滞键 client；strict 源校验同为 127.0.0.1）
+        let (control, relay_port) = associate_relay_port(&socks_bind).await;
+        let client_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut frame = vec![0, 0, 0, 1]; // RSV(2) FRAG ATYP=IPv4
+        match echo_addr.ip() {
+            std::net::IpAddr::V4(v4) => frame.extend_from_slice(&v4.octets()),
+            std::net::IpAddr::V6(v6) => {
+                frame[3] = 4;
+                frame.extend_from_slice(&v6.octets());
+            }
+        }
+        frame.extend_from_slice(&echo_addr.port().to_be_bytes());
+        frame.extend_from_slice(b"seep-udp-metrics");
+        client_udp
+            .send_to(&frame, ("127.0.0.1", relay_port))
+            .await
+            .unwrap();
+
+        // 下行：SOCKS5 帧封装的回声应答（收到即上行/下行两计数均已发生）
+        let mut rxbuf = [0u8; 2048];
+        let (n, _) = timeout(Duration::from_secs(2), client_udp.recv_from(&mut rxbuf))
+            .await
+            .expect("应在超时内收到下行回声")
+            .unwrap();
+        let (parsed, hlen) = seep_core::udp::parse_udp_header(&rxbuf[..n]).unwrap();
+        assert_eq!(parsed.host, echo_addr.ip().to_string());
+        assert_eq!(parsed.port, echo_addr.port());
+        assert_eq!(&rxbuf[hlen..n], b"seep-udp-metrics");
+
+        let s = get_body(&cp, "/metrics").await;
+        assert!(
+            metric_value(&s, "seep_udp_relay_packets_total{direction=\"up\"}").unwrap() >= 1.0,
+            "上行包计数应 ≥1"
+        );
+        assert!(
+            metric_value(&s, "seep_udp_relay_packets_total{direction=\"down\"}").unwrap() >= 1.0,
+            "下行包计数应 ≥1"
+        );
+        assert!(
+            metric_value(&s, "seep_udp_relay_bytes_total{direction=\"up\"}").unwrap() > 0.0,
+            "上行字节应非零"
+        );
+        assert!(
+            metric_value(&s, "seep_udp_relay_bytes_total{direction=\"down\"}").unwrap() > 0.0,
+            "下行字节应非零"
+        );
+
+        drop(control);
+        for t in tasks {
+            t.abort();
+        }
+    }
+
+    /// 测试 3：/udp/stats 结构对齐 §9-1——mesh 两态（未启用 null / 启用对象）+
+    /// mesh_client 条件键 + table/ingress 恒在
+    #[tokio::test]
+    async fn udp_stats_endpoint_shape() {
+        // —— 态一：mesh 面未启用（sample 配置 udp 关）→ 全零恒在、mesh null、
+        //    mesh_client 键省略 ——
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+        let s = get_body(&cp, "/udp/stats").await;
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+
+        let table = v.get("table").expect("table 段恒在").as_object().unwrap();
+        for f in [
+            "sessions_active",
+            "sessions_total",
+            "mappings_active",
+            "reroutes",
+            "bytes_up",
+            "bytes_down",
+        ] {
+            assert_eq!(table[f], serde_json::json!(0), "table.{f} 应为 0");
+        }
+        let dropped = table.get("dropped").unwrap().as_object().unwrap();
+        assert_eq!(dropped.len(), 6, "dropped 六 reason 键齐全");
+        for val in dropped.values() {
+            assert_eq!(*val, serde_json::json!(0));
+        }
+        let expired = table.get("expired").unwrap().as_object().unwrap();
+        assert_eq!(expired.len(), 3, "expired 三 reason 键齐全");
+        assert!(table.get("sessions").unwrap().as_array().unwrap().is_empty());
+
+        let ingress = v.get("ingress").expect("ingress 段恒在").as_object().unwrap();
+        for f in [
+            "associates_active",
+            "associates_total",
+            "associate_rejected",
+            "associate_errors",
+            "uplink_packets",
+            "downlink_packets",
+            "frag_dropped",
+            "source_dropped",
+            "malformed_dropped",
+        ] {
+            assert_eq!(ingress[f], serde_json::json!(0), "ingress.{f} 应为 0");
+        }
+
+        assert!(
+            v.get("mesh").is_some_and(|m| m.is_null()),
+            "面未启用 mesh 应为 null（与零流量对象两态可区分）"
+        );
+        assert!(
+            v.get("mesh_client").is_none(),
+            "未装配 client 桥应省略 mesh_client 键"
+        );
+
+        // —— 态二：relay 角色 + chain+udp + start() → mesh 对象（零流量全零）、
+        //    mesh_client 出现（chain+udp 桥 build 期装配）——
+        let runtime2 = Arc::new(
+            RuntimeBuilder::new(s4_udp_config())
+                .with_runtime_config(RuntimeConfig {
+                    enable_mesh: true,
+                    enable_chain: true,
+                    enable_hot_reload: false,
+                    mesh_config: Some(MeshConfig {
+                        node_id: "s4-relay".into(),
+                        role: "relay".into(),
+                        listen_address: "127.0.0.1:0".parse().unwrap(),
+                        allow_plaintext_data_plane: true,
+                        udp_allow_plaintext_data_plane: true,
+                        ..MeshConfig::default()
+                    }),
+                    ..RuntimeConfig::default()
+                })
+                .build()
+                .unwrap(),
+        );
+        let tasks = runtime2.start().await.unwrap();
+        let cp2 = ControlPlane::new(runtime2, None, true);
+        let s2 = get_body(&cp2, "/udp/stats").await;
+        let v2: serde_json::Value = serde_json::from_str(&s2).unwrap();
+
+        let mesh = v2
+            .get("mesh")
+            .and_then(|m| m.as_object())
+            .expect("面启用后 mesh 应为对象");
+        for f in [
+            "forwarded_up",
+            "forwarded_down",
+            "malformed",
+            "unknown_flow",
+            "evicted",
+            "flows_active",
+        ] {
+            assert_eq!(mesh[f], serde_json::json!(0), "mesh.{f} 零流量应为 0");
+        }
+        let mc = v2
+            .get("mesh_client")
+            .and_then(|m| m.as_object())
+            .expect("chain+udp 桥装配应出现 mesh_client");
+        assert_eq!(mc.get("dropped"), Some(&serde_json::json!(0)));
+
+        for t in tasks {
+            t.abort();
+        }
     }
 }
