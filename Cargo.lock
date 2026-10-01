@@ -2790,6 +2790,7 @@ dependencies = [
  "seep-config",
  "seep-core",
  "serde",
+ "serde_json",
  "sha1",
  "sha2",
  "shadowsocks",
