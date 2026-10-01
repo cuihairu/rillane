@@ -8,8 +8,23 @@ use tracing::info;
 
 mod control_plane;
 
+/// 早期退出参数面（无 clap 依赖的最小实现）：`--version`/`-V` → 版本行。
+/// 容器 HEALTHCHECK 与 CI docker job 冒烟（`docker run seep:test --version`）依赖此路径。
+fn version_flag_response(args: &[String]) -> Option<String> {
+    match args.get(1).map(String::as_str) {
+        Some("--version") | Some("-V") => Some(format!("seepd {}", env!("CARGO_PKG_VERSION"))),
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // --version/-V 在配置加载前短路（daemon 不应因版本查询而读配置/起服务）
+    if let Some(line) = version_flag_response(&env::args().collect::<Vec<_>>()) {
+        println!("{line}");
+        return Ok(());
+    }
+
     let config_path = env::var("SEEP_CONFIG").unwrap_or_else(|_| "config/seep.yaml".to_string());
     let config = SeepConfig::load_from_path(&config_path)?;
 
@@ -84,4 +99,27 @@ async fn main() -> Result<()> {
     let _ = shutdown_tx.send(());
     runtime.stop().await.ok();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// --version/-V 输出版本行；无参/其他参数/第三位参数均走正常启动
+    #[test]
+    fn version_flag_short_circuits() {
+        let line = version_flag_response(&args(&["seepd", "--version"])).unwrap();
+        assert_eq!(line, format!("seepd {}", env!("CARGO_PKG_VERSION")));
+
+        assert!(version_flag_response(&args(&["seepd", "-V"])).is_some());
+
+        assert!(version_flag_response(&args(&["seepd"])).is_none());
+        assert!(version_flag_response(&args(&["seepd", "run"])).is_none());
+        // 仅识别首位参数：`seepd start --version` 不短路（位置语义留给未来 CLI 扩展）
+        assert!(version_flag_response(&args(&["seepd", "start", "--version"])).is_none());
+    }
 }

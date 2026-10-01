@@ -1,0 +1,8 @@
+# 构建上下文裁剪（Dockerfile 走 COPY . .——本文件防本地 target/.git 等进入上下文与镜像）
+target/
+.git/
+.gitignore
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+**/*.rs.bk
