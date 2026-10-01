@@ -2,14 +2,17 @@
 //!
 //! 裁决同 `network_config`：seep-config 镜像 serde 类型，转换落本 crate
 //! （`UdpConfig`/`NetworkBlockConfig` 先例）。M0 交付策略解析（profile 选择 +
-//! spec 映射）；middleware 链构造与选择器闭包固化归 M1/M2（`PaddingMiddleware`
-//! 消费 `PaddingPolicy`，§8 分步）。
+//! spec 映射）；M1 本文件补链构造（`PaddingMiddleware` 消费 `PaddingPolicy`，
+//! 选择器闭包固化，§8 分步）。
+
+use std::sync::Arc;
 
 use anyhow::Result;
 use tracing::warn;
 
 use seep_config::{ApplyTo, ObfuscationConfig, PaddingBlockConfig};
-use seep_core::{PaddingMode, PaddingSpec};
+use seep_core::{FlowMiddleware, MiddlewareChain, PaddingMode, PaddingSpec};
+use seep_protocols::middleware::{LatencyProbe, PadSelector, PaddingMiddleware};
 
 /// 解析后的 padding 策略（选择器 + spec）：M1 构建 middleware 链、M2
 /// `PaddingMiddleware` 的构造输入。选择器按 §1.4 注解值匹配（`seep.route.kind`
@@ -98,6 +101,47 @@ fn padding_block_to_spec(block: &PaddingBlockConfig) -> Result<PaddingSpec> {
         max: block.max,
         max_overhead_ratio: block.max_overhead_ratio,
     })
+}
+
+/// `ObfuscationConfig` → `MiddlewareChain`（§3.2 表行 1：MVP 至多一个
+/// `PaddingMiddleware` + 调试显式挂的 `LatencyProbe`；§1.5 声明序即执行序）。
+///
+/// - 块缺席 / `enabled=false` → 空链（§2.5：build 期不构造任何 middleware，
+///   `latency_probe` 亦不挂——关闭语义覆盖整块，E11）；
+/// - `padding` → `to_padding_policy` 解析策略 + 选择器闭包固化（闭包捕获
+///   `PaddingPolicy` 委托 `matches`，§3.2 表行 2；E5 降级 None 时不挂）；
+/// - `latency_probe` → 显式挂载（§4.1：1ms sleep 为占位语义，默认不挂，
+///   仅配置声明时用于验证管线连通与调试）；
+/// - 未知名字 → Err（validate §3.3-5 已拦，此处直调防御）。
+pub fn build_middleware_chain(
+    cfg: Option<&ObfuscationConfig>,
+    known_egress: &[&str],
+) -> Result<MiddlewareChain> {
+    let Some(cfg) = cfg else {
+        return Ok(MiddlewareChain::default());
+    };
+    if !cfg.enabled {
+        return Ok(MiddlewareChain::default());
+    }
+    let padding_policy = to_padding_policy(cfg, known_egress)?;
+    let mut mws: Vec<Arc<dyn FlowMiddleware>> = Vec::new();
+    for name in &cfg.middleware {
+        match name.as_str() {
+            "padding" => {
+                if let Some(policy) = padding_policy.clone() {
+                    let spec = policy.spec.clone();
+                    let selector: PadSelector =
+                        Box::new(move |kind, egress| policy.matches(kind, egress));
+                    mws.push(Arc::new(PaddingMiddleware::new(spec, selector)));
+                }
+            }
+            "latency_probe" => mws.push(Arc::new(LatencyProbe::new())),
+            other => anyhow::bail!(
+                "obfuscation.middleware 含未知名字 {other:?}（须为 padding|latency_probe，§3.3-5）"
+            ),
+        }
+    }
+    Ok(MiddlewareChain::new(mws))
 }
 
 #[cfg(test)]
@@ -259,5 +303,42 @@ mod tests {
         });
         let err = to_padding_policy(&cfg, &[]).unwrap_err();
         assert!(err.to_string().contains("fixedx"), "{err}");
+    }
+
+    /// §3.2 表行 1/§2.5/E11：块缺席或 enabled=false → 空链——关闭语义覆盖
+    /// 整块（latency_probe 亦不挂）。
+    #[test]
+    fn build_chain_disabled_or_absent_yields_empty() {
+        assert!(build_middleware_chain(None, &[]).unwrap().is_empty());
+
+        let mut cfg = profile_cfg();
+        cfg.enabled = false;
+        cfg.middleware = vec!["latency_probe".to_string()];
+        assert!(build_middleware_chain(Some(&cfg), &[]).unwrap().is_empty());
+    }
+
+    /// §1.5/§3.2：声明序挂载（[latency_probe, padding] → len=2）；E5 降级
+    /// （apply_to 指向不存在 egress）时 padding 不挂、其余照挂。
+    #[test]
+    fn build_chain_mounts_in_declaration_order_with_e5_skip() {
+        let mut cfg = profile_cfg();
+        cfg.middleware = vec!["latency_probe".to_string(), "padding".to_string()];
+        let chain = build_middleware_chain(Some(&cfg), &[]).unwrap();
+        assert_eq!(chain.len(), 2);
+
+        let mut cfg = profile_cfg();
+        cfg.apply_to = ApplyTo::Egress("ghost".to_string());
+        cfg.middleware = vec!["latency_probe".to_string(), "padding".to_string()];
+        let chain = build_middleware_chain(Some(&cfg), &[]).unwrap();
+        assert_eq!(chain.len(), 1, "E5 降级：padding 不挂，latency_probe 照挂");
+    }
+
+    /// §3.3-5 直调防御：未知 middleware 名 Err（带原值）。
+    #[test]
+    fn build_chain_unknown_name_bails() {
+        let mut cfg = profile_cfg();
+        cfg.middleware = vec!["bogus".to_string()];
+        let err = build_middleware_chain(Some(&cfg), &[]).unwrap_err();
+        assert!(err.to_string().contains("bogus"), "{err}");
     }
 }

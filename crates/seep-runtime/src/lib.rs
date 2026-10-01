@@ -25,7 +25,7 @@ pub use chain::{
 pub use hot_reload::{HotReloadConfig, HotReloadManager, ReloadEvent, ReloadStats};
 pub use mesh_transport::{MeshDataPlane, MeshEnvelope, UdpFaceSnapshot};
 pub use network_config::network_block_to_platform;
-pub use obfs_config::{to_padding_policy, PaddingPolicy};
+pub use obfs_config::{build_middleware_chain, to_padding_policy, PaddingPolicy};
 pub use runtime_builder::{
     ConfigMergeStats, FlowStatItem, MeshConfig, MeshEventType, NetworkEventType, Runtime,
     RuntimeBuilder, RuntimeConfig, RuntimeEvent, RuntimeStats, SubscriptionEventType,

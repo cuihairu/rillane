@@ -243,6 +243,53 @@ pub trait FlowMiddleware: Send + Sync {
     async fn handle(&self, flow: Flow) -> Result<Flow>;
 }
 
+/// 静态 middleware 管线（obfuscation-middleware.md §1.2，C1 收口）：build 期
+/// 定序、运行期只读的不可变链。关闭态 = `Default`（空链），调用方以
+/// `is_empty()` 一次分支旁路（§2.5 零开销：无锁、无分配、无 async 调用）；
+/// P3-2 动态加载在此容器之上扩展，本类型不引入任何动态加载依赖（§1.5）。
+#[derive(Clone, Default)]
+pub struct MiddlewareChain {
+    inner: Arc<Vec<Arc<dyn FlowMiddleware>>>,
+}
+
+impl fmt::Debug for MiddlewareChain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // trait 对象无 Debug：以链内 middleware 名呈现（诊断面兼测试断言可用）
+        f.debug_struct("MiddlewareChain")
+            .field(
+                "names",
+                &self.inner.iter().map(|mw| mw.name()).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl MiddlewareChain {
+    pub fn new(inner: Vec<Arc<dyn FlowMiddleware>>) -> Self {
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// 顺序执行（声明序即执行序，§1.5）：任一 middleware 返回 Err 即中止，
+    /// 错误冒泡至调用方（E8：转发失败，不静默继续）。
+    pub async fn run(&self, flow: Flow) -> Result<Flow> {
+        let mut flow = flow;
+        for mw in self.inner.iter() {
+            flow = mw.handle(flow).await?;
+        }
+        Ok(flow)
+    }
+}
+
 /// padding 三模式（obfuscation-middleware.md §2.2 表）：
 /// Fixed 一律补到定长 / Bucket 对齐最近上界桶 / Range 确定性伪随机长度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

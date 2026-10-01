@@ -29,10 +29,11 @@ use seep_core::udp::table::chain_id_of;
 use seep_core::udp::{ChainFailureEvent, EgressUdpConnector};
 use seep_core::{
     EgressConnector, Flow, FlowContext, FlowOutput, FlowReport, FlowRouter, IngressEndpoint,
-    RouteDecision, RoutePath,
+    MiddlewareChain, RouteDecision, RoutePath,
 };
 use seep_mesh::{MeshRegistry, MeshSession, NodeId, SessionId};
 use seep_platform::network::{NetworkConfig, NetworkManager};
+use seep_protocols::middleware::{ANN_ROUTE_EGRESS, ANN_ROUTE_KIND};
 use seep_protocols::{
     DirectConnector, HttpConnector, HttpIngress, Hysteria2Connector, MixedIngress,
     ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress, TrojanConnector,
@@ -127,6 +128,24 @@ impl RuntimeBuilder {
                 self.egress_connectors = connectors;
             }
         }
+
+        // P1-4 §1.2/§3.2：混淆 middleware 链（块缺席/关闭 = 空链零开销，§2.5）。
+        // known_egress = 配置 egress 名 ∪ build 期已注册输出名（E5 判定输入；
+        // 并集覆盖 with_output 显式注册的自定义出口）。
+        let middleware_chain = {
+            let mut names: Vec<String> = config_snapshot
+                .egress
+                .iter()
+                .map(|e| e.name.clone())
+                .collect();
+            for name in self.flow_outputs.keys() {
+                if !names.iter().any(|n| n == name) {
+                    names.push(name.clone());
+                }
+            }
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            crate::obfs_config::build_middleware_chain(config_snapshot.obfuscation.as_ref(), &refs)?
+        };
 
         let network_manager = if self.runtime_config.enable_network_virtualization {
             if let Some(network_cfg) = &self.runtime_config.network_config {
@@ -351,6 +370,8 @@ impl RuntimeBuilder {
             chain_manager,
             chain_failure_tx,
             mesh_udp_gate,
+            // P1-4 §1.2：静态混淆链（start() 构造 FlowOutputRouter 时消费）
+            middleware_chain,
             // P0-5 §4 观测接缝①：控制面 /udp/stats 经 getter 取数（勘误：
             // 设计稿称「Runtime.udp 字段已存在」，实况 P0-2 起即被消费进
             // ingress_endpoints、Runtime 无此字段——本字段为 S2 新增留存）
@@ -614,6 +635,9 @@ pub struct Runtime {
     /// P0-4 §13-6：folded UDP 明文门（chain+udp 同启时 Some；两消费点同源——
     /// client 桥在 build() 已消费，非 client 的 spawn_udp 在 start() 消费）
     mesh_udp_gate: Option<MeshUdpGate>,
+    /// P1-4 §1.2：静态混淆 middleware 链（start() 构造 FlowOutputRouter 时
+    /// 消费；关闭态 = 空链，§2.5）
+    middleware_chain: MiddlewareChain,
     /// P0-5 §4 观测接缝①：UDP 入站服务留存（控制面 /udp/stats 取数；
     /// ingress_endpoints 内共享同一 Arc 单例）
     udp_service: Option<Arc<seep_core::udp::UdpAssociateService>>,
@@ -664,6 +688,7 @@ impl Runtime {
             mesh_tls,
             self.event_tx.clone(),
             self.chain_failure_tx.clone(),
+            self.middleware_chain.clone(),
         ));
 
         // Spawn mesh data-plane listener (TCP) for multi-hop transport (requires chain feature).
@@ -1392,6 +1417,9 @@ struct FlowOutputRouter {
     event_tx: broadcast::Sender<RuntimeEvent>,
     /// P0-4 §8：链路故障事件 → UDP 会话表（None = udp/chain 未同启）
     chain_failure_tx: Option<mpsc::Sender<ChainFailureEvent>>,
+    /// P1-4 §1.3：静态混淆 middleware 链（唯一挂载点在本 forward；
+    /// 关闭态 = 空链，§2.5）
+    middleware_chain: MiddlewareChain,
 }
 
 impl FlowOutputRouter {
@@ -1404,6 +1432,7 @@ impl FlowOutputRouter {
         mesh_tls: Option<MeshTlsConfig>,
         event_tx: broadcast::Sender<RuntimeEvent>,
         chain_failure_tx: Option<mpsc::Sender<ChainFailureEvent>>,
+        middleware_chain: MiddlewareChain,
     ) -> Self {
         Self {
             outputs,
@@ -1413,13 +1442,38 @@ impl FlowOutputRouter {
             mesh_tls,
             event_tx,
             chain_failure_tx,
+            middleware_chain,
         }
     }
 }
 
 #[async_trait]
 impl FlowOutput for FlowOutputRouter {
-    async fn forward(&self, decision: RouteDecision, flow: Flow) -> Result<FlowReport> {
+    async fn forward(&self, decision: RouteDecision, mut flow: Flow) -> Result<FlowReport> {
+        // P1-4 §1.3 三段：① 决策上下文注解注入（§1.4）→ ② middleware 链 →
+        // ③ chain/单跳分派。空链（关闭态）时 ①② 一并跳过（§2.5 零开销
+        // 旁路：连两次 BTreeMap::insert 都省去，零分配零锁）。
+        if !self.middleware_chain.is_empty() {
+            let kind = match &decision.path {
+                RoutePath::Chain { .. } => "chain",
+                _ => "single",
+            };
+            // §1.4：egress 值口径同 forward_single（"egress." 前缀剥离）
+            let final_node = decision.final_node();
+            let egress = final_node
+                .strip_prefix("egress.")
+                .unwrap_or(final_node.as_str())
+                .to_string();
+            flow.metadata
+                .annotations
+                .insert(ANN_ROUTE_KIND.to_string(), kind.to_string());
+            flow.metadata
+                .annotations
+                .insert(ANN_ROUTE_EGRESS.to_string(), egress);
+            // E8：任一 middleware Err 即中止，错误冒泡（转发失败不静默继续）
+            flow = self.middleware_chain.run(flow).await?;
+        }
+
         // 检查是否是多跳链路路由
         match &decision.path {
             RoutePath::Chain { hops } if !hops.is_empty() => {
@@ -2178,6 +2232,7 @@ mod tests {
             None,
             tx,
             None,
+            MiddlewareChain::default(),
         );
 
         let decision = {
@@ -2214,6 +2269,165 @@ mod tests {
         assert_eq!(
             map.get("seep.route.reason").map(|s| s.as_str()),
             Some("test")
+        );
+    }
+
+    /// P1-4 §1.3 测试共用：注册 CaptureOutput("direct") 的 router。
+    /// Captured = CaptureOutput 抓取的注解快照通道（clippy type_complexity 收编）。
+    type Captured = Arc<Mutex<Option<std::collections::BTreeMap<String, String>>>>;
+
+    fn router_with_chain(middleware_chain: MiddlewareChain) -> (FlowOutputRouter, Captured) {
+        let annotations = Arc::new(Mutex::new(None));
+        let mut outputs: HashMap<String, Arc<dyn FlowOutput>> = HashMap::new();
+        outputs.insert(
+            "direct".to_string(),
+            Arc::new(CaptureOutput {
+                annotations: annotations.clone(),
+            }),
+        );
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        (
+            FlowOutputRouter::new(
+                Arc::new(RwLock::new(outputs)),
+                None,
+                None,
+                None,
+                None,
+                tx,
+                None,
+                middleware_chain,
+            ),
+            annotations,
+        )
+    }
+
+    fn mid_test_flow() -> Flow {
+        Flow {
+            id: seep_core::FlowId::new(),
+            target: seep_core::FlowTarget {
+                host: "example.com".to_string(),
+                port: 443,
+                proto: seep_core::TargetProto::Tcp,
+            },
+            io: Box::new(DummyIo),
+            metadata: seep_core::FlowMetadata::default(),
+        }
+    }
+
+    fn mid_chain_decision() -> RouteDecision {
+        let hops = vec![
+            seep_core::RouteHop {
+                node: "direct".to_string(),
+                hop_type: seep_core::HopType::Ingress,
+            },
+            seep_core::RouteHop {
+                node: "exit1".to_string(),
+                hop_type: seep_core::HopType::Egress,
+            },
+        ];
+        RouteDecision::chain(hops)
+    }
+
+    fn mid_padding_chain() -> MiddlewareChain {
+        use seep_core::{PaddingMode, PaddingSpec};
+        use seep_protocols::middleware::PaddingMiddleware;
+        MiddlewareChain::new(vec![Arc::new(PaddingMiddleware::new(
+            PaddingSpec {
+                mode: PaddingMode::Fixed,
+                target: 512,
+                buckets: vec![],
+                min: 0,
+                max: 0,
+                max_overhead_ratio: 0.5,
+            },
+            // 选择器恒命中：隔离验证 ①注入 ②执行 两段接线本身
+            Box::new(|_kind, _egress| true),
+        ))])
+    }
+
+    /// P1-4 §1.3/§1.4/§7.1：链决策 + 链非空 → ① seep.route.kind=chain、
+    /// seep.route.egress=final_node 注入；② PaddingMiddleware 执行并写
+    /// seep.obfs.padding；carrier 键（seep.chain.path）照常注入不被改写。
+    #[tokio::test]
+    async fn forward_chain_runs_middleware_with_route_annotations() {
+        let (router, annotations) = router_with_chain(mid_padding_chain());
+        router
+            .forward(mid_chain_decision(), mid_test_flow())
+            .await
+            .unwrap();
+        let map = annotations.lock().await.as_ref().expect("captured").clone();
+        assert_eq!(
+            map.get("seep.route.kind").map(String::as_str),
+            Some("chain")
+        );
+        assert_eq!(
+            map.get("seep.route.egress").map(String::as_str),
+            Some("exit1"),
+            "final_node 注入（§1.4，链尾跳）"
+        );
+        let json = map
+            .get("seep.obfs.padding")
+            .expect("选择器命中应写 spec 注解");
+        let spec: seep_core::PaddingSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.mode, seep_core::PaddingMode::Fixed);
+        assert!(map.contains_key("seep.chain.path"), "carrier 键照常");
+    }
+
+    /// §1.4：单跳决策 → kind=single、egress 带 egress. 前缀剥离（同
+    /// forward_single 口径）；middleware 照样执行（§1.3 单点覆盖两类决策）。
+    #[tokio::test]
+    async fn forward_single_runs_middleware_with_stripped_egress() {
+        let (router, annotations) = router_with_chain(mid_padding_chain());
+        let decision = RouteDecision::direct("egress.direct".to_string());
+        router.forward(decision, mid_test_flow()).await.unwrap();
+        let map = annotations.lock().await.as_ref().expect("captured").clone();
+        assert_eq!(
+            map.get("seep.route.kind").map(String::as_str),
+            Some("single")
+        );
+        assert_eq!(
+            map.get("seep.route.egress").map(String::as_str),
+            Some("direct")
+        );
+        assert!(map.contains_key("seep.obfs.padding"));
+    }
+
+    /// §2.5/§7.1：空链（关闭态）→ 路由注解两键与 spec 注解全部缺席
+    /// （零副作用——连注解注入都省去）。
+    #[tokio::test]
+    async fn forward_empty_chain_skips_route_annotations() {
+        let (router, annotations) = router_with_chain(MiddlewareChain::default());
+        router
+            .forward(mid_chain_decision(), mid_test_flow())
+            .await
+            .unwrap();
+        let map = annotations.lock().await.as_ref().expect("captured").clone();
+        assert!(!map.contains_key("seep.route.kind"));
+        assert!(!map.contains_key("seep.route.egress"));
+        assert!(!map.contains_key("seep.obfs.padding"));
+        assert!(
+            map.contains_key("seep.chain.path"),
+            "既有 carrier 注解不受影响"
+        );
+    }
+
+    /// §4.1/§8-M1：latency_probe 显式挂载证明管线通（默认不挂——不配置即
+    /// 空链；挂载后 forward 正常到达出口、无 padding 副作用）。
+    #[tokio::test]
+    async fn latency_probe_mounted_proves_pipeline() {
+        use seep_protocols::middleware::LatencyProbe;
+        let (router, annotations) =
+            router_with_chain(MiddlewareChain::new(vec![Arc::new(LatencyProbe::new())]));
+        let decision = RouteDecision::direct("egress.direct".to_string());
+        router.forward(decision, mid_test_flow()).await.unwrap();
+        let map = annotations.lock().await.as_ref().expect("captured").clone();
+        assert_eq!(
+            map.get("seep.route.kind").map(String::as_str),
+            Some("single")
+        );
+        assert!(
+            !map.contains_key("seep.obfs.padding"),
+            "probe 不产 spec 注解"
         );
     }
 
