@@ -2858,6 +2858,7 @@ mod tests {
             udp: seep_config::UdpConfig::default(),
             network: None,
             obfuscation: None,
+            profile: None,
             egress_pool: None,
         };
 
@@ -2900,6 +2901,7 @@ mod tests {
             udp: seep_config::UdpConfig::default(),
             network: None,
             obfuscation: None,
+            profile: None,
             egress_pool: None,
         };
 
@@ -2946,6 +2948,7 @@ mod tests {
             udp: seep_config::UdpConfig::default(),
             network: None,
             obfuscation: None,
+            profile: None,
             egress_pool: None,
         };
 
@@ -3014,6 +3017,7 @@ mod tests {
             udp: seep_config::UdpConfig::default(),
             network: None,
             obfuscation: None,
+            profile: None,
             egress_pool: None,
         };
 
@@ -3090,6 +3094,7 @@ mod tests {
             },
             network: None,
             obfuscation: None,
+            profile: None,
             egress_pool: None,
         }
     }
@@ -3478,6 +3483,7 @@ mod tests {
             udp,
             network: None,
             obfuscation: None,
+            profile: None,
             egress_pool: None,
         }
     }
@@ -3672,6 +3678,7 @@ mod tests {
             network: None,
             obfuscation: None,
             egress_pool,
+            profile: None,
         }
     }
 

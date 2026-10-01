@@ -2538,6 +2538,7 @@ mod tests {
             },
             network: None,
             obfuscation: None,
+            profile: None,
             egress_pool: None,
         }
     }
@@ -2590,6 +2591,7 @@ mod tests {
             },
             network: None,
             obfuscation: None,
+            profile: None,
             egress_pool: Some(seep_config::EgressPoolBlock {
                 enabled: true,
                 tls_resumption: None,

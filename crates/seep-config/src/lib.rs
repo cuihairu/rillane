@@ -9,6 +9,17 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+/// 场景预设（P2-3 scenario-profiles.md §3）：配置期展开为既有块缺省填充
+/// （§2 D-2），运行期不可见——展开产物与手写等价配置走同一 build() 链
+/// （验收「无独立代码路径」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileKind {
+    Proxy,
+    Game,
+    Web,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SeepConfig {
@@ -31,6 +42,10 @@ pub struct SeepConfig {
     /// 不构池不注工厂，行为零差异 §3.4）
     #[serde(default)]
     pub egress_pool: Option<EgressPoolBlock>,
+    /// 场景预设（P2-3 scenario-profiles.md §2-D1；缺省 None = 存量零差异；
+    /// 仅 from_str 入口展开——订阅/程序化构造不触发，§5-1）
+    #[serde(default)]
+    pub profile: Option<ProfileKind>,
 }
 
 /// UDP 数据面配置（udp-dataplane.md §5.2 / udp-relay-path.md §2）。
@@ -507,7 +522,7 @@ impl<'de> Deserialize<'de> for ApplyTo {
 /// deny_unknown_fields = 新块无存量负担（§3.4）；除 enabled 外全 Option
 /// （§3.2 表），其中 max_idle_global 缺席有独立语义：取 runtime
 /// `connection_pool_size`（D-8 孤儿字段收编），其余缺席 = §3.1 缺省值。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EgressPoolBlock {
     /// 池总开关（§3.1 缺省关 = 对齐 udp:/obfuscation: 先例，D-9 零差异）
@@ -596,19 +611,119 @@ impl SeepConfig {
     }
 
     pub fn from_str(raw: &str, hint: Option<&str>) -> Result<Self> {
-        match hint {
-            Some("json") => serde_json::from_str(raw).context("JSON 配置解析失败"),
-            Some("toml") => toml::from_str(raw).context("TOML 配置解析失败"),
-            Some("yaml") | Some("yml") => serde_yaml::from_str(raw).context("YAML 配置解析失败"),
+        let mut config: Self = match hint {
+            Some("json") => serde_json::from_str(raw).context("JSON 配置解析失败")?,
+            Some("toml") => toml::from_str(raw).context("TOML 配置解析失败")?,
+            Some("yaml") | Some("yml") => serde_yaml::from_str(raw).context("YAML 配置解析失败")?,
             _ => serde_yaml::from_str(raw)
                 .or_else(|_| serde_json::from_str(raw))
                 .or_else(|_| toml::from_str(raw))
-                .context("无法识别配置格式"),
+                .context("无法识别配置格式")?,
+        };
+        // P2-3 §5-1：场景预设缺省填充（唯一入口——load_from_path 经此覆盖；
+        // 订阅转换等程序化构造不触发，「订阅不产场景块」同 obfuscation 先例）
+        config.apply_profile();
+        Ok(config)
+    }
+
+    /// 场景预设展开（scenario-profiles.md §2-D2/D4）：**缺省填充，显式恒
+    /// 优先**——只往「未指定」位（groups/rules 空、obfuscation/egress_pool
+    /// None）填预设，不覆盖不删除，天然幂等（§6-E4：填过即非空，再展开
+    /// 为 no-op）。规则模板与组模板同生共死：组非空（用户自组在场）时
+    /// 不填规则——模板 target 指向组模板名，用户自组名不可猜测（§6-E6）。
+    pub fn apply_profile(&mut self) {
+        let Some(kind) = self.profile else {
+            return;
+        };
+        let mut created_group = false;
+        if self.routing.groups.is_empty() {
+            let (name, slo) = match kind {
+                ProfileKind::Game => (
+                    "game-auto",
+                    Some(SloPolicy {
+                        p95_ms: Some(80),
+                        loss_ratio: Some(0.02),
+                        loss_penalty_ms: None,
+                    }),
+                ),
+                ProfileKind::Proxy => ("auto", None),
+                ProfileKind::Web => ("web-auto", None),
+            };
+            self.routing.groups.push(PolicyGroup {
+                name: name.to_string(),
+                strategy: Strategy::Latency,
+                members: vec![GroupMember::Node {
+                    name: self.routing.default_node.clone(),
+                }],
+                slo,
+            });
+            created_group = true;
+        }
+        if self.routing.rules.is_empty() && created_group {
+            self.routing.rules = match kind {
+                ProfileKind::Game => GAME_DOMAIN_SUFFIXES
+                    .iter()
+                    .map(|d| RouteRule {
+                        name: format!("game-{}", d.replace('.', "-")),
+                        matches: vec![MatchCondition::DomainSuffix {
+                            values: vec![(*d).to_string()],
+                        }],
+                        target: "game-auto".to_string(),
+                    })
+                    .collect(),
+                ProfileKind::Proxy => vec![profile_cn_rule("auto")],
+                ProfileKind::Web => vec![profile_cn_rule("web-auto")],
+            };
+        }
+        // game：QoS 包长打散（positioning §2.4；apply_to 缺省 chain = MVP
+        // 帧执行侧，obfuscation-middleware.md §2.3）
+        if kind == ProfileKind::Game && self.obfuscation.is_none() {
+            self.obfuscation = Some(ObfuscationConfig {
+                enabled: true,
+                padding: Some(PaddingBlockConfig {
+                    mode: "bucket".to_string(),
+                    buckets: vec![128, 256, 512, 1024],
+                    ..PaddingBlockConfig::default()
+                }),
+                ..ObfuscationConfig::default()
+            });
+        }
+        // web：网页短连接复用（P1-5；其余字段缺省 = §3.1 缺省值）
+        if kind == ProfileKind::Web && self.egress_pool.is_none() {
+            self.egress_pool = Some(EgressPoolBlock {
+                enabled: true,
+                ..EgressPoolBlock::default()
+            });
         }
     }
 
     pub fn config_dir(&self) -> PathBuf {
         PathBuf::from("/etc/seep")
+    }
+}
+
+/// game 预设规则模板域（scenario-profiles.md §4/§9-4：示例性常见平台域
+/// 非穷举——模板价值在展示策略块写法，精确清单归用户维护；显式 rules
+/// 恒优先 D-2）
+const GAME_DOMAIN_SUFFIXES: &[&str] = &[
+    "steampowered.com",
+    "steamcontent.com",
+    "epicgames.com",
+    "riotgames.com",
+    "battle.net",
+    "playstation.com",
+    "xbox.com",
+    "nintendo.com",
+];
+
+/// proxy/web 预设 cn 规则（同 config/seep.yaml 基线形：geoip CN → 场景组）
+fn profile_cn_rule(target: &str) -> RouteRule {
+    RouteRule {
+        name: "cn".to_string(),
+        matches: vec![MatchCondition::Geoip {
+            country: "CN".to_string(),
+        }],
+        target: target.to_string(),
     }
 }
 

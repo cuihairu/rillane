@@ -429,6 +429,7 @@ impl SeepDslConverter {
             network: None,
             // 订阅转换不产混淆块（P1-4 归用户主配置）
             obfuscation: None,
+            profile: None,
             egress_pool: None,
         };
 

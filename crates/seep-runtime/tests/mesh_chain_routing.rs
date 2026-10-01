@@ -40,6 +40,7 @@ async fn mesh_target_routes_to_chain_decision() {
         udp: seep_config::UdpConfig::default(),
         network: None,
         obfuscation: None,
+        profile: None,
         egress_pool: None,
     };
 
