@@ -1158,6 +1158,11 @@ impl Runtime {
         self.mesh_plane.get().and_then(|p| p.udp_snapshot())
     }
 
+    /// P1-4 §5：obfs 填充执行计数快照（进程级 statics，`/metrics` 渲染数据源）。
+    pub fn get_obfs_pad_snapshot(&self) -> crate::mesh_transport::ObfsPadSnapshot {
+        crate::mesh_transport::obfs_pad_snapshot()
+    }
+
     /// 获取 client 出站侧 UDP 计数（P0-5 §4 观测接缝③：build() 从 bridge 抽出；
     /// None = 无 chain-UDP 桥）
     pub fn get_udp_client_metrics(&self) -> Option<Arc<UdpClientMetrics>> {
@@ -1481,7 +1486,13 @@ impl FlowOutput for FlowOutputRouter {
                 self.forward_chain(&decision, flow, hops).await
             }
             _ => {
-                // 单跳转发
+                // P1-4 §4.3/§5：单跳无帧载体——持 spec 不做字节改写（MVP
+                // no-op 语义），仅记 skipped{no_frame} 保"开而不效"可见
+                if crate::obfs_config::padding_spec_from_annotations(&flow.metadata.annotations)
+                    .is_some()
+                {
+                    crate::mesh_transport::obfs_pad_note_no_frame();
+                }
                 self.forward_single(&decision, flow).await
             }
         }
@@ -2408,6 +2419,50 @@ mod tests {
             Some("direct")
         );
         assert!(map.contains_key("seep.obfs.padding"));
+    }
+
+    /// P1-4 §4.3/§5：单跳无帧载体——持 spec 不做字节改写（MVP no-op），
+    /// 但 skipped{no_frame} 计数递增 + spec 注解在（"开而不效"可见）；
+    /// 关闭态（空链）同路径不计数（§2.5 对照）。
+    #[tokio::test]
+    async fn forward_single_with_padding_spec_counts_no_frame() {
+        let (router, annotations) = router_with_chain(mid_padding_chain());
+        let pre = crate::mesh_transport::obfs_pad_snapshot().skipped_no_frame;
+        router
+            .forward(
+                RouteDecision::direct("egress.direct".to_string()),
+                mid_test_flow(),
+            )
+            .await
+            .unwrap();
+        let map = annotations.lock().await.as_ref().expect("captured").clone();
+        assert!(map.contains_key("seep.obfs.padding"), "spec 注解应在");
+        assert!(
+            crate::mesh_transport::obfs_pad_snapshot().skipped_no_frame > pre,
+            "单跳持 spec 应记 skipped{{no_frame}}"
+        );
+
+        // 关闭态对照：空链 → 注解缺席 → 同路径不计数
+        let (router, annotations) = router_with_chain(MiddlewareChain::default());
+        let pre = crate::mesh_transport::obfs_pad_snapshot().skipped_no_frame;
+        router
+            .forward(
+                RouteDecision::direct("egress.direct".to_string()),
+                mid_test_flow(),
+            )
+            .await
+            .unwrap();
+        assert!(!annotations
+            .lock()
+            .await
+            .as_ref()
+            .expect("captured")
+            .contains_key("seep.obfs.padding"));
+        assert_eq!(
+            crate::mesh_transport::obfs_pad_snapshot().skipped_no_frame,
+            pre,
+            "关闭态不计数（§2.5）"
+        );
     }
 
     /// §2.5/§7.1：空链（关闭态）→ 路由注解两键与 spec 注解全部缺席

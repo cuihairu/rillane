@@ -213,23 +213,53 @@ impl MeshEnvelope {
 pub const MESH_ENVELOPE_VERSION: u32 = 1;
 pub const PAD_ENVELOPE_VERSION: u32 = 2;
 
-/// P1-4 §5 执行侧计数（进程级：`MeshDataPlane` 每次 forward 现建，实例
-/// 计数无法聚合）：frames=实际填充帧数、added=累计填充字节、
-/// too_large=E4 帧上限/引擎 TooLarge 放弃、overhead=E10 策略层放弃。
-/// M4 挂 `/metrics` 渲染（`seep_obfs_padding_*` 家族）。
-static PAD_FRAMES: AtomicU64 = AtomicU64::new(0);
+/// P1-4 §5 `seep_obfs_padding_*` 快照（进程级计数，`/metrics` 渲染数据源）：
+/// frames 按模式分桶（{mode} 封闭三值）、bytes 累计新增填充字节、skipped
+/// 封闭五因——no_frame（单跳无帧载体 §4.3）/overhead_cap（E10 策略层）/
+/// too_large（E4 执行层）生产自增；peer_version（E6）/disabled（E11）MVP
+/// 恒 0 恒渲染（R-obfs2 同版本部署假定下无生产增量点，留标签保封闭集）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObfsPadSnapshot {
+    pub frames_fixed: u64,
+    pub frames_bucket: u64,
+    pub frames_range: u64,
+    pub bytes_added: u64,
+    pub skipped_no_frame: u64,
+    pub skipped_overhead_cap: u64,
+    pub skipped_too_large: u64,
+    pub skipped_peer_version: u64,
+    pub skipped_disabled: u64,
+}
+
+// 进程级 statics（`MeshDataPlane` 每次 forward 现建，实例计数无法聚合）
+static PAD_FRAMES_FIXED: AtomicU64 = AtomicU64::new(0);
+static PAD_FRAMES_BUCKET: AtomicU64 = AtomicU64::new(0);
+static PAD_FRAMES_RANGE: AtomicU64 = AtomicU64::new(0);
 static PAD_BYTES_ADDED: AtomicU64 = AtomicU64::new(0);
+static PAD_SKIPPED_NO_FRAME: AtomicU64 = AtomicU64::new(0);
 static PAD_SKIPPED_TOO_LARGE: AtomicU64 = AtomicU64::new(0);
 static PAD_SKIPPED_OVERHEAD: AtomicU64 = AtomicU64::new(0);
 
-/// 填充计数快照（M4 渲染/测试用；顺序 (frames, added, too_large, overhead)）。
-pub fn obfs_pad_snapshot() -> (u64, u64, u64, u64) {
-    (
-        PAD_FRAMES.load(Ordering::Relaxed),
-        PAD_BYTES_ADDED.load(Ordering::Relaxed),
-        PAD_SKIPPED_TOO_LARGE.load(Ordering::Relaxed),
-        PAD_SKIPPED_OVERHEAD.load(Ordering::Relaxed),
-    )
+/// 填充计数快照（`/metrics` 渲染与测试用）。
+pub fn obfs_pad_snapshot() -> ObfsPadSnapshot {
+    ObfsPadSnapshot {
+        frames_fixed: PAD_FRAMES_FIXED.load(Ordering::Relaxed),
+        frames_bucket: PAD_FRAMES_BUCKET.load(Ordering::Relaxed),
+        frames_range: PAD_FRAMES_RANGE.load(Ordering::Relaxed),
+        bytes_added: PAD_BYTES_ADDED.load(Ordering::Relaxed),
+        skipped_no_frame: PAD_SKIPPED_NO_FRAME.load(Ordering::Relaxed),
+        skipped_overhead_cap: PAD_SKIPPED_OVERHEAD.load(Ordering::Relaxed),
+        skipped_too_large: PAD_SKIPPED_TOO_LARGE.load(Ordering::Relaxed),
+        // E6/E11：MVP 无生产增量点，恒 0（标签恒渲染保封闭集）
+        skipped_peer_version: 0,
+        skipped_disabled: 0,
+    }
+}
+
+/// P1-4 §4.3/§5：单跳（MVP 无帧载体）持 spec 记 `skipped{no_frame}`——
+/// `FlowOutputRouter::forward` 单跳分支在注解含 spec 时调用。
+pub fn obfs_pad_note_no_frame() {
+    PAD_SKIPPED_NO_FRAME.fetch_add(1, Ordering::Relaxed);
 }
 
 /// P1-4 §4.2 执行侧：按 spec 对 envelope 帧求填充决策并产填充帧 payload。
@@ -278,7 +308,13 @@ fn pad_envelope_frame(
             Some(k) if k == declared => {
                 let mut payload = json;
                 payload.resize(target, 0);
-                PAD_FRAMES.fetch_add(1, Ordering::Relaxed);
+                // §5 {mode} 封闭标签：帧计数按决策所用 spec 模式分桶
+                let frames = match spec.mode {
+                    seep_core::PaddingMode::Fixed => &PAD_FRAMES_FIXED,
+                    seep_core::PaddingMode::Bucket => &PAD_FRAMES_BUCKET,
+                    seep_core::PaddingMode::Range => &PAD_FRAMES_RANGE,
+                };
+                frames.fetch_add(1, Ordering::Relaxed);
                 PAD_BYTES_ADDED.fetch_add(declared as u64, Ordering::Relaxed);
                 return Ok(Some(payload));
             }
@@ -1972,6 +2008,7 @@ mod tests {
         // ratio 放开隔离固定点逻辑（+120B 超 0.5 cap——cap 路径归 skip 测钉）
         let mut spec = fixed_spec(base.len() + 120);
         spec.max_overhead_ratio = 100.0;
+        let pre = obfs_pad_snapshot();
         let payload = pad_envelope_frame(&env, &spec, &seep_core::FlowId::new())
             .unwrap()
             .expect("应产生填充帧");
@@ -1980,6 +2017,14 @@ mod tests {
         assert!(
             zeros > 0 && zeros < 120,
             "填充字节 = 120 - 字段开销：{zeros}"
+        );
+        // §5：{mode=fixed} 帧计数与新增字节计数联动（进程级 statics 与同
+        // 二进制并行测试共享——本帧贡献恰 +1/+zeros，他测只增不减，故断下界）
+        let post = obfs_pad_snapshot();
+        assert!(post.frames_fixed >= pre.frames_fixed + 1, "fixed 帧计数递增");
+        assert!(
+            post.bytes_added >= pre.bytes_added + zeros as u64,
+            "新增字节计数 ≥ 本帧填充量"
         );
 
         let decoded = decode_envelope_payload(&payload).unwrap();
@@ -2056,20 +2101,57 @@ mod tests {
         // E10：r=0、min=0 → cap=len < target → 策略层放弃 + overhead 计数
         let mut spec = fixed_spec(base.len() + 10);
         spec.max_overhead_ratio = 0.0;
-        let (_, _, _, o0) = obfs_pad_snapshot();
+        let o0 = obfs_pad_snapshot().skipped_overhead_cap;
         assert!(pad_envelope_frame(&env, &spec, &id).unwrap().is_none());
-        let (_, _, _, o1) = obfs_pad_snapshot();
-        assert!(o1 > o0, "overhead 计数递增");
+        assert!(
+            obfs_pad_snapshot().skipped_overhead_cap > o0,
+            "overhead 计数递增"
+        );
 
         // E4：target 超 MAX_HEADER_BYTES → 执行层放弃 + too_large 计数
         //（ratio 放开让策略层放行——cap 是比例上界，65636/96≈684 倍开销，
         // 100 仍不够；overhead cap 归策略层，帧上限归执行层，两层各自拦截）
         let mut spec = fixed_spec(MAX_HEADER_BYTES + 100);
         spec.max_overhead_ratio = 10000.0;
-        let (_, _, t0, _) = obfs_pad_snapshot();
+        let t0 = obfs_pad_snapshot().skipped_too_large;
         assert!(pad_envelope_frame(&env, &spec, &id).unwrap().is_none());
-        let (_, _, t1, _) = obfs_pad_snapshot();
-        assert!(t1 > t0, "too_large 计数递增");
+        assert!(
+            obfs_pad_snapshot().skipped_too_large > t0,
+            "too_large 计数递增"
+        );
+    }
+
+    /// §7.2/§0 分布口径：range 模式多流帧长取值分散（未开启时帧长恒
+    /// base.len() 单点——分布偏离默认的可测形）；各帧长均落 [min, max]，
+    /// 且 {mode=range} 帧计数联动。
+    #[test]
+    fn envelope_pad_range_mode_distribution_shifts() {
+        let env = pad_env_fixture();
+        let spec = seep_core::PaddingSpec {
+            mode: seep_core::PaddingMode::Range,
+            target: 0,
+            buckets: vec![],
+            min: 300,
+            max: 600,
+            // ~100B 基底掷 [300,600] 需放开比例上限（cap 是相对 len 的比例）
+            max_overhead_ratio: 10000.0,
+        };
+        let r0 = obfs_pad_snapshot().frames_range;
+        let mut lengths = std::collections::BTreeSet::new();
+        for _ in 0..40 {
+            let payload = pad_envelope_frame(&env, &spec, &seep_core::FlowId::new())
+                .unwrap()
+                .expect("range 掷点 ≥ min(300) > len 应产生填充帧");
+            lengths.insert(payload.len());
+        }
+        assert!(lengths.len() >= 5, "40 流的帧长应分散（分布偏离单点默认）");
+        for len in &lengths {
+            assert!(
+                (300..=600).contains(len),
+                "帧长 {len} 应落 [min, max] = [300, 600]"
+            );
+        }
+        assert_eq!(obfs_pad_snapshot().frames_range, r0 + 40, "range 帧计数");
     }
 
     /// §7.2 chain 填充全链路：client 经真实 `dial_and_tunnel` 打填充帧 →

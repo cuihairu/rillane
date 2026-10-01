@@ -711,6 +711,68 @@ impl ControlPlane {
                 .unwrap_or(0) as f64,
         );
 
+        // P1-4 §5 obfs 序列（恒渲染：关闭态全零 = 零开销旁路的可观测证据
+        // §2.5/E11；invocations 的 {name} 标签 = 配置挂载集，空链无条目）
+        let obfs = self.runtime.get_obfs_pad_snapshot();
+        push_metric_header(
+            &mut out,
+            "seep_obfs_padding_frames_total",
+            "Chain envelope frames padded, by padding mode.",
+            "counter",
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_obfs_padding_frames_total",
+            &[("mode", "fixed")],
+            obfs.frames_fixed as f64,
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_obfs_padding_frames_total",
+            &[("mode", "bucket")],
+            obfs.frames_bucket as f64,
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_obfs_padding_frames_total",
+            &[("mode", "range")],
+            obfs.frames_range as f64,
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_obfs_padding_bytes_total",
+            &[("direction", "added")],
+            obfs.bytes_added as f64,
+        );
+        push_metric_header(
+            &mut out,
+            "seep_obfs_padding_skipped_total",
+            "Padding decisions skipped, by reason.",
+            "counter",
+        );
+        for (reason, value) in [
+            ("no_frame", obfs.skipped_no_frame),
+            ("overhead_cap", obfs.skipped_overhead_cap),
+            ("too_large", obfs.skipped_too_large),
+            ("peer_version", obfs.skipped_peer_version),
+            ("disabled", obfs.skipped_disabled),
+        ] {
+            push_metric_labeled(
+                &mut out,
+                "seep_obfs_padding_skipped_total",
+                &[("reason", reason)],
+                value as f64,
+            );
+        }
+        for (name, count) in seep_core::middleware_invocations() {
+            push_metric_labeled(
+                &mut out,
+                "seep_obfs_middleware_invocations_total",
+                &[("name", name)],
+                count as f64,
+            );
+        }
+
         if let Some(subs) = self.runtime.get_subscription_manager() {
             push_gauge(
                 &mut out,
@@ -2180,6 +2242,41 @@ mod tests {
                 "系列 {series} 应恒渲染且值为 0"
             );
         }
+    }
+
+    /// P1-4 §5/§7.2：obfs 序列族恒渲染（关闭态全零 = §2.5 零开销旁路的
+    /// 可观测证据）；invocations 的 {name} 标签集 = 配置挂载集，测试进程
+    /// 空链 → 无条目。
+    #[tokio::test]
+    async fn metrics_contains_full_obfs_family() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+        let s = get_body(&cp, "/metrics").await;
+
+        let zero_series = [
+            // §5 帧计数（按 mode）+ 新增字节
+            "seep_obfs_padding_frames_total{mode=\"fixed\"}",
+            "seep_obfs_padding_frames_total{mode=\"bucket\"}",
+            "seep_obfs_padding_frames_total{mode=\"range\"}",
+            "seep_obfs_padding_bytes_total{direction=\"added\"}",
+            // §5 跳过计数（按 reason；peer_version/disabled MVP 恒 0）
+            "seep_obfs_padding_skipped_total{reason=\"no_frame\"}",
+            "seep_obfs_padding_skipped_total{reason=\"overhead_cap\"}",
+            "seep_obfs_padding_skipped_total{reason=\"too_large\"}",
+            "seep_obfs_padding_skipped_total{reason=\"peer_version\"}",
+            "seep_obfs_padding_skipped_total{reason=\"disabled\"}",
+        ];
+        for series in zero_series {
+            assert_eq!(
+                metric_value(&s, series),
+                Some(0.0),
+                "系列 {series} 应恒渲染且值为 0"
+            );
+        }
+        assert!(
+            !s.contains("seep_obfs_middleware_invocations_total"),
+            "空链无挂载 → invocations 无条目（name 标签集 = 配置挂载集）"
+        );
     }
 
     /// 测试 2：真 socket ASSOCIATE + 环回 echo 往返后 packets/bytes 序列非零

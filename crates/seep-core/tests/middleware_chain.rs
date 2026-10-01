@@ -126,3 +126,45 @@ async fn error_aborts_remaining_middlewares() {
         "中止后不执行后续"
     );
 }
+
+/// P1-4 §5：run 计入进程级调用计数（`middleware_invocations`，键 = name、
+/// 调用即计数——E8 注入失败的调用同样计入；空链 run 不产生条目）。
+#[tokio::test]
+async fn invocations_counted_per_name() {
+    fn get(snap: &[(&'static str, u64)], name: &str) -> u64 {
+        snap.iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| *v)
+            .unwrap_or(0)
+    }
+    let before = seep_core::middleware_invocations();
+
+    let calls_a = Arc::new(Mutex::new(Vec::new()));
+    let calls_b = Arc::new(Mutex::new(Vec::new()));
+    let chain = MiddlewareChain::new(vec![
+        Arc::new(RecordingMiddleware {
+            name: "inva",
+            calls: calls_a.clone(),
+            fail: false,
+        }),
+        Arc::new(RecordingMiddleware {
+            name: "invb",
+            calls: calls_b.clone(),
+            fail: true,
+        }),
+    ]);
+    // 两轮：invb 每轮 Err 冒泡，但"调用"本身两轮均已发生
+    let _ = chain.run(dummy_flow()).await;
+    let _ = chain.run(dummy_flow()).await;
+    let after = seep_core::middleware_invocations();
+    assert_eq!(
+        get(&after, "inva"),
+        get(&before, "inva") + 2,
+        "两轮各计一次"
+    );
+    assert_eq!(
+        get(&after, "invb"),
+        get(&before, "invb") + 2,
+        "Err 的调用同样计入（调用即计数）"
+    );
+}

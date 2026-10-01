@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fmt,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -284,10 +284,28 @@ impl MiddlewareChain {
     pub async fn run(&self, flow: Flow) -> Result<Flow> {
         let mut flow = flow;
         for mw in self.inner.iter() {
+            // P1-4 §5：调用即计数（含最终 Err 的调用；锁守卫不跨 await）
+            if let Ok(mut map) = MIDDLEWARE_INVOCATIONS.lock() {
+                *map.entry(mw.name()).or_insert(0) += 1;
+            }
             flow = mw.handle(flow).await?;
         }
         Ok(flow)
     }
+}
+
+/// P1-4 §5 `seep_obfs_middleware_invocations_total{name}` 数据源：进程级
+/// 调用计数（键 = `FlowMiddleware::name()`，标签封闭集 = 配置挂载集）。
+/// 空链 `run` 不发生（调用方 `is_empty` 旁路，§2.5），关闭态恒无条目；
+/// 锁开销仅链非空时出现（每流一次，§2.5 零开销口径只覆盖关闭态）。
+static MIDDLEWARE_INVOCATIONS: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
+
+/// P1-4 §5：链内 middleware 调用计数快照（`/metrics` 渲染数据源，名字升序）。
+pub fn middleware_invocations() -> Vec<(&'static str, u64)> {
+    let Ok(map) = MIDDLEWARE_INVOCATIONS.lock() else {
+        return Vec::new();
+    };
+    map.iter().map(|(k, v)| (*k, *v)).collect()
 }
 
 /// padding 三模式（obfuscation-middleware.md §2.2 表）：
