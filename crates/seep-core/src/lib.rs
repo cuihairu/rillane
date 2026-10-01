@@ -338,6 +338,51 @@ pub struct PaddingSpec {
     pub max_overhead_ratio: f32,
 }
 
+/// timing 两模式（P2-4 obfuscation-timing-shaping.md §3）：
+/// Fixed 恒定注入 / Uniform 确定性抖动（hash(flow_id, seq) 取值）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimingMode {
+    Fixed,
+    Uniform,
+}
+
+/// timing 策略形态（P2-4）——与 PaddingSpec 同契约：middleware 写
+/// `seep.obfs.timing` 注解，执行侧（同 middleware handle 内 sleep）读取
+/// 实施；`max_delay_ms` 是硬闸门（§2-D4）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimingSpec {
+    pub mode: TimingMode,
+    /// Fixed：注入毫秒值
+    pub fixed_ms: u64,
+    /// Uniform：下界
+    pub min_ms: u64,
+    /// Uniform：上界（min ≤ max，max ≤ max_delay_ms 由 config validate 保证）
+    pub max_ms: u64,
+    /// 硬闸门
+    pub max_delay_ms: u64,
+}
+
+/// shaping 单模式（P2-4 M0：interval 网格归一；其余模式留后续）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapingMode {
+    Interval,
+}
+
+/// shaping 策略形态（P2-4）——middleware 写 `seep.obfs.shaping` 注解，
+/// `PacedIo` 读取实施写侧网格归一（§2-D2）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShapingSpec {
+    pub mode: ShapingMode,
+    /// 网格间隔毫秒
+    pub interval_ms: u64,
+    /// 网格抖动幅度（≤ interval_ms）
+    pub jitter_ms: u64,
+    /// 硬闸门
+    pub max_delay_ms: u64,
+}
+
 /// 流量会话信息
 #[derive(Debug, Clone)]
 pub struct FlowSession {

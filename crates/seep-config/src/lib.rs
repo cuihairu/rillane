@@ -291,7 +291,7 @@ pub struct ObfuscationConfig {
     #[serde(default)]
     pub apply_to: ApplyTo,
     /// 声明链顺序（MVP 已知名 = padding / latency_probe，§3.3-5 + §4.1；
-    /// timing/shaping 归 P2-4）
+    /// timing/shaping 名白名单在 P2-4 M1 一并扩展）
     #[serde(default = "default_obfs_middleware")]
     pub middleware: Vec<String>,
     /// 命名策略集（P2-3 三场景预设的落点容器，§3.5；本文 schema 为其真子集）
@@ -300,6 +300,18 @@ pub struct ObfuscationConfig {
     /// 内联策略（无 default_padding 时生效；两者互斥，§3.3-2）
     #[serde(default)]
     pub padding: Option<PaddingBlockConfig>,
+    /// P2-4：引用 profiles 中的名字（与内联 timing 互斥，同 §3.3-2 语义）
+    #[serde(default)]
+    pub default_timing: Option<String>,
+    /// P2-4：内联 timing 策略
+    #[serde(default)]
+    pub timing: Option<TimingBlockConfig>,
+    /// P2-4：引用 profiles 中的名字（与内联 shaping 互斥）
+    #[serde(default)]
+    pub default_shaping: Option<String>,
+    /// P2-4：内联 shaping 策略
+    #[serde(default)]
+    pub shaping: Option<ShapingBlockConfig>,
 }
 
 impl Default for ObfuscationConfig {
@@ -311,6 +323,10 @@ impl Default for ObfuscationConfig {
             middleware: default_obfs_middleware(),
             profiles: BTreeMap::new(),
             padding: None,
+            default_timing: None,
+            timing: None,
+            default_shaping: None,
+            shaping: None,
         }
     }
 }
@@ -332,8 +348,21 @@ impl ObfuscationConfig {
             "obfuscation.default_padding 与内联 obfuscation.padding 互斥（§3.3-2）"
         );
         anyhow::ensure!(
-            self.default_padding.is_some() || self.padding.is_some(),
-            "obfuscation.enabled=true 但未配策略（default_padding 或内联 padding 任选其一，E1）"
+            !(self.default_timing.is_some() && self.timing.is_some()),
+            "obfuscation.default_timing 与内联 obfuscation.timing 互斥（§3.3-2 同语义）"
+        );
+        anyhow::ensure!(
+            !(self.default_shaping.is_some() && self.shaping.is_some()),
+            "obfuscation.default_shaping 与内联 obfuscation.shaping 互斥（§3.3-2 同语义）"
+        );
+        anyhow::ensure!(
+            self.default_padding.is_some()
+                || self.padding.is_some()
+                || self.default_timing.is_some()
+                || self.timing.is_some()
+                || self.default_shaping.is_some()
+                || self.shaping.is_some(),
+            "obfuscation.enabled=true 但未配策略（default_*/内联 任一维任选其一，E1）"
         );
         if let Some(name) = &self.default_padding {
             let profile = self.profiles.get(name).ok_or_else(|| {
@@ -344,12 +373,46 @@ impl ObfuscationConfig {
                 "profile {name:?} 未定义 padding（E1：开了但没有策略）"
             );
         }
-        // §3.3-4/5：全部 padding 块逐个校验——未选中的坏 profile 也构建期拦截
+        if let Some(name) = &self.default_timing {
+            let profile = self.profiles.get(name).ok_or_else(|| {
+                anyhow::anyhow!("obfuscation.default_timing 指向未定义 profile：{name:?}（E3）")
+            })?;
+            anyhow::ensure!(
+                profile.timing.is_some(),
+                "profile {name:?} 未定义 timing（E1：开了但没有策略）"
+            );
+        }
+        if let Some(name) = &self.default_shaping {
+            let profile = self.profiles.get(name).ok_or_else(|| {
+                anyhow::anyhow!("obfuscation.default_shaping 指向未定义 profile：{name:?}（E3）")
+            })?;
+            anyhow::ensure!(
+                profile.shaping.is_some(),
+                "profile {name:?} 未定义 shaping（E1：开了但没有策略）"
+            );
+        }
+        // §3.3-4/5：全部块逐个校验——未选中的坏 profile 也构建期拦截
         if let Some(inline) = &self.padding {
+            inline.validate()?;
+        }
+        if let Some(inline) = &self.timing {
+            inline.validate()?;
+        }
+        if let Some(inline) = &self.shaping {
             inline.validate()?;
         }
         for (name, profile) in &self.profiles {
             if let Some(block) = &profile.padding {
+                block
+                    .validate()
+                    .with_context(|| format!("profile {name:?}"))?;
+            }
+            if let Some(block) = &profile.timing {
+                block
+                    .validate()
+                    .with_context(|| format!("profile {name:?}"))?;
+            }
+            if let Some(block) = &profile.shaping {
                 block
                     .validate()
                     .with_context(|| format!("profile {name:?}"))?;
@@ -373,6 +436,12 @@ pub struct ObfsProfileConfig {
     /// 该 profile 的 padding 策略；None + 被引用 = E1（开了没有策略）
     #[serde(default)]
     pub padding: Option<PaddingBlockConfig>,
+    /// P2-4：该 profile 的 timing 策略（引用面 = default_timing）
+    #[serde(default)]
+    pub timing: Option<TimingBlockConfig>,
+    /// P2-4：该 profile 的 shaping 策略（引用面 = default_shaping）
+    #[serde(default)]
+    pub shaping: Option<ShapingBlockConfig>,
 }
 
 /// obfuscation.padding 块（§3.1 内联 / profiles 内嵌共用形状）：mode 必填
@@ -452,6 +521,139 @@ impl PaddingBlockConfig {
             ),
             _ => unreachable!("上方 ensure 已拦非三值 mode"),
         }
+        Ok(())
+    }
+}
+
+/// P2-4：obfuscation.timing 块（内联 / profiles 内嵌共用形状）：mode 必填
+/// 字符串（fixed|uniform），逐模式参数 + 硬闸门 max_delay_ms。mode 字符串
+/// → `TimingMode` 枚举在 seep-runtime 转换（对称 PaddingBlockConfig）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimingBlockConfig {
+    /// fixed | uniform（E2）
+    pub mode: String,
+    /// fixed：注入抖动毫秒值（须非 0）
+    #[serde(default)]
+    pub fixed_ms: u64,
+    /// uniform：下界
+    #[serde(default)]
+    pub min_ms: u64,
+    /// uniform：上界（min ≤ max）
+    #[serde(default)]
+    pub max_ms: u64,
+    /// 硬闸门：决策值截断上限（E2：须 ≥ 1 且 ≥ uniform min 的可用下界——
+    /// 0 即未配置视为非法，避免「开了但恒 0」的假开关）
+    #[serde(default)]
+    pub max_delay_ms: u64,
+}
+
+impl Default for TimingBlockConfig {
+    fn default() -> Self {
+        Self {
+            mode: "fixed".to_string(),
+            fixed_ms: 0,
+            min_ms: 0,
+            max_ms: 0,
+            max_delay_ms: 0,
+        }
+    }
+}
+
+impl TimingBlockConfig {
+    /// P2-4 §6-E2：mode 两值 + 逐模式参数 + 闸门须配置，带原值报错。
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            matches!(self.mode.as_str(), "fixed" | "uniform"),
+            "obfuscation.timing.mode 非法：{:?}（E2，须为 fixed|uniform）",
+            self.mode
+        );
+        anyhow::ensure!(
+            self.max_delay_ms >= 1,
+            "obfuscation.timing.max_delay_ms 须 ≥ 1（E2，当前 {}）",
+            self.max_delay_ms
+        );
+        match self.mode.as_str() {
+            "fixed" => anyhow::ensure!(
+                self.fixed_ms >= 1,
+                "fixed 模式 fixed_ms 须 ≥ 1（E2，当前 {}）",
+                self.fixed_ms
+            ),
+            "uniform" => {
+                anyhow::ensure!(
+                    self.min_ms <= self.max_ms,
+                    "uniform 模式须 min_ms ≤ max_ms（E2）：min_ms={}, max_ms={}",
+                    self.min_ms,
+                    self.max_ms
+                );
+                anyhow::ensure!(
+                    self.max_ms <= self.max_delay_ms,
+                    "uniform 模式 max_ms 须 ≤ max_delay_ms 闸门（E2）：max_ms={}, max_delay_ms={}",
+                    self.max_ms,
+                    self.max_delay_ms
+                );
+            }
+            _ => unreachable!("上方 ensure 已拦非双值 mode"),
+        }
+        Ok(())
+    }
+}
+
+/// P2-4：obfuscation.shaping 块（内联 / profiles 内嵌共用形状）：mode 必填
+/// 字符串（interval），网格间隔 + 抖动幅度 + 硬闸门。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShapingBlockConfig {
+    /// interval（E2，M0 仅此一值）
+    pub mode: String,
+    /// 网格间隔毫秒（须非 0）
+    #[serde(default)]
+    pub interval_ms: u64,
+    /// 网格抖动幅度（须 ≤ interval_ms：抖动不喧宾夺主）
+    #[serde(default)]
+    pub jitter_ms: u64,
+    /// 硬闸门：单写延迟截断上限（须 ≥ interval_ms 之外的抖动余量内…
+    /// 口径：max_delay_ms ≥ 1 且 ≥ interval_ms，保证最坏路径可控）
+    #[serde(default)]
+    pub max_delay_ms: u64,
+}
+
+impl Default for ShapingBlockConfig {
+    fn default() -> Self {
+        Self {
+            mode: "interval".to_string(),
+            interval_ms: 0,
+            jitter_ms: 0,
+            max_delay_ms: 0,
+        }
+    }
+}
+
+impl ShapingBlockConfig {
+    /// P2-4 §6-E2：mode 单值 + 间隔/抖动/闸门三字段矩阵，带原值报错。
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.mode == "interval",
+            "obfuscation.shaping.mode 非法：{:?}（E2，须为 interval）",
+            self.mode
+        );
+        anyhow::ensure!(
+            self.interval_ms >= 1,
+            "obfuscation.shaping.interval_ms 须 ≥ 1（E2，当前 {}）",
+            self.interval_ms
+        );
+        anyhow::ensure!(
+            self.jitter_ms <= self.interval_ms,
+            "obfuscation.shaping.jitter_ms 须 ≤ interval_ms（E2）：jitter_ms={}, interval_ms={}",
+            self.jitter_ms,
+            self.interval_ms
+        );
+        anyhow::ensure!(
+            self.max_delay_ms >= self.interval_ms,
+            "obfuscation.shaping.max_delay_ms 须 ≥ interval_ms（E2）：max_delay_ms={}, interval_ms={}",
+            self.max_delay_ms,
+            self.interval_ms
+        );
         Ok(())
     }
 }
@@ -679,6 +881,10 @@ impl SeepConfig {
         // 帧执行侧，obfuscation-middleware.md §2.3）
         if kind == ProfileKind::Game && self.obfuscation.is_none() {
             self.obfuscation = Some(ObfuscationConfig {
+                default_timing: None,
+                timing: None,
+                default_shaping: None,
+                shaping: None,
                 enabled: true,
                 padding: Some(PaddingBlockConfig {
                     mode: "bucket".to_string(),

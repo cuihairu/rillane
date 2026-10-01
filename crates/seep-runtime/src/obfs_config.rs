@@ -11,8 +11,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::warn;
 
-use seep_config::{ApplyTo, ObfuscationConfig, PaddingBlockConfig};
-use seep_core::{FlowMiddleware, MiddlewareChain, PaddingMode, PaddingSpec};
+use seep_config::{
+    ApplyTo, ObfuscationConfig, PaddingBlockConfig, ShapingBlockConfig, TimingBlockConfig,
+};
+use seep_core::{
+    FlowMiddleware, MiddlewareChain, PaddingMode, PaddingSpec, ShapingMode, ShapingSpec,
+    TimingMode, TimingSpec,
+};
 use seep_protocols::middleware::{LatencyProbe, PadSelector, PaddingMiddleware, ANN_OBFS_PADDING};
 
 /// 解析后的 padding 策略（选择器 + spec）：M1 构建 middleware 链、M2
@@ -104,6 +109,161 @@ fn padding_block_to_spec(block: &PaddingBlockConfig) -> Result<PaddingSpec> {
     })
 }
 
+/// P2-4 §3：解析后的 timing 策略（选择器 + spec），与 `PaddingPolicy`
+/// 对称。§7 选择器匹配同语义。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimingPolicy {
+    pub apply_to: ApplyTo,
+    pub spec: TimingSpec,
+}
+
+impl TimingPolicy {
+    pub fn matches(&self, kind: &str, egress: Option<&str>) -> bool {
+        match &self.apply_to {
+            ApplyTo::Chain => kind == "chain",
+            ApplyTo::Single => kind == "single",
+            ApplyTo::All => true,
+            ApplyTo::Egress(name) => egress == Some(name.as_str()),
+        }
+    }
+}
+
+/// P2-4 §3：解析后的 shaping 策略，与 `PaddingPolicy` 对称。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapingPolicy {
+    pub apply_to: ApplyTo,
+    pub spec: ShapingSpec,
+}
+
+impl ShapingPolicy {
+    pub fn matches(&self, kind: &str, egress: Option<&str>) -> bool {
+        match &self.apply_to {
+            ApplyTo::Chain => kind == "chain",
+            ApplyTo::Single => kind == "single",
+            ApplyTo::All => true,
+            ApplyTo::Egress(name) => egress == Some(name.as_str()),
+        }
+    }
+}
+
+/// `ObfuscationConfig` → `TimingPolicy`（P2-4 §3 对称 to_padding_policy）：
+/// 语义同——enabled 总开关短路、E5 降级、default_timing 与内联互斥（防御）、
+/// profile 内嵌解析；至少一维策略是调用侧 validate 的责任，本函数两块皆 None
+/// 时 → Ok(None)（timing 维未启用即不生 middleware）。
+pub fn to_timing_policy(
+    cfg: &ObfuscationConfig,
+    known_egress: &[&str],
+) -> Result<Option<TimingPolicy>> {
+    if !cfg.enabled {
+        return Ok(None);
+    }
+    if let ApplyTo::Egress(name) = &cfg.apply_to {
+        if !known_egress.contains(&name.as_str()) {
+            warn!(
+                target: "seep::obfs",
+                egress = %name,
+                "obfuscation.apply_to 指向不存在的 egress，降级为不生效（E5）"
+            );
+            return Ok(None);
+        }
+    }
+    let block = match (&cfg.default_timing, &cfg.timing) {
+        (Some(name), None) => cfg
+            .profiles
+            .get(name)
+            .and_then(|profile| profile.timing.as_ref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "obfuscation.default_timing 指向未定义或无 timing 的 profile：{name:?}（E3/E1）"
+                )
+            })?,
+        (None, Some(inline)) => inline,
+        (Some(_), Some(_)) => anyhow::bail!("default_timing 与内联 timing 互斥（§3.3-2 同语义）"),
+        (None, None) => return Ok(None),
+    };
+    let spec = timing_block_to_spec(block)?;
+    Ok(Some(TimingPolicy {
+        apply_to: cfg.apply_to.clone(),
+        spec,
+    }))
+}
+
+/// `ObfuscationConfig` → `ShapingPolicy`（P2-4 §3 对称 to_padding_policy）。
+pub fn to_shaping_policy(
+    cfg: &ObfuscationConfig,
+    known_egress: &[&str],
+) -> Result<Option<ShapingPolicy>> {
+    if !cfg.enabled {
+        return Ok(None);
+    }
+    if let ApplyTo::Egress(name) = &cfg.apply_to {
+        if !known_egress.contains(&name.as_str()) {
+            warn!(
+                target: "seep::obfs",
+                egress = %name,
+                "obfuscation.apply_to 指向不存在的 egress，降级为不生效（E5）"
+            );
+            return Ok(None);
+        }
+    }
+    let block = match (&cfg.default_shaping, &cfg.shaping) {
+        (Some(name), None) => cfg
+            .profiles
+            .get(name)
+            .and_then(|profile| profile.shaping.as_ref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "obfuscation.default_shaping 指向未定义或无 shaping 的 profile：{name:?}（E3/E1）"
+                )
+            })?,
+        (None, Some(inline)) => inline,
+        (Some(_), Some(_)) => {
+            anyhow::bail!("default_shaping 与内联 shaping 互斥（§3.3-2 同语义）")
+        }
+        (None, None) => return Ok(None),
+    };
+    let spec = shaping_block_to_spec(block)?;
+    Ok(Some(ShapingPolicy {
+        apply_to: cfg.apply_to.clone(),
+        spec,
+    }))
+}
+
+/// `TimingBlockConfig` → `TimingSpec`：mode 字符串 → 枚举，非法 mode
+/// 带原值 Err（E2；validate 未前置时的直调防御）。
+fn timing_block_to_spec(block: &TimingBlockConfig) -> Result<TimingSpec> {
+    let mode = match block.mode.as_str() {
+        "fixed" => TimingMode::Fixed,
+        "uniform" => TimingMode::Uniform,
+        other => {
+            anyhow::bail!("obfuscation.timing.mode 非法：{other:?}（E2，须为 fixed|uniform）")
+        }
+    };
+    Ok(TimingSpec {
+        mode,
+        fixed_ms: block.fixed_ms,
+        min_ms: block.min_ms,
+        max_ms: block.max_ms,
+        max_delay_ms: block.max_delay_ms,
+    })
+}
+
+/// `ShapingBlockConfig` → `ShapingSpec`：同上。
+fn shaping_block_to_spec(block: &ShapingBlockConfig) -> Result<ShapingSpec> {
+    let mode = match block.mode.as_str() {
+        "interval" => ShapingMode::Interval,
+        other => {
+            anyhow::bail!("obfuscation.shaping.mode 非法：{other:?}（E2，须为 interval）")
+        }
+    };
+    Ok(ShapingSpec {
+        mode,
+        interval_ms: block.interval_ms,
+        jitter_ms: block.jitter_ms,
+        max_delay_ms: block.max_delay_ms,
+    })
+}
+
 /// P1-4 §4.2/E9：从 `seep.obfs.padding` 注解提取 spec——注解缺失或非法
 /// JSON 一律 `None`（不填充：伪装是增益，不得破坏转发）。帧执行侧
 /// （`forward_chain` → `dial_and_tunnel`）的消费入口。
@@ -167,6 +327,10 @@ mod tests {
 
     fn profile_cfg() -> ObfuscationConfig {
         ObfuscationConfig {
+            default_timing: None,
+            timing: None,
+            default_shaping: None,
+            shaping: None,
             enabled: true,
             default_padding: Some("game".to_string()),
             apply_to: ApplyTo::default(),
@@ -174,6 +338,8 @@ mod tests {
             profiles: BTreeMap::from([(
                 "game".to_string(),
                 ObfsProfileConfig {
+                    timing: None,
+                    shaping: None,
                     padding: Some(PaddingBlockConfig {
                         mode: "bucket".to_string(),
                         target: 0,
@@ -186,6 +352,151 @@ mod tests {
             )]),
             padding: None,
         }
+    }
+
+    /// P2-4 §7-2：to_timing_policy 矩阵——enabled 短路零触 / profile 引用解析 /
+    /// 内联生效 + spec JSON 往返（注解形契约）/ E5 降级 None / 直调防御面
+    /// （互斥 / E3 / E2 带原值）。
+    #[test]
+    fn to_timing_policy_matrix() {
+        // 短路：disabled 时即便非法块也不触碰转换
+        let mut cfg = profile_cfg();
+        cfg.enabled = false;
+        cfg.timing = Some(TimingBlockConfig {
+            mode: "bogus".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(to_timing_policy(&cfg, &[]).unwrap(), None);
+
+        // None 维：未配 timing 即 Ok(None)（timing 维未启用）
+        cfg.enabled = true;
+        cfg.timing = None;
+        assert_eq!(to_timing_policy(&cfg, &[]).unwrap(), None);
+
+        // profile 引用解析
+        let mut with_profile = profile_cfg();
+        with_profile.default_timing = Some("game".to_string());
+        with_profile.profiles.get_mut("game").unwrap().timing = Some(TimingBlockConfig {
+            mode: "uniform".to_string(),
+            min_ms: 5,
+            max_ms: 30,
+            max_delay_ms: 50,
+            ..Default::default()
+        });
+        let policy = to_timing_policy(&with_profile, &[])
+            .unwrap()
+            .expect("profile timing 应解析");
+        assert_eq!(policy.spec.mode, TimingMode::Uniform);
+        assert_eq!(policy.spec.min_ms, 5);
+        assert_eq!(policy.spec.max_delay_ms, 50);
+
+        // 内联生效 + JSON 往返
+        let mut inline = profile_cfg();
+        inline.timing = Some(TimingBlockConfig {
+            mode: "fixed".to_string(),
+            fixed_ms: 12,
+            max_delay_ms: 20,
+            ..Default::default()
+        });
+        let policy = to_timing_policy(&inline, &[])
+            .unwrap()
+            .expect("内联 timing 应生效");
+        assert_eq!(policy.spec.mode, TimingMode::Fixed);
+        assert_eq!(policy.spec.fixed_ms, 12);
+        let json = serde_json::to_string(&policy.spec).unwrap();
+        let back: TimingSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, policy.spec);
+
+        // E5 降级：apply_to=egress:ghost 且未知 egress
+        let mut ghost = profile_cfg();
+        ghost.apply_to = ApplyTo::Egress("ghost".to_string());
+        ghost.timing = Some(TimingBlockConfig::default());
+        assert_eq!(to_timing_policy(&ghost, &["hk-1"]).unwrap(), None);
+        let mut hit = profile_cfg();
+        hit.apply_to = ApplyTo::Egress("hk-1".to_string());
+        hit.timing = Some(TimingBlockConfig {
+            mode: "fixed".to_string(),
+            fixed_ms: 1,
+            max_delay_ms: 5,
+            ..Default::default()
+        });
+        assert!(to_timing_policy(&hit, &["hk-1"]).unwrap().is_some());
+
+        // 直调防御面：互斥 / E3 / E2 带原值
+        let mut both = profile_cfg();
+        both.default_timing = Some("game".to_string());
+        both.timing = Some(TimingBlockConfig::default());
+        assert!(to_timing_policy(&both, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("互斥"));
+        let mut bad_ref = profile_cfg();
+        bad_ref.default_timing = Some("ghost".to_string());
+        assert!(to_timing_policy(&bad_ref, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("E3"));
+        let mut bad_mode = profile_cfg();
+        bad_mode.timing = Some(TimingBlockConfig {
+            mode: "bogus".to_string(),
+            ..Default::default()
+        });
+        assert!(to_timing_policy(&bad_mode, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("bogus"));
+    }
+
+    /// P2-4 §7-2：to_shaping_policy 矩阵同 to_timing_policy。
+    #[test]
+    fn to_shaping_policy_matrix() {
+        let mut cfg = profile_cfg();
+        cfg.enabled = false;
+        cfg.shaping = Some(ShapingBlockConfig {
+            mode: "bogus".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(to_shaping_policy(&cfg, &[]).unwrap(), None);
+
+        cfg.enabled = true;
+        cfg.shaping = None;
+        assert_eq!(to_shaping_policy(&cfg, &[]).unwrap(), None);
+
+        let mut with_profile = profile_cfg();
+        with_profile.default_shaping = Some("game".to_string());
+        with_profile.profiles.get_mut("game").unwrap().shaping = Some(ShapingBlockConfig {
+            mode: "interval".to_string(),
+            interval_ms: 20,
+            jitter_ms: 5,
+            max_delay_ms: 40,
+        });
+        let policy = to_shaping_policy(&with_profile, &[])
+            .unwrap()
+            .expect("profile shaping 应解析");
+        assert_eq!(policy.spec.mode, ShapingMode::Interval);
+        assert_eq!(policy.spec.interval_ms, 20);
+        assert_eq!(policy.spec.jitter_ms, 5);
+
+        let json = serde_json::to_string(&policy.spec).unwrap();
+        let back: ShapingSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, policy.spec);
+
+        let mut both = profile_cfg();
+        both.default_shaping = Some("game".to_string());
+        both.shaping = Some(ShapingBlockConfig::default());
+        assert!(to_shaping_policy(&both, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("互斥"));
+        let mut bad_mode = profile_cfg();
+        bad_mode.shaping = Some(ShapingBlockConfig {
+            mode: "bogus".to_string(),
+            ..Default::default()
+        });
+        assert!(to_shaping_policy(&bad_mode, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("bogus"));
     }
 
     /// §2.5/§3.3-1：enabled=false 短路——半成品配置（非法 mode）也不触碰转换。

@@ -81,6 +81,10 @@ fn obfuscation_block_denies_unknown_fields() {
 #[test]
 fn obfuscation_block_serde_roundtrip() {
     let cfg = ObfuscationConfig {
+        default_timing: None,
+        timing: None,
+        default_shaping: None,
+        shaping: None,
         enabled: true,
         default_padding: Some("game".to_string()),
         apply_to: ApplyTo::Egress("hk-1".to_string()),
@@ -89,6 +93,8 @@ fn obfuscation_block_serde_roundtrip() {
             (
                 "game".to_string(),
                 ObfsProfileConfig {
+                    timing: None,
+                    shaping: None,
                     padding: Some(PaddingBlockConfig {
                         mode: "bucket".to_string(),
                         buckets: vec![256, 512, 1024],
@@ -100,6 +106,8 @@ fn obfuscation_block_serde_roundtrip() {
             (
                 "web".to_string(),
                 ObfsProfileConfig {
+                    timing: None,
+                    shaping: None,
                     padding: Some(PaddingBlockConfig {
                         mode: "range".to_string(),
                         min: 512,
@@ -133,6 +141,10 @@ fn obfuscation_validate_matrix() {
 
     // §3.3-1：关闭容忍半成品（非法 mode、无策略、未知 middleware 均不报）
     ObfuscationConfig {
+        default_timing: None,
+        timing: None,
+        default_shaping: None,
+        shaping: None,
         enabled: false,
         padding: Some(PaddingBlockConfig {
             mode: "bogus".to_string(),
@@ -146,6 +158,10 @@ fn obfuscation_validate_matrix() {
 
     // §3.3-2：互斥
     let mut cfg = ObfuscationConfig {
+        default_timing: None,
+        timing: None,
+        default_shaping: None,
+        shaping: None,
         enabled: true,
         default_padding: Some("game".to_string()),
         ..Default::default()
@@ -153,6 +169,8 @@ fn obfuscation_validate_matrix() {
     cfg.profiles.insert(
         "game".to_string(),
         ObfsProfileConfig {
+            timing: None,
+            shaping: None,
             padding: Some(inline()),
         },
     );
@@ -162,6 +180,10 @@ fn obfuscation_validate_matrix() {
 
     // §3.3-2：皆缺 = E1
     let mut cfg = ObfuscationConfig {
+        default_timing: None,
+        timing: None,
+        default_shaping: None,
+        shaping: None,
         enabled: true,
         ..Default::default()
     };
@@ -172,6 +194,10 @@ fn obfuscation_validate_matrix() {
 
     // §3.3-3：策略名不存在 = E3；profile 无 padding = E1
     let mut cfg = ObfuscationConfig {
+        default_timing: None,
+        timing: None,
+        default_shaping: None,
+        shaping: None,
         enabled: true,
         default_padding: Some("ghost".to_string()),
         ..Default::default()
@@ -179,13 +205,23 @@ fn obfuscation_validate_matrix() {
     let err = cfg.validate().expect_err("未知策略名应报 E3");
     assert!(err.to_string().contains("E3"), "{err}");
     cfg.default_padding = Some("empty".to_string());
-    cfg.profiles
-        .insert("empty".to_string(), ObfsProfileConfig { padding: None });
+    cfg.profiles.insert(
+        "empty".to_string(),
+        ObfsProfileConfig {
+            padding: None,
+            timing: None,
+            shaping: None,
+        },
+    );
     let err = cfg.validate().expect_err("无 padding profile 应报 E1");
     assert!(err.to_string().contains("E1"), "{err}");
 
     // §3.3-5：middleware 白名单（padding/latency_probe 合法，其余 Err）
     let mut cfg = ObfuscationConfig {
+        default_timing: None,
+        timing: None,
+        default_shaping: None,
+        shaping: None,
         enabled: true,
         middleware: vec!["padding".to_string(), "latency_probe".to_string()],
         padding: Some(inline()),
@@ -264,6 +300,10 @@ fn obfuscation_validate_matrix() {
     .validate()
     .expect("range min=max=0 合法");
     let mut cfg = ObfuscationConfig {
+        default_timing: None,
+        timing: None,
+        default_shaping: None,
+        shaping: None,
         enabled: true,
         padding: Some(inline()),
         ..Default::default()
@@ -271,6 +311,8 @@ fn obfuscation_validate_matrix() {
     cfg.profiles.insert(
         "broken".to_string(),
         ObfsProfileConfig {
+            timing: None,
+            shaping: None,
             padding: Some(PaddingBlockConfig {
                 mode: "bucket".to_string(),
                 buckets: vec![],
@@ -318,4 +360,104 @@ fn apply_to_parsing() {
     let err =
         serde_yaml::from_str::<ObfuscationConfig>(yaml).expect_err("未知 apply_to 应解析报错");
     assert!(err.to_string().contains("bogus"), "{err}");
+}
+
+/// P2-4 §6-E2：timing/shaping 块解析 + validate 矩阵。
+#[test]
+fn timing_shaping_blocks_validate_matrix() {
+    let yaml = r#"
+enabled: true
+default_timing: game
+default_shaping: game
+profiles:
+  game:
+    timing:
+      mode: uniform
+      min_ms: 5
+      max_ms: 30
+      max_delay_ms: 50
+    shaping:
+      mode: interval
+      interval_ms: 20
+      jitter_ms: 5
+      max_delay_ms: 40
+"#;
+    let cfg: ObfuscationConfig = serde_yaml::from_str(yaml).expect("应解析");
+    cfg.validate().expect("合法矩阵应过");
+
+    // E2 矩阵
+    let bad = |timing: Option<&str>, shaping: Option<&str>| {
+        let mut y = String::from("enabled: true\n");
+        if let Some(t) = timing {
+            y.push_str(&format!("timing:\n{t}\n"));
+        }
+        if let Some(s) = shaping {
+            y.push_str(&format!("shaping:\n{s}\n"));
+        }
+        let cfg: ObfuscationConfig = serde_yaml::from_str(&y).unwrap();
+        cfg.validate()
+    };
+    // timing：非法 mode / fixed_ms=0 / uniform min>max / max_ms 破闸门
+    assert!(bad(Some("  mode: bogus\n"), None)
+        .unwrap_err()
+        .to_string()
+        .contains("E2"));
+    assert!(bad(Some("  mode: fixed\n  max_delay_ms: 10\n"), None)
+        .unwrap_err()
+        .to_string()
+        .contains("E2"));
+    assert!(bad(
+        Some("  mode: uniform\n  min_ms: 30\n  max_ms: 5\n  max_delay_ms: 50\n"),
+        None
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("E2"));
+    assert!(bad(
+        Some("  mode: uniform\n  min_ms: 0\n  max_ms: 60\n  max_delay_ms: 50\n"),
+        None
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("E2"));
+    // shaping：非法 mode / interval 0 / jitter > interval / max_delay < interval
+    assert!(bad(None, Some("  mode: bogus\n"))
+        .unwrap_err()
+        .to_string()
+        .contains("E2"));
+    assert!(bad(
+        None,
+        Some("  mode: interval\n  interval_ms: 0\n  max_delay_ms: 10\n")
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("E2"));
+    assert!(bad(
+        None,
+        Some("  mode: interval\n  interval_ms: 20\n  jitter_ms: 30\n  max_delay_ms: 40\n")
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("E2"));
+    assert!(bad(
+        None,
+        Some("  mode: interval\n  interval_ms: 20\n  max_delay_ms: 10\n")
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("E2"));
+
+    // 互斥：default_timing + 内联 timing
+    let cfg: ObfuscationConfig = serde_yaml::from_str(
+        "enabled: true\ndefault_timing: g\nprofiles:\n  g:\n    timing:\n      mode: fixed\n      fixed_ms: 1\n      max_delay_ms: 1\ntiming:\n  mode: fixed\n  fixed_ms: 1\n  max_delay_ms: 1\n",
+    )
+    .unwrap();
+    assert!(cfg.validate().unwrap_err().to_string().contains("互斥"));
+
+    // E1 扩展面：仅 timing 即可单独成策略
+    let cfg: ObfuscationConfig = serde_yaml::from_str(
+        "enabled: true\ntiming:\n  mode: fixed\n  fixed_ms: 1\n  max_delay_ms: 1\n",
+    )
+    .unwrap();
+    cfg.validate().expect("仅 timing 也视为有策略");
 }
