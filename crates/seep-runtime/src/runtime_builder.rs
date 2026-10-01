@@ -114,6 +114,10 @@ impl RuntimeBuilder {
         let config = Arc::new(RwLock::new(self.config));
         let config_snapshot = config.read().expect("config poisoned").clone();
 
+        // 组级 SLO 值域构建期拦截（slo-scoring.md §4：schema validate +
+        // 装配前防御性调用，存量路由配置无 slo 时零开销直通）
+        config_snapshot.routing.validate()?;
+
         // 创建路由引擎
         let router = Arc::new(RoutingEngine::new(config_snapshot.routing.clone()));
 
@@ -2869,6 +2873,7 @@ mod tests {
                     members: vec![GroupMember::Node {
                         name: "direct".to_string(),
                     }],
+                    slo: None,
                 }],
                 rules: vec![],
             },
@@ -2914,6 +2919,7 @@ mod tests {
                         members: vec![GroupMember::Node {
                             name: "direct".to_string(),
                         }],
+                        slo: None,
                     },
                     PolicyGroup {
                         name: "g2".to_string(),
@@ -2921,6 +2927,7 @@ mod tests {
                         members: vec![GroupMember::Node {
                             name: "p1".to_string(),
                         }],
+                        slo: None,
                     },
                 ],
                 rules: vec![
@@ -3172,6 +3179,7 @@ mod tests {
                     weight: *w,
                 })
                 .collect(),
+            slo: None,
         }
     }
 

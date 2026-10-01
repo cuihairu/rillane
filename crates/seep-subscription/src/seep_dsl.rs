@@ -1044,6 +1044,8 @@ impl SeepDslConverter {
                 name: group.name.clone(),
                 strategy,
                 members,
+                // 订阅不产 SLO 目标（归用户主配置，P1-3/P1-4 同判）
+                slo: None,
             });
         }
 

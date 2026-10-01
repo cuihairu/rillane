@@ -26,6 +26,7 @@ fn create_test_config() -> RoutingConfig {
                         weight: 3,
                     },
                 ],
+                slo: None,
             },
             PolicyGroup {
                 name: "latency-group".to_string(),
@@ -38,6 +39,7 @@ fn create_test_config() -> RoutingConfig {
                         name: "node2".to_string(),
                     },
                 ],
+                slo: None,
             },
             PolicyGroup {
                 name: "bandwidth-group".to_string(),
@@ -50,6 +52,7 @@ fn create_test_config() -> RoutingConfig {
                         name: "node2".to_string(),
                     },
                 ],
+                slo: None,
             },
             PolicyGroup {
                 name: "hash-group".to_string(),
@@ -65,6 +68,7 @@ fn create_test_config() -> RoutingConfig {
                         name: "node3".to_string(),
                     },
                 ],
+                slo: None,
             },
             PolicyGroup {
                 name: "random-group".to_string(),
@@ -77,6 +81,7 @@ fn create_test_config() -> RoutingConfig {
                         name: "node2".to_string(),
                     },
                 ],
+                slo: None,
             },
         ],
         rules: vec![
@@ -283,6 +288,7 @@ async fn test_group_nesting() -> Result<()> {
                 name: "node4".to_string(),
             },
         ],
+        slo: None,
     });
 
     // 添加规则使用嵌套组

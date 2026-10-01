@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use seep_config::{
     GroupDescriptor, GroupDescriptorMember, MatchCondition, PolicyGroup, RouteRule, RoutingConfig,
-    Strategy,
+    SloPolicy, Strategy,
 };
 use seep_core::{FlowContext, FlowRouter, RouteDecision};
 use sha2::{Digest, Sha256};
@@ -26,6 +26,10 @@ pub struct RoutingEngine {
     latency_stats: DashMap<String, u32>,
     // 节点带宽统计缓存 (node_name -> (bandwidth_kbps, last_update_time))
     bandwidth_stats: DashMap<String, (u32, std::time::Instant)>,
+    // 节点真链路质量缓存 (node_name -> (p95_ms, loss_ratio, last_update))
+    // ——slo-scoring.md §2 D-3：seep-runtime 桥自 MeshRegistry 聚合推进
+    // （update_link_quality），seep-routing 保持零 seep-mesh 依赖（D-4）
+    link_quality: DashMap<String, (u32, f64, std::time::Instant)>,
 }
 
 impl RoutingEngine {
@@ -37,6 +41,7 @@ impl RoutingEngine {
             health_status: DashMap::new(),
             latency_stats: DashMap::new(),
             bandwidth_stats: DashMap::new(),
+            link_quality: DashMap::new(),
         };
         engine.build_group_cache();
         engine
@@ -145,6 +150,7 @@ impl RoutingEngine {
                 group.name.clone(),
                 group.strategy.clone(),
                 members,
+                group.slo.clone(),
             ))
         }
     }
@@ -290,35 +296,88 @@ impl RoutingEngine {
             .map(|(member, _)| member)
     }
 
-    /// 基于延迟选择成员
+    /// 更新节点真链路质量（slo-scoring.md §2 D-3：seep-runtime 桥推进，
+    /// p95 = 相邻链路最差跳，loss = Σerrors/Σconnections）
+    pub fn update_link_quality(&self, node_name: &str, p95_ms: u32, loss_ratio: f64) {
+        self.link_quality.insert(
+            node_name.to_string(),
+            (p95_ms, loss_ratio, std::time::Instant::now()),
+        );
+    }
+
+    /// 节点真链路质量快照 (node, p95_ms, loss_ratio)（测试与 O-slo1 观测面）
+    pub fn link_quality_snapshot(&self) -> Vec<(String, u32, f64)> {
+        self.link_quality
+            .iter()
+            .map(|e| (e.key().clone(), e.value().0, e.value().1))
+            .collect()
+    }
+
+    /// 基于延迟选择成员（slo-scoring.md §2 D-2/D-3 升级：SLO 目标门 + 加性
+    /// 罚分评分；取数优先级 = 真链路质量（TTL 内）→ legacy latency_stats →
+    /// 首个健康成员）
     fn select_latency_member<'a>(
         &self,
         members: &'a [&GroupDescriptorMember],
+        slo: Option<&SloPolicy>,
     ) -> Option<&'a GroupDescriptorMember> {
         if members.is_empty() {
             return None;
         }
 
-        // 过滤出有延迟统计的成员
-        let members_with_latency: Vec<(&GroupDescriptorMember, u32)> = members
+        let now = std::time::Instant::now();
+        const QUALITY_TTL: Duration = Duration::from_secs(60);
+
+        // 取数：真链路质量优先；缺席回退 legacy 最后样本（loss 未知记 0——
+        // 语义 = legacy 源无丢包观测，§9 语义变化注记）
+        let candidates: Vec<(&GroupDescriptorMember, f64, f64, bool)> = members
             .iter()
             .filter_map(|member| {
+                if let Some(entry) = self.link_quality.get(member.as_name()) {
+                    let (p95, loss, at) = entry.value();
+                    if now.duration_since(*at) < QUALITY_TTL {
+                        return Some((*member, *p95 as f64, *loss, true));
+                    }
+                }
                 self.latency_stats
                     .get(member.as_name())
-                    .map(|latency| (*member, *latency))
+                    .map(|latency| (*member, *latency.value() as f64, 0.0, false))
             })
             .collect();
 
-        if members_with_latency.is_empty() {
-            // 如果没有延迟统计，返回第一个健康成员
+        if candidates.is_empty() {
             return members.first().copied();
         }
 
-        // 选择延迟最低的成员
-        members_with_latency
+        let penalty = slo.map(SloPolicy::penalty_or_default).unwrap_or(1000.0);
+        // score = p95 + loss × penalty（D-1 加性形；legacy 源 loss=0）
+        let score =
+            |&(_, p95, loss, _): &(&GroupDescriptorMember, f64, f64, bool)| p95 + loss * penalty;
+        // 门（D-2）：仅真数据成员受门约束（legacy/unknown 视为合规）；
+        // 门内空 → 全体候选（不 dead-end）
+        let compliant: Vec<_> = match slo {
+            Some(slo) => {
+                let gated: Vec<_> = candidates
+                    .iter()
+                    .filter(|(_, p95, loss, real)| {
+                        !*real
+                            || (slo.p95_ms.is_none_or(|t| *p95 <= f64::from(t))
+                                && slo.loss_ratio.is_none_or(|t| *loss <= t))
+                    })
+                    .collect();
+                if gated.is_empty() {
+                    candidates.iter().collect()
+                } else {
+                    gated
+                }
+            }
+            None => candidates.iter().collect(),
+        };
+
+        compliant
             .into_iter()
-            .min_by_key(|(_, latency)| *latency)
-            .map(|(member, _)| member)
+            .min_by(|a, b| score(a).total_cmp(&score(b)))
+            .map(|(member, _, _, _)| *member)
     }
 
     /// 更新节点带宽统计
@@ -403,7 +462,9 @@ impl RoutingEngine {
                     self.get_next_round_robin_index(&descriptor.name, healthy_members.len());
                 healthy_members.get(index).copied()
             }
-            Strategy::Latency => self.select_latency_member(&healthy_members),
+            Strategy::Latency => {
+                self.select_latency_member(&healthy_members, descriptor.slo.as_ref())
+            }
         };
 
         let selected_member =
@@ -513,4 +574,225 @@ fn matches_rule(rule: &RouteRule, ctx: &FlowContext) -> bool {
             .unwrap_or(false),
         MatchCondition::Port { values } => values.contains(&ctx.target.port),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 双成员健康组直构（slo-scoring.md §7-2：选择翻转断言面）
+    fn two_member_group() -> Vec<GroupDescriptorMember> {
+        vec![
+            GroupDescriptorMember::Node {
+                name: "good".into(),
+                weight: 1,
+                is_healthy: true,
+            },
+            GroupDescriptorMember::Node {
+                name: "bad".into(),
+                weight: 1,
+                is_healthy: true,
+            },
+        ]
+    }
+
+    /// §7-2：真链路质量注入驱动选择——低 p95 成员入选；注入劣化后翻转
+    #[test]
+    fn latency_strategy_flips_on_real_quality_degradation() {
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "good".into(),
+            groups: vec![],
+            rules: vec![],
+        });
+        let members = two_member_group();
+        let refs: Vec<&GroupDescriptorMember> = members.iter().collect();
+
+        // 初始：good p95 30ms / bad p95 80ms（loss 皆 0）→ 选 good
+        engine.update_link_quality("good", 30, 0.0);
+        engine.update_link_quality("bad", 80, 0.0);
+        assert_eq!(
+            engine.select_latency_member(&refs, None).unwrap().as_name(),
+            "good"
+        );
+
+        // 劣化注入：good p95 升至 120 → 选 bad（验收「模拟链路劣化」选择面）
+        engine.update_link_quality("good", 120, 0.0);
+        assert_eq!(
+            engine.select_latency_member(&refs, None).unwrap().as_name(),
+            "bad"
+        );
+    }
+
+    /// §7-1/D-1：丢包罚分参与排序——同 p95 下高丢包成员落选；
+    /// 门（D-2）：越门真数据成员被过滤，门内空不 dead-end 回全体
+    #[test]
+    fn slo_gate_filters_violators_and_never_dead_ends() {
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "good".into(),
+            groups: vec![],
+            rules: vec![],
+        });
+        let members = two_member_group();
+        let refs: Vec<&GroupDescriptorMember> = members.iter().collect();
+
+        // 罚分翻转到胜利方向：bad p95 20 分 70（20+0.05×1000）< good p95 80
+        // 分 80 → 无门选 bad（丢包罚分不改变此处排序，仅垫高劣化者）
+        engine.update_link_quality("good", 80, 0.0);
+        engine.update_link_quality("bad", 20, 0.05);
+        let slo = SloPolicy {
+            p95_ms: None,
+            loss_ratio: None,
+            loss_penalty_ms: None,
+        };
+        assert_eq!(
+            engine
+                .select_latency_member(&refs, Some(&slo))
+                .unwrap()
+                .as_name(),
+            "bad"
+        );
+
+        // 罚分压倒性形：good p95 50 loss 0 分 50 < bad p95 45 loss 5% 分 95
+        // → 高丢包成员落选（D-1 罚分参与排序）
+        engine.update_link_quality("good", 50, 0.0);
+        engine.update_link_quality("bad", 45, 0.05);
+        assert_eq!(
+            engine
+                .select_latency_member(&refs, Some(&slo))
+                .unwrap()
+                .as_name(),
+            "good"
+        );
+
+        // 门（D-2）：bad loss 5% 越门 1% → 被过滤只剩 good（尽管 bad 分更低）
+        engine.update_link_quality("good", 80, 0.0);
+        engine.update_link_quality("bad", 20, 0.05);
+        let slo_strict = SloPolicy {
+            p95_ms: None,
+            loss_ratio: Some(0.01),
+            loss_penalty_ms: None,
+        };
+        assert_eq!(
+            engine
+                .select_latency_member(&refs, Some(&slo_strict))
+                .unwrap()
+                .as_name(),
+            "good"
+        );
+
+        // 门全破不 dead-end：两成员皆越门 → 回全体取最低分（bad 70 < good 580）
+        engine.update_link_quality("good", 80, 0.5);
+        assert_eq!(
+            engine
+                .select_latency_member(&refs, Some(&slo_strict))
+                .unwrap()
+                .as_name(),
+            "bad"
+        );
+    }
+
+    /// §7-2/§6 E1：无真数据成员视为合规（门不误杀）+ 取数优先级——真数据
+    /// 在场压过 legacy；真数据缺席回 legacy 最后样本；皆缺席回首个成员
+    #[test]
+    fn quality_source_priority_and_unknown_compliance() {
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "good".into(),
+            groups: vec![],
+            rules: vec![],
+        });
+        let members = two_member_group();
+        let refs: Vec<&GroupDescriptorMember> = members.iter().collect();
+
+        // 皆无数据 → 首个健康成员
+        assert_eq!(
+            engine.select_latency_member(&refs, None).unwrap().as_name(),
+            "good"
+        );
+
+        // 仅 legacy：bad 20ms < good 60ms → 选 bad（旧路径保持）
+        engine.latency_stats.insert("good".into(), 60);
+        engine.latency_stats.insert("bad".into(), 20);
+        assert_eq!(
+            engine.select_latency_member(&refs, None).unwrap().as_name(),
+            "bad"
+        );
+
+        // 成员级真数据优先（D-3）：真数据只覆盖本成员的 legacy 值——good
+        // legacy 60 被真数据 10ms 覆盖后以 10 分入选（若仍读 legacy 60 则
+        // bad 20 胜）；bad 无真数据继续用 legacy 20
+        engine.update_link_quality("good", 10, 0.0);
+        assert_eq!(
+            engine.select_latency_member(&refs, None).unwrap().as_name(),
+            "good"
+        );
+
+        // §6 E1：strict 门下 good 真数据越门、bad 无真数据（unknown 合规）
+        // → bad 以 legacy 分入选（unknown 不被门误杀）
+        engine.update_link_quality("good", 100, 0.5);
+        let slo_strict = SloPolicy {
+            p95_ms: Some(50),
+            loss_ratio: None,
+            loss_penalty_ms: None,
+        };
+        assert_eq!(
+            engine
+                .select_latency_member(&refs, Some(&slo_strict))
+                .unwrap()
+                .as_name(),
+            "bad"
+        );
+    }
+
+    /// §7-1：SloPolicy 值域 validate（seep-config 层）
+    #[test]
+    fn slo_policy_validate_ranges() {
+        use seep_config::RoutingConfig as Cfg;
+        let ok = Cfg {
+            default_node: "n".into(),
+            groups: vec![PolicyGroup {
+                name: "g".into(),
+                strategy: Strategy::Latency,
+                members: vec![],
+                slo: Some(SloPolicy {
+                    p95_ms: Some(150),
+                    loss_ratio: Some(0.05),
+                    loss_penalty_ms: Some(500.0),
+                }),
+            }],
+            rules: vec![],
+        };
+        assert!(ok.validate().is_ok());
+
+        let bad_loss = Cfg {
+            groups: vec![PolicyGroup {
+                name: "g".into(),
+                strategy: Strategy::Latency,
+                members: vec![],
+                slo: Some(SloPolicy {
+                    p95_ms: None,
+                    loss_ratio: Some(1.5),
+                    loss_penalty_ms: None,
+                }),
+            }],
+            ..ok.clone()
+        };
+        let err = bad_loss.validate().unwrap_err().to_string();
+        assert!(err.contains("g"), "错误应点名组：{err}");
+        assert!(err.contains("loss_ratio"), "错误应带原值维：{err}");
+
+        let bad_penalty = Cfg {
+            groups: vec![PolicyGroup {
+                name: "g".into(),
+                strategy: Strategy::Latency,
+                members: vec![],
+                slo: Some(SloPolicy {
+                    p95_ms: None,
+                    loss_ratio: None,
+                    loss_penalty_ms: Some(-1.0),
+                }),
+            }],
+            ..ok
+        };
+        assert!(bad_penalty.validate().is_err());
+    }
 }

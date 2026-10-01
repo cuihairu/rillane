@@ -849,11 +849,70 @@ pub struct RoutingConfig {
     pub rules: Vec<RouteRule>,
 }
 
+impl RoutingConfig {
+    /// 组级 SLO 值域构建期拦截（slo-scoring.md §4）：runtime build()/热更新
+    /// 装配前防御性调用。
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for group in &self.groups {
+            if let Some(slo) = &group.slo {
+                slo.validate()
+                    .map_err(|e| anyhow::anyhow!("组 {} 的 slo 配置非法: {e}", group.name))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyGroup {
     pub name: String,
     pub strategy: Strategy,
     pub members: Vec<GroupMember>,
+    /// 组级 SLO 目标（slo-scoring.md §3）：`latency` 策略以 p95 RTT/丢包
+    /// 为目标门 + 加性罚分评分（§2 D-1/D-2）；缺省 None = 纯最低分
+    /// （存量行为兼容面）
+    #[serde(default)]
+    pub slo: Option<SloPolicy>,
+}
+
+/// 组级 SLO 目标策略（slo-scoring.md §2 D-1/D-2）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SloPolicy {
+    /// p95 RTT 目标门（ms）：有真链路数据的成员超过即不合规（无数据成员
+    /// 视为合规——unknown 不误杀，§6 E1）
+    #[serde(default)]
+    pub p95_ms: Option<u32>,
+    /// 丢包率目标门（0.0-1.0）
+    #[serde(default)]
+    pub loss_ratio: Option<f64>,
+    /// 丢包罚分权重（ms / 单位丢包率）；缺省 1000.0（1% 丢包 ≈ +10ms 罚分）
+    #[serde(default)]
+    pub loss_penalty_ms: Option<f64>,
+}
+
+impl SloPolicy {
+    /// 值域构建期拦截（slo-scoring.md §4 validate 行）：由
+    /// `RoutingConfig::validate` 逐组调用。
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(loss) = self.loss_ratio {
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&loss),
+                "slo.loss_ratio 必须 ∈ [0,1]，当前 {loss}"
+            );
+        }
+        if let Some(penalty) = self.loss_penalty_ms {
+            anyhow::ensure!(
+                penalty >= 0.0,
+                "slo.loss_penalty_ms 必须 ≥ 0，当前 {penalty}"
+            );
+        }
+        Ok(())
+    }
+
+    /// 罚分权重（None → 1000.0，§2 D-1 缺省）
+    pub fn penalty_or_default(&self) -> f64 {
+        self.loss_penalty_ms.unwrap_or(1000.0)
+    }
 }
 
 /// 运行时组描述符，包含解析后的组和统计信息
@@ -864,6 +923,8 @@ pub struct GroupDescriptor {
     pub members: Vec<GroupDescriptorMember>,
     pub fallback_enabled: bool,
     pub health_check_interval: Option<u64>,
+    /// 组级 SLO 目标（自 PolicyGroup.slo 透传，slo-scoring.md §4）
+    pub slo: Option<SloPolicy>,
 }
 
 #[derive(Debug, Clone)]
@@ -907,13 +968,19 @@ impl GroupDescriptorMember {
 }
 
 impl GroupDescriptor {
-    pub fn new(name: String, strategy: Strategy, members: Vec<GroupDescriptorMember>) -> Self {
+    pub fn new(
+        name: String,
+        strategy: Strategy,
+        members: Vec<GroupDescriptorMember>,
+        slo: Option<SloPolicy>,
+    ) -> Self {
         Self {
             name,
             strategy,
             members,
             fallback_enabled: true,
             health_check_interval: Some(30),
+            slo,
         }
     }
 
