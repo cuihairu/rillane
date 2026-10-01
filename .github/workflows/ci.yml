@@ -83,7 +83,10 @@ jobs:
       uses: codecov/codecov-action@v4
       with:
         files: lcov.info
-        fail_ci_if_error: true
+        # 上传尽力而为：仓库未配置 CODECOV_TOKEN secret，codecov v4 起
+        # GHA tokenless 上传被拒（"Token required"）——缺 token 只降级上传，
+        # 不置红 CI；覆盖率报告生成（llvm-cov 步）失败仍会失败本 job。
+        fail_ci_if_error: false
 
   audit:
     name: Security audit
@@ -130,11 +133,16 @@ jobs:
     name: Cross compile
     runs-on: ubuntu-latest
     strategy:
+      # 单目标失败不连环取消其余目标（此前 fail-fast 默认把另外 4 个
+      # 目标遮在 cancelled 态，掩盖真实信号）
+      fail-fast: false
       matrix:
+        # darwin 不在列：Apple SDK 再分发受 Apple 许可限制，linux 上无法
+        # 合法交叉编译（cross 官方亦无 darwin 镜像）——darwin 侧检查待
+        # macos runner 原生跑（P3-3 打包面，todo 待派已登记）
         target:
           - x86_64-unknown-linux-gnu
           - x86_64-pc-windows-gnu
-          - x86_64-apple-darwin
           - aarch64-unknown-linux-gnu
           - armv7-unknown-linux-gnueabihf
 
@@ -147,6 +155,11 @@ jobs:
       with:
         targets: ${{ matrix.target }}
 
+    - name: Install cross
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cross
+
     - name: Cache dependencies
       uses: actions/cache@v4
       with:
@@ -154,10 +167,16 @@ jobs:
           ~/.cargo/registry
           ~/.cargo/git
           target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        # 键含 matrix.target：不同目标的 target/ 产物互异，
+        # 共用一键会互相覆盖缓存
+        key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Check cross compilation
-      run: cargo check --target ${{ matrix.target }}
+      # bare `cargo check --target` 在 linux host 无 C 交叉工具链——
+      # ring/aws-lc-sys 的 build script 会以 host cc 编 C 并打目标专属
+      # 旗标必炸（此前 darwin 15 连红的根因）；cross 以 docker 镜像携带
+      # 各目标的完整 C 工具链
+      run: cross check --target ${{ matrix.target }}
 
   docker:
     name: Docker build

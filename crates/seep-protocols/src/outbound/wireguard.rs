@@ -8,16 +8,21 @@ use std::{net::IpAddr, str::FromStr, sync::Arc};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use defguard_wireguard_rs::{
-    host::Peer, key::Key, net::IpAddrMask, InterfaceConfiguration, Userspace, WGApi,
-    WireguardInterfaceApi,
-};
+use defguard_wireguard_rs::{net::IpAddrMask, Userspace, WGApi};
+// Windows：defguard_wireguard_rs 0.8 `mod wgapi_userspace` 仅 #[cfg(unix)]——
+// `WGApi<Userspace>` 无 `WireguardInterfaceApi` impl（windows 侧仅 `WGApi<Kernel>`
+// 面向 wireguard-windows 服务），接口配置面符号仅 unix 编译（ensure_interface 门见下）
+#[cfg(not(windows))]
+use defguard_wireguard_rs::{host::Peer, key::Key, InterfaceConfiguration, WireguardInterfaceApi};
 use seep_core::{
     EgressConnector, Flow, FlowContext, FlowReport, FlowTarget, RouteDecision, TargetProto,
 };
+#[cfg(not(windows))]
 use sha1::{Digest, Sha1};
 use tokio::{net::TcpStream, sync::OnceCell};
 
+// windows 侧 ensure_interface 走 Err 门，接口配置字段不再被读
+#[cfg_attr(windows, allow(dead_code))]
 pub struct WireguardConnector {
     egress_name: String,
     endpoint: String,
@@ -64,6 +69,7 @@ impl WireguardConnector {
         }
     }
 
+    #[cfg(not(windows))]
     fn iface_candidates(&self) -> Vec<String> {
         let mut seed = [0u8; 8];
         {
@@ -92,6 +98,7 @@ impl WireguardConnector {
         }
     }
 
+    #[cfg(not(windows))]
     fn parse_addresses(&self) -> Result<Vec<IpAddrMask>> {
         let parts = self
             .address
@@ -111,6 +118,7 @@ impl WireguardConnector {
         Ok(out)
     }
 
+    #[cfg(not(windows))]
     fn parse_allowed_ips(&self) -> Result<Vec<IpAddrMask>> {
         let Some(ips) = self.allowed_ips.clone() else {
             return Err(anyhow!(
@@ -131,6 +139,7 @@ impl WireguardConnector {
         Ok(out)
     }
 
+    #[cfg(not(windows))]
     fn parse_dns(&self) -> Result<Vec<IpAddr>> {
         let mut out = Vec::new();
         for s in self.dns.clone().unwrap_or_default() {
@@ -140,6 +149,17 @@ impl WireguardConnector {
         Ok(out)
     }
 
+    /// Windows 侧（编译期门 + 运行期 Err，口径同 network 四工厂非 Linux 恒 Err）：
+    /// `WGApi<Userspace>` 在 windows 无平台 impl，本连接器围绕 Userspace（wg-quick
+    /// 风格）实现，Windows 支持随平台面（V2）另落。
+    #[cfg(windows)]
+    async fn ensure_interface(&self) -> Result<()> {
+        Err(anyhow!(
+            "WireGuard 出站暂不支持 Windows（WGApi<Userspace> 无平台 impl）"
+        ))
+    }
+
+    #[cfg(not(windows))]
     async fn ensure_interface(&self) -> Result<()> {
         self.api
             .get_or_try_init(|| async {
@@ -260,7 +280,7 @@ impl EgressConnector for WireguardConnector {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 fn hex8(bytes: &[u8; 8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(16);
