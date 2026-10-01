@@ -275,7 +275,7 @@ fn pad_envelope_frame(
     spec: &seep_core::PaddingSpec,
     flow_id: &seep_core::FlowId,
 ) -> Result<Option<Vec<u8>>> {
-    let base = serde_json::to_vec(env)?;
+    let base = encode_mesh_envelope_binary(env)?;
     let decision = seep_protocols::middleware::decide_padding(spec, base.len(), flow_id, 0);
     let target = match decision {
         seep_protocols::middleware::PadDecision::Pad { padded_len, .. } => padded_len,
@@ -303,10 +303,10 @@ fn pad_envelope_frame(
         let mut env2 = env.clone();
         env2.version = PAD_ENVELOPE_VERSION;
         env2.pad_len = declared as u32;
-        let json = serde_json::to_vec(&env2)?;
-        match target.checked_sub(json.len()) {
+        let bin = encode_mesh_envelope_binary(&env2)?;
+        match target.checked_sub(bin.len()) {
             Some(k) if k == declared => {
-                let mut payload = json;
+                let mut payload = bin;
                 payload.resize(target, 0);
                 // §5 {mode} 封闭标签：帧计数按决策所用 spec 模式分桶
                 let frames = match spec.mode {
@@ -325,25 +325,165 @@ fn pad_envelope_frame(
     Ok(None)
 }
 
-/// P1-4 §2.4 接收侧：解填充帧——尾部 0x00 计数与 `pad_len` 声明一致性校验
-/// （E7：不符 → Err 丢帧）；version=1 帧携带填充亦按 E7 拒（旧形无此态）。
-/// 未填充帧（无尾部 0x00、无 pad_len 字段）走纯 JSON 解析，与旧行为一致。
+/// P1-4 §2.4 / P2-6：帧载荷解码——按首字节嗅探双格式（§9-1 假设：JSON
+/// 帧恒以 `{` 开头、二进制帧恒以 `'S'` 开头，两者不相交）：
+/// - `{` → 旧 JSON 路径（接收侧兼容；剥尾部 0x00 后 JSON 解析，E7 两门）；
+/// - 否则 → 二进制路径（P2-6 `decode_mesh_envelope_binary`，E5/E6 在内）。
 fn decode_envelope_payload(buf: &[u8]) -> Result<MeshEnvelope> {
-    let zeros = buf.iter().rev().take_while(|&&b| b == 0).count();
-    let env: MeshEnvelope = serde_json::from_slice(&buf[..buf.len() - zeros])?;
-    if env.pad_len as usize != zeros {
+    if buf.first() == Some(&b'{') {
+        let zeros = buf.iter().rev().take_while(|&&b| b == 0).count();
+        let env: MeshEnvelope = serde_json::from_slice(&buf[..buf.len() - zeros])?;
+        if env.pad_len as usize != zeros {
+            anyhow::bail!(
+                "mesh envelope pad_len {} 与帧尾 {zeros} 字节 0x00 不一致（E7，丢弃帧）",
+                env.pad_len
+            );
+        }
+        if zeros > 0 && env.version < PAD_ENVELOPE_VERSION {
+            anyhow::bail!(
+                "mesh envelope version {} 携带填充（E7，须 ≥ {PAD_ENVELOPE_VERSION}）",
+                env.version
+            );
+        }
+        return Ok(env);
+    }
+    decode_mesh_envelope_binary(buf)
+}
+
+/// P2-6 §2：TCP 面二进制 envelope 头版本（结构 ver；与 `env.version`
+/// 填充能力门正交）。
+pub const MESH_ENVELOPE_BIN_VERSION: u8 = 2;
+
+/// P2-6 §2：`MeshEnvelope` 二进制编码（大端，与 UDP `UdpEnvelope` 同风格布局）。
+/// 校验失败一律 Err（截断/保留位/长度字段越界）；尾部 pad 一致性由
+/// `decode_mesh_envelope_binary` 的 pad 校验兜底（E5/E6，§3）。
+pub fn encode_mesh_envelope_binary(env: &MeshEnvelope) -> Result<Vec<u8>> {
+    if env.path.len() > u8::MAX as usize {
+        anyhow::bail!("mesh envelope: 路径节点数超上界 255");
+    }
+    if env.flow_id.is_empty() || env.flow_id.len() > u8::MAX as usize {
+        anyhow::bail!("mesh envelope: flow_id 长度非法（空或 >255）");
+    }
+    if env.target_host.is_empty() || env.target_host.len() > u8::MAX as usize {
+        anyhow::bail!("mesh envelope: target_host 长度非法（空或 >255）");
+    }
+    for id in &env.path {
+        if id.is_empty() || id.len() > u8::MAX as usize {
+            anyhow::bail!("mesh envelope: node_id 长度非法（空或 >255）");
+        }
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"SU");
+    out.push(MESH_ENVELOPE_BIN_VERSION);
+    out.push(0u8); // flags 保留位恒 0
+    out.extend_from_slice(&env.version.to_be_bytes());
+    out.push(env.flow_id.len() as u8);
+    out.extend_from_slice(env.flow_id.as_bytes());
+    out.push(env.target_host.len() as u8);
+    out.extend_from_slice(env.target_host.as_bytes());
+    out.extend_from_slice(&env.target_port.to_be_bytes());
+    out.push(env.path.len() as u8);
+    for id in &env.path {
+        out.push(id.len() as u8);
+        out.extend_from_slice(id.as_bytes());
+    }
+    out.extend_from_slice(&env.pad_len.to_be_bytes());
+    Ok(out)
+}
+
+/// P2-6 §2/§3：二进制 envelope 解码——头部二进制解析 + 尾部 pad 一致性
+///（E5：pad_len == 帧尾 0x00 数；E6 = P1-4 §2.4 版门：pad_len > 0 须
+/// version ≥ PAD_ENVELOPE_VERSION）。`buf` 为完整帧体（含尾部 pad）。
+pub fn decode_mesh_envelope_binary(buf: &[u8]) -> Result<MeshEnvelope> {
+    if buf.len() < 2 + 1 + 1 + 4 + 1 + 1 + 1 + 2 + 1 + 4 {
+        anyhow::bail!("mesh envelope: 截断（固定头）");
+    }
+    if &buf[0..2] != b"SU" {
+        anyhow::bail!("mesh envelope: magic 不符");
+    }
+    let ver = buf[2];
+    if ver != MESH_ENVELOPE_BIN_VERSION {
         anyhow::bail!(
-            "mesh envelope pad_len {} 与帧尾 {zeros} 字节 0x00 不一致（E7，丢弃帧）",
-            env.pad_len
+            "mesh envelope: 不支持的二进制版本 {ver}（仅支持 {MESH_ENVELOPE_BIN_VERSION}）"
         );
     }
-    if zeros > 0 && env.version < PAD_ENVELOPE_VERSION {
+    let flags = buf[3];
+    if flags != 0 {
+        anyhow::bail!("mesh envelope: 保留位非 0（flags=0x{flags:02x}）");
+    }
+    let version = u32::from_be_bytes(buf[4..8].try_into().unwrap());
+    let mut pos = 8usize;
+
+    fn read_len_bytes<'a>(buf: &'a [u8], pos: &mut usize, what: &str) -> Result<&'a [u8]> {
+        let len =
+            *buf.get(*pos)
+                .ok_or_else(|| anyhow!("mesh envelope: 截断（{what} len）"))? as usize;
+        *pos += 1;
+        let end = pos
+            .checked_add(len)
+            .ok_or_else(|| anyhow!("mesh envelope: 长度溢出（{what}）"))?;
+        let s = buf
+            .get(*pos..end)
+            .ok_or_else(|| anyhow!("mesh envelope: 截断（{what}）"))?;
+        *pos = end;
+        Ok(s)
+    }
+
+    let flow_id = String::from_utf8(read_len_bytes(buf, &mut pos, "flow_id")?.to_vec())
+        .map_err(|_| anyhow!("mesh envelope: flow_id 非 UTF-8"))?;
+    let target_host = String::from_utf8(read_len_bytes(buf, &mut pos, "target_host")?.to_vec())
+        .map_err(|_| anyhow!("mesh envelope: target_host 非 UTF-8"))?;
+    if target_host.is_empty() {
+        anyhow::bail!("mesh envelope: target_host 为空");
+    }
+    let port_end = pos + 2;
+    let target_port = u16::from_be_bytes(
+        buf.get(pos..port_end)
+            .ok_or_else(|| anyhow!("mesh envelope: 截断（port）"))?
+            .try_into()
+            .unwrap(),
+    );
+    pos = port_end;
+    let hop_count = *buf
+        .get(pos)
+        .ok_or_else(|| anyhow!("mesh envelope: 截断（hop_count）"))? as usize;
+    pos += 1;
+    let mut path = Vec::with_capacity(hop_count);
+    for _ in 0..hop_count {
+        let id = String::from_utf8(read_len_bytes(buf, &mut pos, "node_id")?.to_vec())
+            .map_err(|_| anyhow!("mesh envelope: node_id 非 UTF-8"))?;
+        path.push(id);
+    }
+    let pad_len = u32::from_be_bytes(
+        buf.get(pos..pos + 4)
+            .ok_or_else(|| anyhow!("mesh envelope: 截断（pad_len）"))?
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    pos += 4;
+    let trailing = &buf[pos..];
+    if trailing.iter().any(|&b| b != 0) {
+        anyhow::bail!("mesh envelope: 头后存在非 0x00 字节（填充区污染）");
+    }
+    if trailing.len() != pad_len {
         anyhow::bail!(
-            "mesh envelope version {} 携带填充（E7，须 ≥ {PAD_ENVELOPE_VERSION}）",
-            env.version
+            "mesh envelope pad_len {pad_len} 与帧尾 {} 字节 0x00 不一致（E7，丢弃帧）",
+            trailing.len()
         );
     }
-    Ok(env)
+    if pad_len > 0 && version < PAD_ENVELOPE_VERSION {
+        anyhow::bail!(
+            "mesh envelope version {version} 携带填充（E7，须 ≥ {PAD_ENVELOPE_VERSION}）"
+        );
+    }
+    Ok(MeshEnvelope {
+        version,
+        flow_id,
+        target_host,
+        target_port,
+        path,
+        pad_len: pad_len as u32,
+    })
 }
 
 // ── P0-4 §2：UDP 面二进制 envelope（与 TCP 面 JSON MeshEnvelope 同文件；纯函数，单测钉住）──
@@ -1606,7 +1746,7 @@ async fn write_envelope<W>(stream: &mut W, env: &MeshEnvelope) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let buf = serde_json::to_vec(env)?;
+    let buf = encode_mesh_envelope_binary(env)?;
     write_frame(stream, &buf).await
 }
 
@@ -2004,7 +2144,8 @@ mod tests {
     #[test]
     fn envelope_pad_strip_golden_fixed() {
         let env = pad_env_fixture();
-        let base = serde_json::to_vec(&env).unwrap();
+        let base = encode_mesh_envelope_binary(&env).unwrap();
+        assert_eq!(&base[0..2], b"SU", "P2-6 帧形：magic 开头");
         // ratio 放开隔离固定点逻辑（+120B 超 0.5 cap——cap 路径归 skip 测钉）
         let mut spec = fixed_spec(base.len() + 120);
         spec.max_overhead_ratio = 100.0;
@@ -2014,9 +2155,9 @@ mod tests {
             .expect("应产生填充帧");
         assert_eq!(payload.len(), base.len() + 120, "帧总长精确命中 target");
         let zeros = payload.iter().rev().take_while(|&&b| b == 0).count();
-        assert!(
-            zeros > 0 && zeros < 120,
-            "填充字节 = 120 - 字段开销：{zeros}"
+        assert_eq!(
+            zeros, 120,
+            "二进制头恒含 pad_len 字段——无字段开销抖动，zeros == 声明量"
         );
         // §5：{mode=fixed} 帧计数与新增字节计数联动（进程级 statics 与同
         // 二进制并行测试共享——本帧贡献恰 +1/+zeros，他测只增不减，故断下界）
@@ -2036,26 +2177,26 @@ mod tests {
         assert_eq!(decoded.path, env.path);
     }
 
-    /// §7.1：pad_len=0 不序列化——未填充帧与旧行为字节一致（关闭对照的
-    /// 字节级口径）；write → read 全往返经 strip 路径还原。
     #[tokio::test]
-    async fn envelope_unpadded_bytes_match_legacy_and_roundtrip() {
+    async fn envelope_unpadded_bytes_match_binary_golden_and_legacy_receive() {
         let env = pad_env_fixture();
-        let json = serde_json::to_vec(&env).unwrap();
-        assert!(
-            !json.windows(b"pad_len".len()).any(|w| w == b"pad_len"),
-            "0 值字段不序列化"
-        );
+        let bin = encode_mesh_envelope_binary(&env).unwrap();
         assert_eq!(env.version, MESH_ENVELOPE_VERSION);
+        assert_eq!(bin[2], MESH_ENVELOPE_BIN_VERSION, "结构 ver=2");
 
-        // wire 字节级：长度前缀 = json 字节数，帧体逐字节等于旧序列化形
+        // wire 字节级：长度前缀 = 二进制帧字节数，帧体逐字节等于 golden
         let (mut client, mut server) = tokio::io::duplex(4096);
         write_envelope(&mut client, &env).await.unwrap();
         let len = server.read_u32().await.unwrap() as usize;
-        assert_eq!(len, json.len());
+        assert_eq!(len, bin.len());
         let mut buf = vec![0u8; len];
         server.read_exact(&mut buf).await.unwrap();
-        assert_eq!(buf, json, "wire 字节与旧序列化形逐字节一致");
+        assert_eq!(buf, bin, "wire 字节与二进制 golden 逐字节一致");
+
+        // P2-6 §0-2：旧 JSON 帧仍可解码（接收侧嗅探分支）
+        let legacy = serde_json::to_vec(&env).unwrap();
+        let decoded_legacy = decode_envelope_payload(&legacy).unwrap();
+        assert_eq!(decoded_legacy, env, "旧 JSON 帧接收兼容");
 
         // strip 路径往返（read_envelope 内走 decode_envelope_payload）
         let (mut c2, mut s2) = tokio::io::duplex(4096);
@@ -2084,6 +2225,22 @@ mod tests {
         frame3.resize(frame3.len() + 3, 0); // version=1 携带填充
         let err = decode_envelope_payload(&frame3).unwrap_err();
         assert!(err.to_string().contains("E7"), "{err}");
+
+        // P2-6 §3 E5/E6 二进制帧形同门：声明 ≠ 实长 / version<2 携带填充
+        let mut b2 = env.clone();
+        b2.version = PAD_ENVELOPE_VERSION;
+        b2.pad_len = 99;
+        let frame_b = encode_mesh_envelope_binary(&b2).unwrap(); // 未附 99 字节 0x00
+        let err = decode_envelope_payload(&frame_b).unwrap_err();
+        assert!(err.to_string().contains("E7"), "{err}");
+
+        let mut b3 = env.clone();
+        b3.version = MESH_ENVELOPE_VERSION;
+        b3.pad_len = 3;
+        let mut frame_b3 = encode_mesh_envelope_binary(&b3).unwrap();
+        frame_b3.resize(frame_b3.len() + 3, 0);
+        let err = decode_envelope_payload(&frame_b3).unwrap_err();
+        assert!(err.to_string().contains("E7"), "{err}");
     }
 
     /// §2.6/E10 + §6 E4：InPlace（恰为 target）→ None；overhead cap（策略层
@@ -2091,7 +2248,7 @@ mod tests {
     #[test]
     fn envelope_pad_skip_paths_and_counters() {
         let env = pad_env_fixture();
-        let base = serde_json::to_vec(&env).unwrap();
+        let base = encode_mesh_envelope_binary(&env).unwrap();
         let id = seep_core::FlowId::new();
 
         // 恰为 target → InPlace → None
@@ -2257,7 +2414,7 @@ mod tests {
             peer_addr.port(),
             vec!["exit1".into()],
         );
-        let legacy = serde_json::to_vec(&env).unwrap();
+        let bin = encode_mesh_envelope_binary(&env).unwrap();
 
         let (mut client_io, mut io_peer) = tokio::io::duplex(4096);
         let dial = tokio::spawn(async move {
@@ -2267,8 +2424,8 @@ mod tests {
         });
 
         let (wire_len, frame) = frame_rx.recv().await.unwrap();
-        assert_eq!(wire_len, legacy.len());
-        assert_eq!(frame, legacy, "wire 字节与旧行为逐字节一致（零差异）");
+        assert_eq!(wire_len, bin.len());
+        assert_eq!(frame, bin, "wire 帧 = P2-6 二进制 golden");
 
         io_peer.write_all(&[5, 6, 7, 8]).await.unwrap();
         let mut echo = [0u8; 4];
@@ -2352,6 +2509,154 @@ mod tests {
         let decoded: MeshEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.flow_id, env.flow_id);
         assert_eq!(decoded.path, env.path);
+    }
+
+    /// P2-6 §6-1：二进制 golden——encode→decode 全字段往返 + 逐字节形状钉。
+    #[test]
+    fn mesh_envelope_binary_roundtrip_golden() {
+        let env = MeshEnvelope::new(
+            "flow-binary-1".into(),
+            "target.example.com".into(),
+            8443,
+            vec!["relay-1".into(), "exit-1".into()],
+        );
+
+        let bin = encode_mesh_envelope_binary(&env).unwrap();
+        // 逐字节形状钉：magic/ver/flags/version/flow_id/host/port/hop_count/path/pad_len
+        assert_eq!(&bin[0..2], b"SU", "magic");
+        assert_eq!(bin[2], MESH_ENVELOPE_BIN_VERSION, "ver=2");
+        assert_eq!(bin[3], 0u8, "flags 保留位=0");
+        assert_eq!(
+            u32::from_be_bytes(bin[4..8].try_into().unwrap()),
+            1,
+            "env.version"
+        );
+        // flow_id len + bytes
+        assert_eq!(bin[8], b"flow-binary-1".len() as u8);
+        assert_eq!(&bin[9..9 + b"flow-binary-1".len()], b"flow-binary-1");
+        // host len + bytes
+        let host_start = 9 + b"flow-binary-1".len();
+        assert_eq!(bin[host_start], b"target.example.com".len() as u8);
+        assert_eq!(
+            &bin[host_start + 1..host_start + 1 + b"target.example.com".len()],
+            b"target.example.com"
+        );
+        // port
+        let port_start = host_start + 1 + b"target.example.com".len();
+        assert_eq!(
+            u16::from_be_bytes(bin[port_start..port_start + 2].try_into().unwrap()),
+            8443
+        );
+        // hop_count
+        let hop_start = port_start + 2;
+        assert_eq!(bin[hop_start], 2u8, "path 两跳");
+        // path[0]
+        let id0_start = hop_start + 1;
+        assert_eq!(bin[id0_start], b"relay-1".len() as u8);
+        assert_eq!(
+            &bin[id0_start + 1..id0_start + 1 + b"relay-1".len()],
+            b"relay-1"
+        );
+        // path[1]
+        let id1_start = id0_start + 1 + b"relay-1".len();
+        assert_eq!(bin[id1_start], b"exit-1".len() as u8);
+        assert_eq!(
+            &bin[id1_start + 1..id1_start + 1 + b"exit-1".len()],
+            b"exit-1"
+        );
+        // pad_len
+        let pad_start = id1_start + 1 + b"exit-1".len();
+        assert_eq!(
+            u32::from_be_bytes(bin[pad_start..pad_start + 4].try_into().unwrap()),
+            0
+        );
+
+        // decode 全字段往返
+        let back = decode_mesh_envelope_binary(&bin).unwrap();
+        assert_eq!(back.flow_id, env.flow_id);
+        assert_eq!(back.target_host, env.target_host);
+        assert_eq!(back.target_port, env.target_port);
+        assert_eq!(back.path, env.path);
+        assert_eq!(back.version, env.version);
+        assert_eq!(back.pad_len, env.pad_len);
+    }
+
+    /// P2-6 §6-2：旧 JSON 接收——serde_json 旧字节进 decode_envelope_payload 字段还原。
+    #[test]
+    fn mesh_envelope_legacy_json_receive() {
+        let env = MeshEnvelope {
+            version: 1,
+            flow_id: "legacy-flow".into(),
+            target_host: "legacy.example.com".into(),
+            target_port: 443,
+            path: vec!["r1".into(), "e1".into()],
+            pad_len: 0,
+        };
+        let json = serde_json::to_vec(&env).unwrap();
+        assert_eq!(json[0], b'{');
+
+        let decoded = decode_envelope_payload(&json).unwrap();
+        assert_eq!(decoded.flow_id, env.flow_id);
+        assert_eq!(decoded.target_host, env.target_host);
+        assert_eq!(decoded.target_port, env.target_port);
+        assert_eq!(decoded.path, env.path);
+        assert_eq!(decoded.version, env.version);
+        assert_eq!(decoded.pad_len, env.pad_len);
+
+        // 带填充的旧 JSON（version=2 + pad_len>0 + 尾部 0x00）
+        let env_padded = MeshEnvelope {
+            version: 2,
+            flow_id: "legacy-padded".into(),
+            target_host: "padded.example.com".into(),
+            target_port: 443,
+            path: vec!["r1".into()],
+            pad_len: 4,
+        };
+        let json_padded = serde_json::to_vec(&env_padded).unwrap();
+        let mut with_zeros = json_padded.clone();
+        with_zeros.extend_from_slice(&[0u8; 4]);
+        let decoded = decode_envelope_payload(&with_zeros).unwrap();
+        assert_eq!(decoded.flow_id, env_padded.flow_id);
+        assert_eq!(decoded.pad_len, 4);
+    }
+
+    /// P2-6 §6-4：E5/E6 拒帧（构造旧 JSON 与新二进制两形）。
+    #[test]
+    fn mesh_envelope_reject_bad_frames() {
+        // E1: magic 不符（二进制路径）
+        let mut bad_magic = b"XX".to_vec();
+        bad_magic.extend_from_slice(&[2u8, 0u8, 0, 0, 0, 1]); // 补最小头
+        assert!(decode_mesh_envelope_binary(&bad_magic).is_err());
+
+        // E2: ver != 2 且首字节非 {
+        let mut bad_ver = b"SU".to_vec();
+        bad_ver.push(1u8); // ver=1
+        bad_ver.extend_from_slice(&[0u8, 0, 0, 0, 1]); // 补最小头
+        assert!(decode_mesh_envelope_binary(&bad_ver).is_err());
+
+        // E3: flags 保留位非 0
+        let mut bad_flags = b"SU".to_vec();
+        bad_flags.extend_from_slice(&[2u8, 1u8, 0, 0, 0, 1]); // flags=1
+        assert!(decode_mesh_envelope_binary(&bad_flags).is_err());
+
+        // E4: 截断（固定头不足）
+        let truncated = b"SU".to_vec();
+        assert!(decode_mesh_envelope_binary(&truncated).is_err());
+
+        // E5: pad_len 与帧尾 0x00 数不一致
+        let mut env = MeshEnvelope::new("f".into(), "h".into(), 443, vec!["n".into()]);
+        env.pad_len = 4;
+        let mut bin = encode_mesh_envelope_binary(&env).unwrap();
+        bin.extend_from_slice(&[0u8; 2]); // 只有 2 个零，pad_len=4
+        assert!(decode_mesh_envelope_binary(&bin).is_err());
+
+        // E6: version < 2 但携带填充
+        let mut env2 = MeshEnvelope::new("f".into(), "h".into(), 443, vec!["n".into()]);
+        env2.version = 1;
+        env2.pad_len = 4;
+        let mut bin2 = encode_mesh_envelope_binary(&env2).unwrap();
+        bin2.extend_from_slice(&[0u8; 4]);
+        assert!(decode_mesh_envelope_binary(&bin2).is_err());
     }
 
     #[test]

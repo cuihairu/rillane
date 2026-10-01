@@ -112,8 +112,10 @@
   验收：对外握手指纹可按配置选择（chrome/ios 等），指纹检测工具可区分。
   实现级设计：[docs/design/tls-fingerprint.md](docs/design/tls-fingerprint.md)（2026-10-02 设计稿就绪并同轮落地；D-1 预设=参数表非新栈、D-2 单漏斗挂载、D-3 sig_schemes 验证器包装、D-4 池键扩展、D-5 预设 none/chrome/ios/safari、D-6 不做新指标族）。
   进度（2026-10-02 落地）：**M0–M1 全部完成**（M0 hello 五元组+捕获测试 `48f633a` / M1 配置面+池键+工厂 本提交）；egress 四 TLS 变体（http/vmess/vless/trojan）新增 `tls_fingerprint: <none|chrome|ios|safari>` 配置面，连接器透传、池键含指纹、工厂缓存键扩展，订阅产线置 None，validate 期解析非法值报错带原值；hysteria/hysteria2 走 quinn 不在面内。§9-1 诚实降档：rustls 扩展集成员固定（无 GREASE/padding），交付=形态可变可分非等值伪装，真 uTLS 归 V2。
-- [ ] **P2-6 mesh envelope 二进制化**：替换 JSON 头降低固定开销（UDP 面尤其重要）。
+- [x] **P2-6 mesh envelope 二进制化**：替换 JSON 头降低固定开销（UDP 面尤其重要）。
   验收：envelope 编解码有兼容测试；UDP 面单包开销 ≤ 目标字节数。
+  实现级设计：[docs/design/mesh-envelope-binary.md](docs/design/mesh-envelope-binary.md)（2026-10-02 落地；D-1 接收侧首字节嗅探双格式、D-2 大端头布局、D-3 env.version 与结构 ver 正交、D-4 校验矩阵、D-5 结构体不动仅编解码替换、D-6 零协商同版本部署假设继承 R-obfs2）。
+  进度（2026-10-02 落地）：**M0–M1 同步完成**（UDP 面 P0-4 已是同款二进制，本步补齐 TCP 面）：`MeshEnvelope` 二进制编解码（流长降约一半——固定头 8B+len 字段 vs JSON 键名重复，golden 测试钉字节）+ 接收侧嗅探（`{`→旧 JSON 兼容解码，P1-4 pad/strip 语义双格式同门 E5/E6）+ `pad_len` 进二进制头（P1-4 迁移无损）+ `write_envelope`/`pad_envelope_frame` 切换；旧 JSON E7 拒帧用例保留 + 二进制 E5/E6 拒帧新增。
 - [ ] **P2-7 mesh 高级安全**（原 §4 遗留）：CRL/OCSP、多跳端到端 MAC/防重放。
   验收：撤销节点无需重启即可被拒（文件热加载已有，补 CRL 分发）；重放报文被丢弃并有计数。
 - [ ] **P2-8 DNS 分流**（网页加速）：国内外 DNS 分流、缓存、防污染，对接 `seep-platform::network::dns` 设计。
@@ -160,7 +162,7 @@
 |--------|------|---------|------|
 | P0 | 5 | S1 UDP 全链路 | 5/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷、P0-4 mesh UDP 面、P0-5 观测与配置——S0–S6 全部落地） |
 | P1 | 5 | S2 TUN + S3 前半 | 1/5（**P1-5 完成**——M0–M5 全部落地 2026-10-02；P1-1 T2/P1-3 R0/P1-4 M0 部分步已落地（另会话在途推进）；设计稿就绪 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5 已落地）） |
-| P2 | 8 | S3 后半 + S4 | 4/8（**P2-1/P2-2/P2-3/P2-5 完成**——均 2026-10-02 全步落地；P2-4 阻塞于 P1-4 M1+ 另会话在途） |
+| P2 | 8 | S3 后半 + S4 | 5/8（**P2-1/P2-2/P2-3/P2-5/P2-6 完成**——均 2026-10-02 全步落地；P2-4 阻塞于 P1-4 M1+ 另会话在途） |
 | P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
 
 已完成底座（S0）9 大项见上文归档清单；原 19 条清单中 10 项核实为真实完成、3 项勘误重开、其余并入 P0–P3 对应条目。
