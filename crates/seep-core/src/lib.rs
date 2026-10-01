@@ -24,6 +24,12 @@ pub type BoxedIo = Box<dyn IoStream>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FlowId(Uuid);
 
+impl Default for FlowId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FlowId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
@@ -310,7 +316,7 @@ pub enum SessionStatus {
 }
 
 /// 客户端信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ClientInfo {
     /// 客户端节点ID
     pub node_id: Option<String>,
@@ -528,17 +534,6 @@ impl FlowSession {
                 self.last_active.elapsed() > Duration::from_secs(30)
             }
             _ => false,
-        }
-    }
-}
-
-impl Default for ClientInfo {
-    fn default() -> Self {
-        Self {
-            node_id: None,
-            address: None,
-            user_agent: None,
-            auth_info: None,
         }
     }
 }

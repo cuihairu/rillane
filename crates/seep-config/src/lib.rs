@@ -111,7 +111,10 @@ impl UdpConfig {
     /// P0-5 §1.6：非法值构建期报错（约束对齐 `UdpSessionConfig::validate`，
     /// `session_lifetime_secs` 存在时须 ≥ `session_idle_secs`）。
     pub fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.sweep_interval_secs >= 1, "udp.sweep_interval_secs 必须 ≥ 1");
+        anyhow::ensure!(
+            self.sweep_interval_secs >= 1,
+            "udp.sweep_interval_secs 必须 ≥ 1"
+        );
         anyhow::ensure!(self.max_mappings >= 1, "udp.max_mappings 必须 ≥ 1");
         anyhow::ensure!(
             self.downlink_queue_depth >= 1,
@@ -154,17 +157,13 @@ pub struct NetworkBlockConfig {
 /// network.mode（serde 名随 platform 枚举：transparent 弃 "redir"，§1.3 B4 收口）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum NetworkBlockMode {
+    #[default]
     Tun,
     Transparent,
     Tap,
     Hybrid,
-}
-
-impl Default for NetworkBlockMode {
-    fn default() -> Self {
-        NetworkBlockMode::Tun
-    }
 }
 
 /// network.tun 块（§1.1；字段镜像 platform `TunConfig` 的用户可配子集）
@@ -209,9 +208,9 @@ pub struct RoutingBlockConfig {
 /// 语法口径对齐 route.rs::parse_cidr；要求显式前缀形式：裸 IP 不收，主机路由写 /32，
 /// `RouteDestination::Host` 变体不进 schema——§9-10）
 pub fn parse_cidr_pair(cidr: &str) -> Result<(IpAddr, u8)> {
-    let (addr_str, prefix_str) = cidr.split_once('/').ok_or_else(|| {
-        anyhow::anyhow!("CIDR 须为 addr/prefix 形式（主机路由写 /32）：{cidr:?}")
-    })?;
+    let (addr_str, prefix_str) = cidr
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("CIDR 须为 addr/prefix 形式（主机路由写 /32）：{cidr:?}"))?;
     let addr: IpAddr = addr_str
         .parse()
         .with_context(|| format!("CIDR 地址段非法：{cidr:?}"))?;
@@ -419,10 +418,7 @@ impl PaddingBlockConfig {
                 self.target
             ),
             "bucket" => {
-                anyhow::ensure!(
-                    !self.buckets.is_empty(),
-                    "bucket 模式 buckets 非空（E2）"
-                );
+                anyhow::ensure!(!self.buckets.is_empty(), "bucket 模式 buckets 非空（E2）");
                 anyhow::ensure!(
                     self.buckets.windows(2).all(|w| w[0] < w[1]),
                     "bucket 模式 buckets 须严格升序（E2）：{:?}",
@@ -445,18 +441,13 @@ impl PaddingBlockConfig {
 /// `seep.route.kind`（"chain"/"single"）与 `seep.route.egress`（最终节点名）。
 /// serde 呈现为扁平字符串：`chain` / `single` / `all` / `egress:<name>`
 /// （§3.1 样例形态），未知值构建期解析报错。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ApplyTo {
+    #[default]
     Chain,
     Single,
     All,
     Egress(String),
-}
-
-impl Default for ApplyTo {
-    fn default() -> Self {
-        ApplyTo::Chain
-    }
 }
 
 impl ApplyTo {
@@ -500,9 +491,7 @@ impl Serialize for ApplyTo {
 }
 
 impl<'de> Deserialize<'de> for ApplyTo {
-    fn deserialize<D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         ApplyTo::parse_config_str(&s).map_err(serde::de::Error::custom)
     }

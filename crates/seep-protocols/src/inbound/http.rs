@@ -62,8 +62,10 @@ pub(crate) async fn handle_http_connect_stream(
     stream.write_all(response.as_bytes()).await?;
 
     // 构建 Flow
-    let mut metadata = FlowMetadata::default();
-    metadata.tags = vec!["ingress:http".into(), format!("node:{}", ingress_node_name)];
+    let mut metadata = FlowMetadata {
+        tags: vec!["ingress:http".into(), format!("node:{}", ingress_node_name)],
+        ..Default::default()
+    };
     if let Some(addr) = client_addr {
         metadata
             .annotations

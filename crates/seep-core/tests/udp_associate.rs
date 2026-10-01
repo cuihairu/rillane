@@ -4,11 +4,12 @@
 //! 并发 ASSOCIATE 拒绝、BND.PORT 真实性。
 
 use seep_core::udp::{
-    encode_udp_header, parse_udp_header, Clock, DirectUdpConnector, MockClock,
-    UdpAssociateService, UdpHeaderError, UdpIngressMetrics, UdpSessionConfig, UdpSessionKey,
-    UdpSessionTable,
+    encode_udp_header, parse_udp_header, Clock, DirectUdpConnector, MockClock, UdpAssociateService,
+    UdpHeaderError, UdpIngressMetrics, UdpSessionConfig, UdpSessionKey, UdpSessionTable,
 };
-use seep_core::{FlowContext, FlowRouter, FlowTarget, RouteDecision, RoutePath, RouteType, TargetProto};
+use seep_core::{
+    FlowContext, FlowRouter, FlowTarget, RouteDecision, RoutePath, RouteType, TargetProto,
+};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +24,9 @@ struct FixedRouter;
 impl FlowRouter for FixedRouter {
     async fn route(&self, _ctx: FlowContext) -> anyhow::Result<RouteDecision> {
         Ok(RouteDecision {
-            path: RoutePath::Direct { node: NODE_A.into() },
+            path: RoutePath::Direct {
+                node: NODE_A.into(),
+            },
             reason: None,
             route_type: RouteType::Standard,
         })
@@ -62,7 +65,9 @@ async fn spawn_echo_server() -> SocketAddr {
 }
 
 /// 建立控制连接对并跑 serve；返回 (客户端流, 中继端口, serve 句柄)
-async fn associate(svc: &Arc<UdpAssociateService>) -> (TcpStream, u16, tokio::task::JoinHandle<()>) {
+async fn associate(
+    svc: &Arc<UdpAssociateService>,
+) -> (TcpStream, u16, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listen_addr = listener.local_addr().unwrap();
     let client = TcpStream::connect(listen_addr).await.unwrap();
@@ -133,20 +138,44 @@ fn header_parse_ipv6() {
 
 #[test]
 fn header_parse_rejects_short_and_bad_atyp() {
-    assert_eq!(parse_udp_header(&[0, 0, 0]).unwrap_err(), UdpHeaderError::TooShort);
+    assert_eq!(
+        parse_udp_header(&[0, 0, 0]).unwrap_err(),
+        UdpHeaderError::TooShort
+    );
     // IPv4 截断（不足 10 字节）
-    assert_eq!(parse_udp_header(&[0, 0, 0, 1, 8, 8]).unwrap_err(), UdpHeaderError::TooShort);
+    assert_eq!(
+        parse_udp_header(&[0, 0, 0, 1, 8, 8]).unwrap_err(),
+        UdpHeaderError::TooShort
+    );
     // 域名长度截断
-    assert_eq!(parse_udp_header(&[0, 0, 0, 3, 20, b'a']).unwrap_err(), UdpHeaderError::TooShort);
-    assert_eq!(parse_udp_header(&[0, 0, 0, 9]).unwrap_err(), UdpHeaderError::BadAtyp(9));
+    assert_eq!(
+        parse_udp_header(&[0, 0, 0, 3, 20, b'a']).unwrap_err(),
+        UdpHeaderError::TooShort
+    );
+    assert_eq!(
+        parse_udp_header(&[0, 0, 0, 9]).unwrap_err(),
+        UdpHeaderError::BadAtyp(9)
+    );
 }
 
 #[test]
 fn header_encode_parse_roundtrip_all_atyps() {
     let cases = [
-        FlowTarget { host: "1.2.3.4".into(), port: 53, proto: TargetProto::Udp },
-        FlowTarget { host: "example.com".into(), port: 8899, proto: TargetProto::Udp },
-        FlowTarget { host: "::1".into(), port: 443, proto: TargetProto::Udp },
+        FlowTarget {
+            host: "1.2.3.4".into(),
+            port: 53,
+            proto: TargetProto::Udp,
+        },
+        FlowTarget {
+            host: "example.com".into(),
+            port: 8899,
+            proto: TargetProto::Udp,
+        },
+        FlowTarget {
+            host: "::1".into(),
+            port: 443,
+            proto: TargetProto::Udp,
+        },
     ];
     for t in cases {
         let mut frame = encode_udp_header(&t, 2);
@@ -226,10 +255,14 @@ async fn frag_and_malformed_are_dropped_and_counted() {
     // FRAG=1 → 丢弃 + 计数（§2.3 步骤 2）
     let mut frag_frame = vec![0, 0, 1, 1, 8, 8, 8, 8, 0, 53];
     frag_frame.extend_from_slice(b"q");
-    sock.send_to(&frag_frame, format!("127.0.0.1:{relay_port}")).await.unwrap();
+    sock.send_to(&frag_frame, format!("127.0.0.1:{relay_port}"))
+        .await
+        .unwrap();
 
     // 截断头 → 丢弃 + 计数
-    sock.send_to(&[0, 0, 0, 1, 8, 8], format!("127.0.0.1:{relay_port}")).await.unwrap();
+    sock.send_to(&[0, 0, 0, 1, 8, 8], format!("127.0.0.1:{relay_port}"))
+        .await
+        .unwrap();
 
     wait_until(|| {
         let m = svc.metrics();
@@ -264,7 +297,10 @@ async fn strict_source_rejects_foreign_source_ip() {
     }
     frame.extend_from_slice(&target_addr.port().to_be_bytes());
     frame.extend_from_slice(b"spoofed");
-    foreign.send_to(&frame, format!("127.0.0.1:{relay_port}")).await.unwrap();
+    foreign
+        .send_to(&frame, format!("127.0.0.1:{relay_port}"))
+        .await
+        .unwrap();
 
     wait_until(|| UdpIngressMetrics::get(&svc.metrics().source_dropped) == 1).await;
     assert_eq!(svc.table().snapshot().sessions_active, 0);
@@ -279,21 +315,27 @@ async fn concurrent_associate_from_same_client_rejected() {
 
     // 预绑定源端口：local_addr 即 connect 后的对端地址，可先占并发门
     let sock = tokio::net::TcpSocket::new_v4().unwrap();
-    sock.bind("127.0.0.1:0".parse::<SocketAddr>().unwrap()).unwrap();
+    sock.bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .unwrap();
     let peer = sock.local_addr().unwrap();
     assert!(svc.try_register_associate(&peer), "首占成功");
-    assert!(!svc.try_register_associate(&peer), "同键二占失败（gate 语义）");
+    assert!(
+        !svc.try_register_associate(&peer),
+        "同键二占失败（gate 语义）"
+    );
 
     let client = sock.connect(listen_addr).await.unwrap();
     let (server, _) = listener.accept().await.unwrap();
-    let mut server = server;
+    let server = server;
     let svc2 = Arc::clone(&svc);
     let h = tokio::spawn(async move {
         let mut s = server;
         let _ = svc2.serve(&mut s, None).await;
     });
     let mut c = client;
-    c.write_all(&[0x05, 0x03, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0]).await.unwrap();
+    c.write_all(&[0x05, 0x03, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
     let mut reply = [0u8; 10];
     timeout(Duration::from_secs(2), c.read_exact(&mut reply))
         .await
@@ -302,7 +344,10 @@ async fn concurrent_associate_from_same_client_rejected() {
     assert_eq!(reply[1], 0x01, "并发 ASSOCIATE 应答 0x01 general failure");
     let _ = h.await;
     assert_eq!(UdpIngressMetrics::get(&svc.metrics().associate_rejected), 1);
-    assert_eq!(UdpIngressMetrics::get_gauge(&svc.metrics().associates_active), 0);
+    assert_eq!(
+        UdpIngressMetrics::get_gauge(&svc.metrics().associates_active),
+        0
+    );
     svc.table().shutdown();
 }
 
@@ -318,7 +363,10 @@ async fn associate_survives_session_idle_but_revoke_on_eof() {
     let mut frame = vec![0, 0, 0, 1, 127, 0, 0, 1];
     frame.extend_from_slice(&relay_port.to_be_bytes());
     // 注意：中继端口自身无回声服务，会建会话+映射但下行无回包——本测试只看生命周期
-    client_udp.send_to(&frame, format!("127.0.0.1:{relay_port}")).await.unwrap();
+    client_udp
+        .send_to(&frame, format!("127.0.0.1:{relay_port}"))
+        .await
+        .unwrap();
     wait_until(|| svc.table().snapshot().sessions_active == 1).await;
 
     // 会话被 force_revoke 之外的方式（此处手动吊销模拟空闲回收）后，
@@ -327,7 +375,11 @@ async fn associate_survives_session_idle_but_revoke_on_eof() {
     assert!(svc.table().force_revoke(&key));
     wait_until(|| svc.table().snapshot().sessions_active == 0).await;
     sleep(Duration::from_millis(50)).await;
-    assert_eq!(UdpIngressMetrics::get_gauge(&svc.metrics().associates_active), 1, "控制连接未受会话回收影响");
+    assert_eq!(
+        UdpIngressMetrics::get_gauge(&svc.metrics().associates_active),
+        1,
+        "控制连接未受会话回收影响"
+    );
 
     // EOF 后整个关联收尾
     drop(control);
@@ -355,7 +407,10 @@ async fn mapping_layer_metrics_flow_through_associate() {
     for i in 0..5u8 {
         let mut f = frame.clone();
         f.push(i);
-        client_udp.send_to(&f, format!("127.0.0.1:{relay_port}")).await.unwrap();
+        client_udp
+            .send_to(&f, format!("127.0.0.1:{relay_port}"))
+            .await
+            .unwrap();
     }
     wait_until(|| UdpIngressMetrics::get(&svc.metrics().downlink_packets) == 5).await;
     let snap = svc.table().snapshot();
@@ -383,7 +438,8 @@ async fn max_associates_cap_rejects_and_counts() {
 
     // 真实 serve 路径：第 3 条控制连接 → 0x01 + 计数
     let sock = tokio::net::TcpSocket::new_v4().unwrap();
-    sock.bind("127.0.0.1:0".parse::<SocketAddr>().unwrap()).unwrap();
+    sock.bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .unwrap();
     let client = sock.connect(listen_addr).await.unwrap();
     let (server, _) = listener.accept().await.unwrap();
     let svc2 = Arc::clone(&svc);
@@ -392,7 +448,9 @@ async fn max_associates_cap_rejects_and_counts() {
         let _ = svc2.serve(&mut s, None).await;
     });
     let mut c = client;
-    c.write_all(&[0x05, 0x03, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0]).await.unwrap();
+    c.write_all(&[0x05, 0x03, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
     let mut reply = [0u8; 10];
     timeout(Duration::from_secs(2), c.read_exact(&mut reply))
         .await
@@ -401,7 +459,10 @@ async fn max_associates_cap_rejects_and_counts() {
     assert_eq!(reply[1], 0x01, "总量超限应答 0x01 general failure");
     let _ = h.await;
     assert_eq!(UdpIngressMetrics::get(&svc.metrics().associate_rejected), 1);
-    assert_eq!(UdpIngressMetrics::get_gauge(&svc.metrics().associates_active), 0);
+    assert_eq!(
+        UdpIngressMetrics::get_gauge(&svc.metrics().associates_active),
+        0
+    );
     svc.table().shutdown();
 }
 
@@ -417,16 +478,30 @@ async fn ingress_snapshot_fields_complete() {
     let mut query = vec![0, 0, 0, 1, 127, 0, 0, 1];
     query.extend_from_slice(&target_addr.port().to_be_bytes());
     query.extend_from_slice(b"q");
-    client_udp.send_to(&query, format!("127.0.0.1:{relay_port}")).await.unwrap();
+    client_udp
+        .send_to(&query, format!("127.0.0.1:{relay_port}"))
+        .await
+        .unwrap();
     let mut rxbuf = [0u8; 2048];
-    let _ = timeout(Duration::from_secs(2), client_udp.recv_from(&mut rxbuf)).await.unwrap();
-    let mut frag = vec![0, 0, 1, 1, 8, 8, 8, 8, 0, 53, b'f'];
-    client_udp.send_to(&frag, format!("127.0.0.1:{relay_port}")).await.unwrap();
-    client_udp.send_to(&[0, 0, 0, 1, 8, 8], format!("127.0.0.1:{relay_port}")).await.unwrap();
+    let _ = timeout(Duration::from_secs(2), client_udp.recv_from(&mut rxbuf))
+        .await
+        .unwrap();
+    let frag = vec![0, 0, 1, 1, 8, 8, 8, 8, 0, 53, b'f'];
+    client_udp
+        .send_to(&frag, format!("127.0.0.1:{relay_port}"))
+        .await
+        .unwrap();
+    client_udp
+        .send_to(&[0, 0, 0, 1, 8, 8], format!("127.0.0.1:{relay_port}"))
+        .await
+        .unwrap();
 
     wait_until(|| {
         let s = svc.ingress_snapshot();
-        s.uplink_packets == 3 && s.downlink_packets == 1 && s.frag_dropped == 1 && s.malformed_dropped == 1
+        s.uplink_packets == 3
+            && s.downlink_packets == 1
+            && s.frag_dropped == 1
+            && s.malformed_dropped == 1
     })
     .await;
     let snap = svc.ingress_snapshot();

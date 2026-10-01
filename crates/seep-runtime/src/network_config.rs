@@ -10,10 +10,10 @@ use anyhow::Result;
 use tracing::warn;
 
 use seep_config::{
-    NetworkBlockConfig, NetworkBlockMode, RoutingBlockConfig, TunBlockConfig, parse_cidr_pair,
+    parse_cidr_pair, NetworkBlockConfig, NetworkBlockMode, RoutingBlockConfig, TunBlockConfig,
 };
 use seep_platform::network::route::{
-    RouteDestination, RouteRule, default_bypass_rules, ipv4_netmask,
+    default_bypass_rules, ipv4_netmask, RouteDestination, RouteRule,
 };
 use seep_platform::network::{
     NetworkConfig, NetworkMode, RoutingConfig as PlatformRoutingConfig, TunConfig,
@@ -56,9 +56,11 @@ pub fn network_block_to_platform(cfg: &NetworkBlockConfig) -> Result<NetworkConf
 /// `enable_routing = routing.is_some()`（R1 消费）、`enable_dns = false`（P2-8）、
 /// 网关字段 None（默认路由归 V2 全局接管）。
 fn tun_block_to_platform(tun: &TunBlockConfig, enable_routing: bool) -> Result<TunConfig> {
-    let mut out = TunConfig::default();
-    out.name = tun.name.clone();
-    out.mtu = tun.mtu;
+    let mut out = TunConfig {
+        name: tun.name.clone(),
+        mtu: tun.mtu,
+        ..Default::default()
+    };
     if let Some(ipv4) = &tun.ipv4 {
         let (addr, prefix) = parse_cidr_pair(ipv4)?;
         let addr = match addr {
@@ -188,7 +190,10 @@ mod tests {
             "/24 → 255.255.255.0"
         );
         assert_eq!(tun.ipv4_gateway, None, "网关归 V2 全局接管");
-        assert_eq!(tun.ipv6_addr, Some(Ipv6Addr::new(0xfd00, 0xdb8, 0, 0, 0, 0, 0, 1)));
+        assert_eq!(
+            tun.ipv6_addr,
+            Some(Ipv6Addr::new(0xfd00, 0xdb8, 0, 0, 0, 0, 0, 1))
+        );
         assert_eq!(tun.ipv6_prefix_len, Some(64));
         assert_eq!(tun.dns_servers, vec!["1.1.1.1".parse::<IpAddr>().unwrap()]);
 
@@ -217,7 +222,10 @@ mod tests {
             seep_platform::network::RoutingMode::Ip
         ));
         assert_eq!(routing.default_gateway, None);
-        assert_eq!(routing.dns_servers, vec!["1.1.1.1".parse::<IpAddr>().unwrap()]);
+        assert_eq!(
+            routing.dns_servers,
+            vec!["1.1.1.1".parse::<IpAddr>().unwrap()]
+        );
         assert_eq!(routing.bypass_rules.len(), default_bypass_rules().len());
         assert!(routing.enabled);
 
@@ -248,7 +256,10 @@ mod tests {
         let r2 = &routing.rules[2];
         assert_eq!(r2.priority, 102);
         assert!(
-            matches!(r2.destination, RouteDestination::Ipv4Network { prefix: 32, .. }),
+            matches!(
+                r2.destination,
+                RouteDestination::Ipv4Network { prefix: 32, .. }
+            ),
             "/32 即主机路由（§9-10）"
         );
     }

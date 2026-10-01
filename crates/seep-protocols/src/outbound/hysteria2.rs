@@ -20,6 +20,8 @@ pub struct Hysteria2Connector {
 }
 
 impl Hysteria2Connector {
+    /// 参数面镜像 `EgressConfig::Hysteria2` 字段 1:1，不收敛 options 结构
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         server: String,
         port: u16,

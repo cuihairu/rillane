@@ -14,6 +14,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
+use dashmap::DashMap;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -21,7 +22,6 @@ use tokio::{
     net::{lookup_host, TcpListener, TcpStream, UdpSocket},
     task::JoinHandle,
 };
-use dashmap::DashMap;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use x509_parser::prelude::parse_x509_certificate;
 
@@ -270,7 +270,7 @@ pub fn encode_udp_envelope(env: &UdpEnvelope) -> Result<Vec<u8>> {
         anyhow::bail!("udp envelope: path 节点数超上界 255");
     }
     for id in &env.path {
-        if id.as_bytes().len() > u8::MAX as usize {
+        if id.len() > u8::MAX as usize {
             anyhow::bail!("udp envelope: node_id 超长（{id}）");
         }
     }
@@ -308,7 +308,7 @@ pub fn encode_udp_envelope(env: &UdpEnvelope) -> Result<Vec<u8>> {
     if matches!(env.path_mode, UdpPathMode::Full) {
         out.push(env.path.len() as u8);
         for id in &env.path {
-            out.push(id.as_bytes().len() as u8);
+            out.push(id.len() as u8);
             out.extend_from_slice(id.as_bytes());
         }
     }
@@ -338,21 +338,21 @@ pub fn decode_udp_envelope(buf: &[u8]) -> Result<UdpEnvelope> {
     if flags & 0xFE != 0 {
         anyhow::bail!("udp envelope: 保留位非 0（flags=0x{flags:02x}）");
     }
-    let dir = if flags & 1 == 0 { UdpDir::Up } else { UdpDir::Down };
+    let dir = if flags & 1 == 0 {
+        UdpDir::Up
+    } else {
+        UdpDir::Down
+    };
     let flow_id: [u8; 16] = buf[4..20].try_into().expect("长度已由固定头校验保证");
     let atyp = buf[20];
     let mut pos = 21usize;
     let target_host = match atyp {
         1 => {
-            let o: [u8; 4] = udp_take(buf, &mut pos, 4, "addr v4")?
-                .try_into()
-                .unwrap();
+            let o: [u8; 4] = udp_take(buf, &mut pos, 4, "addr v4")?.try_into().unwrap();
             Ipv4Addr::from(o).to_string()
         }
         4 => {
-            let o: [u8; 16] = udp_take(buf, &mut pos, 16, "addr v6")?
-                .try_into()
-                .unwrap();
+            let o: [u8; 16] = udp_take(buf, &mut pos, 16, "addr v6")?.try_into().unwrap();
             Ipv6Addr::from(o).to_string()
         }
         3 => {
@@ -361,8 +361,7 @@ pub fn decode_udp_envelope(buf: &[u8]) -> Result<UdpEnvelope> {
             if len == 0 {
                 anyhow::bail!("udp envelope: domain 长度为 0");
             }
-            String::from_utf8(b.to_vec())
-                .map_err(|_| anyhow!("udp envelope: domain 非 UTF-8"))?
+            String::from_utf8(b.to_vec()).map_err(|_| anyhow!("udp envelope: domain 非 UTF-8"))?
         }
         other => anyhow::bail!("udp envelope: 未知 atyp {other}"),
     };
@@ -1232,8 +1231,11 @@ impl MeshDataPlane {
                             self.registry.record_link_error(&self.local_node_id, &next);
                             return Err(e.into());
                         }
-                        self.registry
-                            .record_link_bytes(&self.local_node_id, &next, wire.len() as u64);
+                        self.registry.record_link_bytes(
+                            &self.local_node_id,
+                            &next,
+                            wire.len() as u64,
+                        );
                         face.metrics.forwarded_up.fetch_add(1, Ordering::Relaxed);
                         Ok(())
                     }
@@ -1318,7 +1320,11 @@ impl MeshDataPlane {
                     )
                 })?
             };
-            let bind_addr = if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+            let bind_addr = if addr.is_ipv4() {
+                "0.0.0.0:0"
+            } else {
+                "[::]:0"
+            };
             let flow_sock = Arc::new(UdpSocket::bind(bind_addr).await?);
             flow_sock.connect(addr).await?;
             if let Err(e) = flow_sock.send(&env.payload).await {
@@ -1923,8 +1929,12 @@ mod tests {
         let v6 =
             encode_udp_envelope(&udp_env_sample("::1", UdpPathMode::Cached, UdpDir::Up)).unwrap();
         assert_eq!(v6[20], 4);
-        let d = encode_udp_envelope(&udp_env_sample("example.com", UdpPathMode::Cached, UdpDir::Up))
-            .unwrap();
+        let d = encode_udp_envelope(&udp_env_sample(
+            "example.com",
+            UdpPathMode::Cached,
+            UdpDir::Up,
+        ))
+        .unwrap();
         assert_eq!(d[20], 3);
         assert_eq!(d[21], b"example.com".len() as u8);
     }
@@ -1932,8 +1942,12 @@ mod tests {
     /// T1 拒绝类 1-3：坏 magic / ver / 保留位。
     #[test]
     fn udp_envelope_rejects_bad_magic_version_reserved() {
-        let wire = encode_udp_envelope(&udp_env_sample("example.com", UdpPathMode::Full, UdpDir::Down))
-            .unwrap();
+        let wire = encode_udp_envelope(&udp_env_sample(
+            "example.com",
+            UdpPathMode::Full,
+            UdpDir::Down,
+        ))
+        .unwrap();
         let mut bad = wire.clone();
         bad[0] = b'X';
         assert!(decode_udp_envelope(&bad).is_err(), "magic 应拒绝");
@@ -2292,7 +2306,11 @@ mod tests {
         let face = plane.udp.as_ref().unwrap();
         assert_eq!(face.cache.unknown_flow_count(), 2, "过期 miss + 未知 miss");
         assert!(!face.contains(&flow), "过期条目应被惰性清除");
-        assert_eq!(face.metrics.forwarded_up.load(Ordering::Relaxed), 1, "仅 FULL 被转发");
+        assert_eq!(
+            face.metrics.forwarded_up.load(Ordering::Relaxed),
+            1,
+            "仅 FULL 被转发"
+        );
         assert_eq!(face.metrics.malformed.load(Ordering::Relaxed), 0);
 
         // 下一跳只收到首包 FULL
@@ -2301,7 +2319,10 @@ mod tests {
             .await
             .expect("首包 FULL 已转发")
             .unwrap();
-        assert_eq!(decode_udp_envelope(&buf[..n]).unwrap().path_mode, UdpPathMode::Full);
+        assert_eq!(
+            decode_udp_envelope(&buf[..n]).unwrap().path_mode,
+            UdpPathMode::Full
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(200), next_sock.recv_from(&mut buf))
                 .await
@@ -2690,10 +2711,7 @@ mod tests {
         let relay_serve = relay_plane.spawn_udp(relay_udp_addr);
 
         // 起始态：面快照全零（挂载即有、无流量恒零——验收 #2 恒渲染口径的数据侧对位）
-        assert_eq!(
-            relay_plane.udp_snapshot(),
-            Some(UdpFaceSnapshot::default())
-        );
+        assert_eq!(relay_plane.udp_snapshot(), Some(UdpFaceSnapshot::default()));
         assert_eq!(exit_plane.udp_snapshot(), Some(UdpFaceSnapshot::default()));
 
         // —— 客户端出站两跳往返（FULL + CACHED 各一包）——

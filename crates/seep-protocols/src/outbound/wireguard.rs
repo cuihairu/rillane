@@ -95,7 +95,7 @@ impl WireguardConnector {
     fn parse_addresses(&self) -> Result<Vec<IpAddrMask>> {
         let parts = self
             .address
-            .split(|c| c == ',' || c == ' ' || c == '\n' || c == '\t' || c == ';')
+            .split([',', ' ', '\n', '\t', ';'])
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();

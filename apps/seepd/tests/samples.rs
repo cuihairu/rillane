@@ -4,7 +4,9 @@ use seep_config::SeepConfig;
 
 /// 相对仓库根的样例路径（测试运行于 target/ 之下，CARGO_MANIFEST_DIR = apps/seepd）
 fn repo_root(rel: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel)
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
 }
 
 /// S6 测试 1：dashboard JSON 可解析 + 含 `seep_udp_` 查询串（防手改坏 JSON/漏序列，
@@ -14,8 +16,8 @@ fn grafana_dashboard_json_parses() {
     let path = repo_root("docs/grafana/seep-dashboard.json");
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("无法读取 {}: {e}", path.display()));
-    let v: serde_json::Value = serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("dashboard JSON 解析失败: {e}"));
+    let v: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("dashboard JSON 解析失败: {e}"));
 
     let exprs: Vec<String> = v["panels"]
         .as_array()
@@ -57,10 +59,14 @@ fn grafana_dashboard_json_parses() {
 #[test]
 fn sample_config_parses_with_udp_block() {
     let path = repo_root("config/seep.yaml");
-    let cfg = SeepConfig::load_from_path(&path)
-        .unwrap_or_else(|e| panic!("样例配置解析失败: {e}"));
-    cfg.udp.validate().unwrap_or_else(|e| panic!("样例 udp 块未过 validate: {e}"));
-    assert!(!cfg.udp.enabled, "样例 udp.enabled 应保持 false（缺省关闭）");
+    let cfg = SeepConfig::load_from_path(&path).unwrap_or_else(|e| panic!("样例配置解析失败: {e}"));
+    cfg.udp
+        .validate()
+        .unwrap_or_else(|e| panic!("样例 udp 块未过 validate: {e}"));
+    assert!(
+        !cfg.udp.enabled,
+        "样例 udp.enabled 应保持 false（缺省关闭）"
+    );
     // 非活跃字段走 serde default——与 S0 缺省常量一致即合法
     assert_eq!(cfg.udp.max_associates, 256);
     assert_eq!(cfg.udp.sweep_interval_secs, 15);

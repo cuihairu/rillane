@@ -9,7 +9,6 @@
 use seep_core::udp::EgressUdpConnector as _;
 use seep_core::{FlowContext, FlowId, RouteDecision, RoutePath, RouteType, TargetProto};
 use seep_protocols::{ShadowsocksConnector, ShadowsocksUdpConnector, WireguardUdpConnector};
-use std::sync::Arc;
 use std::time::Duration;
 
 fn flow_ctx(host: &str, port: u16) -> FlowContext {

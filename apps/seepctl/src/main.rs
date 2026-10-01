@@ -356,8 +356,9 @@ fn main() -> Result<()> {
             };
             let rt = tokio::runtime::Runtime::new().context("无法启动 tokio 运行时")?;
             let auth_ref = auth.as_ref().map(|(u, p)| (u.as_str(), p.as_str()));
-            let outcome =
-                rt.block_on(udp_probe::run(&socks5, &host, port, &payload, timeout, auth_ref));
+            let outcome = rt.block_on(udp_probe::run(
+                &socks5, &host, port, &payload, timeout, auth_ref,
+            ));
             match outcome {
                 Ok(ok) => {
                     println!(
@@ -1599,7 +1600,7 @@ fn format_bytes(n: u64) -> String {
 /// 最小 hex 解码（P0-5 §3.3 `--payload-hex`；不引入依赖，容忍空白）
 fn decode_hex(raw: &str) -> Result<Vec<u8>> {
     let s: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         anyhow::bail!("--payload-hex 长度须为偶数：{s}");
     }
     (0..s.len())
@@ -1616,7 +1617,9 @@ fn parse_duration_arg(raw: &str) -> Result<Duration> {
     let t = raw.trim();
     let split = t.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(t.len());
     let (num, unit) = t.split_at(split);
-    let n: f64 = num.parse().with_context(|| format!("无法解析时长数字：{raw}"))?;
+    let n: f64 = num
+        .parse()
+        .with_context(|| format!("无法解析时长数字：{raw}"))?;
     let secs = match unit {
         "" | "s" => n,
         "ms" => n / 1000.0,
@@ -1696,7 +1699,10 @@ mod tests {
 
     #[test]
     fn url_base_strips_path() {
-        assert_eq!(url_base("http://127.0.0.1:9090/flows"), "http://127.0.0.1:9090");
+        assert_eq!(
+            url_base("http://127.0.0.1:9090/flows"),
+            "http://127.0.0.1:9090"
+        );
         assert_eq!(url_base("http://127.0.0.1:9090"), "http://127.0.0.1:9090");
         assert_eq!(url_base("127.0.0.1:9090/flows"), "http://127.0.0.1:9090");
     }
@@ -1704,7 +1710,10 @@ mod tests {
     #[test]
     fn duration_and_hex_helpers() {
         assert_eq!(parse_duration_arg("3s").unwrap(), Duration::from_secs(3));
-        assert_eq!(parse_duration_arg("250ms").unwrap(), Duration::from_millis(250));
+        assert_eq!(
+            parse_duration_arg("250ms").unwrap(),
+            Duration::from_millis(250)
+        );
         assert_eq!(parse_duration_arg("2m").unwrap(), Duration::from_secs(120));
         assert_eq!(parse_duration_arg("5").unwrap(), Duration::from_secs(5));
         assert!(parse_duration_arg("3x").is_err());

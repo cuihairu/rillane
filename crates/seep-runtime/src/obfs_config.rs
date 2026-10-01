@@ -86,9 +86,9 @@ fn padding_block_to_spec(block: &PaddingBlockConfig) -> Result<PaddingSpec> {
         "fixed" => PaddingMode::Fixed,
         "bucket" => PaddingMode::Bucket,
         "range" => PaddingMode::Range,
-        other => anyhow::bail!(
-            "obfuscation.padding.mode 非法：{other:?}（E2，须为 fixed|bucket|range）"
-        ),
+        other => {
+            anyhow::bail!("obfuscation.padding.mode 非法：{other:?}（E2，须为 fixed|bucket|range）")
+        }
     };
     Ok(PaddingSpec {
         mode,

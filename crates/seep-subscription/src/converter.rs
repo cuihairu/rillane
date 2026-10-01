@@ -619,7 +619,7 @@ impl SubscriptionConverter {
         let mut padded = s.to_string();
         let rem = padded.len() % 4;
         if rem != 0 {
-            padded.extend(std::iter::repeat('=').take(4 - rem));
+            padded.extend(std::iter::repeat_n('=', 4 - rem));
             if let Ok(v) = BASE64.decode(&padded) {
                 return Ok(v);
             }
@@ -1650,7 +1650,7 @@ proxies:
                 },
                 udp: seep_config::UdpConfig::default(),
                 network: None,
-            obfuscation: None,
+                obfuscation: None,
             },
             stats: ConversionStats {
                 input: InputStats {

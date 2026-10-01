@@ -45,21 +45,17 @@ pub struct DnsConfig {
 /// DNS 模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DnsMode {
     /// 直连模式
     Direct,
     /// 代理模式
+    #[default]
     Proxy,
     /// 混合模式
     Hybrid,
     /// 劫持模式
     Hijack,
-}
-
-impl Default for DnsMode {
-    fn default() -> Self {
-        DnsMode::Proxy
-    }
 }
 
 /// DNS 服务器
@@ -954,7 +950,7 @@ impl DnsHandlerFactory {
         #[cfg(target_os = "linux")]
         {
             // TODO: 平台特定实现待完成
-            return Err(anyhow!("Linux DNS 处理器待实现"));
+            Err(anyhow!("Linux DNS 处理器待实现"))
         }
 
         #[cfg(target_os = "macos")]

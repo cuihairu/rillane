@@ -69,12 +69,15 @@ impl EgressUdpConnector for UdpChainRouter {
         decision: &RouteDecision,
     ) -> Result<Arc<dyn UdpRelay>> {
         match &decision.path {
-            RoutePath::Chain { hops } if hops.len() >= 2 => self
-                .mesh
-                .as_ref()
-                .ok_or_else(|| anyhow!("chain UDP 未启用（mesh 桥未构建——构建期 gate 应已拦截）"))?
-                .associate(ctx, hops)
-                .await,
+            RoutePath::Chain { hops } if hops.len() >= 2 => {
+                self.mesh
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow!("chain UDP 未启用（mesh 桥未构建——构建期 gate 应已拦截）")
+                    })?
+                    .associate(ctx, hops)
+                    .await
+            }
             _ => self.inner.associate(ctx, decision).await,
         }
     }
@@ -183,7 +186,7 @@ impl UdpRelay for MeshUdpRelay {
         let use_full = {
             let mut last = self.last_full.lock().expect("last_full poisoned");
             let due = !self.sent_full.load(Ordering::Relaxed)
-                || n % FULL_RESEND_PACKETS == 0
+                || n.is_multiple_of(FULL_RESEND_PACKETS)
                 || last.elapsed() >= FULL_RESEND_INTERVAL;
             if due {
                 self.sent_full.store(true, Ordering::Relaxed);
@@ -330,11 +333,7 @@ mod tests {
             ))
             .unwrap();
         registry
-            .register_node(NodeRecord::new(
-                "relay1".into(),
-                NodeRole::Relay,
-                stub_addr,
-            ))
+            .register_node(NodeRecord::new("relay1".into(), NodeRole::Relay, stub_addr))
             .unwrap();
 
         let inner = RoutingUdpConnector::new();
@@ -348,13 +347,8 @@ mod tests {
         let router = UdpChainRouter::new(
             inner,
             Some(
-                MeshUdpBridge::new(
-                    "client1".into(),
-                    registry,
-                    None,
-                    &MeshUdpGate::new(true),
-                )
-                .unwrap(),
+                MeshUdpBridge::new("client1".into(), registry, None, &MeshUdpGate::new(true))
+                    .unwrap(),
             ),
         );
 
@@ -435,19 +429,10 @@ mod tests {
             ))
             .unwrap();
         registry
-            .register_node(NodeRecord::new(
-                "relay1".into(),
-                NodeRole::Relay,
-                stub_addr,
-            ))
+            .register_node(NodeRecord::new("relay1".into(), NodeRole::Relay, stub_addr))
             .unwrap();
-        let bridge = MeshUdpBridge::new(
-            "client1".into(),
-            registry,
-            None,
-            &MeshUdpGate::new(true),
-        )
-        .unwrap();
+        let bridge =
+            MeshUdpBridge::new("client1".into(), registry, None, &MeshUdpGate::new(true)).unwrap();
 
         let hops = vec![
             RouteHop {
@@ -470,10 +455,11 @@ mod tests {
         };
         relay.send_to(&target, b"ping").await.unwrap();
         let mut buf = [0u8; 4096];
-        let (n, client_from) = tokio::time::timeout(Duration::from_secs(2), stub_face.recv_from(&mut buf))
-            .await
-            .expect("首包 FULL 应到达桩对端")
-            .unwrap();
+        let (n, client_from) =
+            tokio::time::timeout(Duration::from_secs(2), stub_face.recv_from(&mut buf))
+                .await
+                .expect("首包 FULL 应到达桩对端")
+                .unwrap();
         let full = decode_udp_envelope(&buf[..n]).unwrap();
         assert_eq!(full.path_mode, UdpPathMode::Full);
         assert_eq!(full.payload, b"ping");
@@ -540,14 +526,9 @@ mod tests {
     #[test]
     fn mesh_udp_bridge_gate_rejects_plaintext() {
         let registry = Arc::new(MeshRegistry::new());
-        let err = MeshUdpBridge::new(
-            "client1".into(),
-            registry,
-            None,
-            &MeshUdpGate::new(false),
-        )
-        .err()
-        .expect("tls=None 且 !allow_plaintext 应在构造点拒绝");
+        let err = MeshUdpBridge::new("client1".into(), registry, None, &MeshUdpGate::new(false))
+            .err()
+            .expect("tls=None 且 !allow_plaintext 应在构造点拒绝");
         assert!(
             format!("{err:#}").contains("SEEP_MESH_UDP_ALLOW_PLAINTEXT"),
             "错误信息应含开关名: {err:#}"
@@ -558,13 +539,8 @@ mod tests {
     #[tokio::test]
     async fn mesh_udp_bridge_rejects_foreign_chain_start() {
         let registry = Arc::new(MeshRegistry::new());
-        let bridge = MeshUdpBridge::new(
-            "client1".into(),
-            registry,
-            None,
-            &MeshUdpGate::new(true),
-        )
-        .unwrap();
+        let bridge =
+            MeshUdpBridge::new("client1".into(), registry, None, &MeshUdpGate::new(true)).unwrap();
         let hops = vec![
             RouteHop {
                 node: "other".into(),
@@ -576,7 +552,10 @@ mod tests {
             },
         ];
         assert!(
-            bridge.associate(ctx_for("127.0.0.1", 53), &hops).await.is_err(),
+            bridge
+                .associate(ctx_for("127.0.0.1", 53), &hops)
+                .await
+                .is_err(),
             "hops[0] 非本机应拒绝"
         );
     }
@@ -598,19 +577,10 @@ mod tests {
             ))
             .unwrap();
         registry
-            .register_node(NodeRecord::new(
-                "relay1".into(),
-                NodeRole::Relay,
-                stub_addr,
-            ))
+            .register_node(NodeRecord::new("relay1".into(), NodeRole::Relay, stub_addr))
             .unwrap();
-        let bridge = MeshUdpBridge::new(
-            "client1".into(),
-            registry,
-            None,
-            &MeshUdpGate::new(true),
-        )
-        .unwrap();
+        let bridge =
+            MeshUdpBridge::new("client1".into(), registry, None, &MeshUdpGate::new(true)).unwrap();
         let metrics = bridge.client_metrics();
         assert_eq!(metrics.dropped(), 0, "初始零");
 
@@ -629,8 +599,14 @@ mod tests {
             port: 5353,
             proto: TargetProto::Udp,
         };
-        let r1 = bridge.associate(ctx_for("127.0.0.1", 53), &hops).await.unwrap();
-        let r2 = bridge.associate(ctx_for("127.0.0.1", 53), &hops).await.unwrap();
+        let r1 = bridge
+            .associate(ctx_for("127.0.0.1", 53), &hops)
+            .await
+            .unwrap();
+        let r2 = bridge
+            .associate(ctx_for("127.0.0.1", 53), &hops)
+            .await
+            .unwrap();
 
         // recv 任务先拉起（丢弃计数发生在 recv_from 轮询中，无 poll 者不消费）
         let t1 = {
@@ -652,14 +628,16 @@ mod tests {
         r1.send_to(&target, b"a").await.unwrap();
         r2.send_to(&target, b"b").await.unwrap();
         let mut buf = [0u8; 4096];
-        let (_, from1) = tokio::time::timeout(Duration::from_secs(2), stub_face.recv_from(&mut buf))
-            .await
-            .expect("relay1 FULL 应到达桩")
-            .unwrap();
-        let (_, from2) = tokio::time::timeout(Duration::from_secs(2), stub_face.recv_from(&mut buf))
-            .await
-            .expect("relay2 FULL 应到达桩")
-            .unwrap();
+        let (_, from1) =
+            tokio::time::timeout(Duration::from_secs(2), stub_face.recv_from(&mut buf))
+                .await
+                .expect("relay1 FULL 应到达桩")
+                .unwrap();
+        let (_, from2) =
+            tokio::time::timeout(Duration::from_secs(2), stub_face.recv_from(&mut buf))
+                .await
+                .expect("relay2 FULL 应到达桩")
+                .unwrap();
         assert_ne!(from1, from2, "两个 relay 各持独立 socket");
 
         // 注入非匹配回包（dir=Up，可解码但不匹配过滤条件）→ 各自丢弃、共享计数累加
@@ -682,7 +660,11 @@ mod tests {
         while metrics.dropped() < 2 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(metrics.dropped(), 2, "共享 dropped 跨 relay 累加（§2.4 收编）");
+        assert_eq!(
+            metrics.dropped(),
+            2,
+            "共享 dropped 跨 relay 累加（§2.4 收编）"
+        );
 
         t1.abort();
         t2.abort();

@@ -14,8 +14,7 @@
 //! include 语义（§1.3），`AppliedStep` 记录已执行步骤供逆序撤销。
 
 use std::{
-    fmt, fs,
-    io,
+    fmt, fs, io,
     net::{IpAddr, Ipv4Addr},
     os::fd::{AsRawFd, OwnedFd},
     sync::Mutex,
@@ -24,13 +23,13 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use nix::{libc, errno::Errno};
+use nix::{errno::Errno, libc};
 use tokio::{io::unix::AsyncFd, process::Command};
 use tracing::debug;
 
 use super::route::{
-    RouteManager, RouteMonitor, RouteRule, RouteStats, RoutingConfig,
-    RouteDestination, BypassCondition, default_bypass_rules, parse_cidr,
+    default_bypass_rules, parse_cidr, BypassCondition, RouteDestination, RouteManager,
+    RouteMonitor, RouteRule, RouteStats, RoutingConfig,
 };
 use super::tun::{InterfaceStats, PacketInfo, PacketType, TunConfig, TunProvider};
 
@@ -41,7 +40,7 @@ nix::ioctl_read_bad!(tun_get_iff, libc::TUNGETIFF, libc::ifreq);
 /// 构建 TUNSETIFF 请求：ifr_name 按给定名（空名 = 内核分配 tun%d）、
 /// flags 固定 `IFF_TUN | IFF_NO_PI`（§6-4：TAP 归 V2）
 fn build_iff_request(name: &str) -> Result<libc::ifreq> {
-    if name.len() >= libc::IFNAMSIZ as usize {
+    if name.len() >= libc::IFNAMSIZ {
         return Err(anyhow!(
             "TUN 接口名 {:?} 超长（≥{} 字节，E4 早期拦截）",
             name,
@@ -122,9 +121,9 @@ async fn run_ip(argv: &[String]) -> Result<()> {
         .output()
         .await
         .map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => anyhow!(
-                "ip 命令不可用（E6）——需 iproute2 或 busybox ip：{e}"
-            ),
+            io::ErrorKind::NotFound => {
+                anyhow!("ip 命令不可用（E6）——需 iproute2 或 busybox ip：{e}")
+            }
             _ => anyhow!("执行 ip 失败：{e}"),
         })?;
     if !out.status.success() {
@@ -215,12 +214,12 @@ fn open_tun_file() -> Result<fs::File> {
 /// TUNSETIFF errno 映射（E2/E3/E4）
 fn map_tunsetiff_err(name: &str, e: Errno) -> anyhow::Error {
     match e {
-        Errno::EEXIST => anyhow!(
-            "TUNSETIFF EEXIST——接口名 {name:?} 已被占用（config.name 强制名冲突，E3）：{e}"
-        ),
-        Errno::EPERM | Errno::EACCES => anyhow!(
-            "TUNSETIFF {e}——需 CAP_NET_ADMIN（root/capabilities，E2）：接口 {name:?}"
-        ),
+        Errno::EEXIST => {
+            anyhow!("TUNSETIFF EEXIST——接口名 {name:?} 已被占用（config.name 强制名冲突，E3）：{e}")
+        }
+        Errno::EPERM | Errno::EACCES => {
+            anyhow!("TUNSETIFF {e}——需 CAP_NET_ADMIN（root/capabilities，E2）：接口 {name:?}")
+        }
         Errno::EINVAL => anyhow!(
             "TUNSETIFF EINVAL——flags={:#x}（IFF_TUN|IFF_NO_PI）非法（程序缺陷，E4）：{e}",
             libc::IFF_TUN | libc::IFF_NO_PI
@@ -379,25 +378,13 @@ impl TunProvider for LinuxTunProvider {
         // ipv4_gateway 不在此消费——默认路由/网关接管归 P1-3（§6-3）
         let mut configured = false;
         if let Some(v4) = self.config.ipv4_addr {
-            let prefix = self
-                .config
-                .ipv4_netmask
-                .map(netmask_prefix)
-                .unwrap_or(32);
-            run_ip(&ip_argv_addr_replace(
-                &format!("{v4}/{prefix}"),
-                &self.name,
-            ))
-            .await?;
+            let prefix = self.config.ipv4_netmask.map(netmask_prefix).unwrap_or(32);
+            run_ip(&ip_argv_addr_replace(&format!("{v4}/{prefix}"), &self.name)).await?;
             configured = true;
         }
         if let Some(v6) = self.config.ipv6_addr {
             let prefix = self.config.ipv6_prefix_len.unwrap_or(128);
-            run_ip(&ip_argv_addr_replace(
-                &format!("{v6}/{prefix}"),
-                &self.name,
-            ))
-            .await?;
+            run_ip(&ip_argv_addr_replace(&format!("{v6}/{prefix}"), &self.name)).await?;
             configured = true;
         }
         if !configured {
@@ -470,14 +457,14 @@ impl TunProvider for LinuxTunProvider {
             .ok_or_else(|| anyhow!("TUN 设备未创建——先调用 create_interface"))?;
         loop {
             let mut guard = fd.writable().await?;
-            let attempt = guard.try_io(|inner| match nix::unistd::write(
-                inner.get_ref(),
-                packet.as_ref(),
-            ) {
-                Ok(n) => Ok(n),
-                Err(Errno::EAGAIN) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
-                Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
-            });
+            let attempt =
+                guard.try_io(
+                    |inner| match nix::unistd::write(inner.get_ref(), packet.as_ref()) {
+                        Ok(n) => Ok(n),
+                        Err(Errno::EAGAIN) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                        Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
+                    },
+                );
             match attempt {
                 Ok(Ok(n)) if n == packet.len() => {
                     self.stats.packets_sent += 1;
@@ -519,9 +506,15 @@ pub enum AppliedStep {
 impl fmt::Display for AppliedStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AppliedStep::AddrReplaced { interface, cidr } => write!(f, "AddrReplaced({cidr} dev {interface})"),
+            AppliedStep::AddrReplaced { interface, cidr } => {
+                write!(f, "AddrReplaced({cidr} dev {interface})")
+            }
             AppliedStep::LinkUp { interface } => write!(f, "LinkUp({interface})"),
-            AppliedStep::RouteReplaced { cidr, interface, metric } => write!(f, "RouteReplaced({cidr} dev {interface} metric {metric})"),
+            AppliedStep::RouteReplaced {
+                cidr,
+                interface,
+                metric,
+            } => write!(f, "RouteReplaced({cidr} dev {interface} metric {metric})"),
         }
     }
 }
@@ -531,6 +524,7 @@ impl fmt::Display for AppliedStep {
 /// - mesh listen_address 与已注册 peer 地址
 /// - control.api_bind
 /// - tun 自身网段（TunConfig.ipv4_addr/ipv6_addr + prefix）
+///
 /// 这些前缀**不写入** include 路由，且进进程内兜底名单。
 fn compute_auto_bypass(
     _routing_config: &RoutingConfig,
@@ -553,12 +547,18 @@ fn compute_auto_bypass(
         if let Some(v4) = tun.ipv4_addr {
             if let Some(netmask) = tun.ipv4_netmask {
                 let prefix = u32::from(netmask).leading_ones() as u8;
-                bypass.push(RouteDestination::Ipv4Network { network: v4, prefix });
+                bypass.push(RouteDestination::Ipv4Network {
+                    network: v4,
+                    prefix,
+                });
             }
         }
         if let Some(v6) = tun.ipv6_addr {
             if let Some(prefix) = tun.ipv6_prefix_len {
-                bypass.push(RouteDestination::Ipv6Network { network: v6, prefix });
+                bypass.push(RouteDestination::Ipv6Network {
+                    network: v6,
+                    prefix,
+                });
             }
         }
     }
@@ -571,17 +571,25 @@ fn compute_auto_bypass(
 
 /// 判断目标是否在 auto-bypass 集（排除不写入路由）
 fn is_auto_bypass(destination: &RouteDestination, auto_bypass: &[RouteDestination]) -> bool {
-    auto_bypass.iter().any(|b| {
-        match (destination, b) {
-            (RouteDestination::Ipv4Network { network, prefix }, RouteDestination::Ipv4Network { network: bn, prefix: bp }) => {
-                network == bn && prefix == bp
-            }
-            (RouteDestination::Ipv6Network { network, prefix }, RouteDestination::Ipv6Network { network: bn, prefix: bp }) => {
-                network == bn && prefix == bp
-            }
-            (RouteDestination::Host { address }, RouteDestination::Host { address: ba }) => address == ba,
-            _ => false,
+    auto_bypass.iter().any(|b| match (destination, b) {
+        (
+            RouteDestination::Ipv4Network { network, prefix },
+            RouteDestination::Ipv4Network {
+                network: bn,
+                prefix: bp,
+            },
+        ) => network == bn && prefix == bp,
+        (
+            RouteDestination::Ipv6Network { network, prefix },
+            RouteDestination::Ipv6Network {
+                network: bn,
+                prefix: bp,
+            },
+        ) => network == bn && prefix == bp,
+        (RouteDestination::Host { address }, RouteDestination::Host { address: ba }) => {
+            address == ba
         }
+        _ => false,
     })
 }
 
@@ -644,9 +652,11 @@ impl LinuxRouteManager {
                 AppliedStep::LinkUp { interface } => {
                     run_ip(&ip_argv_link_down_name(&interface)).await
                 }
-                AppliedStep::RouteReplaced { cidr, interface, metric: _ } => {
-                    run_ip(&ip_argv_route_del(&cidr, &interface)).await
-                }
+                AppliedStep::RouteReplaced {
+                    cidr,
+                    interface,
+                    metric: _,
+                } => run_ip(&ip_argv_route_del(&cidr, &interface)).await,
             };
             // 撤销阶段尽力而为，不因单步失败中断
         }
@@ -662,7 +672,11 @@ impl LinuxRouteManager {
             AppliedStep::LinkUp { interface: _ } => {
                 // LinkUp 已在 up_interface 处理，此处仅记录
             }
-            AppliedStep::RouteReplaced { cidr, interface, metric } => {
+            AppliedStep::RouteReplaced {
+                cidr,
+                interface,
+                metric,
+            } => {
                 run_ip(&ip_argv_route_replace(cidr, interface, *metric)).await?;
             }
         }
@@ -680,7 +694,10 @@ impl RouteManager for LinuxRouteManager {
     fn stats(&self) -> RouteStats {
         let applied = self.applied.lock().unwrap();
         RouteStats {
-            active_routes: applied.iter().filter(|s| matches!(s, AppliedStep::RouteReplaced { .. })).count(),
+            active_routes: applied
+                .iter()
+                .filter(|s| matches!(s, AppliedStep::RouteReplaced { .. }))
+                .count(),
             total_routes: applied.len(),
             ..Default::default()
         }
@@ -704,14 +721,23 @@ impl RouteManager for LinuxRouteManager {
                     .map(|nm| u32::from(nm).leading_ones() as u8)
                     .unwrap_or(32);
                 let cidr = format!("{v4}/{prefix}");
-                let step = AppliedStep::AddrReplaced { interface: interface.clone(), cidr: cidr.clone() };
+                let step = AppliedStep::AddrReplaced {
+                    interface: interface.clone(),
+                    cidr: cidr.clone(),
+                };
                 self.apply_step(step).await?;
-                temp_applied.push(AppliedStep::AddrReplaced { interface: interface.clone(), cidr });
+                temp_applied.push(AppliedStep::AddrReplaced {
+                    interface: interface.clone(),
+                    cidr,
+                });
             }
             if let Some(v6) = tun.ipv6_addr {
                 let prefix = tun.ipv6_prefix_len.unwrap_or(128);
                 let cidr = format!("{v6}/{prefix}");
-                let step = AppliedStep::AddrReplaced { interface: interface.clone(), cidr: cidr.clone() };
+                let step = AppliedStep::AddrReplaced {
+                    interface: interface.clone(),
+                    cidr: cidr.clone(),
+                };
                 self.apply_step(step).await?;
                 temp_applied.push(AppliedStep::AddrReplaced { interface, cidr });
             }
@@ -728,26 +754,43 @@ impl RouteManager for LinuxRouteManager {
                 debug!(target: "seep::route", name = %rule.name, dest = %rule.destination.as_string(), "跳过 auto-bypass 目标");
                 continue;
             }
-            let interface = rule.interface.clone().unwrap_or_else(|| self.get_interface_name().unwrap_or_default());
+            let interface = rule
+                .interface
+                .clone()
+                .unwrap_or_else(|| self.get_interface_name().unwrap_or_default());
             if interface.is_empty() {
                 return Err(anyhow!("路由规则 {} 缺少接口（tun 未配置）", rule.name));
             }
             let metric = rule.metric.unwrap_or(0);
             let cidr = rule.destination.as_string();
-            let step = AppliedStep::RouteReplaced { cidr: cidr.clone(), interface: interface.clone(), metric };
+            let step = AppliedStep::RouteReplaced {
+                cidr: cidr.clone(),
+                interface: interface.clone(),
+                metric,
+            };
             // 尝试应用，失败则回滚已应用的临时步骤
             if let Err(e) = self.apply_step(step).await {
                 // 逆序撤销本次 apply 中已成功的步骤
                 for s in temp_applied.drain(..).rev() {
                     let _ = match s {
-                        AppliedStep::AddrReplaced { interface, cidr } => run_ip(&ip_argv_addr_del(&cidr, &interface)).await,
-                        AppliedStep::RouteReplaced { cidr, interface, metric: _ } => run_ip(&ip_argv_route_del(&cidr, &interface)).await,
+                        AppliedStep::AddrReplaced { interface, cidr } => {
+                            run_ip(&ip_argv_addr_del(&cidr, &interface)).await
+                        }
+                        AppliedStep::RouteReplaced {
+                            cidr,
+                            interface,
+                            metric: _,
+                        } => run_ip(&ip_argv_route_del(&cidr, &interface)).await,
                         AppliedStep::LinkUp { .. } => Ok(()),
                     };
                 }
                 return Err(e.context(format!("应用路由规则 {} 失败，已回滚", rule.name)));
             }
-            temp_applied.push(AppliedStep::RouteReplaced { cidr, interface, metric });
+            temp_applied.push(AppliedStep::RouteReplaced {
+                cidr,
+                interface,
+                metric,
+            });
         }
 
         // 全部成功，合并到正式 applied
@@ -762,15 +805,24 @@ impl RouteManager for LinuxRouteManager {
     async fn add_route(&self, rule: RouteRule) -> Result<()> {
         let auto_bypass = compute_auto_bypass(&self.config, self.tun_config.as_ref());
         if is_auto_bypass(&rule.destination, &auto_bypass) {
-            return Err(anyhow!("目标 {} 在 auto-bypass 集，不写入路由", rule.destination.as_string()));
+            return Err(anyhow!(
+                "目标 {} 在 auto-bypass 集，不写入路由",
+                rule.destination.as_string()
+            ));
         }
-        let interface = rule.interface.unwrap_or_else(|| self.get_interface_name().unwrap_or_default());
+        let interface = rule
+            .interface
+            .unwrap_or_else(|| self.get_interface_name().unwrap_or_default());
         if interface.is_empty() {
             return Err(anyhow!("路由规则 {} 缺少接口", rule.name));
         }
         let metric = rule.metric.unwrap_or(0);
         let cidr = rule.destination.as_string();
-        let step = AppliedStep::RouteReplaced { cidr: cidr.clone(), interface: interface.clone(), metric };
+        let step = AppliedStep::RouteReplaced {
+            cidr: cidr.clone(),
+            interface: interface.clone(),
+            metric,
+        };
         self.apply_step(step).await?;
         Ok(())
     }
@@ -779,15 +831,20 @@ impl RouteManager for LinuxRouteManager {
         // 先找到并取出步骤，释放锁再 await
         let step = {
             let mut applied = self.applied.lock().unwrap();
-            if let Some(idx) = applied.iter().position(|s| {
-                matches!(s, AppliedStep::RouteReplaced { cidr, .. } if s.to_string().contains(name))
-            }) {
+            if let Some(idx) = applied.iter().position(
+                |s| matches!(s, AppliedStep::RouteReplaced { .. } if s.to_string().contains(name)),
+            ) {
                 applied.remove(idx)
             } else {
                 return Err(anyhow!("未找到路由规则: {name}"));
             }
         };
-        if let AppliedStep::RouteReplaced { cidr, interface, metric: _ } = step {
+        if let AppliedStep::RouteReplaced {
+            cidr,
+            interface,
+            metric: _,
+        } = step
+        {
             run_ip(&ip_argv_route_del(&cidr, &interface)).await?;
         }
         Ok(())
@@ -805,9 +862,18 @@ impl RouteManager for LinuxRouteManager {
         Ok(applied
             .iter()
             .filter_map(|s| {
-                if let AppliedStep::RouteReplaced { cidr, interface, metric } = s {
+                if let AppliedStep::RouteReplaced {
+                    cidr,
+                    interface,
+                    metric,
+                } = s
+                {
                     let dest = parse_cidr(cidr).ok()?;
-                    Some(RouteRule::new(format!("route-{cidr}"), dest).with_interface(interface.clone()).with_metric(*metric))
+                    Some(
+                        RouteRule::new(format!("route-{cidr}"), dest)
+                            .with_interface(interface.clone())
+                            .with_metric(*metric),
+                    )
                 } else {
                     None
                 }
@@ -818,10 +884,19 @@ impl RouteManager for LinuxRouteManager {
     async fn lookup_route(&self, destination: IpAddr) -> Result<Option<RouteRule>> {
         let applied = self.applied.lock().unwrap();
         for s in applied.iter() {
-            if let AppliedStep::RouteReplaced { cidr, interface, metric } = s {
+            if let AppliedStep::RouteReplaced {
+                cidr,
+                interface,
+                metric,
+            } = s
+            {
                 if let Ok(dest) = parse_cidr(cidr) {
                     if dest.matches(destination) {
-                        return Ok(Some(RouteRule::new(format!("route-{cidr}"), dest).with_interface(interface.clone()).with_metric(*metric)));
+                        return Ok(Some(
+                            RouteRule::new(format!("route-{cidr}"), dest)
+                                .with_interface(interface.clone())
+                                .with_metric(*metric),
+                        ));
                     }
                 }
             }
@@ -953,10 +1028,17 @@ mod tests {
 
     /// 探测 /dev/net/tun 可用性（ENOENT / EACCES → skip）
     fn tun_device_available() -> bool {
-        match fs::OpenOptions::new().read(true).write(true).open("/dev/net/tun") {
+        match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/net/tun")
+        {
             Ok(_) => true,
             Err(e) => {
-                eprintln!("skip: /dev/net/tun 不可用（{:?}）——需 modprobe tun / 容器映射设备节点", e.kind());
+                eprintln!(
+                    "skip: /dev/net/tun 不可用（{:?}）——需 modprobe tun / 容器映射设备节点",
+                    e.kind()
+                );
                 false
             }
         }
@@ -975,15 +1057,12 @@ mod tests {
 
         // 周期 A：强制名（§4.2 创建/强制名）+ up/addr/mtu 断言 + 捕获钉子
         let forced = format!("seepT1{}", std::process::id());
-        let mut tun = LinuxTunProvider::new(
-            TunConfig::default()
-                .with_name(forced.clone())
-                .with_ipv4(
-                    Ipv4Addr::new(10, 66, 0, 1),
-                    Ipv4Addr::new(255, 255, 255, 0),
-                    Ipv4Addr::new(10, 66, 0, 1),
-                ),
-        );
+        let mut tun =
+            LinuxTunProvider::new(TunConfig::default().with_name(forced.clone()).with_ipv4(
+                Ipv4Addr::new(10, 66, 0, 1),
+                Ipv4Addr::new(255, 255, 255, 0),
+                Ipv4Addr::new(10, 66, 0, 1),
+            ));
         if let Err(e) = tun.create_interface().await {
             if is_permission_skip(&e) {
                 eprintln!("skip: 无 CAP_NET_ADMIN——{e}");
@@ -1048,14 +1127,8 @@ mod tests {
         let (bytes, info) = captured;
 
         assert_eq!(info.packet_type, PacketType::Ipv4);
-        assert_eq!(
-            info.src_ip,
-            Some(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1)))
-        );
-        assert_eq!(
-            info.dst_ip,
-            Some(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)))
-        );
+        assert_eq!(info.src_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))));
+        assert_eq!(info.dst_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2))));
         assert_eq!(info.src_port, Some(local_port));
         assert_eq!(info.dst_port, Some(9999));
         assert_eq!(info.protocol, Some(17));

@@ -55,8 +55,10 @@ pub struct NetworkConfig {
 /// 网络模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum NetworkMode {
     /// TUN 模式 - Layer 3 IP 层虚拟化
+    #[default]
     Tun,
     /// TAP 模式 - Layer 2 以太网层虚拟化
     Tap,
@@ -64,12 +66,6 @@ pub enum NetworkMode {
     Transparent,
     /// 混合模式
     Hybrid,
-}
-
-impl Default for NetworkMode {
-    fn default() -> Self {
-        NetworkMode::Tun
-    }
 }
 
 /// 流量统计信息
@@ -376,8 +372,8 @@ mod tests {
         assert_eq!(tun.mtu(), 1500);
         assert_eq!(tun.name(), ""); // 内核分配名 TUNGETIFF 读回归 T1
 
-        let route = create_route_manager(&routing_config())
-            .expect("Linux 工厂应返回 LinuxRouteManager");
+        let route =
+            create_route_manager(&routing_config()).expect("Linux 工厂应返回 LinuxRouteManager");
         assert_eq!(route.config().mode, RoutingMode::Global);
     }
 

@@ -34,6 +34,8 @@ pub struct VlessConnector {
 }
 
 impl VlessConnector {
+    /// 参数面镜像 `EgressConfig::Vless` 字段 1:1，不收敛 options 结构
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         server: String,
         port: u16,

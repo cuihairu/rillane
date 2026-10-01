@@ -16,7 +16,9 @@ use seep_config::{
 /// Clash 代理类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ClashProxyType {
+    #[default]
     Ss,
     Vmess,
     Vless,
@@ -29,12 +31,6 @@ pub enum ClashProxyType {
     Hysteria,
     Hysteria2,
     Wireguard,
-}
-
-impl Default for ClashProxyType {
-    fn default() -> Self {
-        Self::Ss
-    }
 }
 
 /// Clash 代理服务器配置

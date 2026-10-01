@@ -224,18 +224,24 @@ impl ControlPlane {
         false
     }
 
+    // Err = 错误响应体（handler ? 早退惯例），不装箱
+    #[allow(clippy::result_large_err)]
     fn mesh(&self) -> Result<Arc<MeshRegistry>, Response<Body>> {
         self.runtime
             .get_mesh_registry()
             .ok_or_else(|| text(StatusCode::SERVICE_UNAVAILABLE, "mesh not enabled"))
     }
 
+    // Err = 错误响应体（handler ? 早退惯例），不装箱
+    #[allow(clippy::result_large_err)]
     fn chain_mgr(&self) -> Result<Arc<seep_runtime::ChainManager>, Response<Body>> {
         self.runtime
             .get_chain_manager()
             .ok_or_else(|| text(StatusCode::SERVICE_UNAVAILABLE, "chain not enabled"))
     }
 
+    // Err = 错误响应体（handler ? 早退惯例），不装箱
+    #[allow(clippy::result_large_err)]
     fn subscription_mgr(
         &self,
     ) -> Result<Arc<seep_subscription::SubscriptionManager>, Response<Body>> {
@@ -400,7 +406,10 @@ impl ControlPlane {
                 "Total chains created.",
                 "counter",
             );
-            out.push_str(&format!("seep_chain_total_created {}\n", stats.total_chains_created));
+            out.push_str(&format!(
+                "seep_chain_total_created {}\n",
+                stats.total_chains_created
+            ));
             push_gauge(
                 &mut out,
                 "seep_chain_active",
@@ -794,7 +803,9 @@ impl ControlPlane {
             mesh_client: self
                 .runtime
                 .get_udp_client_metrics()
-                .map(|m| UdpClientDroppedDto { dropped: m.dropped() }),
+                .map(|m| UdpClientDroppedDto {
+                    dropped: m.dropped(),
+                }),
         };
         json(StatusCode::OK, &dto)
     }
@@ -1485,6 +1496,8 @@ impl From<seep_core::ChainContext> for ChainContextDto {
     }
 }
 
+// Err = 错误响应体（handler ? 早退惯例），不装箱
+#[allow(clippy::result_large_err)]
 async fn read_json<T: for<'de> Deserialize<'de>>(req: Request<Body>) -> Result<T, Response<Body>> {
     let bytes = body::to_bytes(req.into_body())
         .await
@@ -2272,9 +2285,18 @@ mod tests {
         }
         let expired = table.get("expired").unwrap().as_object().unwrap();
         assert_eq!(expired.len(), 3, "expired 三 reason 键齐全");
-        assert!(table.get("sessions").unwrap().as_array().unwrap().is_empty());
+        assert!(table
+            .get("sessions")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
 
-        let ingress = v.get("ingress").expect("ingress 段恒在").as_object().unwrap();
+        let ingress = v
+            .get("ingress")
+            .expect("ingress 段恒在")
+            .as_object()
+            .unwrap();
         for f in [
             "associates_active",
             "associates_total",

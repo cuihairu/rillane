@@ -59,8 +59,10 @@ pub struct RoutingConfig {
 /// 路由模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RoutingMode {
     /// 全局路由
+    #[default]
     Global,
     /// 分应用路由
     Application,
@@ -70,12 +72,6 @@ pub enum RoutingMode {
     Ip,
     /// 混合路由
     Hybrid,
-}
-
-impl Default for RoutingMode {
-    fn default() -> Self {
-        RoutingMode::Global
-    }
 }
 
 /// 路由规则
@@ -174,7 +170,7 @@ impl RouteRule {
 }
 
 /// 路由目标
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RouteDestination {
     /// IPv4 网络
@@ -182,6 +178,7 @@ pub enum RouteDestination {
     /// IPv6 网络
     Ipv6Network { network: Ipv6Addr, prefix: u8 },
     /// 默认路由
+    #[default]
     Default,
     /// 主机路由
     Host { address: IpAddr },
@@ -202,11 +199,6 @@ impl RouteDestination {
             return Err(anyhow!("IPv6 前缀长度不能超过 128"));
         }
         Ok(RouteDestination::Ipv6Network { network, prefix })
-    }
-
-    /// 创建默认路由
-    pub fn default() -> Self {
-        RouteDestination::Default
     }
 
     /// 创建主机路由
@@ -284,8 +276,10 @@ impl RouteDestination {
 /// 路由类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RouteType {
     /// 单播路由
+    #[default]
     Unicast,
     /// 多播路由
     Multicast,
@@ -293,12 +287,6 @@ pub enum RouteType {
     Broadcast,
     /// 任何路由
     Any,
-}
-
-impl Default for RouteType {
-    fn default() -> Self {
-        RouteType::Unicast
-    }
 }
 
 /// 绕过规则
@@ -605,7 +593,7 @@ impl RouteManagerFactory {
         #[cfg(target_os = "linux")]
         {
             // TODO: 平台特定实现待完成
-            return Err(anyhow!("Linux 路由管理器待实现"));
+            Err(anyhow!("Linux 路由管理器待实现"))
         }
 
         #[cfg(target_os = "macos")]

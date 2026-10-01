@@ -77,11 +77,13 @@ async fn forward_tcp(
     target_host: String,
     target_port: u16,
 ) -> Result<()> {
-    let mut metadata = FlowMetadata::default();
-    metadata.tags = vec![
-        "ingress:socks5".into(),
-        format!("node:{}", ingress_node_name),
-    ];
+    let mut metadata = FlowMetadata {
+        tags: vec![
+            "ingress:socks5".into(),
+            format!("node:{}", ingress_node_name),
+        ],
+        ..Default::default()
+    };
     if let Some(addr) = client_addr {
         metadata
             .annotations

@@ -4,9 +4,8 @@
 
 use bytes::Bytes;
 use seep_core::udp::{
-    sweep_once, ChainFailureEvent, Clock, Dir, DropReason, MockUdpRelay,
-    ProcessIdentity, ResolveError, SessionLedger, UdpSessionConfig, UdpSessionKey,
-    UdpSessionTable,
+    sweep_once, ChainFailureEvent, Clock, Dir, DropReason, MockUdpRelay, ProcessIdentity,
+    ResolveError, SessionLedger, UdpSessionConfig, UdpSessionKey, UdpSessionTable,
 };
 use seep_core::{
     FailureType, FlowContext, FlowId, RouteDecision, RoutePath, RouteType, SessionStatus,
@@ -29,7 +28,11 @@ struct MockRouter {
 
 impl MockRouter {
     fn new(node: &str) -> Arc<Self> {
-        Arc::new(Self { calls: AtomicUsize::new(0), node: node.to_string(), fail: AtomicBool::new(false) })
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            node: node.to_string(),
+            fail: AtomicBool::new(false),
+        })
     }
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
@@ -44,7 +47,9 @@ impl seep_core::FlowRouter for MockRouter {
         }
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(RouteDecision {
-            path: RoutePath::Direct { node: self.node.clone() },
+            path: RoutePath::Direct {
+                node: self.node.clone(),
+            },
             reason: None,
             route_type: RouteType::Standard,
         })
@@ -58,7 +63,11 @@ fn addr(p: u16) -> SocketAddr {
 }
 
 fn udp_target(host: &str, port: u16) -> seep_core::FlowTarget {
-    seep_core::FlowTarget { host: host.to_string(), port, proto: TargetProto::Udp }
+    seep_core::FlowTarget {
+        host: host.to_string(),
+        port,
+        proto: TargetProto::Udp,
+    }
 }
 
 struct Ctx {
@@ -79,17 +88,18 @@ async fn make_table(mut cfg: impl FnMut(&mut UdpSessionConfig)) -> Ctx {
         clock.clone() as Arc<dyn seep_core::udp::Clock>,
     )
     .unwrap();
-    Ctx { table, router, clock }
+    Ctx {
+        table,
+        router,
+        clock,
+    }
 }
 
 /// 轮询至条件成立（forwarder 任务异步性的确定性等待）
 async fn wait_until(mut cond: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while !cond() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "wait_until 超时"
-        );
+        assert!(tokio::time::Instant::now() < deadline, "wait_until 超时");
         sleep(Duration::from_millis(10)).await;
     }
 }
@@ -100,8 +110,16 @@ async fn wait_until(mut cond: impl FnMut() -> bool) {
 async fn lifecycle_resolve_creates_and_reuses_session() {
     let c = make_table(|_| {}).await;
     let key = UdpSessionKey::new(addr(40000));
-    let s1 = c.table.resolve(&key, &udp_target("example.com", 53)).await.unwrap();
-    let s2 = c.table.resolve(&key, &udp_target("other.com", 9953)).await.unwrap();
+    let s1 = c
+        .table
+        .resolve(&key, &udp_target("example.com", 53))
+        .await
+        .unwrap();
+    let s2 = c
+        .table
+        .resolve(&key, &udp_target("other.com", 9953))
+        .await
+        .unwrap();
     // 同一粘滞键：会话复用（同 FlowId），不重建
     assert_eq!(s1.id(), s2.id());
     let snap = c.table.snapshot();
@@ -116,8 +134,10 @@ async fn sticky_key_dimensions_distinguish_sessions() {
     let k_plain = UdpSessionKey::new(base);
     let k_alice = UdpSessionKey::new(base).with_user(Some("Alice".into()));
     let k_bob = UdpSessionKey::new(base).with_user(Some("bob".into()));
-    let k_proc = UdpSessionKey::new(base)
-        .with_process(Some(ProcessIdentity { pid: 7, name: "game.exe".into() }));
+    let k_proc = UdpSessionKey::new(base).with_process(Some(ProcessIdentity {
+        pid: 7,
+        name: "game.exe".into(),
+    }));
     let t = udp_target("x.test", 1);
     let a = c.table.resolve(&k_plain, &t).await.unwrap();
     let b = c.table.resolve(&k_alice, &t).await.unwrap();
@@ -129,7 +149,10 @@ async fn sticky_key_dimensions_distinguish_sessions() {
     // 用户名归一化：Alice → alice（快照里可见）
     let snap = c.table.snapshot();
     assert_eq!(snap.sessions_active, 4);
-    assert!(snap.sessions.iter().any(|s| s.user.as_deref() == Some("alice")));
+    assert!(snap
+        .sessions
+        .iter()
+        .any(|s| s.user.as_deref() == Some("alice")));
 }
 
 // ---------- 快路径与映射复用（P0-1 验收核心） ----------
@@ -147,8 +170,14 @@ async fn forward_up_miss_then_bind_then_sent() {
     // resolve + bind → Sent
     let sref = c.table.resolve(&key, &t).await.unwrap();
     let (relay, _tx) = MockUdpRelay::new(t.clone());
-    assert_eq!(sref.bind_mapping(&t, relay.clone()).await.unwrap(), seep_core::udp::BindOutcome::Created);
-    let r = c.table.forward_up(&key, &t, Bytes::from_static(b"query")).await;
+    assert_eq!(
+        sref.bind_mapping(&t, relay.clone()).await.unwrap(),
+        seep_core::udp::BindOutcome::Created
+    );
+    let r = c
+        .table
+        .forward_up(&key, &t, Bytes::from_static(b"query"))
+        .await;
     assert_eq!(r, seep_core::udp::UpResult::Sent);
     assert_eq!(relay.send_count(), 1);
     let snap = c.table.snapshot();
@@ -186,7 +215,10 @@ async fn downlink_packets_flow_to_session_channel() {
     let mut rx = sref.take_downlink_rx().await.unwrap();
     // forwarder：mock 下行注入 → 会话下行通道
     tx.send(vec![1, 2, 3, 4]).await.unwrap();
-    let pkt = timeout(Duration::from_secs(2), rx.recv()).await.unwrap().unwrap();
+    let pkt = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(pkt.data.as_ref(), &[1, 2, 3, 4]);
     wait_until(|| {
         let snap = c.table.snapshot();
@@ -439,7 +471,9 @@ async fn shutdown_drops_uplink_and_rejects_resolve() {
     let res = c.table.forward_up(&key, &t, Bytes::from_static(b"x")).await;
     assert_eq!(
         res,
-        seep_core::udp::UpResult::Dropped { reason: DropReason::ShuttingDown }
+        seep_core::udp::UpResult::Dropped {
+            reason: DropReason::ShuttingDown
+        }
     );
     assert!(matches!(
         c.table.resolve(&key, &t).await,
@@ -462,7 +496,12 @@ async fn route_failure_revokes_mapping_and_clears_decision() {
     assert!(sref.decision().is_some());
 
     let res = sref.send_up(&t, Bytes::from_static(b"x")).await;
-    assert_eq!(res, seep_core::udp::UpResult::Dropped { reason: DropReason::SendFailed });
+    assert_eq!(
+        res,
+        seep_core::udp::UpResult::Dropped {
+            reason: DropReason::SendFailed
+        }
+    );
     wait_until(|| !sref.has_mapping(&t)).await;
     assert!(sref.decision().is_none());
     assert_eq!(c.table.snapshot().dropped.get("send_failed"), Some(&1));
@@ -484,14 +523,22 @@ async fn timeout_failure_keeps_mapping() {
 
     for _ in 0..3 {
         let res = sref.send_up(&t, Bytes::from_static(b"x")).await;
-        assert_eq!(res, seep_core::udp::UpResult::Dropped { reason: DropReason::SendFailed });
+        assert_eq!(
+            res,
+            seep_core::udp::UpResult::Dropped {
+                reason: DropReason::SendFailed
+            }
+        );
     }
     sleep(Duration::from_millis(50)).await;
     assert!(sref.has_mapping(&t), "timeout 类失败不应拆映射");
     assert_eq!(c.table.snapshot().dropped.get("send_failed"), Some(&3));
     // 恢复后同一映射继续可用
     r.clear_failures();
-    assert_eq!(sref.send_up(&t, Bytes::from_static(b"ok")).await, seep_core::udp::UpResult::Sent);
+    assert_eq!(
+        sref.send_up(&t, Bytes::from_static(b"ok")).await,
+        seep_core::udp::UpResult::Sent
+    );
 }
 
 #[tokio::test]
@@ -527,7 +574,10 @@ async fn success_resets_consecutive_error_count() {
     let _ = sref.send_up(&t, Bytes::from_static(b"x")).await;
     let _ = sref.send_up(&t, Bytes::from_static(b"x")).await;
     r.clear_failures();
-    assert_eq!(sref.send_up(&t, Bytes::from_static(b"ok")).await, seep_core::udp::UpResult::Sent);
+    assert_eq!(
+        sref.send_up(&t, Bytes::from_static(b"ok")).await,
+        seep_core::udp::UpResult::Sent
+    );
     // 成功归零：再连挂 2 次仍不拆，第 3 次才拆
     r.fail_sends(true);
     let _ = sref.send_up(&t, Bytes::from_static(b"x")).await;
@@ -575,8 +625,20 @@ async fn concurrent_bind_same_target_yields_single_mapping() {
     let (ra, rb) = tokio::join!(a, b);
     let outcomes = [ra.unwrap().unwrap(), rb.unwrap().unwrap()];
     // 一个 Created、一个 Reused；映射总数恒为 1
-    assert_eq!(outcomes.iter().filter(|o| **o == seep_core::udp::BindOutcome::Created).count(), 1);
-    assert_eq!(outcomes.iter().filter(|o| **o == seep_core::udp::BindOutcome::Reused).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| **o == seep_core::udp::BindOutcome::Created)
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|o| **o == seep_core::udp::BindOutcome::Reused)
+            .count(),
+        1
+    );
     assert_eq!(c.table.snapshot().mappings_active, 1);
 }
 
@@ -596,7 +658,10 @@ async fn concurrent_forward_up_no_race() {
             let key = UdpSessionKey::new(addr(60000 + i));
             let sref = table.resolve(&key, &t).await.unwrap();
             sref.bind_mapping(&t, r).await.unwrap();
-            assert_eq!(sref.send_up(&t, Bytes::from_static(b"z")).await, seep_core::udp::UpResult::Sent);
+            assert_eq!(
+                sref.send_up(&t, Bytes::from_static(b"z")).await,
+                seep_core::udp::UpResult::Sent
+            );
         }));
     }
     for h in handles {
@@ -680,7 +745,11 @@ async fn table_bytes_aggregate_tracks_mappings() {
     sref.bind_mapping(&t, relay).await.unwrap();
 
     // 上行 5+7+9 字节
-    for payload in [Bytes::from_static(b"12345"), Bytes::from_static(b"1234567"), Bytes::from_static(b"123456789")] {
+    for payload in [
+        Bytes::from_static(b"12345"),
+        Bytes::from_static(b"1234567"),
+        Bytes::from_static(b"123456789"),
+    ] {
         assert_eq!(
             c.table.forward_up(&key, &t, payload).await,
             seep_core::udp::UpResult::Sent
@@ -709,7 +778,10 @@ async fn table_bytes_aggregate_tracks_mappings() {
             sref.bind_mapping(&t, relay).await.unwrap();
             for _ in 0..50 {
                 let data = vec![0u8; 10].into();
-                assert_eq!(table.forward_up(&key, &t, data).await, seep_core::udp::UpResult::Sent);
+                assert_eq!(
+                    table.forward_up(&key, &t, data).await,
+                    seep_core::udp::UpResult::Sent
+                );
             }
         }));
     }
@@ -717,7 +789,14 @@ async fn table_bytes_aggregate_tracks_mappings() {
         task.await.unwrap();
     }
     let snap = c.table.snapshot();
-    assert_eq!(snap.bytes_up, 21 + 8 * 50 * 10, "并发终值 = 单会话 + 并发总量");
+    assert_eq!(
+        snap.bytes_up,
+        21 + 8 * 50 * 10,
+        "并发终值 = 单会话 + 并发总量"
+    );
     let per_session_sum: u64 = snap.sessions.iter().map(|s| s.bytes_uploaded).sum();
-    assert_eq!(snap.bytes_up, per_session_sum, "表级与 per-mapping 快照一致");
+    assert_eq!(
+        snap.bytes_up, per_session_sum,
+        "表级与 per-mapping 快照一致"
+    );
 }

@@ -48,7 +48,8 @@ routing:
 /// §1.6 约束逐组拒非法（sweep=0 / max_mappings=0 / lifetime<idle / queue_depth=0 / max_associates=0）。
 #[test]
 fn udp_config_validate_rejects_illegal() {
-    let cases: Vec<(&str, Box<dyn Fn(&mut UdpConfig)>)> = vec![
+    type Mutate = Box<dyn Fn(&mut UdpConfig)>;
+    let cases: Vec<(&str, Mutate)> = vec![
         (
             "sweep_interval_secs",
             Box::new(|c: &mut UdpConfig| c.sweep_interval_secs = 0),

@@ -189,7 +189,7 @@ impl UdpSessionTable {
                 let (tx, rx) = mpsc::channel(self.config.downlink_capacity);
                 let inner = Arc::new(UdpSessionInner {
                     key: key.clone(),
-                    id: id.clone(),
+                    id,
                     ledger: SessionLedger::create(id),
                     decision: RwLock::new(None),
                     mappings: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -451,7 +451,7 @@ impl SessionRef {
             return Ok(d);
         }
         let ctx = FlowContext {
-            id: self.inner.id.clone(),
+            id: self.inner.id,
             target: target.clone(),
             metadata: FlowMetadata::default(),
         };

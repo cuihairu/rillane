@@ -59,19 +59,15 @@ pub struct FilteringConfig {
 /// 过滤模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum FilteringMode {
     /// 黑名单模式
+    #[default]
     Blacklist,
     /// 白名单模式
     Whitelist,
     /// 混合模式
     Hybrid,
-}
-
-impl Default for FilteringMode {
-    fn default() -> Self {
-        FilteringMode::Blacklist
-    }
 }
 
 /// 应用程序规则
@@ -289,7 +285,7 @@ impl ProtocolType {
     }
 
     /// 从字符串解析
-    pub fn from_str(s: &str) -> Result<Self> {
+    pub fn parse(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "tcp" => Ok(ProtocolType::Tcp),
             "udp" => Ok(ProtocolType::Udp),

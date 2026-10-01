@@ -99,7 +99,11 @@ pub async fn run(
     let mut ctrl = TcpStream::connect(socks_addr)
         .await
         .map_err(|e| ProbeError::Connect(format!("TCP 连接失败（{socks5}）: {e}")))?;
-    let methods: &[u8] = if auth.is_some() { &[0x00, 0x02] } else { &[0x00] };
+    let methods: &[u8] = if auth.is_some() {
+        &[0x00, 0x02]
+    } else {
+        &[0x00]
+    };
     let mut hello = vec![0x05, methods.len() as u8];
     hello.extend_from_slice(methods);
     ctrl.write_all(&hello)

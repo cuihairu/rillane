@@ -409,7 +409,7 @@ impl UdpUplink {
         if !sref.has_mapping(target) {
             // 关联时机：首包路由决策产出后、映射创建处（relay-path §4.1）
             let ctx = FlowContext {
-                id: sref.id().clone(),
+                id: *sref.id(),
                 target: target.clone(),
                 metadata: FlowMetadata::default(),
             };

@@ -56,24 +56,23 @@ fn network_block_defaults_backward_compatible() {
 #[test]
 fn network_block_denies_unknown_fields() {
     let yaml = "mode: tun\nunknwon_field: 1\n";
-    let err = serde_yaml::from_str::<NetworkBlockConfig>(yaml)
-        .expect_err("未知字段应被 deny 拒绝");
+    let err = serde_yaml::from_str::<NetworkBlockConfig>(yaml).expect_err("未知字段应被 deny 拒绝");
     assert!(
         err.to_string().contains("unknown field"),
         "错误应点名未知字段：{err}"
     );
 
     let yaml = "mode: tun\ntun:\n  nam: seep0\n";
-    let err = serde_yaml::from_str::<NetworkBlockConfig>(yaml)
-        .expect_err("tun 子块未知字段应被拒绝");
+    let err =
+        serde_yaml::from_str::<NetworkBlockConfig>(yaml).expect_err("tun 子块未知字段应被拒绝");
     assert!(
         err.to_string().contains("unknown field"),
         "错误应点名未知字段：{err}"
     );
 
     let yaml = "mode: tun\nrouting:\n  inclde: []\n";
-    let err = serde_yaml::from_str::<NetworkBlockConfig>(yaml)
-        .expect_err("routing 子块未知字段应被拒绝");
+    let err =
+        serde_yaml::from_str::<NetworkBlockConfig>(yaml).expect_err("routing 子块未知字段应被拒绝");
     assert!(
         err.to_string().contains("unknown field"),
         "错误应点名未知字段：{err}"
@@ -101,8 +100,7 @@ fn network_block_serde_roundtrip() {
         }),
     };
     let rendered = serde_yaml::to_string(&cfg).expect("应可序列化");
-    let reparsed: NetworkBlockConfig =
-        serde_yaml::from_str(&rendered).expect("序列化结果应可往返");
+    let reparsed: NetworkBlockConfig = serde_yaml::from_str(&rendered).expect("序列化结果应可往返");
     assert_eq!(reparsed, cfg);
 }
 
@@ -162,7 +160,10 @@ fn network_block_validate_rejects_illegal_values() {
     let mut cfg = base();
     cfg.tun.as_mut().unwrap().ipv4 = Some("10.255.0.300/24".to_string());
     let err = cfg.validate().expect_err("坏地址应被拒绝");
-    assert!(err.to_string().contains("10.255.0.300/24"), "应带原串：{err}");
+    assert!(
+        err.to_string().contains("10.255.0.300/24"),
+        "应带原串：{err}"
+    );
 
     // tun.ipv6 前缀超上限
     let mut cfg = base();

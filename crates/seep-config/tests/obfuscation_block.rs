@@ -4,9 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use seep_config::{
-    ApplyTo, ObfsProfileConfig, ObfuscationConfig, PaddingBlockConfig, SeepConfig,
-};
+use seep_config::{ApplyTo, ObfsProfileConfig, ObfuscationConfig, PaddingBlockConfig, SeepConfig};
 
 const BASE_YAML: &str = r#"
 control:
@@ -37,8 +35,16 @@ fn obfuscation_block_defaults_backward_compatible() {
     let obfs = cfg.obfuscation.expect("obfuscation 块应存在");
     assert!(obfs.enabled);
     assert_eq!(obfs.default_padding, None);
-    assert_eq!(obfs.apply_to, ApplyTo::Chain, "apply_to 缺省 chain（§2.3 MVP 帧）");
-    assert_eq!(obfs.middleware, ["padding".to_string()], "middleware 缺省 [padding]");
+    assert_eq!(
+        obfs.apply_to,
+        ApplyTo::Chain,
+        "apply_to 缺省 chain（§2.3 MVP 帧）"
+    );
+    assert_eq!(
+        obfs.middleware,
+        ["padding".to_string()],
+        "middleware 缺省 [padding]"
+    );
     assert!(obfs.profiles.is_empty());
     let inline = obfs.padding.expect("内联 padding 应存在");
     assert_eq!(inline.mode, "fixed");
@@ -61,13 +67,13 @@ fn obfuscation_block_denies_unknown_fields() {
     assert!(err.to_string().contains("unknown field"), "{err}");
 
     let yaml = "enabled: false\nprofiles:\n  game:\n    pading: {}\n";
-    let err = serde_yaml::from_str::<ObfuscationConfig>(yaml)
-        .expect_err("profile 未知字段应被拒绝");
+    let err =
+        serde_yaml::from_str::<ObfuscationConfig>(yaml).expect_err("profile 未知字段应被拒绝");
     assert!(err.to_string().contains("unknown field"), "{err}");
 
     let yaml = "enabled: false\npadding:\n  mode: fixed\n  targe: 512\n";
-    let err = serde_yaml::from_str::<ObfuscationConfig>(yaml)
-        .expect_err("padding 未知字段应被拒绝");
+    let err =
+        serde_yaml::from_str::<ObfuscationConfig>(yaml).expect_err("padding 未知字段应被拒绝");
     assert!(err.to_string().contains("unknown field"), "{err}");
 }
 
@@ -111,8 +117,7 @@ fn obfuscation_block_serde_roundtrip() {
         rendered.contains("egress:hk-1"),
         "apply_to 应呈扁平字符串形：{rendered}"
     );
-    let reparsed: ObfuscationConfig =
-        serde_yaml::from_str(&rendered).expect("序列化结果应可往返");
+    let reparsed: ObfuscationConfig = serde_yaml::from_str(&rendered).expect("序列化结果应可往返");
     assert_eq!(reparsed, cfg);
 }
 
@@ -174,7 +179,8 @@ fn obfuscation_validate_matrix() {
     let err = cfg.validate().expect_err("未知策略名应报 E3");
     assert!(err.to_string().contains("E3"), "{err}");
     cfg.default_padding = Some("empty".to_string());
-    cfg.profiles.insert("empty".to_string(), ObfsProfileConfig { padding: None });
+    cfg.profiles
+        .insert("empty".to_string(), ObfsProfileConfig { padding: None });
     let err = cfg.validate().expect_err("无 padding profile 应报 E1");
     assert!(err.to_string().contains("E1"), "{err}");
 
@@ -185,31 +191,78 @@ fn obfuscation_validate_matrix() {
         padding: Some(inline()),
         ..Default::default()
     };
-    cfg.validate().expect("padding + latency_probe 应通过（§4.1）");
+    cfg.validate()
+        .expect("padding + latency_probe 应通过（§4.1）");
     cfg.middleware = vec!["timing".to_string()];
     let err = cfg.validate().expect_err("未知 middleware 应报错");
     assert!(err.to_string().contains("timing"), "{err}");
 
     // §3.3-4：padding 块 E2 矩阵
     for (block, expect) in [
-        (PaddingBlockConfig { mode: "fixedx".to_string(), target: 512, ..Default::default() }, "mode"),
-        (PaddingBlockConfig { mode: "fixed".to_string(), target: 0, ..Default::default() }, "target"),
-        (PaddingBlockConfig { mode: "bucket".to_string(), buckets: vec![], ..Default::default() }, "buckets 非空"),
         (
-            PaddingBlockConfig { mode: "bucket".to_string(), buckets: vec![512, 256], ..Default::default() },
+            PaddingBlockConfig {
+                mode: "fixedx".to_string(),
+                target: 512,
+                ..Default::default()
+            },
+            "mode",
+        ),
+        (
+            PaddingBlockConfig {
+                mode: "fixed".to_string(),
+                target: 0,
+                ..Default::default()
+            },
+            "target",
+        ),
+        (
+            PaddingBlockConfig {
+                mode: "bucket".to_string(),
+                buckets: vec![],
+                ..Default::default()
+            },
+            "buckets 非空",
+        ),
+        (
+            PaddingBlockConfig {
+                mode: "bucket".to_string(),
+                buckets: vec![512, 256],
+                ..Default::default()
+            },
             "严格升序",
         ),
-        (PaddingBlockConfig { mode: "range".to_string(), min: 1400, max: 512, ..Default::default() }, "min ≤ max"),
-        (PaddingBlockConfig { mode: "fixed".to_string(), target: 512, max_overhead_ratio: -0.1, ..Default::default() }, "≥ 0"),
+        (
+            PaddingBlockConfig {
+                mode: "range".to_string(),
+                min: 1400,
+                max: 512,
+                ..Default::default()
+            },
+            "min ≤ max",
+        ),
+        (
+            PaddingBlockConfig {
+                mode: "fixed".to_string(),
+                target: 512,
+                max_overhead_ratio: -0.1,
+                ..Default::default()
+            },
+            "≥ 0",
+        ),
     ] {
         let err = block.validate().unwrap_err();
         assert!(err.to_string().contains(expect), "应报 {expect}：{err}");
     }
 
     // 合法边界：三模式 + 未选中的坏 profile 也被拦（validate 全量校验）
-    PaddingBlockConfig { mode: "range".to_string(), min: 0, max: 0, ..Default::default() }
-        .validate()
-        .expect("range min=max=0 合法");
+    PaddingBlockConfig {
+        mode: "range".to_string(),
+        min: 0,
+        max: 0,
+        ..Default::default()
+    }
+    .validate()
+    .expect("range min=max=0 合法");
     let mut cfg = ObfuscationConfig {
         enabled: true,
         padding: Some(inline()),
@@ -225,15 +278,23 @@ fn obfuscation_validate_matrix() {
             }),
         },
     );
-    let err = cfg.validate().expect_err("未选中的坏 profile 也应构建期拦截");
-    assert!(err.to_string().contains("broken"), "报错应点名 profile：{err}");
+    let err = cfg
+        .validate()
+        .expect_err("未选中的坏 profile 也应构建期拦截");
+    assert!(
+        err.to_string().contains("broken"),
+        "报错应点名 profile：{err}"
+    );
 }
 
 /// §3.1：apply_to 扁平字符串形四值解析 + 未知值/空 egress 名报错 + YAML 直入。
 #[test]
 fn apply_to_parsing() {
     assert_eq!(ApplyTo::parse_config_str("chain").unwrap(), ApplyTo::Chain);
-    assert_eq!(ApplyTo::parse_config_str("single").unwrap(), ApplyTo::Single);
+    assert_eq!(
+        ApplyTo::parse_config_str("single").unwrap(),
+        ApplyTo::Single
+    );
     assert_eq!(ApplyTo::parse_config_str("all").unwrap(), ApplyTo::All);
     assert_eq!(
         ApplyTo::parse_config_str("egress:hk-1").unwrap(),
@@ -254,7 +315,7 @@ fn apply_to_parsing() {
     assert_eq!(cfg.apply_to, ApplyTo::Egress("my-node".to_string()));
 
     let yaml = "enabled: true\napply_to: bogus\npadding:\n  mode: fixed\n  target: 512\n";
-    let err = serde_yaml::from_str::<ObfuscationConfig>(yaml)
-        .expect_err("未知 apply_to 应解析报错");
+    let err =
+        serde_yaml::from_str::<ObfuscationConfig>(yaml).expect_err("未知 apply_to 应解析报错");
     assert!(err.to_string().contains("bogus"), "{err}");
 }

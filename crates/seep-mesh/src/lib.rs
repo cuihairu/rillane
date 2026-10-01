@@ -81,7 +81,7 @@ pub struct HardwareSpec {
 }
 
 /// 节点配额限制
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeQuota {
     /// 每日带宽限制 (GB)
     pub daily_bandwidth_gb: Option<u32>,
@@ -96,7 +96,7 @@ pub struct NodeQuota {
 }
 
 /// 节点 ACL 规则
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeACL {
     /// 允许的客户端 CIDR 列表
     pub allowed_client_cidrs: Vec<String>,
@@ -168,31 +168,6 @@ impl NodeRecord {
             connection_count: 0,
             total_bytes_transferred: 0,
             registered_at: Instant::now(),
-        }
-    }
-}
-
-impl Default for NodeQuota {
-    fn default() -> Self {
-        Self {
-            daily_bandwidth_gb: None,
-            monthly_bandwidth_gb: None,
-            connections_per_minute: None,
-            max_concurrent_connections: None,
-            max_packet_size: None,
-        }
-    }
-}
-
-impl Default for NodeACL {
-    fn default() -> Self {
-        Self {
-            allowed_client_cidrs: Vec::new(),
-            denied_client_cidrs: Vec::new(),
-            allowed_target_domains: Vec::new(),
-            denied_target_domains: Vec::new(),
-            allowed_target_ports: Vec::new(),
-            denied_target_ports: Vec::new(),
         }
     }
 }

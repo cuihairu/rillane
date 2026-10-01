@@ -370,7 +370,7 @@ impl SubscriptionFetcher {
         if lines.len() == 1 {
             let t = trimmed;
             return t.len() >= 8
-                && t.len() % 4 == 0
+                && t.len().is_multiple_of(4)
                 && t.chars().all(|c| {
                     c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')
                 });

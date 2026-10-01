@@ -240,8 +240,7 @@ impl RuntimeBuilder {
                     IngressConfig::Socks5 {
                         udp_enabled: Some(true),
                         ..
-                    }
-                    | IngressConfig::Mixed {
+                    } | IngressConfig::Mixed {
                         udp_enabled: Some(true),
                         ..
                     }
@@ -473,7 +472,7 @@ impl Default for MeshConfig {
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
     ConfigUpdated {
-        config: SeepConfig,
+        config: Box<SeepConfig>,
     },
     MeshEvent {
         session_id: SessionId,
@@ -555,6 +554,12 @@ pub struct RuntimeStats {
     pub subscription_nodes: usize,
     pub error_count: u64,
     pub last_updated: Instant,
+}
+
+impl Default for RuntimeStats {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RuntimeStats {
@@ -870,7 +875,9 @@ impl Runtime {
                             *egress_connectors
                                 .write()
                                 .expect("egress_connectors lock poisoned") = connectors;
-                            let _ = tx.send(RuntimeEvent::ConfigUpdated { config: merged });
+                            let _ = tx.send(RuntimeEvent::ConfigUpdated {
+                                config: Box::new(merged),
+                            });
 
                             let changes = vec![
                                 format!("nodes_added={}", merge_stats.nodes_added),
@@ -1075,9 +1082,9 @@ impl Runtime {
             .egress_connectors
             .write()
             .expect("egress_connectors lock poisoned") = connectors;
-        let _ = self
-            .event_tx
-            .send(RuntimeEvent::ConfigUpdated { config: new_config });
+        let _ = self.event_tx.send(RuntimeEvent::ConfigUpdated {
+            config: Box::new(new_config),
+        });
         Ok(())
     }
 
@@ -1696,11 +1703,9 @@ fn build_ingress_endpoints(
             IngressConfig::Http { bind } => {
                 Arc::new(HttpIngress::new(desc.name.clone(), bind.clone()))
             }
-            IngressConfig::Mixed { bind, .. } => Arc::new(MixedIngress::new(
-                desc.name.clone(),
-                bind.clone(),
-                udp_here,
-            )),
+            IngressConfig::Mixed { bind, .. } => {
+                Arc::new(MixedIngress::new(desc.name.clone(), bind.clone(), udp_here))
+            }
         };
         map.insert(desc.name.clone(), endpoint);
     }
@@ -1841,19 +1846,20 @@ fn egress_kind(spec: &EgressConfig) -> &'static str {
     }
 }
 
-fn build_egress_outputs(
-    descriptors: &[EgressDescriptor],
-) -> Result<(
+/// 出口构建产物：FlowOutput（入口侧复用）+ EgressConnector（chain 消费）对
+type EgressBuildPair = (
     HashMap<String, Arc<dyn FlowOutput>>,
     HashMap<String, Arc<dyn EgressConnector>>,
-)> {
+);
+
+fn build_egress_outputs(descriptors: &[EgressDescriptor]) -> Result<EgressBuildPair> {
     let mut outputs = HashMap::new();
     let mut connectors = HashMap::new();
 
     for desc in descriptors {
         match &desc.spec {
             EgressConfig::Direct => {
-                let connector: Arc<dyn EgressConnector> = Arc::new(DirectConnector::default());
+                let connector: Arc<dyn EgressConnector> = Arc::new(DirectConnector);
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
                     connector.clone(),
@@ -2197,7 +2203,7 @@ mod tests {
                 port: 443,
                 proto: seep_core::TargetProto::Tcp,
             },
-            io: Box::new(DummyIo::default()),
+            io: Box::new(DummyIo),
             metadata: seep_core::FlowMetadata::default(),
         };
 
@@ -2245,7 +2251,7 @@ mod tests {
                 port: 443,
                 proto: seep_core::TargetProto::Tcp,
             },
-            io: Box::new(DummyIo::default()),
+            io: Box::new(DummyIo),
             metadata: seep_core::FlowMetadata::default(),
         };
 
@@ -2546,10 +2552,7 @@ mod tests {
         }
     }
 
-    fn s5_runtime_config(
-        enable_chain: bool,
-        udp_allow_plaintext: bool,
-    ) -> RuntimeConfig {
+    fn s5_runtime_config(enable_chain: bool, udp_allow_plaintext: bool) -> RuntimeConfig {
         RuntimeConfig {
             enable_mesh: true,
             enable_chain,
@@ -2783,8 +2786,7 @@ mod tests {
             rules: vec![rule("r1", "g")],
         };
         let err = scan_udp_capability(&routing, &egress, &connectors)
-            .err()
-            .expect("UDP 不可达节点应使构建失败");
+            .expect_err("UDP 不可达节点应使构建失败");
         let msg = format!("{err:#}");
         assert!(msg.contains("vmess-out"), "应点名 vmess-out: {msg}");
         assert!(
@@ -2888,7 +2890,11 @@ mod tests {
         format!("127.0.0.1:{}", l.local_addr().unwrap().port())
     }
 
-    fn s2_config(udp: UdpConfig, socks_udp_enabled: Option<bool>, mixed_udp_enabled: Option<bool>) -> SeepConfig {
+    fn s2_config(
+        udp: UdpConfig,
+        socks_udp_enabled: Option<bool>,
+        mixed_udp_enabled: Option<bool>,
+    ) -> SeepConfig {
         SeepConfig {
             control: seep_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
@@ -3003,7 +3009,11 @@ mod tests {
         let tasks = runtime.start().await.expect("start 应成功");
 
         assert_eq!(associate_rep(&socks).await, 0x07, "显式关闭入口应回 0x07");
-        assert_eq!(associate_rep(&mixed).await, 0x00, "继承全局的 mixed 入口应受理");
+        assert_eq!(
+            associate_rep(&mixed).await,
+            0x00,
+            "继承全局的 mixed 入口应受理"
+        );
         for t in tasks {
             t.abort();
         }
@@ -3026,8 +3036,16 @@ mod tests {
         );
         let tasks = runtime.start().await.expect("start 应成功");
 
-        assert_eq!(associate_rep(&mixed).await, 0x00, "显式开启的 mixed 入口应受理");
-        assert_eq!(associate_rep(&socks).await, 0x07, "继承全局（关）的 socks5 应回 0x07");
+        assert_eq!(
+            associate_rep(&mixed).await,
+            0x00,
+            "显式开启的 mixed 入口应受理"
+        );
+        assert_eq!(
+            associate_rep(&socks).await,
+            0x07,
+            "继承全局（关）的 socks5 应回 0x07"
+        );
         for t in tasks {
             t.abort();
         }
@@ -3055,5 +3073,4 @@ mod tests {
             t.abort();
         }
     }
-
 }
