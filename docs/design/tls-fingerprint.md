@@ -1,6 +1,6 @@
 # P2-5 客户端 TLS 指纹模拟（设计稿）
 
-> 2026-10-02 就绪。uTLS 类能力挂载到出站 TLS 公共层（tls.rs）。
+> 2026-10-02 就绪；**M0–M1 已落地**（M0 `48f633a` 公共层+捕获测试 / M1 本提交 配置面+池键+工厂+文档回填）。uTLS 类能力挂载到出站 TLS 公共层（tls.rs）。
 > 定位依据：positioning.md §2.4「指纹模拟」行（uTLS/客户端 TLS 指纹
 > chrome/ios/safari，对标 sing-box `utls`）。
 

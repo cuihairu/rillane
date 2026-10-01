@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use seep_core::EgressConnector;
 use seep_protocols::{
-    PoolPolicy, TlsConnectorFactory, TransportKey, TransportPool, TrojanConnector,
+    PoolPolicy, TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool, TrojanConnector,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -218,11 +218,19 @@ async fn trojan_tls_pooled_serial_reuse_and_resumption() {
         PASSWORD.to_string(),
         Some("localhost".to_string()),
         true,
+        TlsFingerprint::None,
         Some(pool.clone()),
         Some(factory.clone()),
     ));
 
-    let key = TransportKey::tls(&server, port, Some("localhost"), true, &[]);
+    let key = TransportKey::tls(
+        &server,
+        port,
+        Some("localhost"),
+        true,
+        &[],
+        TlsFingerprint::None,
+    );
     let mut payloads = Vec::new();
     for i in 0..FLOWS {
         let (flow, client) = make_flow("www.example.com", 443);

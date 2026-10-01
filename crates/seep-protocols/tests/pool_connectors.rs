@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use seep_core::{Flow, FlowId, FlowTarget, TargetProto};
 use seep_protocols::{
-    DirectConnector, HttpConnector, LeaseGuard, PoolPolicy, TransportPool, VlessConnector,
+    DirectConnector, HttpConnector, LeaseGuard, PoolPolicy, TlsFingerprint, TransportPool,
+    VlessConnector,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -155,6 +156,7 @@ async fn http_none_pool_sends_legacy_connect_bytes() {
         false,
         false,
         None,
+        TlsFingerprint::None,
         None,
         None,
     );
@@ -184,6 +186,7 @@ async fn http_pooled_acquire_bind_relay_and_refill_hits() {
         false,
         false,
         None,
+        TlsFingerprint::None,
         Some(pool.clone()),
         None,
     ));
@@ -316,6 +319,7 @@ async fn vless_pooled_stale_redial_recovers_from_dead_idle() {
         false,
         None,
         None,
+        TlsFingerprint::None,
         Some(pool.clone()),
         None,
     );
@@ -363,6 +367,7 @@ async fn vless_none_pool_inline_roundtrip() {
         false,
         None,
         None,
+        TlsFingerprint::None,
         None,
         None,
     );

@@ -1,6 +1,7 @@
 //! P1-5 §8.1（M0 范围）：键 / 池核心 / 工厂 单测。
 //! 全 loopback 无特权；idle 超时与驱逐次序走 `MockPoolClock` 确定性拨秒。
 
+use crate::fingerprint::TlsFingerprint;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,6 +63,7 @@ fn transport_key_equality_and_display() {
         Some("sni.com"),
         false,
         &["h2".into(), "http/1.1".into()],
+        TlsFingerprint::None,
     );
     // alpn 顺序 + 空项/空白规一化后相等
     let b = TransportKey::tls(
@@ -70,6 +72,7 @@ fn transport_key_equality_and_display() {
         Some("sni.com"),
         false,
         &["http/1.1".into(), " h2 ".into(), "".into()],
+        TlsFingerprint::None,
     );
     assert_eq!(a, b, "alpn 顺序规一化");
     assert_eq!(a.alpn, vec!["h2".to_string(), "http/1.1".to_string()]);
@@ -82,23 +85,45 @@ fn transport_key_equality_and_display() {
             443,
             Some("sni.com"),
             true,
-            &["h2".into(), "http/1.1".into()]
+            &["h2".into(), "http/1.1".into()],
+            TlsFingerprint::None,
         ),
         "skip_cert_verify 敏感"
     );
     assert_ne!(
         a,
-        TransportKey::tls("e.com", 443, Some("other"), false, &a.alpn),
+        TransportKey::tls(
+            "e.com",
+            443,
+            Some("other"),
+            false,
+            &a.alpn,
+            TlsFingerprint::None
+        ),
         "sni 敏感"
     );
     assert_ne!(
         a,
-        TransportKey::tls("e.com", 8443, Some("sni.com"), false, &a.alpn),
+        TransportKey::tls(
+            "e.com",
+            8443,
+            Some("sni.com"),
+            false,
+            &a.alpn,
+            TlsFingerprint::None
+        ),
         "端口敏感"
     );
     assert_ne!(
         a,
-        TransportKey::tls("other.com", 443, Some("sni.com"), false, &a.alpn),
+        TransportKey::tls(
+            "other.com",
+            443,
+            Some("sni.com"),
+            false,
+            &a.alpn,
+            TlsFingerprint::None
+        ),
         "server 敏感"
     );
     // plain 与 tls 不撞（同端点）
@@ -106,7 +131,7 @@ fn transport_key_equality_and_display() {
 
     // sni 空白归 None
     assert_eq!(
-        TransportKey::tls("e.com", 443, Some("  "), false, &[]).sni,
+        TransportKey::tls("e.com", 443, Some("  "), false, &[], TlsFingerprint::None).sni,
         None
     );
 
@@ -114,7 +139,7 @@ fn transport_key_equality_and_display() {
     assert_eq!(a.to_string(), "tls:sni=sni.com@e.com:443[alpn=h2,http/1.1]");
     assert_eq!(TransportKey::plain("e.com", 443).to_string(), "e.com:443");
     assert_eq!(
-        TransportKey::tls("e.com", 443, None, false, &[]).to_string(),
+        TransportKey::tls("e.com", 443, None, false, &[], TlsFingerprint::None).to_string(),
         "tls:sni@e.com:443"
     );
 }
@@ -264,6 +289,7 @@ async fn tls_key_without_factory_is_a_clear_error() {
         Some("x.example"),
         false,
         &[],
+        TlsFingerprint::None,
     );
     let pool = TransportPool::new(test_policy(2, 0, 16), None);
     let err = match pool.acquire(&key).await {
@@ -312,19 +338,28 @@ async fn pool_drop_counts_shutdown_eviction() {
 fn factory_same_key_shares_config_arc() {
     let factory = TlsConnectorFactory::new(64);
     let a = factory
-        .shared_config(false, &["h2".to_string(), "http/1.1".to_string()])
+        .shared_config(
+            false,
+            &["h2".to_string(), "http/1.1".to_string()],
+            TlsFingerprint::None,
+        )
         .unwrap();
     let b = factory
         .shared_config(
             false,
             &[" http/1.1 ".to_string(), "h2".to_string(), "".to_string()],
+            TlsFingerprint::None,
         )
         .unwrap();
     assert!(Arc::ptr_eq(&a, &b), "同键（alpn 规一化后）共享 Arc 实例");
 
-    let c = factory.shared_config(true, &["h2".to_string()]).unwrap();
+    let c = factory
+        .shared_config(true, &["h2".to_string()], TlsFingerprint::None)
+        .unwrap();
     assert!(!Arc::ptr_eq(&a, &c), "skip_cert_verify 异键异实例");
-    let d = factory.shared_config(false, &[]).unwrap();
+    let d = factory
+        .shared_config(false, &[], TlsFingerprint::None)
+        .unwrap();
     assert!(!Arc::ptr_eq(&a, &d), "无 alpn 异键异实例");
 
     assert_eq!(a.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
@@ -332,8 +367,36 @@ fn factory_same_key_shares_config_arc() {
 
     // connector 构造走同一路径
     let _ = factory
-        .connector(true, &["h2".to_string()])
+        .connector(true, &["h2".to_string()], TlsFingerprint::None)
         .expect("connector");
+}
+
+/// P2-5 D-4：指纹形态进传输身份键——同 server/alpn 不同形态 = 异键异实例；
+/// 显示串仅在非缺省形态时追加 `[fp=...]`（存量 none 键串零差异）。
+#[test]
+fn factory_fingerprint_is_part_of_config_key() {
+    let factory = TlsConnectorFactory::new(64);
+    let none = factory
+        .shared_config(false, &[], TlsFingerprint::None)
+        .unwrap();
+    let chrome = factory
+        .shared_config(false, &[], TlsFingerprint::Chrome)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&none, &chrome), "指纹异键异实例");
+    let none_again = factory
+        .shared_config(false, &[], TlsFingerprint::None)
+        .unwrap();
+    assert!(Arc::ptr_eq(&none, &none_again), "同指纹同键共享");
+
+    let base = TransportKey::tls("e.com", 443, None, false, &[], TlsFingerprint::None);
+    let shaped = TransportKey::tls("e.com", 443, None, false, &[], TlsFingerprint::Chrome);
+    assert_ne!(base, shaped, "TransportKey 指纹敏感");
+    assert_eq!(
+        base.to_string(),
+        "tls:sni@e.com:443",
+        "none 形态显示串零差异"
+    );
+    assert!(shaped.to_string().contains("[fp=chrome]"));
 }
 
 #[test]

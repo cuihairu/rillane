@@ -808,6 +808,8 @@ pub enum EgressConfig {
         skip_cert_verify: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         sni: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tls_fingerprint: Option<String>,
     },
     Shadowsocks {
         server: String,
@@ -837,6 +839,8 @@ pub enum EgressConfig {
         sni: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         alpn: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tls_fingerprint: Option<String>,
     },
     Vless {
         server: String,
@@ -858,6 +862,8 @@ pub enum EgressConfig {
         sni: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         alpn: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tls_fingerprint: Option<String>,
     },
     Trojan {
         server: String,
@@ -877,6 +883,8 @@ pub enum EgressConfig {
         sni: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         alpn: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tls_fingerprint: Option<String>,
     },
     Hysteria {
         server: String,

@@ -13,28 +13,11 @@ use tokio_rustls::TlsConnector;
 use crate::fingerprint::TlsFingerprint;
 
 /// 工厂缓存键 = (skip_cert_verify, 规一化 alpn)——与 pool::normalize_alpn 同规整
-type FactoryConfigKey = (bool, Vec<String>);
+type FactoryConfigKey = (bool, Vec<String>, TlsFingerprint);
 type FactoryConfigCache = HashMap<FactoryConfigKey, Arc<ClientConfig>>;
 
-/// 创建 TLS 连接器
-pub fn create_tls_connector(skip_cert_verify: bool) -> Result<TlsConnector> {
-    create_tls_connector_with_alpn(skip_cert_verify, None)
-}
-
-/// 创建支持 ALPN 的 TLS 连接器
-///
-/// 既有每流路径（D-9 关闭态零差异的基线）：每次新建 `ClientConfig`，会话
-/// 缓存随流销毁——会话恢复失效的根因（egress-connection-pool.md §2.4），
-/// 由 [`TlsConnectorFactory`] 的共享实例修复；本函数行为保持逐字节不动。
-pub fn create_tls_connector_with_alpn(
-    skip_cert_verify: bool,
-    alpn: Option<&[String]>,
-) -> Result<TlsConnector> {
-    create_tls_connector_with_profile(skip_cert_verify, alpn, TlsFingerprint::None)
-}
-
 /// 创建指定指纹形态的 TLS 连接器（P2-5 §4-1 单漏斗：每流路径变形入口，
-/// M1 起由连接器透传配置面指纹）
+/// M1 起由连接器透传配置面指纹；`None` 形态 = 存量逐字节行为）
 pub fn create_tls_connector_with_profile(
     skip_cert_verify: bool,
     alpn: Option<&[String]>,
@@ -161,15 +144,15 @@ impl TlsConnectorFactory {
         &self,
         skip_cert_verify: bool,
         alpn: &[String],
+        fingerprint: TlsFingerprint,
     ) -> Result<Arc<ClientConfig>> {
         let norm = crate::pool::normalize_alpn(alpn);
-        let key = (skip_cert_verify, norm);
+        let key = (skip_cert_verify, norm, fingerprint);
         if let Some(hit) = self.configs.lock().expect("factory configs lock").get(&key) {
             return Ok(hit.clone());
         }
         let protos = filter_alpn(&key.1);
-        // P2-5 M1 起缓存键扩展指纹形态（D-2/D-4）；当前仅 none 单键
-        let mut config = build_client_config(key.0, protos, TlsFingerprint::None)?;
+        let mut config = build_client_config(key.0, protos, key.2)?;
         config.resumption = rustls::client::Resumption::in_memory_sessions(self.session_cache_size);
         let arc = Arc::new(config);
         self.configs
@@ -181,10 +164,17 @@ impl TlsConnectorFactory {
 
     /// 同键返回共享 `Arc` 的连接器（`TlsConnector::from(Arc<ClientConfig>)`
     /// 为廉价克隆）。
-    pub fn connector(&self, skip_cert_verify: bool, alpn: &[String]) -> Result<TlsConnector> {
-        Ok(TlsConnector::from(
-            self.shared_config(skip_cert_verify, alpn)?,
-        ))
+    pub fn connector(
+        &self,
+        skip_cert_verify: bool,
+        alpn: &[String],
+        fingerprint: TlsFingerprint,
+    ) -> Result<TlsConnector> {
+        Ok(TlsConnector::from(self.shared_config(
+            skip_cert_verify,
+            alpn,
+            fingerprint,
+        )?))
     }
 
     /// 拨号完成侧回填握手形态（HandshakeKind 三变体直映，§6.1）

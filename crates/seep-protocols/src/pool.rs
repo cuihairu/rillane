@@ -15,6 +15,7 @@ use anyhow::{anyhow, Result};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+use crate::fingerprint::TlsFingerprint;
 use crate::tls::TlsConnectorFactory;
 
 // 池借出对象 = seep_core::IoStream（连接器侧 `Flow.io` 同型，M2 统一：
@@ -99,7 +100,7 @@ pub fn normalize_alpn(alpn: &[String]) -> Vec<String> {
     v
 }
 
-/// 传输身份键 `(server, port, tls, sni, skip_cert_verify, alpn)`。
+/// 传输身份键 `(server, port, tls, sni, skip_cert_verify, alpn, fingerprint)`。
 /// 不同出站名撞同一传输身份共享键空间——语义等价（同为到该端点的同形
 /// 传输），无害且有益（§2.2）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -111,6 +112,7 @@ pub struct TransportKey {
     pub skip_cert_verify: bool,
     /// 规一化后的 ALPN
     pub alpn: Vec<String>,
+    pub fingerprint: TlsFingerprint,
 }
 
 impl TransportKey {
@@ -123,16 +125,18 @@ impl TransportKey {
             sni: None,
             skip_cert_verify: false,
             alpn: Vec::new(),
+            fingerprint: TlsFingerprint::None,
         }
     }
 
-    /// TLS 键（sni 空串归 None；alpn 规一化）
+    /// TLS 键（sni 空串归 None；alpn 规一化；指纹为 hello 形态身份 D-4）
     pub fn tls(
         server: impl Into<String>,
         port: u16,
         sni: Option<&str>,
         skip_cert_verify: bool,
         alpn: &[String],
+        fingerprint: TlsFingerprint,
     ) -> Self {
         Self {
             server: server.into(),
@@ -144,6 +148,7 @@ impl TransportKey {
                 .map(str::to_string),
             skip_cert_verify,
             alpn: normalize_alpn(alpn),
+            fingerprint,
         }
     }
 }
@@ -160,6 +165,9 @@ impl fmt::Display for TransportKey {
             write!(f, "@{}:{}", self.server, self.port)?;
             if !self.alpn.is_empty() {
                 write!(f, "[alpn={}]", self.alpn.join(","))?;
+            }
+            if self.fingerprint != TlsFingerprint::None {
+                write!(f, "[fp={}]", self.fingerprint.as_str())?;
             }
             Ok(())
         } else {
@@ -553,7 +561,7 @@ impl TransportPool {
         let factory = self.tls_factory.as_ref().ok_or_else(|| {
             anyhow!("pool: 键 {key} 为 TLS 但池未注入 TlsConnectorFactory（tls_resumption=false 的装配错配）")
         })?;
-        let connector = factory.connector(key.skip_cert_verify, &key.alpn)?;
+        let connector = factory.connector(key.skip_cert_verify, &key.alpn, key.fingerprint)?;
         let sni = key.sni.clone().unwrap_or_else(|| key.server.clone());
         let server_name = rustls::pki_types::ServerName::try_from(sni)?;
         let tls = connector.connect(server_name, tcp).await?;

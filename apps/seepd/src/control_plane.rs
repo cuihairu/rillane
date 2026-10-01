@@ -2578,6 +2578,7 @@ mod tests {
                     skip_cert_verify: false,
                     sni: None,
                     alpn: None,
+                    tls_fingerprint: None,
                 },
             }],
             routing: seep_config::RoutingConfig {

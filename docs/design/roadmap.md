@@ -1,7 +1,7 @@
 # Seep 分阶段路线图
 
 > 状态：设计文档（2026-09）· 定位依据：[positioning.md](positioning.md) · 可执行条目：[todo.md](../../todo.md)
-> 进度速览（2026-10-02）：S0 ✅ ｜ S1 进行中 4/5（P0-4 已完成；P0-5 实现级设计与派工拆解 S0–S6 就绪）｜ S2/S3 进行中（P1-5 出站连接池**已完成** M0–M5；P1-1 T2/P1-3 R0/P1-4 M0 部分步落地、推进中；P1-2 设计就绪）｜ S4 进行中（P2-1 per-link 指标**已完成** M1–M2；P2-2 SLO 打分选路**已完成** M1–M2；P2-3 场景 profile 预设**已完成** M0–M1）
+> 进度速览（2026-10-02）：S0 ✅ ｜ S1 进行中 4/5（P0-4 已完成；P0-5 实现级设计与派工拆解 S0–S6 就绪）｜ S2/S3 进行中（P1-5 出站连接池**已完成** M0–M5；P1-1 T2/P1-3 R0/P1-4 M0 部分步落地、推进中；P1-2 设计就绪）｜ S4 进行中（P2-1 per-link 指标**已完成** M1–M2；P2-2 SLO 打分选路**已完成** M1–M2；P2-3 场景 profile 预设**已完成** M0–M1；P2-5 TLS 指纹形态**已完成** M0–M1）
 
 ## 执行摘要
 
@@ -70,7 +70,7 @@
 - **复用**：`FlowMiddleware` trait（混淆以中间件形态挂载——核对注记：trait 已定义但数据通路**尚无挂载点**，P1-4 须先建静态中间件链，[status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §3）；各协议既有 TLS 伪装能力（Trojan/VLESS/Reality 类）；`seep-routing` 规则分流。
 - **新增**：
   1. 混淆中间件（`seep-protocols::middleware`）：`padding`（包长分布对齐）、`timing`（微抖动）、`shaping`（流形状归一），按 profile 开关；
-  2. 客户端 TLS 指纹模拟（uTLS 类能力，优先挂在 TLS 出站公共层 `tls.rs`）；
+  2. 客户端 TLS 指纹模拟（**已完成 2026-10，P2-5**——预设 chrome/ios/safari 形态参数表挂单漏斗 `build_client_config`，池键/工厂键扩展，见 [tls-fingerprint.md](tls-fingerprint.md)）；
   3. obfs 插件兼容（simple-obfs http/tls；salamander 随 hy2 配置暴露）；
   4. 出站连接池：同出口 keep-alive 复用 + TLS 会话恢复，服务于网页短连接（**已完成**，2026-10-02 P1-5 M0–M5——[egress-connection-pool.md](egress-connection-pool.md)，验收判据 1–3 经 TLS 集成测复现）；
   5. mesh envelope 二进制化（替换 JSON 头，压缩固定开销）。

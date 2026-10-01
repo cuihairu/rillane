@@ -8,8 +8,9 @@ use seep_core::{EgressConnector, Flow, FlowReport};
 use sha2::{Digest, Sha224};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
+use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
-use crate::tls::{create_tls_connector, TlsConnectorFactory};
+use crate::tls::{create_tls_connector_with_profile, TlsConnectorFactory};
 
 /// Trojan 出口连接器
 pub struct TrojanConnector {
@@ -18,6 +19,8 @@ pub struct TrojanConnector {
     password: String,
     sni: Option<String>,
     skip_cert_verify: bool,
+    /// 客户端 TLS 指纹形态（P2-5；None = rustls 缺省形态）
+    fingerprint: TlsFingerprint,
     /// 出站连接池（P1-5 §4.2；None = 旧行为内联路径，D-9）
     pool: Option<Arc<TransportPool>>,
     /// 共享 ClientConfig 工厂：pool=None 时使 TLS 会话恢复独立于池生效
@@ -26,12 +29,14 @@ pub struct TrojanConnector {
 }
 
 impl TrojanConnector {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         server: String,
         port: u16,
         password: String,
         sni: Option<String>,
         skip_cert_verify: bool,
+        fingerprint: TlsFingerprint,
         pool: Option<Arc<TransportPool>>,
         factory: Option<Arc<TlsConnectorFactory>>,
     ) -> Self {
@@ -41,6 +46,7 @@ impl TrojanConnector {
             password,
             sni,
             skip_cert_verify,
+            fingerprint,
             pool,
             factory,
         }
@@ -92,6 +98,7 @@ impl TrojanConnector {
             self.sni.as_deref(),
             self.skip_cert_verify,
             &[],
+            self.fingerprint,
         )
     }
 }
@@ -171,8 +178,10 @@ impl TrojanConnector {
         // TLS 握手
         let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
         let connector = match &self.factory {
-            Some(factory) => factory.connector(self.skip_cert_verify, &[])?,
-            None => create_tls_connector(self.skip_cert_verify)?,
+            Some(factory) => factory.connector(self.skip_cert_verify, &[], self.fingerprint)?,
+            None => {
+                create_tls_connector_with_profile(self.skip_cert_verify, None, self.fingerprint)?
+            }
         };
         let server_name = rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
         let mut tls_stream = connector.connect(server_name, tcp_stream).await?;

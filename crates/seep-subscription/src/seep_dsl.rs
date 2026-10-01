@@ -630,6 +630,7 @@ impl SeepDslConverter {
                         .map(|t| t.skip_cert_verify)
                         .unwrap_or(false),
                     sni: node.tls.as_ref().and_then(|t| t.server_name.clone()),
+                    tls_fingerprint: None,
                 })
             }
             NodeType::Shadowsocks => {
@@ -725,6 +726,7 @@ impl SeepDslConverter {
                     } else {
                         Some(tls_config.alpn.clone())
                     },
+                    tls_fingerprint: None,
                 })
             }
             NodeType::Vless => {
@@ -794,6 +796,7 @@ impl SeepDslConverter {
                     } else {
                         Some(tls_config.alpn.clone())
                     },
+                    tls_fingerprint: None,
                 })
             }
             NodeType::Trojan => {
@@ -857,6 +860,7 @@ impl SeepDslConverter {
                     } else {
                         Some(tls_config.alpn.clone())
                     },
+                    tls_fingerprint: None,
                 })
             }
             NodeType::Hysteria => {

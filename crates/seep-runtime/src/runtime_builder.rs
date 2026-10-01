@@ -37,8 +37,8 @@ use seep_protocols::middleware::{ANN_ROUTE_EGRESS, ANN_ROUTE_KIND};
 use seep_protocols::{
     DirectConnector, HttpConnector, HttpIngress, Hysteria2Connector, MixedIngress,
     ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress,
-    TlsConnectorFactory, TransportKey, TransportPool, TrojanConnector, VlessConnector,
-    WireguardConnector, WireguardUdpConnector,
+    TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool, TrojanConnector,
+    VlessConnector, WireguardConnector, WireguardUdpConnector,
 };
 use seep_routing::RoutingEngine;
 use seep_subscription::SubscriptionConverter;
@@ -719,7 +719,7 @@ impl Runtime {
                 .expect("config lock poisoned")
                 .egress
                 .clone();
-            for key in derive_tls_warm_keys(&egress) {
+            for key in derive_tls_warm_keys(&egress)? {
                 pool.prewarm(&key, pool.policy().max_idle_per_key);
             }
             pool.spawn_sweeper();
@@ -2040,11 +2040,20 @@ type EgressBuildPair = (
     HashMap<String, Arc<dyn EgressConnector>>,
 );
 
+/// 配置面指纹解析（P2-5 §4-3）：E1 未知值报错带原值与 egress 名。
+fn parse_egress_fingerprint(v: &Option<String>, egress: &str) -> Result<TlsFingerprint> {
+    match v {
+        None => Ok(TlsFingerprint::None),
+        Some(raw) => TlsFingerprint::parse(raw)
+            .with_context(|| format!("egress {egress}: 指纹值 `{raw}` 非法")),
+    }
+}
+
 /// D-7 warm 键推导：配置内 TLS 出站逐键预拨（与各连接器 `forward_pooled`
 /// 的传输键同源）。vless ws 网络补 ws 分支键（实际 SNI = sni ∥ host 首值
 /// ∥ server）；重复键去重。tcp 主键恒推——同 server 预热无害（warm 是
 /// 优化不是前置条件，miss 走前台拨号）。
-fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Vec<TransportKey> {
+fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Result<Vec<TransportKey>> {
     let mut keys: Vec<TransportKey> = Vec::new();
     for desc in egress {
         match &desc.spec {
@@ -2054,6 +2063,7 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Vec<TransportKey> {
                 tls,
                 skip_cert_verify,
                 sni,
+                tls_fingerprint,
                 ..
             } => {
                 if *tls {
@@ -2063,6 +2073,7 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Vec<TransportKey> {
                         sni.as_deref(),
                         *skip_cert_verify,
                         &[],
+                        parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
                     ));
                 }
             }
@@ -2072,6 +2083,7 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Vec<TransportKey> {
                 tls: true,
                 skip_cert_verify,
                 sni,
+                tls_fingerprint,
                 ..
             } => {
                 keys.push(TransportKey::tls(
@@ -2080,6 +2092,7 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Vec<TransportKey> {
                     sni.as_deref(),
                     *skip_cert_verify,
                     &[],
+                    parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
                 ));
             }
             EgressConfig::Vless {
@@ -2091,10 +2104,12 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Vec<TransportKey> {
                 sni,
                 alpn,
                 host,
+                tls_fingerprint,
                 ..
             } => {
                 let empty: Vec<String> = Vec::new();
                 let alpn = alpn.as_ref().unwrap_or(&empty);
+                let fp = parse_egress_fingerprint(tls_fingerprint, &desc.name)?;
                 // tcp 主键实际 SNI = sni ∥ server（与 forward_pooled tcp 分支同源）
                 let tcp_sni = sni.clone().unwrap_or_else(|| server.clone());
                 keys.push(TransportKey::tls(
@@ -2103,6 +2118,7 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Vec<TransportKey> {
                     Some(&tcp_sni),
                     *skip_cert_verify,
                     alpn,
+                    fp,
                 ));
                 if network == "ws" || network == "websocket" {
                     let ws_sni = sni
@@ -2115,6 +2131,7 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Vec<TransportKey> {
                         Some(&ws_sni),
                         *skip_cert_verify,
                         alpn,
+                        fp,
                     ));
                 }
             }
@@ -2124,7 +2141,7 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Vec<TransportKey> {
     // 非相邻重复也去重（同键多 egress 条目 / vless tcp-ws 同键）
     let mut seen = std::collections::HashSet::new();
     keys.retain(|k| seen.insert(k.clone()));
-    keys
+    Ok(keys)
 }
 
 fn build_egress_outputs(
@@ -2180,6 +2197,7 @@ fn build_egress_outputs(
                 tls,
                 skip_cert_verify,
                 sni,
+                tls_fingerprint,
             } => {
                 let connector: Arc<dyn EgressConnector> = Arc::new(HttpConnector::new(
                     server.clone(),
@@ -2189,6 +2207,7 @@ fn build_egress_outputs(
                     *tls,
                     *skip_cert_verify,
                     sni.clone(),
+                    parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
                     transport_pool.clone(),
                     tls_factory.clone(),
                 ));
@@ -2226,6 +2245,7 @@ fn build_egress_outputs(
                 tls,
                 skip_cert_verify,
                 sni,
+                tls_fingerprint,
                 ..
             } => {
                 if network != "tcp" {
@@ -2248,6 +2268,7 @@ fn build_egress_outputs(
                     password.clone(),
                     sni.clone(),
                     *skip_cert_verify,
+                    parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
                     transport_pool.clone(),
                     tls_factory.clone(),
                 ));
@@ -2299,6 +2320,7 @@ fn build_egress_outputs(
                 skip_cert_verify,
                 sni,
                 alpn,
+                tls_fingerprint,
             } => {
                 let connector: Arc<dyn EgressConnector> = Arc::new(VlessConnector::new(
                     server.clone(),
@@ -2312,6 +2334,7 @@ fn build_egress_outputs(
                     *skip_cert_verify,
                     sni.clone(),
                     alpn.clone(),
+                    parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
                     transport_pool.clone(),
                     tls_factory.clone(),
                 ));
@@ -3287,6 +3310,7 @@ mod tests {
             skip_cert_verify: false,
             sni: None,
             alpn: None,
+            tls_fingerprint: None,
         }
     }
 
@@ -3379,6 +3403,7 @@ mod tests {
                     skip_cert_verify: false,
                     sni: None,
                     alpn: None,
+                    tls_fingerprint: None,
                 },
             ),
         ];
@@ -3666,6 +3691,7 @@ mod tests {
                         skip_cert_verify: false,
                         sni: Some("sni.example".to_string()),
                         alpn: None,
+                        tls_fingerprint: None,
                     },
                 },
             ],
@@ -3773,6 +3799,7 @@ mod tests {
                 skip_cert_verify: false,
                 sni: None,
                 alpn: None,
+                tls_fingerprint: None,
             },
         });
         runtime.update_config(new_cfg).await.expect("update");
@@ -3803,6 +3830,7 @@ mod tests {
                     skip_cert_verify: false,
                     sni: Some("sni.example".to_string()),
                     alpn: None,
+                    tls_fingerprint: None,
                 },
             },
             EgressDescriptor {
@@ -3819,6 +3847,7 @@ mod tests {
                     skip_cert_verify: false,
                     sni: None,
                     alpn: None,
+                    tls_fingerprint: None,
                 },
             },
             EgressDescriptor {
@@ -3831,6 +3860,7 @@ mod tests {
                     tls: false,
                     skip_cert_verify: false,
                     sni: None,
+                    tls_fingerprint: None,
                 },
             },
             EgressDescriptor {
@@ -3838,7 +3868,7 @@ mod tests {
                 spec: EgressConfig::Direct,
             },
         ];
-        let keys = derive_tls_warm_keys(&egress);
+        let keys = derive_tls_warm_keys(&egress).expect("REASON");
         assert_eq!(keys.len(), 3, "trojan 主键 + vless tcp/ws 双键");
         assert!(
             keys.contains(&TransportKey::tls(
@@ -3846,7 +3876,8 @@ mod tests {
                 443,
                 Some("sni.example"),
                 false,
-                &[]
+                &[],
+                TlsFingerprint::None,
             )),
             "trojan 键与 forward_pooled 同源"
         );
@@ -3856,7 +3887,8 @@ mod tests {
                 443,
                 Some("w.example"),
                 false,
-                &[]
+                &[],
+                TlsFingerprint::None,
             )),
             "vless tcp 主键（sni 缺省 = server）"
         );
@@ -3866,7 +3898,8 @@ mod tests {
                 443,
                 Some("cdn.example"),
                 false,
-                &[]
+                &[],
+                TlsFingerprint::None,
             )),
             "vless ws 分支键（实际 SNI = host 首值）"
         );
@@ -3879,7 +3912,11 @@ mod tests {
                 spec: egress[0].spec.clone(),
             },
         ];
-        assert_eq!(derive_tls_warm_keys(&dup).len(), 1, "跨条目同键去重");
+        assert_eq!(
+            derive_tls_warm_keys(&dup).expect("REASON").len(),
+            1,
+            "跨条目同键去重"
+        );
     }
 
     /// P2-2 §7-3：mesh→routing 质量桥聚合——节点 p95 取相邻链路最差跳

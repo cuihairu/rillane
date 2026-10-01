@@ -11,8 +11,9 @@ use tokio::{
     net::TcpStream,
 };
 
+use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
-use crate::tls::{create_tls_connector, TlsConnectorFactory};
+use crate::tls::{create_tls_connector_with_profile, TlsConnectorFactory};
 
 /// HTTP CONNECT 代理出口连接器
 pub struct HttpConnector {
@@ -23,6 +24,8 @@ pub struct HttpConnector {
     tls: bool,
     skip_cert_verify: bool,
     sni: Option<String>,
+    /// 客户端 TLS 指纹形态（P2-5；None = rustls 缺省形态；仅 tls=true 时生效）
+    fingerprint: TlsFingerprint,
     /// 出站连接池（P1-5 §4.2；None = 旧行为内联路径，D-9）
     pool: Option<Arc<TransportPool>>,
     /// 共享 ClientConfig 工厂：pool=None 且 tls=true 时使 TLS 会话恢复独立于
@@ -40,6 +43,7 @@ impl HttpConnector {
         tls: bool,
         skip_cert_verify: bool,
         sni: Option<String>,
+        fingerprint: TlsFingerprint,
         pool: Option<Arc<TransportPool>>,
         factory: Option<Arc<TlsConnectorFactory>>,
     ) -> Self {
@@ -51,6 +55,7 @@ impl HttpConnector {
             tls,
             skip_cert_verify,
             sni,
+            fingerprint,
             pool,
             factory,
         }
@@ -69,6 +74,7 @@ impl HttpConnector {
                 self.sni.as_deref(),
                 self.skip_cert_verify,
                 &[],
+                self.fingerprint,
             )
         } else {
             TransportKey::plain(&self.server, self.port)
@@ -168,8 +174,12 @@ impl HttpConnector {
             // TLS 包装
             let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
             let connector = match &self.factory {
-                Some(factory) => factory.connector(self.skip_cert_verify, &[])?,
-                None => create_tls_connector(self.skip_cert_verify)?,
+                Some(factory) => factory.connector(self.skip_cert_verify, &[], self.fingerprint)?,
+                None => create_tls_connector_with_profile(
+                    self.skip_cert_verify,
+                    None,
+                    self.fingerprint,
+                )?,
             };
             let server_name = rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
             let mut tls_stream = connector.connect(server_name, tcp_stream).await?;

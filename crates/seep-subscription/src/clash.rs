@@ -683,6 +683,7 @@ impl ClashConverter {
                 tls: proxy.tls,
                 skip_cert_verify: proxy.skip_cert_verify,
                 sni: proxy.servername.clone(),
+                tls_fingerprint: None,
             }),
             ClashProxyType::Https => Ok(EgressConfig::Http {
                 server: proxy.server.clone(),
@@ -692,6 +693,7 @@ impl ClashConverter {
                 tls: true,
                 skip_cert_verify: proxy.skip_cert_verify,
                 sni: proxy.servername.clone(),
+                tls_fingerprint: None,
             }),
             ClashProxyType::Socks5 => Ok(EgressConfig::Socks5 {
                 server: proxy.server.clone(),
@@ -737,6 +739,7 @@ impl ClashConverter {
                     } else {
                         Some(proxy.alpn.clone())
                     },
+                    tls_fingerprint: None,
                 })
             }
             ClashProxyType::Vless => {
@@ -761,6 +764,7 @@ impl ClashConverter {
                     } else {
                         Some(proxy.alpn.clone())
                     },
+                    tls_fingerprint: None,
                 })
             }
             ClashProxyType::Trojan => {
@@ -784,6 +788,7 @@ impl ClashConverter {
                     } else {
                         Some(proxy.alpn.clone())
                     },
+                    tls_fingerprint: None,
                 })
             }
             ClashProxyType::Hysteria => {

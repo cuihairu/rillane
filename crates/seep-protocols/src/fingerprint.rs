@@ -14,7 +14,7 @@ use rustls::ClientConfig;
 use crate::tls::ShapedVerifier;
 
 /// 指纹形态预设（D-5）：`None` = rustls 缺省形（存量零差异，E2）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum TlsFingerprint {
     #[default]
     None,
@@ -470,7 +470,7 @@ mod tests {
         );
     }
 
-    /// §7-5 存量零差异：none 形态经新漏斗 = 既有 `create_tls_connector_with_alpn`
+    /// §7-5 存量零差异：none 形态经新漏斗 = 既有 none 形态直连路径
     /// 路径（hello 逐字节同形——五元组全等）。
     #[tokio::test]
     async fn none_profile_matches_legacy_path() {
@@ -494,7 +494,12 @@ mod tests {
             buf.truncate(5 + rec_len);
             buf
         });
-        let connector = crate::tls::create_tls_connector_with_alpn(true, None).unwrap();
+        let connector = crate::tls::create_tls_connector_with_profile(
+            true,
+            None,
+            crate::fingerprint::TlsFingerprint::None,
+        )
+        .unwrap();
         let server_name =
             rustls::pki_types::ServerName::try_from("capture.test".to_string()).unwrap();
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
