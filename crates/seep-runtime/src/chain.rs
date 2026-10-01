@@ -692,6 +692,14 @@ pub enum SwitchReason {
 }
 
 impl SwitchReason {
+    /// 全部原因值（控制面 `seep_mesh_switch_total{reason}` 恒渲染零值用）
+    pub const ALL: [SwitchReason; 4] = [
+        SwitchReason::FailureReported,
+        SwitchReason::FallbackExhausted,
+        SwitchReason::TtlExpired,
+        SwitchReason::TerminatedUnhealthy,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             SwitchReason::FailureReported => "failure_reported",

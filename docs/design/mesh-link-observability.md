@@ -4,6 +4,19 @@
 > 丢包观测、切换原因账本；节点间流量已有面（`LinkTrafficStats`）补齐暴露。
 > 方法论循 udp-observability.md（P0-5）：恒渲染纪律、关闭态对照、统计口径
 > 显式改写不缩水。
+>
+> **落地注记（2026-10-02，M1–M2 全部完成）**：M1（样本环+账本+存量缺陷修缮）
+> `a9c7e11`、M2（控制面三族 + `/mesh/switches` + 文档回填）本提交。实施期
+> 修缮三处存量缺陷（M1 账本测试首度覆盖暴露）：①`handle_chain_failure`
+> 备用耗尽分支 RefMut 持有下调 `active_chains.len()`——DashMap 全分片读锁
+> 与本线程分片写锁互斥即自锁，修 = 先 drop 分片守卫；②seep-core
+> `ChainContext` 路径语义——fallback 非空时 `get_current_path()` 恒读
+> `fallback_paths[idx]`：从未切换链路谎报 fallback[0] 为当前路径（路由决策
+> 同源污染）且首跳跳过 fallback[0]，修 = 单口径 current_path + 按声明序
+> 提升（`switch_fallback_path` 复用 update_path 升主）；③
+> `check_chains_health` 归因顺序——状态先于 TTL（ZERO TTL 巡检下已终止链
+> 两因同时成立，旧序冤枉死因为 TtlExpired）。§10-1（主动探测源）、
+> §10-2（seepctl 包装）、§10-3（事件持久化）维持未决。
 
 ## 0. 范围与验收口径
 

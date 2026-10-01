@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use seep_core::udp::{TableSnapshot, UdpIngressMetrics, UdpIngressSnapshot};
 use seep_mesh::{LinkState, MeshRegistry, NodeCapability, NodeRecord, NodeRole};
-use seep_runtime::{ChainConstraints, ConfigMergeStats, Runtime, RuntimeEvent};
+use seep_runtime::{ChainConstraints, ConfigMergeStats, Runtime, RuntimeEvent, SwitchReason};
 use seep_subscription::{Subscription, SubscriptionConverter, SubscriptionType};
 
 #[derive(Clone)]
@@ -105,6 +105,7 @@ impl ControlPlane {
             (Method::GET, "/logs") => self.handle_logs(req).await,
             (Method::POST, "/mesh/nodes/register") => self.handle_register_node(req).await,
             (Method::POST, "/mesh/link-states") => self.handle_update_link_state(req).await,
+            (Method::GET, "/mesh/switches") => self.handle_mesh_switches().await,
 
             (Method::POST, "/chains/dry-run") => self.handle_chain_dry_run(req).await,
             (Method::POST, "/chains") => self.handle_chain_create(req).await,
@@ -362,7 +363,7 @@ impl ControlPlane {
                     "counter",
                 );
 
-                for t in traffic {
+                for t in &traffic {
                     push_metric_labeled(
                         &mut out,
                         "seep_mesh_link_bytes_total",
@@ -380,6 +381,52 @@ impl ControlPlane {
                         "seep_mesh_link_errors_total",
                         &[("from", &t.from), ("to", &t.to)],
                         t.errors_total as f64,
+                    );
+                }
+
+                // P2-1 §5：观测形丢包派生（D-2 = errors/connections；分母 0
+                // 不出序列，E4——0/0 无意义。上报形 seep_mesh_packet_loss_rate
+                // 语义不同，保留不动不合并）
+                if traffic.iter().any(|t| t.connections_total > 0) {
+                    push_metric_header(
+                        &mut out,
+                        "seep_mesh_link_loss_ratio",
+                        "Observed link loss ratio (errors/connections) on a directed mesh link.",
+                        "gauge",
+                    );
+                    for t in traffic.iter().filter(|t| t.connections_total > 0) {
+                        push_metric_labeled(
+                            &mut out,
+                            "seep_mesh_link_loss_ratio",
+                            &[("from", &t.from), ("to", &t.to)],
+                            t.errors_total as f64 / t.connections_total as f64,
+                        );
+                    }
+                }
+            }
+
+            // P2-1 §5：per-link RTT 分位（D-1 上报流入环样本；环空链路不出
+            // 序列，E3——无样本画 0ms 是误导）
+            let rtts = mesh.get_all_link_rtt();
+            if !rtts.is_empty() {
+                push_metric_header(
+                    &mut out,
+                    "seep_mesh_link_rtt_ms",
+                    "Mesh link RTT quantile in milliseconds (reported-stream samples).",
+                    "gauge",
+                );
+                for r in rtts {
+                    push_metric_labeled(
+                        &mut out,
+                        "seep_mesh_link_rtt_ms",
+                        &[("from", &r.from), ("to", &r.to), ("quantile", "p50")],
+                        r.p50_ms as f64,
+                    );
+                    push_metric_labeled(
+                        &mut out,
+                        "seep_mesh_link_rtt_ms",
+                        &[("from", &r.from), ("to", &r.to), ("quantile", "p95")],
+                        r.p95_ms as f64,
                     );
                 }
             }
@@ -455,6 +502,25 @@ impl ControlPlane {
                 "Unix epoch seconds of the most recent chain failover (0 if never).",
                 stats.last_failover_epoch_seconds.unwrap_or(0) as f64,
             );
+
+            // P2-1 §5：切换/终止原因计数族（恒渲染——四因零值也在，便于
+            // Grafana absent 告警语义与按维查询）
+            let counters = chain_mgr.switch_counters_snapshot();
+            push_metric_header(
+                &mut out,
+                "seep_mesh_switch_total",
+                "Mesh chain switch/termination events by reason.",
+                "counter",
+            );
+            for reason in SwitchReason::ALL {
+                let n = counters.get(reason.as_str()).copied().unwrap_or(0);
+                push_metric_labeled(
+                    &mut out,
+                    "seep_mesh_switch_total",
+                    &[("reason", reason.as_str())],
+                    n as f64,
+                );
+            }
         } else {
             push_gauge(
                 &mut out,
@@ -1149,6 +1215,20 @@ impl ControlPlane {
         json(StatusCode::OK, &serde_json::json!({ "ok": true }))
     }
 
+    /// P2-1 §5：最近链路变更事件（切换/终止按因留痕，cap 100 最新保留）。
+    /// 门控随 mesh 能力存在性（§5 未启用 503 同 /nodes 先例——账本宿主链路
+    /// 管理器在 mesh 关闭的构建形态下也存在，mesh 注册表才是能力边界）。
+    async fn handle_mesh_switches(&self) -> Response<Body> {
+        if let Err(r) = self.mesh() {
+            return r;
+        }
+        let events = match self.runtime.get_chain_manager() {
+            Some(mgr) => mgr.get_recent_switches(usize::MAX),
+            None => Vec::new(),
+        };
+        json(StatusCode::OK, &MeshSwitchesDto { events })
+    }
+
     async fn handle_chain_dry_run(&self, req: Request<Body>) -> Response<Body> {
         let dto: ChainDryRunRequest = match read_json(req).await {
             Ok(v) => v,
@@ -1526,6 +1606,12 @@ fn udp_zero_table_snapshot() -> TableSnapshot {
             .collect(),
         sessions: Vec::new(),
     }
+}
+
+/// P2-1 §5：`GET /mesh/switches` 响应体（事件形即 chain.rs SwitchEvent 序列化）
+#[derive(Debug, Serialize)]
+struct MeshSwitchesDto {
+    events: Vec<seep_runtime::SwitchEvent>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2198,6 +2284,168 @@ mod tests {
             .unwrap();
         let resp = cp.handle(get).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// P2-1 §7-4：控制面三族按维查询 + /mesh/switches 端点。
+    /// 驱动：注册双节点 + link-state（latency 20 入 RTT 环，D-1 上报流采样
+    /// 源）→ 建链（单边拓扑无备用路径）→ handle_chain_failure 触发
+    /// FallbackExhausted → record_link_connection/error 直写观测形丢包
+    /// （数据面流驱动在单测里过重，计数器与渲染面同源）。
+    #[tokio::test]
+    async fn mesh_switches_endpoint_and_metric_families() {
+        let runtime = build_runtime(true, true).await;
+        let cp = ControlPlane::new(runtime.clone(), None, true);
+
+        let reg = |id: &str, role: &str, port: u16| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/mesh/nodes/register")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"id":"{id}","role":"{role}","addr":"127.0.0.1:{port}"}}"#
+                )))
+                .unwrap()
+        };
+        assert_eq!(
+            cp.handle(reg("client1", "client", 10001)).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            cp.handle(reg("exit1", "exit", 10002)).await.status(),
+            StatusCode::OK
+        );
+        let link = Request::builder()
+            .method(Method::POST)
+            .uri("/mesh/link-states")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"source":"client1","target":"exit1","latency_ms":20,"bandwidth_mbps":100,"packet_loss_rate":0.0}"#,
+            ))
+            .unwrap();
+        assert_eq!(cp.handle(link).await.status(), StatusCode::OK);
+
+        let create = Request::builder()
+            .method(Method::POST)
+            .uri("/chains")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"source":"client1","target":"exit1"}"#))
+            .unwrap();
+        let resp = cp.handle(create).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let chain_id = v
+            .get("chain_id")
+            .and_then(|x| x.as_str())
+            .unwrap()
+            .to_string();
+
+        // 无备用路径 → 首次故障即 FallbackExhausted（事件 + 计数器）
+        runtime
+            .get_chain_manager()
+            .unwrap()
+            .handle_chain_failure(&chain_id, "test failure")
+            .await
+            .unwrap();
+
+        // 观测形丢包：1 连接 1 错误 → ratio 1
+        let registry = runtime.get_mesh_registry().unwrap();
+        registry.record_link_connection(&"client1".to_string(), &"exit1".to_string());
+        registry.record_link_error(&"client1".to_string(), &"exit1".to_string());
+
+        // /mesh/switches：事件形断言（chain_id/reason/detail 透传）
+        let get = Request::builder()
+            .method(Method::GET)
+            .uri("/mesh/switches")
+            .body(Body::empty())
+            .unwrap();
+        let resp = cp.handle(get).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let events = v.get("events").and_then(|x| x.as_array()).unwrap();
+        assert_eq!(events.len(), 1, "单事件（健康巡检 30s 间隔未触发）");
+        assert_eq!(
+            events[0].get("chain_id").and_then(|x| x.as_str()),
+            Some(chain_id.as_str())
+        );
+        assert_eq!(
+            events[0].get("reason").and_then(|x| x.as_str()),
+            Some("fallback_exhausted")
+        );
+        assert_eq!(
+            events[0].get("detail").and_then(|x| x.as_str()),
+            Some("test failure")
+        );
+        assert_eq!(
+            events[0].get("to_path"),
+            Some(&serde_json::Value::Null),
+            "耗尽事件 to=None"
+        );
+
+        // /metrics 三族按维查询（from/to/quantile/reason 标签断言）
+        let get = Request::builder()
+            .method(Method::GET)
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = cp.handle(get).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let s = String::from_utf8(body.to_vec()).unwrap();
+
+        // RTT 分位：单样本 20ms → p50 = p95 = 20
+        assert!(
+            s.contains("seep_mesh_link_rtt_ms{from=\"client1\",to=\"exit1\",quantile=\"p50\"} 20")
+        );
+        assert!(
+            s.contains("seep_mesh_link_rtt_ms{from=\"client1\",to=\"exit1\",quantile=\"p95\"} 20")
+        );
+        // 观测形丢包 = 1/1
+        assert!(s.contains("seep_mesh_link_loss_ratio{from=\"client1\",to=\"exit1\"} 1"));
+        // 切换计数族恒渲染：四因全在（零值也在），耗尽 = 1
+        for reason in [
+            "failure_reported",
+            "fallback_exhausted",
+            "ttl_expired",
+            "terminated_unhealthy",
+        ] {
+            assert!(
+                s.contains(&format!("seep_mesh_switch_total{{reason=\"{reason}\"}}")),
+                "恒渲染缺 {reason}"
+            );
+        }
+        assert!(s.contains("seep_mesh_switch_total{reason=\"fallback_exhausted\"} 1"));
+        assert!(s.contains("seep_mesh_switch_total{reason=\"failure_reported\"} 0"));
+    }
+
+    /// P2-1 §7-4/D-5：mesh 未启用 → 三族与端点均不渲染（链路观测随能力
+    /// 存在性开落，无链路无序列名可立）
+    #[tokio::test]
+    async fn mesh_observability_absent_when_disabled() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let get = Request::builder()
+            .method(Method::GET)
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = cp.handle(get).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let s = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!s.contains("seep_mesh_link_rtt_ms"));
+        assert!(!s.contains("seep_mesh_link_loss_ratio"));
+        assert!(!s.contains("seep_mesh_switch_total"));
+
+        let get = Request::builder()
+            .method(Method::GET)
+            .uri("/mesh/switches")
+            .body(Body::empty())
+            .unwrap();
+        let resp = cp.handle(get).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

@@ -94,8 +94,10 @@
 
 ## P2 — 调度闭环与高级安全（roadmap S3 后半 + S4）
 
-- [ ] **P2-1 per-link 细粒度指标**（原 §4 遗留收口）：时延分布、丢包、切换原因、节点间流量。
+- [x] **P2-1 per-link 细粒度指标**（原 §4 遗留收口）：时延分布、丢包、切换原因、节点间流量。
   验收：Grafana 可按 link 维度查询 p50/p95 RTT 与最近 N 次切换原因。
+  实现级设计：[docs/design/mesh-link-observability.md](docs/design/mesh-link-observability.md)（2026-10-02 设计稿就绪并同轮落地；D-1 RTT 样本环 per-link cap 256 最近秩就地分位（采样源 MVP = `update_link_state` 上报流 + `record_link_rtt` 公开写点，探测源后接 O-link-obs1）、D-2 丢包 = 观测派生 errors/connections（上报形语义不同不合并）、D-3 切换原因枚举化 + 账本 cap 100 + 按因计数、D-4 零 trait 变更零新依赖、D-5 关闭态三族与端点均缺席——随 mesh 能力存在性开落；§9 偏差载明终止事件同账本/就地排序分位/loss 以 connections 为分母）。
+  进度（2026-10-02 落地）：**M1–M2 全部完成**（M1 样本环+账本+存量缺陷修缮 `a9c7e11` / M2 控制面+文档回填 本提交）；`/metrics` `seep_mesh_link_rtt_ms{from,to,quantile}`（环空链路不出序列）+ `seep_mesh_link_loss_ratio{from,to}`（connections=0 不出序列）+ `seep_mesh_switch_total{reason}`（chain 块内恒渲染四因零值也在）+ `GET /mesh/switches`（最近 100 事件 JSON，未启用 503 同 /nodes 先例）；**存量缺陷修缮三处**（M1 账本测试首度覆盖暴露）：handle_chain_failure 备用耗尽分支 RefMut+`DashMap::len()` 同线程分片锁自锁死锁、seep-core ChainContext 路径语义（fallback 非空时谎报 fallback[0] 且首跳跳过 fallback[0]，路由决策同源污染——修为单口径 current_path+按声明序提升）、check_chains_health 归因顺序（状态先于 TTL）；节点间流量 = P0-5 已交付 `seep_mesh_link_{bytes,connections,errors}_total` 即验收面不重复建设。
 - [ ] **P2-2 SLO 打分选路**：以 p95 RTT/丢包为目标打分，升级 `latency` 组策略；游戏 profile 默认启用。
   验收：模拟链路劣化时自动切换且记录切换原因；`ChainContext` fallback 路径生效。
 - [ ] **P2-3 场景 profile 预设**：`proxy` / `game` / `web` 三套配置模板（路由规则 + 混淆开关 + 调度目标），底层同一引擎。
@@ -152,7 +154,7 @@
 |--------|------|---------|------|
 | P0 | 5 | S1 UDP 全链路 | 5/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷、P0-4 mesh UDP 面、P0-5 观测与配置——S0–S6 全部落地） |
 | P1 | 5 | S2 TUN + S3 前半 | 1/5（**P1-5 完成**——M0–M5 全部落地 2026-10-02；P1-1 T2/P1-3 R0/P1-4 M0 部分步已落地（另会话在途推进）；设计稿就绪 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5 已落地）） |
-| P2 | 8 | S3 后半 + S4 | 未开始 |
+| P2 | 8 | S3 后半 + S4 | 1/8（**P2-1 完成**——M1–M2 全部落地 2026-10-02；P2-4 阻塞于 P1-4 M1+ 另会话在途） |
 | P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
 
 已完成底座（S0）9 大项见上文归档清单；原 19 条清单中 10 项核实为真实完成、3 项勘误重开、其余并入 P0–P3 对应条目。

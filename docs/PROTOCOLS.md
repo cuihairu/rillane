@@ -2,7 +2,7 @@
 
 Seep 是一个高性能的网络路由代理系统，支持多种主流的网络协议。
 
-> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态；2026-10-02 回填 P1-4 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
+> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态；2026-10-02 回填 P1-4/P1-5/P2-1 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
 >
 > | 能力 | 状态 | 落地去向 |
 > |------|------|---------|
@@ -17,6 +17,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 > | hysteria v1 | 未实现 | 无计划（仅 hy2） |
 > | 出站连接池 / TLS 会话恢复 | **已实现（2026-10，P1-5）**：`egress_pool:` 配置块 + 预建立/借出即消费池（trojan/http/vless + direct 选通）+ TLS 会话恢复（进程级共享 ClientConfig）+ `seep_pool_*`/`seep_tls_*` 指标 + `GET /egress/pool/stats` | — |
 > | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `seep_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
+> | mesh 链路可观测（per-link RTT 分位 / 观测形丢包 / 切换原因账本） | **已实现（2026-10，P2-1）**：`seep_mesh_link_rtt_ms{from,to,quantile}` + `seep_mesh_link_loss_ratio{from,to}` + `seep_mesh_switch_total{reason}`（chain 启用时恒渲染）+ `GET /mesh/switches` 最近 100 事件；mesh 未启用三族与端点均缺席 | [mesh-link-observability.md](design/mesh-link-observability.md) |
 > | obfs/salamander 插件 / TLS 指纹模拟 / timing/shaping 扰动 | 未实现 | P2-4 / P2-5（[positioning.md](design/positioning.md) §2.4） |
 >
 > 各节标注中的「超前」指：本文保留了设计目标描述，但当前代码不包含对应实现。
@@ -242,6 +243,7 @@ impl EgressConnector for MyProtocol {
 - **智能选择**: 根据延迟、带宽、负载自动选择最优路径
 - **会话保持**: 保持同一连接的路由一致性
 - **故障转移**: 自动检测故障并切换备用路径
+- **链路可观测**: per-link RTT p50/p95 分位、观测形丢包比、切换原因账本与计数（2026-10，P2-1，`/metrics` 三族 + `GET /mesh/switches`）
 
 ## 安全特性
 
