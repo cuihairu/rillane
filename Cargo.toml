@@ -30,7 +30,7 @@ serde_yaml = "0.9"
 toml = { version = "0.8", features = ["preserve_order"] }
 thiserror = "1.0"
 bytes = "1.0"
-tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time", "fs"] }
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "signal", "sync", "time", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
 uuid = { version = "1.8", features = ["serde", "v4"] }
