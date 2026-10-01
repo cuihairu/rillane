@@ -16,7 +16,7 @@
 use std::{
     fmt, fs,
     io,
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr},
     os::fd::{AsRawFd, OwnedFd},
     sync::Mutex,
 };
@@ -28,7 +28,10 @@ use nix::{libc, errno::Errno};
 use tokio::{io::unix::AsyncFd, process::Command};
 use tracing::debug;
 
-use super::route::{RouteManager, RouteMonitor, RouteRule, RouteStats, RoutingConfig};
+use super::route::{
+    RouteManager, RouteMonitor, RouteRule, RouteStats, RoutingConfig,
+    RouteDestination, BypassCondition, default_bypass_rules, parse_cidr,
+};
 use super::tun::{InterfaceStats, PacketInfo, PacketType, TunConfig, TunProvider};
 
 // TUN ioctl（§1.1：libc 定义与内核 tun.h 同源——TUNSETIFF = _IOW('T', 202, int)）
@@ -141,6 +144,55 @@ async fn run_ip(argv: &[String]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// `ip route replace <cidr> dev <iface> metric <metric>` 构造器
+fn ip_argv_route_replace(cidr: &str, iface: &str, metric: u32) -> Vec<String> {
+    vec![
+        "ip".into(),
+        "route".into(),
+        "replace".into(),
+        cidr.into(),
+        "dev".into(),
+        iface.into(),
+        "metric".into(),
+        metric.to_string(),
+    ]
+}
+
+/// `ip route del <cidr> dev <iface>` 构造器（撤销用）
+fn ip_argv_route_del(cidr: &str, iface: &str) -> Vec<String> {
+    vec![
+        "ip".into(),
+        "route".into(),
+        "del".into(),
+        cidr.into(),
+        "dev".into(),
+        iface.into(),
+    ]
+}
+
+/// `ip addr del <cidr> dev <iface>` 构造器（撤销用）
+fn ip_argv_addr_del(cidr: &str, iface: &str) -> Vec<String> {
+    vec![
+        "ip".into(),
+        "addr".into(),
+        "del".into(),
+        cidr.into(),
+        "dev".into(),
+        iface.into(),
+    ]
+}
+
+/// `ip link set <iface> down` 构造器（撤销用）
+fn ip_argv_link_down_name(iface: &str) -> Vec<String> {
+    vec![
+        "ip".into(),
+        "link".into(),
+        "set".into(),
+        iface.into(),
+        "down".into(),
+    ]
 }
 
 /// 打开 `/dev/net/tun`（E1/E2 错误提示）
@@ -464,6 +516,75 @@ pub enum AppliedStep {
     },
 }
 
+impl fmt::Display for AppliedStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AppliedStep::AddrReplaced { interface, cidr } => write!(f, "AddrReplaced({cidr} dev {interface})"),
+            AppliedStep::LinkUp { interface } => write!(f, "LinkUp({interface})"),
+            AppliedStep::RouteReplaced { cidr, interface, metric } => write!(f, "RouteReplaced({cidr} dev {interface} metric {metric})"),
+        }
+    }
+}
+
+/// 计算 auto-bypass 集（§2.7）：
+/// - egress server/endpoint 解析地址
+/// - mesh listen_address 与已注册 peer 地址
+/// - control.api_bind
+/// - tun 自身网段（TunConfig.ipv4_addr/ipv6_addr + prefix）
+/// 这些前缀**不写入** include 路由，且进进程内兜底名单。
+fn compute_auto_bypass(
+    _routing_config: &RoutingConfig,
+    tun_config: Option<&TunConfig>,
+) -> Vec<RouteDestination> {
+    let mut bypass = Vec::new();
+
+    // 默认 bypass：private/loopback/multicast（复用既有）
+    for rule in default_bypass_rules() {
+        if let BypassCondition::IpRange { start, end } = &rule.condition {
+            if let (IpAddr::V4(_s), IpAddr::V4(_e)) = (start, end) {
+                // 简化：PrivateIp/LanIp 已在进程内 BypassRule 匹配，这里只收集显式 CIDR
+                // 实际 auto-bypass 以进程内 rules 为准；本函数仅收集可表达为 CIDR 的项
+            }
+        }
+    }
+
+    // tun 自身网段（若配置了地址）
+    if let Some(tun) = tun_config {
+        if let Some(v4) = tun.ipv4_addr {
+            if let Some(netmask) = tun.ipv4_netmask {
+                let prefix = u32::from(netmask).leading_ones() as u8;
+                bypass.push(RouteDestination::Ipv4Network { network: v4, prefix });
+            }
+        }
+        if let Some(v6) = tun.ipv6_addr {
+            if let Some(prefix) = tun.ipv6_prefix_len {
+                bypass.push(RouteDestination::Ipv6Network { network: v6, prefix });
+            }
+        }
+    }
+
+    // TODO: egress/mesh/control 地址解析（运行时注入，此处为静态配置占位）
+    // RoutingConfig 本身不含这些字段，实际 auto-bypass 由 TunIngress 运行时组装后再过滤
+
+    bypass
+}
+
+/// 判断目标是否在 auto-bypass 集（排除不写入路由）
+fn is_auto_bypass(destination: &RouteDestination, auto_bypass: &[RouteDestination]) -> bool {
+    auto_bypass.iter().any(|b| {
+        match (destination, b) {
+            (RouteDestination::Ipv4Network { network, prefix }, RouteDestination::Ipv4Network { network: bn, prefix: bp }) => {
+                network == bn && prefix == bp
+            }
+            (RouteDestination::Ipv6Network { network, prefix }, RouteDestination::Ipv6Network { network: bn, prefix: bp }) => {
+                network == bn && prefix == bp
+            }
+            (RouteDestination::Host { address }, RouteDestination::Host { address: ba }) => address == ba,
+            _ => false,
+        }
+    })
+}
+
 /// Linux 系统路由管理器（tun-dataplane.md §1.3）
 ///
 /// MVP = main 表显式路由 include 语义（不改默认路由、不用 ip rule、
@@ -472,8 +593,11 @@ pub enum AppliedStep {
 pub struct LinuxRouteManager {
     config: RoutingConfig,
     /// T2 起由 apply/clear 读写（记录已执行步骤供逆序撤销）
-    #[allow(dead_code)]
     applied: Mutex<Vec<AppliedStep>>,
+    /// tun 配置（用于 auto-bypass 计算 tun 自身网段）
+    tun_config: Option<TunConfig>,
+    /// 实际接口名（create_interface 后由 TUNGETIFF 读回，供路由操作使用）
+    interface_name: Option<String>,
 }
 
 impl LinuxRouteManager {
@@ -482,7 +606,68 @@ impl LinuxRouteManager {
         Self {
             config,
             applied: Mutex::new(Vec::new()),
+            tun_config: None,
+            interface_name: None,
         }
+    }
+
+    /// 设置 tun 配置（用于 auto-bypass 计算 tun 自身网段）
+    pub fn with_tun_config(mut self, tun_config: TunConfig) -> Self {
+        self.tun_config = Some(tun_config);
+        self
+    }
+
+    /// 设置实际接口名（create_interface 后调用，TUNGETIFF 读回的名字）
+    pub fn set_interface_name(&mut self, name: String) {
+        self.interface_name = Some(name);
+    }
+
+    fn get_interface_name(&self) -> Result<String> {
+        self.interface_name
+            .clone()
+            .ok_or_else(|| anyhow!("接口名未设置——先调用 set_interface_name 或 create_interface"))
+    }
+
+    /// 反向撤销所有已应用步骤（clear_routing 与 apply 中途失败共用）
+    async fn rollback_all(&self) -> Result<()> {
+        // 先取出所有步骤，释放锁再 await
+        let steps = {
+            let mut applied = self.applied.lock().unwrap();
+            applied.drain(..).rev().collect::<Vec<_>>()
+        };
+        // 逆序撤销（锁已释放）
+        for step in steps {
+            let _ = match step {
+                AppliedStep::AddrReplaced { interface, cidr } => {
+                    run_ip(&ip_argv_addr_del(&cidr, &interface)).await
+                }
+                AppliedStep::LinkUp { interface } => {
+                    run_ip(&ip_argv_link_down_name(&interface)).await
+                }
+                AppliedStep::RouteReplaced { cidr, interface, metric: _ } => {
+                    run_ip(&ip_argv_route_del(&cidr, &interface)).await
+                }
+            };
+            // 撤销阶段尽力而为，不因单步失败中断
+        }
+        Ok(())
+    }
+
+    /// 应用单条路由（addr 或 route），记录 AppliedStep
+    async fn apply_step(&self, step: AppliedStep) -> Result<()> {
+        match &step {
+            AppliedStep::AddrReplaced { interface, cidr } => {
+                run_ip(&ip_argv_addr_replace(cidr, interface)).await?;
+            }
+            AppliedStep::LinkUp { interface: _ } => {
+                // LinkUp 已在 up_interface 处理，此处仅记录
+            }
+            AppliedStep::RouteReplaced { cidr, interface, metric } => {
+                run_ip(&ip_argv_route_replace(cidr, interface, *metric)).await?;
+            }
+        }
+        self.applied.lock().unwrap().push(step);
+        Ok(())
     }
 }
 
@@ -493,43 +678,168 @@ impl RouteManager for LinuxRouteManager {
     }
 
     fn stats(&self) -> RouteStats {
-        RouteStats::default()
+        let applied = self.applied.lock().unwrap();
+        RouteStats {
+            active_routes: applied.iter().filter(|s| matches!(s, AppliedStep::RouteReplaced { .. })).count(),
+            total_routes: applied.len(),
+            ..Default::default()
+        }
     }
 
     async fn apply_routing(&self) -> Result<()> {
-        Err(anyhow!("Linux 路由应用（ip route replace + AppliedStep 记录）归 T2（tun-dataplane.md §1.3）"))
+        if !self.config.enabled {
+            return Ok(());
+        }
+
+        let auto_bypass = compute_auto_bypass(&self.config, self.tun_config.as_ref());
+        let mut temp_applied = Vec::new();
+
+        // 1. 先应用地址（若有 tun_config，configure_ip 已在 LinuxTunProvider 做；
+        //    此处兼容 RouteManager 独立使用场景，重复 replace 幂等无害）
+        if let Some(tun) = &self.tun_config {
+            let interface = self.get_interface_name()?;
+            if let Some(v4) = tun.ipv4_addr {
+                let prefix = tun
+                    .ipv4_netmask
+                    .map(|nm| u32::from(nm).leading_ones() as u8)
+                    .unwrap_or(32);
+                let cidr = format!("{v4}/{prefix}");
+                let step = AppliedStep::AddrReplaced { interface: interface.clone(), cidr: cidr.clone() };
+                self.apply_step(step).await?;
+                temp_applied.push(AppliedStep::AddrReplaced { interface: interface.clone(), cidr });
+            }
+            if let Some(v6) = tun.ipv6_addr {
+                let prefix = tun.ipv6_prefix_len.unwrap_or(128);
+                let cidr = format!("{v6}/{prefix}");
+                let step = AppliedStep::AddrReplaced { interface: interface.clone(), cidr: cidr.clone() };
+                self.apply_step(step).await?;
+                temp_applied.push(AppliedStep::AddrReplaced { interface, cidr });
+            }
+        }
+
+        // 2. 应用路由规则（按 priority 升序：数字越小优先级越高）
+        let mut rules = self.config.rules.clone();
+        rules.sort_by_key(|r| r.priority);
+        for rule in rules {
+            if !rule.enabled {
+                continue;
+            }
+            if is_auto_bypass(&rule.destination, &auto_bypass) {
+                debug!(target: "seep::route", name = %rule.name, dest = %rule.destination.as_string(), "跳过 auto-bypass 目标");
+                continue;
+            }
+            let interface = rule.interface.clone().unwrap_or_else(|| self.get_interface_name().unwrap_or_default());
+            if interface.is_empty() {
+                return Err(anyhow!("路由规则 {} 缺少接口（tun 未配置）", rule.name));
+            }
+            let metric = rule.metric.unwrap_or(0);
+            let cidr = rule.destination.as_string();
+            let step = AppliedStep::RouteReplaced { cidr: cidr.clone(), interface: interface.clone(), metric };
+            // 尝试应用，失败则回滚已应用的临时步骤
+            if let Err(e) = self.apply_step(step).await {
+                // 逆序撤销本次 apply 中已成功的步骤
+                for s in temp_applied.drain(..).rev() {
+                    let _ = match s {
+                        AppliedStep::AddrReplaced { interface, cidr } => run_ip(&ip_argv_addr_del(&cidr, &interface)).await,
+                        AppliedStep::RouteReplaced { cidr, interface, metric: _ } => run_ip(&ip_argv_route_del(&cidr, &interface)).await,
+                        AppliedStep::LinkUp { .. } => Ok(()),
+                    };
+                }
+                return Err(e.context(format!("应用路由规则 {} 失败，已回滚", rule.name)));
+            }
+            temp_applied.push(AppliedStep::RouteReplaced { cidr, interface, metric });
+        }
+
+        // 全部成功，合并到正式 applied
+        self.applied.lock().unwrap().extend(temp_applied);
+        Ok(())
     }
 
     async fn clear_routing(&self) -> Result<()> {
-        Err(anyhow!("Linux 路由清理（逆序撤销 AppliedStep）归 T2（tun-dataplane.md §1.3）"))
+        self.rollback_all().await
     }
 
-    async fn add_route(&self, _rule: RouteRule) -> Result<()> {
-        Err(anyhow!("Linux 单条路由添加归 T2（tun-dataplane.md §1.3）"))
+    async fn add_route(&self, rule: RouteRule) -> Result<()> {
+        let auto_bypass = compute_auto_bypass(&self.config, self.tun_config.as_ref());
+        if is_auto_bypass(&rule.destination, &auto_bypass) {
+            return Err(anyhow!("目标 {} 在 auto-bypass 集，不写入路由", rule.destination.as_string()));
+        }
+        let interface = rule.interface.unwrap_or_else(|| self.get_interface_name().unwrap_or_default());
+        if interface.is_empty() {
+            return Err(anyhow!("路由规则 {} 缺少接口", rule.name));
+        }
+        let metric = rule.metric.unwrap_or(0);
+        let cidr = rule.destination.as_string();
+        let step = AppliedStep::RouteReplaced { cidr: cidr.clone(), interface: interface.clone(), metric };
+        self.apply_step(step).await?;
+        Ok(())
     }
 
-    async fn remove_route(&self, _name: &str) -> Result<()> {
-        Err(anyhow!("Linux 单条路由删除归 T2（tun-dataplane.md §1.3）"))
+    async fn remove_route(&self, name: &str) -> Result<()> {
+        // 先找到并取出步骤，释放锁再 await
+        let step = {
+            let mut applied = self.applied.lock().unwrap();
+            if let Some(idx) = applied.iter().position(|s| {
+                matches!(s, AppliedStep::RouteReplaced { cidr, .. } if s.to_string().contains(name))
+            }) {
+                applied.remove(idx)
+            } else {
+                return Err(anyhow!("未找到路由规则: {name}"));
+            }
+        };
+        if let AppliedStep::RouteReplaced { cidr, interface, metric: _ } = step {
+            run_ip(&ip_argv_route_del(&cidr, &interface)).await?;
+        }
+        Ok(())
     }
 
-    async fn modify_route(&self, _rule: RouteRule) -> Result<()> {
-        Err(anyhow!("Linux 路由修改归 T2（tun-dataplane.md §1.3）"))
+    async fn modify_route(&self, rule: RouteRule) -> Result<()> {
+        // 简化：先删后加（幂等 replace 也可直接 apply）
+        let _ = self.remove_route(&rule.name).await;
+        self.add_route(rule).await
     }
 
     async fn get_routing_table(&self) -> Result<Vec<RouteRule>> {
-        Err(anyhow!("Linux 路由表读取归 T2（tun-dataplane.md §1.3）"))
+        // 从 applied 重建 RouteRule（简化版本，仅含已应用的路由）
+        let applied = self.applied.lock().unwrap();
+        Ok(applied
+            .iter()
+            .filter_map(|s| {
+                if let AppliedStep::RouteReplaced { cidr, interface, metric } = s {
+                    let dest = parse_cidr(cidr).ok()?;
+                    Some(RouteRule::new(format!("route-{cidr}"), dest).with_interface(interface.clone()).with_metric(*metric))
+                } else {
+                    None
+                }
+            })
+            .collect())
     }
 
-    async fn lookup_route(&self, _destination: std::net::IpAddr) -> Result<Option<RouteRule>> {
-        Err(anyhow!("Linux 路由查找归 T2（tun-dataplane.md §1.3）"))
+    async fn lookup_route(&self, destination: IpAddr) -> Result<Option<RouteRule>> {
+        let applied = self.applied.lock().unwrap();
+        for s in applied.iter() {
+            if let AppliedStep::RouteReplaced { cidr, interface, metric } = s {
+                if let Ok(dest) = parse_cidr(cidr) {
+                    if dest.matches(destination) {
+                        return Ok(Some(RouteRule::new(format!("route-{cidr}"), dest).with_interface(interface.clone()).with_metric(*metric)));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
-    async fn enable_route(&self, _name: &str, _enabled: bool) -> Result<()> {
-        Err(anyhow!("Linux 路由启停归 T2（tun-dataplane.md §1.3）"))
+    async fn enable_route(&self, name: &str, enabled: bool) -> Result<()> {
+        if enabled {
+            // 重新应用（幂等）
+            self.apply_routing().await
+        } else {
+            self.remove_route(name).await
+        }
     }
 
     async fn flush_cache(&self) -> Result<()> {
-        // 骨架无路由缓存可刷——真缓存随 T2 落地
+        // MVP 无路由缓存可刷
         Ok(())
     }
 
