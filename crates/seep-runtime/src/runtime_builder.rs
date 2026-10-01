@@ -1942,7 +1942,7 @@ fn build_egress_outputs(descriptors: &[EgressDescriptor]) -> Result<EgressBuildP
     for desc in descriptors {
         match &desc.spec {
             EgressConfig::Direct => {
-                let connector: Arc<dyn EgressConnector> = Arc::new(DirectConnector);
+                let connector: Arc<dyn EgressConnector> = Arc::new(DirectConnector::new());
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
                     connector.clone(),
@@ -1986,6 +1986,8 @@ fn build_egress_outputs(descriptors: &[EgressDescriptor]) -> Result<EgressBuildP
                     *tls,
                     *skip_cert_verify,
                     sni.clone(),
+                    None,
+                    None,
                 ));
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
@@ -2043,6 +2045,8 @@ fn build_egress_outputs(descriptors: &[EgressDescriptor]) -> Result<EgressBuildP
                     password.clone(),
                     sni.clone(),
                     *skip_cert_verify,
+                    None,
+                    None,
                 ));
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
@@ -2105,6 +2109,8 @@ fn build_egress_outputs(descriptors: &[EgressDescriptor]) -> Result<EgressBuildP
                     *skip_cert_verify,
                     sni.clone(),
                     alpn.clone(),
+                    None,
+                    None,
                 ));
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),

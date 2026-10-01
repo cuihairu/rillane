@@ -1,12 +1,15 @@
 //! Trojan 出口连接器实现
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use seep_core::{EgressConnector, Flow, FlowReport};
 use sha2::{Digest, Sha224};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
-use crate::tls::create_tls_connector;
+use crate::pool::{TransportKey, TransportPool};
+use crate::tls::{create_tls_connector, TlsConnectorFactory};
 
 /// Trojan 出口连接器
 pub struct TrojanConnector {
@@ -15,6 +18,11 @@ pub struct TrojanConnector {
     password: String,
     sni: Option<String>,
     skip_cert_verify: bool,
+    /// 出站连接池（P1-5 §4.2；None = 旧行为内联路径，D-9）
+    pool: Option<Arc<TransportPool>>,
+    /// 共享 ClientConfig 工厂：pool=None 时使 TLS 会话恢复独立于池生效
+    /// （§3.1「块存在即生效」；None = 既有每流 ClientConfig）
+    factory: Option<Arc<TlsConnectorFactory>>,
 }
 
 impl TrojanConnector {
@@ -24,6 +32,8 @@ impl TrojanConnector {
         password: String,
         sni: Option<String>,
         skip_cert_verify: bool,
+        pool: Option<Arc<TransportPool>>,
+        factory: Option<Arc<TlsConnectorFactory>>,
     ) -> Self {
         Self {
             server,
@@ -31,6 +41,8 @@ impl TrojanConnector {
             password,
             sni,
             skip_cert_verify,
+            pool,
+            factory,
         }
     }
 
@@ -71,6 +83,17 @@ impl TrojanConnector {
 
         request
     }
+
+    /// 传输键（§4.2：alpn 空 = 既有 trojan 路径不设 ALPN）
+    fn transport_key(&self) -> TransportKey {
+        TransportKey::tls(
+            &self.server,
+            self.port,
+            self.sni.as_deref(),
+            self.skip_cert_verify,
+            &[],
+        )
+    }
 }
 
 #[async_trait]
@@ -79,7 +102,56 @@ impl EgressConnector for TrojanConnector {
         "trojan"
     }
 
-    async fn forward(&self, mut flow: Flow) -> Result<FlowReport> {
+    async fn forward(&self, flow: Flow) -> Result<FlowReport> {
+        match &self.pool {
+            Some(pool) => self.forward_pooled(flow, pool).await,
+            None => self.forward_inline(flow).await,
+        }
+    }
+}
+
+impl TrojanConnector {
+    /// 池借出路径（§4.2）：acquire → 写协议头（bind）→ 双向转发；首写失败
+    /// → stale 一次性重拨（D-11，[`TransportPool::acquire_bound`]）。
+    async fn forward_pooled(
+        &self,
+        mut flow: Flow,
+        pool: &Arc<TransportPool>,
+    ) -> Result<FlowReport> {
+        let server_addr = format!("{}:{}", self.server, self.port);
+        let target = format!("{}:{}", flow.target.host, flow.target.port);
+        tracing::debug!(
+            target: "seep::trojan",
+            id = %flow.id.as_uuid(),
+            %target,
+            server = %server_addr,
+            pooled = true,
+            "通过 Trojan 连接"
+        );
+
+        let key = self.transport_key();
+        let request = self.build_request(&flow.target.host, flow.target.port);
+        let (mut outbound, _lease) = pool
+            .acquire_bound(&key, |io| {
+                let request = request.clone();
+                Box::pin(async move { io.write_all(&request).await.map_err(Into::into) })
+            })
+            .await
+            .with_context(|| format!("连接 Trojan 服务器失败: {server_addr}"))?;
+
+        let (up, down) = tokio::io::copy_bidirectional(&mut flow.io, &mut outbound)
+            .await
+            .context("双向转发失败")?;
+
+        Ok(FlowReport {
+            upstream: up,
+            downstream: down,
+        })
+    }
+
+    /// 内联路径（pool=None）：与既有实现逐字节同构（D-9）；factory=Some 时
+    /// TLS 连接器改取共享 ClientConfig（tls_resumption 独立于池生效）。
+    async fn forward_inline(&self, mut flow: Flow) -> Result<FlowReport> {
         let server_addr = format!("{}:{}", self.server, self.port);
         let target = format!("{}:{}", flow.target.host, flow.target.port);
 
@@ -98,7 +170,10 @@ impl EgressConnector for TrojanConnector {
 
         // TLS 握手
         let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
-        let connector = create_tls_connector(self.skip_cert_verify)?;
+        let connector = match &self.factory {
+            Some(factory) => factory.connector(self.skip_cert_verify, &[])?,
+            None => create_tls_connector(self.skip_cert_verify)?,
+        };
         let server_name = rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
         let mut tls_stream = connector.connect(server_name, tcp_stream).await?;
 

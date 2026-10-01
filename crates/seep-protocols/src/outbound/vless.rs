@@ -1,6 +1,7 @@
 //! VLESS 出口连接器实现（TCP/TLS/WS）
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -15,7 +16,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::tls::create_tls_connector_with_alpn;
+use crate::pool::{TransportKey, TransportPool};
+use crate::tls::{create_tls_connector_with_alpn, TlsConnectorFactory};
 
 const WS_MAGIC: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -31,6 +33,11 @@ pub struct VlessConnector {
     skip_cert_verify: bool,
     sni: Option<String>,
     alpn: Option<Vec<String>>,
+    /// 出站连接池（P1-5 §4.2；None = 旧行为内联路径，D-9）
+    pool: Option<Arc<TransportPool>>,
+    /// 共享 ClientConfig 工厂：pool=None 且 tls 时使 TLS 会话恢复独立于池
+    /// 生效（§3.1「块存在即生效」；None = 既有每流 ClientConfig）
+    factory: Option<Arc<TlsConnectorFactory>>,
 }
 
 impl VlessConnector {
@@ -48,6 +55,8 @@ impl VlessConnector {
         skip_cert_verify: bool,
         sni: Option<String>,
         alpn: Option<Vec<String>>,
+        pool: Option<Arc<TransportPool>>,
+        factory: Option<Arc<TlsConnectorFactory>>,
     ) -> Self {
         Self {
             server,
@@ -61,11 +70,29 @@ impl VlessConnector {
             skip_cert_verify,
             sni,
             alpn,
+            pool,
+            factory,
         }
     }
 
     fn server_addr(&self) -> String {
         format!("{}:{}", self.server, self.port)
+    }
+
+    /// 传输键（§4.2）：TLS 走五元组键（sni = 实际握手 SNI，tcp/ws 分支各异），
+    /// 平文走 plain 键；alpn 规一化入键（D-2）。
+    fn transport_key(&self, actual_sni: &str) -> TransportKey {
+        if self.tls {
+            TransportKey::tls(
+                &self.server,
+                self.port,
+                Some(actual_sni),
+                self.skip_cert_verify,
+                self.alpn.as_deref().unwrap_or(&[]),
+            )
+        } else {
+            TransportKey::plain(&self.server, self.port)
+        }
     }
 
     fn ws_host_header(&self) -> String {
@@ -131,7 +158,9 @@ impl VlessConnector {
         Ok(out)
     }
 
-    async fn read_vless_response_header<S: AsyncRead + Unpin>(stream: &mut S) -> Result<()> {
+    async fn read_vless_response_header<S: AsyncRead + Unpin + ?Sized>(
+        stream: &mut S,
+    ) -> Result<()> {
         // Response: Version(1) + OptLen(1) + Opt(OptLen)
         let mut hdr = [0u8; 2];
         stream
@@ -156,7 +185,101 @@ impl EgressConnector for VlessConnector {
         "vless"
     }
 
-    async fn forward(&self, mut flow: Flow) -> Result<FlowReport> {
+    async fn forward(&self, flow: Flow) -> Result<FlowReport> {
+        match &self.pool {
+            Some(pool) => self.forward_pooled(flow, pool).await,
+            None => self.forward_inline(flow).await,
+        }
+    }
+}
+
+impl VlessConnector {
+    /// 池借出路径（§4.2）：acquire → 协议绑定（tcp = 请求头往返；ws = upgrade
+    /// 借出后进行）→ 双向转发；绑定失败 → stale 一次性重拨（D-11）。
+    async fn forward_pooled(
+        &self,
+        mut flow: Flow,
+        pool: &Arc<TransportPool>,
+    ) -> Result<FlowReport> {
+        match flow.target.proto {
+            TargetProto::Tcp => {}
+            _ => return Err(anyhow!("VLESS 暂仅支持 TCP 转发")),
+        }
+        if self.flow.is_some() {
+            return Err(anyhow!(
+                "VLESS 暂不支持 flow（例如 xtls-rprx-vision），请设置为 null/省略"
+            ));
+        }
+
+        let target = format!("{}:{}", flow.target.host, flow.target.port);
+        let server_addr = self.server_addr();
+
+        tracing::debug!(
+            target: "seep::vless",
+            id = %flow.id.as_uuid(),
+            %target,
+            server = %server_addr,
+            tls = %self.tls,
+            network = %self.network,
+            pooled = true,
+            "通过 VLESS 连接"
+        );
+
+        match self.network.as_str() {
+            "tcp" => {
+                let sni_actual = self.sni.clone().unwrap_or_else(|| self.server.clone());
+                let key = self.transport_key(&sni_actual);
+                let req = self.build_vless_tcp_request(&flow.target.host, flow.target.port)?;
+                let (mut stream, _lease) = pool
+                    .acquire_bound(&key, |io| {
+                        let req = req.clone();
+                        Box::pin(async move {
+                            io.write_all(&req).await?;
+                            io.flush().await?;
+                            Self::read_vless_response_header(io).await
+                        })
+                    })
+                    .await
+                    .with_context(|| format!("连接 VLESS 服务器失败: {server_addr}"))?;
+
+                let (up, down) = tokio::io::copy_bidirectional(&mut flow.io, &mut stream).await?;
+                Ok(FlowReport {
+                    upstream: up,
+                    downstream: down,
+                })
+            }
+            "ws" | "websocket" => {
+                let ws_host = self.ws_host_header();
+                let ws_path = self.ws_path();
+                let sni_actual = self.sni.clone().unwrap_or_else(|| ws_host.clone());
+                let key = self.transport_key(&sni_actual);
+
+                // 借出传输层（TLS 已由池侧建立）；ws upgrade 借出后进行（§4.2）
+                let (boxed, first_lease) = pool
+                    .acquire(&key)
+                    .await
+                    .with_context(|| format!("连接 VLESS 服务器失败: {server_addr}"))?;
+                let handshake = ws_client_handshake(boxed, &ws_host, &ws_path).await;
+                let (ws, _lease) = match handshake {
+                    Ok(ws) => (ws, first_lease),
+                    Err(_) => {
+                        // upgrade 首写首读失败 → stale 一次性重拨（D-11）
+                        drop(first_lease);
+                        pool.note_stale(&key);
+                        let (boxed, lease) = pool.acquire_fresh(&key).await?;
+                        let ws = ws_client_handshake(boxed, &ws_host, &ws_path).await?;
+                        (ws, lease)
+                    }
+                };
+                self.relay_vless_over_ws(flow, ws).await
+            }
+            other => Err(anyhow!("暂不支持的 VLESS network: {}", other)),
+        }
+    }
+
+    /// 内联路径（pool=None）：与既有实现逐 IO 序列同构（D-9）；factory=Some
+    /// 且 tls 时 TLS 连接器改取共享 ClientConfig（tls_resumption 独立于池生效）。
+    async fn forward_inline(&self, mut flow: Flow) -> Result<FlowReport> {
         match flow.target.proto {
             TargetProto::Tcp => {}
             _ => return Err(anyhow!("VLESS 暂仅支持 TCP 转发")),
@@ -189,10 +312,16 @@ impl EgressConnector for VlessConnector {
             "tcp" => {
                 if self.tls {
                     let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
-                    let connector = create_tls_connector_with_alpn(
-                        self.skip_cert_verify,
-                        self.alpn.as_deref(),
-                    )?;
+                    let connector = match &self.factory {
+                        Some(factory) => factory.connector(
+                            self.skip_cert_verify,
+                            self.alpn.as_deref().unwrap_or(&[]),
+                        )?,
+                        None => create_tls_connector_with_alpn(
+                            self.skip_cert_verify,
+                            self.alpn.as_deref(),
+                        )?,
+                    };
                     let server_name =
                         rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
                     let mut stream = connector.connect(server_name, tcp).await?;
@@ -227,10 +356,16 @@ impl EgressConnector for VlessConnector {
 
                 if self.tls {
                     let sni = self.sni.clone().unwrap_or_else(|| ws_host.clone());
-                    let connector = create_tls_connector_with_alpn(
-                        self.skip_cert_verify,
-                        self.alpn.as_deref(),
-                    )?;
+                    let connector = match &self.factory {
+                        Some(factory) => factory.connector(
+                            self.skip_cert_verify,
+                            self.alpn.as_deref().unwrap_or(&[]),
+                        )?,
+                        None => create_tls_connector_with_alpn(
+                            self.skip_cert_verify,
+                            self.alpn.as_deref(),
+                        )?,
+                    };
                     let server_name =
                         rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
                     let tls_stream = connector.connect(server_name, tcp).await?;
@@ -257,8 +392,21 @@ impl VlessConnector {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let mut ws = ws_client_handshake(stream, &ws_host, &ws_path).await?;
+        let ws = ws_client_handshake(stream, &ws_host, &ws_path).await?;
+        self.relay_vless_over_ws(flow, ws).await
+    }
 
+    /// VLESS over WS 双向转发（upgrade 完成后的协议段；池路径复用——
+    /// `WsClient<ReadHalf<BoxedIo>, WriteHalf<BoxedIo>>` 同型可用）。
+    async fn relay_vless_over_ws<R, W>(
+        &self,
+        flow: Flow,
+        mut ws: WsClient<R, W>,
+    ) -> Result<FlowReport>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         // Send VLESS request as first binary message.
         let req = self.build_vless_tcp_request(&flow.target.host, flow.target.port)?;
         ws.write_binary(&req).await?;

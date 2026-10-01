@@ -12,11 +12,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use crate::tls::TlsConnectorFactory;
+
+// 池借出对象 = seep_core::IoStream（连接器侧 `Flow.io` 同型，M2 统一：
+// 独立 trait 会在连接器接入处产生两种不互通的 trait 对象）
+pub use seep_core::{BoxedIo, IoStream};
 
 // ---------------------------------------------------------------------------
 // 时钟注入（循 seep-core udp/clock.rs 先例）：idle 过期/驱逐次序的确定性单测
@@ -268,12 +271,6 @@ impl PoolMetrics {
 // 池核心
 // ---------------------------------------------------------------------------
 
-/// 借出后的连接（零协议字节写入的传输层连接，协议头由连接器写入 §2.2 契约）。
-pub type BoxedIo = Box<dyn IoStream>;
-
-pub trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> IoStream for T {}
-
 struct IdleConn {
     io: BoxedIo,
     born_millis: u64,
@@ -454,6 +451,39 @@ impl TransportPool {
     /// 计数落在 `acquire_fresh`（stale_redial），此处仅留观测日志。
     pub fn note_stale(&self, key: &TransportKey) {
         tracing::warn!(key = %key, "pool: 借出连接 stale（首写/首读失败），一次性重拨");
+    }
+
+    /// 借出并执行协议绑定（§4.2 时序：acquire → bind → relay 的前两步）。
+    ///
+    /// `bind` = 协议首写/首读（trojan 写请求头、http CONNECT 握手、vless-tcp
+    /// 请求头往返、vless-ws 的 upgrade）。bind 失败 → [`Self::note_stale`] +
+    /// [`Self::acquire_fresh`] 一次性重拨 + bind 重放（D-11，二次失败即 Err
+    /// 不三试）。闭包 `FnMut`：同一 bind 在两条连接上各执行一次。
+    pub async fn acquire_bound<F>(
+        self: &Arc<Self>,
+        key: &TransportKey,
+        mut bind: F,
+    ) -> Result<(BoxedIo, LeaseGuard)>
+    where
+        // 装箱 future + `&mut dyn IoStream`（非 `&mut BoxedIo`）：前者抹平
+        // future 生命周期、后者固定 Box 内层 'static——async 闭包 HRTB 泛化
+        // 在当前 rustc 下不过（"AsyncFnMut is not general enough"），此为
+        // 既有稳定习语（tower service 同形）
+        F: FnMut(
+            &mut dyn IoStream,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>,
+    {
+        let (mut io, lease) = self.acquire(key).await?;
+        if bind(io.as_mut()).await.is_err() {
+            self.note_stale(key);
+            drop((io, lease));
+            let (mut fresh, lease) = self.acquire_fresh(key).await?;
+            // 二次 bind 失败即 Err（新连接新握手仍败 = 真协议/服务端问题）
+            bind(fresh.as_mut()).await?;
+            return Ok((fresh, lease));
+        }
+        Ok((io, lease))
     }
 
     /// 单次拨号（含超时与 dials_total 记账；前台失败直接 Err，后台走退避）。
