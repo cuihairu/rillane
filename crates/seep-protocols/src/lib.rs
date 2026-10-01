@@ -17,6 +17,7 @@
 pub mod inbound;
 pub mod middleware;
 pub mod outbound;
+pub mod pool;
 mod tls;
 
 pub use inbound::{HttpIngress, MixedIngress, Socks5Ingress};
@@ -26,3 +27,8 @@ pub use outbound::{
     ShadowsocksUdpConnector, Socks5Connector, TrojanConnector, VlessConnector, WireguardConnector,
     WireguardUdpConnector,
 };
+pub use pool::{
+    BoxedIo, LeaseGuard, MockPoolClock, PoolClock, PoolPolicy, PoolSnapshot, SystemClock,
+    TransportKey, TransportPool,
+};
+pub use tls::TlsConnectorFactory;
