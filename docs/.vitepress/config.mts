@@ -77,6 +77,7 @@ export default defineConfig({
         text: '设计文档 — TUN 与网络接管（P1-1..P1-3）',
         items: [
           { text: 'P1-1/P1-2 Linux TUN 真实现 + TunIngress', link: '/design/tun-dataplane' },
+          { text: 'P1-1 实现落定稿（Linux TUN T0–T2）', link: '/design/tun-linux-impl' },
           { text: 'P1-3 network 配置区块 + seepctl route', link: '/design/network-route' },
         ],
       },

@@ -71,6 +71,8 @@
 
 - [ ] **P1-1 Linux TUN 真实现**：`/dev/net/tun` + TUNSETIFF、包读写循环，替换 `platform.rs` 占位。
   实现级设计：[docs/design/tun-dataplane.md](docs/design/tun-dataplane.md) §1（设备生命周期/接口签名；最小 `LinuxRouteManager`＝main 表显式路由 + AppliedStep 回滚；模块接线与 `platform.rs`/`TunInterface` 占位处置——注意核对结论：该文件未编译且启用即编译失败，见 status-audit §1）；§5 清单 **T0–T2** 对应本条。
+  实现落定稿：[docs/design/tun-linux-impl.md](docs/design/tun-linux-impl.md)（TUNSETIFF 接口/包读写循环/platform.rs 占位替换三线收口/测试计划与落地实况 + 偏差回填 9 条）。
+  本轮注记（2026-10-01 文档轮，源码零改动）：**T0–T2 已落地**（c076fb8 trait 裁剪+四工厂分派、75c7747 设备生命周期+读写+捕获钉子、92f12ba RouteManager+AppliedStep 回滚）——验收钉子 provider 半边就位（skip 守卫集成测两周期：强制名/自动名+捕获+回收断言）；「捕获 IP 包进入 FlowRouter」的 FlowRouter 半边随 T3（P1-2）收口；auto-bypass 全集（egress/mesh/control 地址）随 T3/R1 合流；musl 交叉验收归 P3-3。
   验收：Linux 集成测试中 tun 设备创建、捕获 IP 包进入 FlowRouter（设计 §4.2 钉子）；OpenWrt（musl）可复用同路径编译（§6 假设 #9；交叉产物验收归 P3-3）。
 - [ ] **P1-2 TunIngress 接线 runtime**：IP 流重组 → `FlowContext`（注入进程/端口），TUN 作为新 ingress 类型接入。
   实现级设计：[docs/design/tun-dataplane.md](docs/design/tun-dataplane.md) §2（TunFlowTable 镜像 P0-1 语义 / UDP 头编解码含 v6 强制校验和 / smoltcp TCP 面 / 进程注解 `process.*` + `MatchCondition::Process` / TunIngress 属主化不经 NetworkManager / §2.7 bypass 防环）+ §3 错误路径 + §4 测试策略 + §5 清单 **T3–T5**（**2026-09 设计稿就绪，实施未开始**；2026-09-30 六要素审计补 §2.6 与既有 ingress 的选择边界——路由决定入哪个 ingress、seep 不选，TUN 流不入 `UdpSessionTable`，§2.8 计量边界、§2.9 smoltcp poll 驱动与下行注入（T4 主路径，Notify 事件驱动非定时轮询））。
