@@ -28,7 +28,7 @@ pub use outbound::{
     WireguardUdpConnector,
 };
 pub use pool::{
-    BoxedIo, LeaseGuard, MockPoolClock, PoolClock, PoolPolicy, PoolSnapshot, SystemClock,
-    TransportKey, TransportPool,
+    BoxedIo, KeySnapshot, LeaseGuard, MockPoolClock, PoolClock, PoolPolicy, PoolSnapshot,
+    SystemClock, TransportKey, TransportPool,
 };
 pub use tls::TlsConnectorFactory;

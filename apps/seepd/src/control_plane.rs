@@ -98,6 +98,7 @@ impl ControlPlane {
             (Method::GET, "/flows") => self.handle_flows().await,
             (Method::GET, "/metrics") => self.handle_metrics().await,
             (Method::GET, "/udp/stats") => self.handle_udp_stats().await,
+            (Method::GET, "/egress/pool/stats") => self.handle_egress_pool_stats().await,
             (Method::GET, "/runtime/stats") => self.handle_runtime_stats().await,
             (Method::GET, "/runtime/config") => self.handle_runtime_config().await,
             (Method::GET, "/events") => self.handle_events().await,
@@ -773,6 +774,107 @@ impl ControlPlane {
             );
         }
 
+        // P1-5 §6.1 池/握手序列：池启用才渲染（§8.2 对照关闭态 = 无
+        // seep_pool_* 序列，非恒渲染——区别于 obfs E11 恒零纪律）
+        if let Some(pool) = self.runtime.get_transport_pool() {
+            let s = pool.snapshot();
+            push_metric_header(
+                &mut out,
+                "seep_pool_acquires_total",
+                "Pool lease outcomes, by result.",
+                "counter",
+            );
+            for (result, value) in [
+                ("hit", s.acquires_hit),
+                ("miss", s.acquires_miss),
+                ("stale_redial", s.acquires_stale_redial),
+            ] {
+                push_metric_labeled(
+                    &mut out,
+                    "seep_pool_acquires_total",
+                    &[("result", result)],
+                    value as f64,
+                );
+            }
+            push_metric_header(
+                &mut out,
+                "seep_pool_dials_total",
+                "Transport dials, by origin and result.",
+                "counter",
+            );
+            for (origin, ok, err) in [
+                ("foreground", s.dials_foreground_ok, s.dials_foreground_err),
+                ("warm", s.dials_warm_ok, s.dials_warm_err),
+                ("refill", s.dials_refill_ok, s.dials_refill_err),
+            ] {
+                push_metric_labeled(
+                    &mut out,
+                    "seep_pool_dials_total",
+                    &[("origin", origin), ("result", "ok")],
+                    ok as f64,
+                );
+                push_metric_labeled(
+                    &mut out,
+                    "seep_pool_dials_total",
+                    &[("origin", origin), ("result", "error")],
+                    err as f64,
+                );
+            }
+            push_gauge(
+                &mut out,
+                "seep_pool_idle_connections",
+                "Idle pooled connections.",
+                s.idle as f64,
+            );
+            push_gauge(
+                &mut out,
+                "seep_pool_leased_connections",
+                "Leased (in-use) pooled connections.",
+                s.leased as f64,
+            );
+            push_gauge(
+                &mut out,
+                "seep_pool_reuse_ratio",
+                "Lease hits over hits+misses, since start.",
+                s.reuse_ratio(),
+            );
+            push_metric_header(
+                &mut out,
+                "seep_pool_evicted_total",
+                "Idle connection evictions, by reason.",
+                "counter",
+            );
+            for (reason, value) in [
+                ("idle_timeout", s.evicted_idle_timeout),
+                ("capacity", s.evicted_capacity),
+                ("shutdown", s.evicted_shutdown),
+            ] {
+                push_metric_labeled(
+                    &mut out,
+                    "seep_pool_evicted_total",
+                    &[("reason", reason)],
+                    value as f64,
+                );
+            }
+        }
+        if let Some(factory) = self.runtime.get_tls_factory() {
+            let (full, full_hrr, resumed) = factory.handshake_snapshot();
+            push_metric_header(
+                &mut out,
+                "seep_tls_handshakes_total",
+                "TLS handshakes through the shared config, by kind.",
+                "counter",
+            );
+            for (kind, value) in [("full", full), ("resumed", resumed), ("full_hrr", full_hrr)] {
+                push_metric_labeled(
+                    &mut out,
+                    "seep_tls_handshakes_total",
+                    &[("type", kind)],
+                    value as f64,
+                );
+            }
+        }
+
         if let Some(subs) = self.runtime.get_subscription_manager() {
             push_gauge(
                 &mut out,
@@ -868,6 +970,45 @@ impl ControlPlane {
                 .map(|m| UdpClientDroppedDto {
                     dropped: m.dropped(),
                 }),
+        };
+        json(StatusCode::OK, &dto)
+    }
+
+    /// P1-5 §6.2 `GET /egress/pool/stats`：池快照 + 每键 idle + 计数族。
+    /// 块缺席/未启用 = enabled:false 零值响应（形态稳定，脚本好消费）。
+    async fn handle_egress_pool_stats(&self) -> Response<Body> {
+        let block = self.runtime.get_config().egress_pool;
+        let (enabled, tls_resumption) = match &block {
+            Some(b) => (b.enabled, b.tls_resumption()),
+            None => (false, false),
+        };
+        let pool = self.runtime.get_transport_pool();
+        let snap = pool.as_ref().map(|p| p.snapshot());
+        let keys: Option<Vec<EgressPoolKeyDto>> = pool.as_ref().map(|p| {
+            p.key_snapshots()
+                .into_iter()
+                .map(|k| EgressPoolKeyDto {
+                    key: k.key,
+                    idle: k.idle,
+                })
+                .collect()
+        });
+        let counters = match &snap {
+            Some(s) => EgressPoolCountersDto {
+                hit: s.acquires_hit,
+                miss: s.acquires_miss,
+                stale_redial: s.acquires_stale_redial,
+                dials_ok: s.dials_foreground_ok + s.dials_warm_ok + s.dials_refill_ok,
+                dials_err: s.dials_foreground_err + s.dials_warm_err + s.dials_refill_err,
+            },
+            None => EgressPoolCountersDto::default(),
+        };
+        let dto = EgressPoolStatsDto {
+            enabled,
+            tls_resumption,
+            keys: keys.unwrap_or_default(),
+            counters,
+            reuse_ratio: snap.as_ref().map(|s| s.reuse_ratio()).unwrap_or(0.0),
         };
         json(StatusCode::OK, &dto)
     }
@@ -1327,6 +1468,31 @@ struct UdpStatsDto {
 #[derive(Debug, Clone, Serialize)]
 struct UdpClientDroppedDto {
     dropped: u64,
+}
+
+/// P1-5 §6.2 响应体（keys = 每键 idle 快照；leased 全局 gauge 不分键记账）
+#[derive(Debug, Clone, Serialize)]
+struct EgressPoolStatsDto {
+    enabled: bool,
+    tls_resumption: bool,
+    keys: Vec<EgressPoolKeyDto>,
+    counters: EgressPoolCountersDto,
+    reuse_ratio: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EgressPoolKeyDto {
+    key: String,
+    idle: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct EgressPoolCountersDto {
+    hit: u64,
+    miss: u64,
+    stale_redial: u64,
+    dials_ok: u64,
+    dials_err: u64,
 }
 
 /// P0-5 §2.2 reason 封闭枚举（与 `TableSnapshot` dropped/expired 映射键同源；
@@ -2124,6 +2290,68 @@ mod tests {
         }
     }
 
+    /// P1-5 §6 测试配置：socks5 入口 + trojan(TLS) 出口 + egress_pool 启用块
+    ///（全缺省子字段——验证缺省面 enabled=true/tls_resumption=true）
+    fn pool_enabled_config() -> SeepConfig {
+        SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: true,
+                enable_tracing: false,
+            },
+            ingress: vec![IngressDescriptor {
+                name: "pool-socks".to_string(),
+                spec: IngressConfig::Socks5 {
+                    bind: free_bind(),
+                    auth: None,
+                    udp_enabled: None,
+                },
+            }],
+            egress: vec![EgressDescriptor {
+                name: "trojan-out".to_string(),
+                spec: EgressConfig::Trojan {
+                    server: "127.0.0.1".to_string(),
+                    port: 1,
+                    password: "pool-test".to_string(),
+                    network: "tcp".to_string(),
+                    path: None,
+                    host: None,
+                    tls: true,
+                    skip_cert_verify: false,
+                    sni: None,
+                    alpn: None,
+                },
+            }],
+            routing: seep_config::RoutingConfig {
+                default_node: "trojan-out".to_string(),
+                groups: vec![],
+                rules: vec![],
+            },
+            udp: UdpConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            network: None,
+            obfuscation: None,
+            egress_pool: Some(seep_config::EgressPoolBlock {
+                enabled: true,
+                tls_resumption: None,
+                max_idle_per_key: None,
+                max_idle_global: None,
+                low_watermark: None,
+                idle_timeout_secs: None,
+                dial_timeout_secs: None,
+                session_cache_size: None,
+                pre_dial_direct: None,
+            }),
+        }
+    }
+
     /// 从 /metrics 文本取指定序列（含标签）的值
     fn metric_value(body: &str, series: &str) -> Option<f64> {
         for line in body.lines() {
@@ -2278,6 +2506,95 @@ mod tests {
             !s.contains("seep_obfs_middleware_invocations_total"),
             "空链无挂载 → invocations 无条目（name 标签集 = 配置挂载集）"
         );
+    }
+
+    /// P1-5 §8.2 对照关闭态（无块）：`/egress/pool/stats` 报 enabled=false
+    /// 空计数，/metrics 无 seep_pool_* / seep_tls_* 序列（§6.1 只随池存在渲染）。
+    #[tokio::test]
+    async fn pool_disabled_renders_no_pool_series() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let s = get_body(&cp, "/egress/pool/stats").await;
+        assert!(
+            s.contains("\"enabled\":false") && s.contains("\"reuse_ratio\":0"),
+            "关闭态 stats 应报 enabled=false 零复用：{s}"
+        );
+        assert!(s.contains("\"hit\":0"), "关闭态计数应恒零：{s}");
+
+        let m = get_body(&cp, "/metrics").await;
+        assert!(
+            !m.contains("seep_pool_"),
+            "无块 → 无 seep_pool_* 序列（§8.2 对照关闭态）"
+        );
+        assert!(
+            !m.contains("seep_tls_handshakes"),
+            "无块 → 无 seep_tls_* 序列"
+        );
+    }
+
+    /// P1-5 §6.1/§6.2：块启用 → 池/工厂句柄在位，stats 报 enabled=true 且
+    /// 计数恒零初值，metrics 渲染完整 seep_pool_* / seep_tls_* 族（0 值）。
+    #[tokio::test]
+    async fn pool_enabled_renders_stats_and_metric_family() {
+        let cfg = pool_enabled_config();
+        let runtime = Arc::new(
+            RuntimeBuilder::new(cfg)
+                .with_runtime_config(RuntimeConfig {
+                    enable_hot_reload: false,
+                    ..RuntimeConfig::default()
+                })
+                .build()
+                .unwrap(),
+        );
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let s = get_body(&cp, "/egress/pool/stats").await;
+        assert!(s.contains("\"enabled\":true"), "启用态：{s}");
+        assert!(s.contains("\"tls_resumption\":true"), "缺省恢复开启：{s}");
+        assert!(
+            s.contains("\"hit\":0")
+                && s.contains("\"miss\":0")
+                && s.contains("\"stale_redial\":0")
+                && s.contains("\"dials_ok\":0")
+                && s.contains("\"dials_err\":0"),
+            "启动即查无流量 → 计数恒零：{s}"
+        );
+        assert!(s.contains("\"keys\":[]"), "未预热未借出 → 空 keys：{s}");
+
+        let m = get_body(&cp, "/metrics").await;
+        let zero_series = [
+            "seep_pool_acquires_total{result=\"hit\"}",
+            "seep_pool_acquires_total{result=\"miss\"}",
+            "seep_pool_acquires_total{result=\"stale_redial\"}",
+            "seep_pool_dials_total{origin=\"foreground\",result=\"ok\"}",
+            "seep_pool_dials_total{origin=\"warm\",result=\"error\"}",
+            "seep_pool_dials_total{origin=\"refill\",result=\"ok\"}",
+            "seep_pool_evicted_total{reason=\"idle_timeout\"}",
+            "seep_pool_evicted_total{reason=\"capacity\"}",
+            "seep_pool_evicted_total{reason=\"shutdown\"}",
+        ];
+        for series in zero_series {
+            assert_eq!(
+                metric_value(&m, series),
+                Some(0.0),
+                "系列 {series} 应渲染且初值 0"
+            );
+        }
+        for gauge in ["seep_pool_idle_connections", "seep_pool_leased_connections"] {
+            assert_eq!(metric_value(&m, gauge), Some(0.0), "{gauge} 初值 0");
+        }
+        assert!(
+            metric_value(&m, "seep_pool_reuse_ratio").is_some(),
+            "reuse_ratio gauge 应渲染"
+        );
+        for kind in ["full", "resumed", "full_hrr"] {
+            assert_eq!(
+                metric_value(&m, &format!("seep_tls_handshakes_total{{type=\"{kind}\"}}")),
+                Some(0.0),
+                "seep_tls_handshakes_total{{type={kind}}} 应渲染且初值 0"
+            );
+        }
     }
 
     /// 测试 2：真 socket ASSOCIATE + 环回 echo 往返后 packets/bytes 序列非零

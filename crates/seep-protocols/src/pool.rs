@@ -286,6 +286,13 @@ struct KeyState {
     backoff_millis: u64,
 }
 
+/// 每键 idle 快照（§6.2 keys 数组条目；Serialize 供控制面 DTO 直用）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KeySnapshot {
+    pub key: String,
+    pub idle: usize,
+}
+
 /// RAII 借出守卫：Drop 递减 leased gauge。连接消耗不回池（D-1），
 /// guard 只管记账，无归还语义。
 pub struct LeaseGuard {
@@ -401,6 +408,22 @@ impl TransportPool {
     /// 测试观察点：键数（孤儿键回收断言用）。
     pub fn live_key_count(&self) -> usize {
         self.keys.lock().expect("pool keys lock").len()
+    }
+
+    /// 每键 idle 快照（控制面 `/egress/pool/stats` keys 数组，§6.2）。
+    /// leased 为全局 gauge 不分键记账（D-1 借出即消费，per-key leased 无
+    /// 运营动作）——与 §6.2 示例形状的偏差记 M4 提交。
+    pub fn key_snapshots(&self) -> Vec<KeySnapshot> {
+        self.keys
+            .lock()
+            .expect("pool keys lock")
+            .iter()
+            .filter(|(_, st)| !st.idle.is_empty())
+            .map(|(key, st)| KeySnapshot {
+                key: key.to_string(),
+                idle: st.idle.len(),
+            })
+            .collect()
     }
 
     fn expired(&self, born_millis: u64) -> bool {

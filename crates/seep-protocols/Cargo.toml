@@ -36,3 +36,8 @@ shadowsocks.workspace = true
 
 # Hysteria2
 hysteria2.workspace = true
+
+[dev-dependencies]
+# §8.2 mock TLS 服务端（自签证书）
+rcgen.workspace = true
+rustls-pemfile.workspace = true
