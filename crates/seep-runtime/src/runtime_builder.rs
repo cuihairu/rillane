@@ -2316,6 +2316,7 @@ mod tests {
                 rules: vec![],
             },
             udp: seep_config::UdpConfig::default(),
+            network: None,
         };
 
         let runtime = RuntimeBuilder::new(cfg)
@@ -2355,6 +2356,7 @@ mod tests {
                 rules: vec![],
             },
             udp: seep_config::UdpConfig::default(),
+            network: None,
         };
 
         let stats = runtime
@@ -2397,6 +2399,7 @@ mod tests {
                 rules: vec![],
             },
             udp: seep_config::UdpConfig::default(),
+            network: None,
         };
 
         let delta = SeepConfig {
@@ -2460,6 +2463,7 @@ mod tests {
                 ],
             },
             udp: seep_config::UdpConfig::default(),
+            network: None,
         };
 
         let stats = merge_config_delta_in_place(&mut target, &delta);
@@ -2533,6 +2537,7 @@ mod tests {
                 enabled: udp_enabled,
                 ..Default::default()
             },
+            network: None,
         }
     }
 
@@ -2917,6 +2922,7 @@ mod tests {
                 rules: vec![],
             },
             udp,
+            network: None,
         }
     }
 

@@ -1649,6 +1649,7 @@ proxies:
                     rules: vec![],
                 },
                 udp: seep_config::UdpConfig::default(),
+                network: None,
             },
             stats: ConversionStats {
                 input: InputStats {

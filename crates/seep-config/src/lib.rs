@@ -1,5 +1,6 @@
 use std::{
     fs,
+    net::IpAddr,
     path::{Path, PathBuf},
 };
 
@@ -18,6 +19,9 @@ pub struct SeepConfig {
     /// UDP 数据面（P0-2；缺省整块关闭，兼容既有配置）
     #[serde(default)]
     pub udp: UdpConfig,
+    /// 网络虚拟化（P1-3 network-route.md §1；缺省 None = 整块关闭，行为零差异）
+    #[serde(default)]
+    pub network: Option<NetworkBlockConfig>,
 }
 
 /// UDP 数据面配置（udp-dataplane.md §5.2 / udp-relay-path.md §2）。
@@ -123,6 +127,127 @@ impl UdpConfig {
 /// Some 显式覆盖。求值点 = `build_ingress_endpoints` 逐入口一次。
 pub fn resolve_udp_enabled(global_enabled: bool, per_ingress: Option<bool>) -> bool {
     per_ingress.unwrap_or(global_enabled)
+}
+
+/// network 区块（network-route.md §1.1/§1.5）：seep-config 镜像 serde 类型，
+/// 到 seep-platform `NetworkConfig` 的转换在 seep-runtime（§1.2 裁决：镜像而非加依赖，
+/// `UdpConfig` 先例）。deny_unknown_fields = 新块无存量兼容负担，拼错子字段立刻报错（B2 定向收口）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkBlockConfig {
+    /// 网络模式；缺省 tun（MVP 唯一实现，validate 拒其余）
+    #[serde(default)]
+    pub mode: NetworkBlockMode,
+    /// TUN 设备块（mode=tun 时可选——routing 缺省即只建设备不设路由，E4 合法）
+    #[serde(default)]
+    pub tun: Option<TunBlockConfig>,
+    /// 路由块（include 语义）
+    #[serde(default)]
+    pub routing: Option<RoutingBlockConfig>,
+}
+
+/// network.mode（serde 名随 platform 枚举：transparent 弃 "redir"，§1.3 B4 收口）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkBlockMode {
+    Tun,
+    Transparent,
+    Tap,
+    Hybrid,
+}
+
+impl Default for NetworkBlockMode {
+    fn default() -> Self {
+        NetworkBlockMode::Tun
+    }
+}
+
+/// network.tun 块（§1.1；字段镜像 platform `TunConfig` 的用户可配子集）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunBlockConfig {
+    /// 接口名；缺省 None → 内核分配 tun%d（TUNGETIFF 读回）
+    #[serde(default)]
+    pub name: Option<String>,
+    /// MTU（TunConfig::validate 口径：≥68）
+    #[serde(default = "default_tun_mtu")]
+    pub mtu: u16,
+    /// 设备地址 CIDR（进 auto-bypass，tun-dataplane §2.7）
+    #[serde(default = "default_tun_ipv4")]
+    pub ipv4: Option<String>,
+    /// IPv6 地址 CIDR（可选）
+    #[serde(default)]
+    pub ipv6: Option<String>,
+    /// 仅记录（消费归 P2-8）
+    #[serde(default)]
+    pub dns_servers: Vec<IpAddr>,
+}
+
+const fn default_tun_mtu() -> u16 {
+    1500
+}
+
+fn default_tun_ipv4() -> Option<String> {
+    Some("10.255.0.1/24".to_string())
+}
+
+/// network.routing 块（§1.1：main 表显式路由纳入集，include 语义）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingBlockConfig {
+    /// 纳入 tun 的前缀列表；include 负向即天然 bypass（§9-3：不暴露用户 bypass 列表）
+    #[serde(default)]
+    pub include: Vec<String>,
+}
+
+/// network 块 CIDR 解析（schema 层最小实现——seep-config 不依赖 seep-platform，
+/// 语法口径对齐 route.rs::parse_cidr；要求显式前缀形式：裸 IP 不收，主机路由写 /32，
+/// `RouteDestination::Host` 变体不进 schema——§9-10）
+pub fn parse_cidr_pair(cidr: &str) -> Result<(IpAddr, u8)> {
+    let (addr_str, prefix_str) = cidr.split_once('/').ok_or_else(|| {
+        anyhow::anyhow!("CIDR 须为 addr/prefix 形式（主机路由写 /32）：{cidr:?}")
+    })?;
+    let addr: IpAddr = addr_str
+        .parse()
+        .with_context(|| format!("CIDR 地址段非法：{cidr:?}"))?;
+    let prefix: u8 = prefix_str
+        .parse()
+        .with_context(|| format!("CIDR 前缀段非法：{cidr:?}"))?;
+    let max = if addr.is_ipv4() { 32 } else { 128 };
+    anyhow::ensure!(prefix <= max, "CIDR 前缀超上限 /{max}：{cidr:?}");
+    Ok((addr, prefix))
+}
+
+impl NetworkBlockConfig {
+    /// §1.4 构建期校验：E1（mode 仅 tun）/ E3（mtu ≥68、CIDR 逐条过解析带原串）。
+    /// E5（include 命中 auto-bypass 剔除 + warning）落转换处——validate 是只读检查，
+    /// 见 seep-runtime `network_config.rs`（egress/mesh/control 地址集 R1 接线时并入）。
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.mode == NetworkBlockMode::Tun,
+            "network.mode = {:?} 未实现（E1）——MVP 仅 tun；transparent/tap/hybrid 归 V2 全局接管条目",
+            self.mode
+        );
+        if let Some(tun) = &self.tun {
+            anyhow::ensure!(
+                tun.mtu >= 68,
+                "network.tun.mtu 必须 ≥ 68（最小 IPv4 MTU），当前 {}",
+                tun.mtu
+            );
+            if let Some(ipv4) = &tun.ipv4 {
+                parse_cidr_pair(ipv4)?;
+            }
+            if let Some(ipv6) = &tun.ipv6 {
+                parse_cidr_pair(ipv6)?;
+            }
+        }
+        if let Some(routing) = &self.routing {
+            for cidr in &routing.include {
+                parse_cidr_pair(cidr)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl SeepConfig {

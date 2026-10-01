@@ -425,6 +425,8 @@ impl SeepDslConverter {
             egress,
             routing,
             udp: seep_config::UdpConfig::default(),
+            // 订阅转换不产网络虚拟化块（P1-3 归用户主配置）
+            network: None,
         };
 
         debug!(

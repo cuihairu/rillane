@@ -2043,6 +2043,7 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             },
+            network: None,
         }
     }
 
