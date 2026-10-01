@@ -5,9 +5,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
+use rustls::client::danger::ServerCertVerifier;
 use rustls::crypto::CryptoProvider;
 use rustls::{ClientConfig, HandshakeKind};
 use tokio_rustls::TlsConnector;
+
+use crate::fingerprint::TlsFingerprint;
 
 /// 工厂缓存键 = (skip_cert_verify, 规一化 alpn)——与 pool::normalize_alpn 同规整
 type FactoryConfigKey = (bool, Vec<String>);
@@ -27,8 +30,18 @@ pub fn create_tls_connector_with_alpn(
     skip_cert_verify: bool,
     alpn: Option<&[String]>,
 ) -> Result<TlsConnector> {
+    create_tls_connector_with_profile(skip_cert_verify, alpn, TlsFingerprint::None)
+}
+
+/// 创建指定指纹形态的 TLS 连接器（P2-5 §4-1 单漏斗：每流路径变形入口，
+/// M1 起由连接器透传配置面指纹）
+pub fn create_tls_connector_with_profile(
+    skip_cert_verify: bool,
+    alpn: Option<&[String]>,
+    profile: TlsFingerprint,
+) -> Result<TlsConnector> {
     let alpn_protos = alpn.map(filter_alpn);
-    let config = build_client_config(skip_cert_verify, alpn_protos.unwrap_or_default())?;
+    let config = build_client_config(skip_cert_verify, alpn_protos.unwrap_or_default(), profile)?;
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
@@ -52,7 +65,7 @@ fn filter_alpn(alpn: &[String]) -> Vec<Vec<u8>> {
 /// 在双提供方歧义下直接 panic（rustls crypto/mod.rs）——既有出站 TLS 首拨即崩
 /// 的潜在缺陷。此处显式选 ring 并安装为进程默认（已装则尊重既有安装），
 /// `build_client_config` 经 `builder_with_provider` 走显式提供方构造。
-fn tls_crypto_provider() -> Arc<CryptoProvider> {
+pub(crate) fn tls_crypto_provider() -> Arc<CryptoProvider> {
     static INSTALL: OnceLock<()> = OnceLock::new();
     INSTALL.get_or_init(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -62,7 +75,25 @@ fn tls_crypto_provider() -> Arc<CryptoProvider> {
         .clone()
 }
 
-fn build_client_config(skip_cert_verify: bool, alpn_protos: Vec<Vec<u8>>) -> Result<ClientConfig> {
+/// 按形态构造 ClientConfig（P2-5 §4-1 单漏斗）：none = 缺省路径逐字节
+/// 不动（E2 零差异），其余形态经变形漏斗（fingerprint.rs）。
+fn build_client_config(
+    skip_cert_verify: bool,
+    alpn_protos: Vec<Vec<u8>>,
+    profile: TlsFingerprint,
+) -> Result<ClientConfig> {
+    match profile {
+        TlsFingerprint::None => default_client_config(skip_cert_verify, alpn_protos),
+        shaped => {
+            crate::fingerprint::build_shaped_client_config(skip_cert_verify, alpn_protos, shaped)
+        }
+    }
+}
+
+fn default_client_config(
+    skip_cert_verify: bool,
+    alpn_protos: Vec<Vec<u8>>,
+) -> Result<ClientConfig> {
     let builder = ClientConfig::builder_with_provider(tls_crypto_provider())
         .with_safe_default_protocol_versions()?;
     let mut config = if skip_cert_verify {
@@ -137,7 +168,8 @@ impl TlsConnectorFactory {
             return Ok(hit.clone());
         }
         let protos = filter_alpn(&key.1);
-        let mut config = build_client_config(key.0, protos)?;
+        // P2-5 M1 起缓存键扩展指纹形态（D-2/D-4）；当前仅 none 单键
+        let mut config = build_client_config(key.0, protos, TlsFingerprint::None)?;
         config.resumption = rustls::client::Resumption::in_memory_sessions(self.session_cache_size);
         let arc = Arc::new(config);
         self.configs
@@ -182,11 +214,26 @@ impl TlsConnectorFactory {
     }
 }
 
+/// 全量签名方案清单（NoVerifier 广告面；P2-5 预设子集的取值域，
+/// §5-E5——子集只从此清单收缩，不引入清单外方案）
+pub(crate) const FULL_VERIFY_SCHEMES: &[rustls::SignatureScheme] = &[
+    rustls::SignatureScheme::RSA_PKCS1_SHA256,
+    rustls::SignatureScheme::RSA_PKCS1_SHA384,
+    rustls::SignatureScheme::RSA_PKCS1_SHA512,
+    rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+    rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+    rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+    rustls::SignatureScheme::RSA_PSS_SHA256,
+    rustls::SignatureScheme::RSA_PSS_SHA384,
+    rustls::SignatureScheme::RSA_PSS_SHA512,
+    rustls::SignatureScheme::ED25519,
+];
+
 /// 跳过证书验证的验证器
 #[derive(Debug)]
-struct NoVerifier;
+pub(crate) struct NoVerifier;
 
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
+impl ServerCertVerifier for NoVerifier {
     fn verify_server_cert(
         &self,
         _end_entity: &rustls::pki_types::CertificateDer<'_>,
@@ -217,17 +264,71 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-            rustls::SignatureScheme::ED25519,
-        ]
+        FULL_VERIFY_SCHEMES.to_vec()
+    }
+}
+
+/// 指纹形态验证器包装（P2-5 D-3）：委托全部校验语义，仅收缩 hello
+/// 广告面 `supported_verify_schemes`（清单是广告面非校验面）。
+pub(crate) struct ShapedVerifier {
+    inner: Arc<dyn ServerCertVerifier>,
+    schemes: Vec<rustls::SignatureScheme>,
+}
+
+impl std::fmt::Debug for ShapedVerifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShapedVerifier")
+            .field("schemes", &self.schemes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ShapedVerifier {
+    /// 按预设子集排序装配（表值必须 ⊆ [`FULL_VERIFY_SCHEMES`]——构造
+    /// 期不查，§7-1 纯函数测试钉住）。
+    pub(crate) fn new(
+        inner: Arc<dyn ServerCertVerifier>,
+        schemes: &[rustls::SignatureScheme],
+    ) -> Self {
+        Self {
+            inner,
+            schemes: schemes.to_vec(),
+        }
+    }
+}
+
+impl ServerCertVerifier for ShapedVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        self.inner
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.schemes.clone()
     }
 }

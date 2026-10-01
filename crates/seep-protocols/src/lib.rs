@@ -14,12 +14,14 @@
 //! - Trojan - Trojan 协议（TLS + 密码认证）
 //! - WireGuard - WireGuard VPN（系统级接口）
 
+pub mod fingerprint;
 pub mod inbound;
 pub mod middleware;
 pub mod outbound;
 pub mod pool;
 mod tls;
 
+pub use fingerprint::TlsFingerprint;
 pub use inbound::{HttpIngress, MixedIngress, Socks5Ingress};
 pub use middleware::LatencyProbe;
 pub use outbound::{
