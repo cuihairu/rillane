@@ -170,7 +170,7 @@ impl MeshTlsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MeshEnvelope {
     pub version: u32,
     pub flow_id: String,
@@ -178,18 +178,136 @@ pub struct MeshEnvelope {
     pub target_port: u16,
     /// Remaining path including the current node id as the first element.
     pub path: Vec<NodeId>,
+    /// P1-4 §2.4：尾部填充字节数（0 = 无填充，不序列化——未填充帧与
+    /// 旧行为字节一致，§7.1 关闭对照口径）。旧端 serde 忽略未知字段，
+    /// 但尾部填充字节会污染其 JSON 解析，故打填充的帧同时升 version=2
+    /// （接收端见下），旧端在版本检查处显式拒绝而非解析错乱。
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub pad_len: u32,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 impl MeshEnvelope {
     pub fn new(flow_id: String, target_host: String, target_port: u16, path: Vec<NodeId>) -> Self {
         Self {
-            version: 1,
+            version: MESH_ENVELOPE_VERSION,
             flow_id,
             target_host,
             target_port,
             path,
+            pad_len: 0,
         }
     }
+}
+
+// ── P1-4 §2.4/§4.2：MeshEnvelope 帧填充执行侧（TCP 面 chain 帧）──
+
+/// P1-4 §2.4 版本门：MESH_ENVELOPE_VERSION=1 为既有帧形；本条目起打填充的
+/// 帧升 version=2（携带 `pad_len` + 尾部 0x00）。发送端仅打填充时升版本
+/// （未填充帧维持 1，与旧行为字节一致）；接收端 1|2 皆收、仅 2 可能携带
+/// 填充。MVP 假定同版本部署（§2.4/§10 R-obfs2：无法确认对端版本时不填充
+/// 的完整判定归后续版本协商；混布升级窗口退化为不填充，fail-open）。
+pub const MESH_ENVELOPE_VERSION: u32 = 1;
+pub const PAD_ENVELOPE_VERSION: u32 = 2;
+
+/// P1-4 §5 执行侧计数（进程级：`MeshDataPlane` 每次 forward 现建，实例
+/// 计数无法聚合）：frames=实际填充帧数、added=累计填充字节、
+/// too_large=E4 帧上限/引擎 TooLarge 放弃、overhead=E10 策略层放弃。
+/// M4 挂 `/metrics` 渲染（`seep_obfs_padding_*` 家族）。
+static PAD_FRAMES: AtomicU64 = AtomicU64::new(0);
+static PAD_BYTES_ADDED: AtomicU64 = AtomicU64::new(0);
+static PAD_SKIPPED_TOO_LARGE: AtomicU64 = AtomicU64::new(0);
+static PAD_SKIPPED_OVERHEAD: AtomicU64 = AtomicU64::new(0);
+
+/// 填充计数快照（M4 渲染/测试用；顺序 (frames, added, too_large, overhead)）。
+pub fn obfs_pad_snapshot() -> (u64, u64, u64, u64) {
+    (
+        PAD_FRAMES.load(Ordering::Relaxed),
+        PAD_BYTES_ADDED.load(Ordering::Relaxed),
+        PAD_SKIPPED_TOO_LARGE.load(Ordering::Relaxed),
+        PAD_SKIPPED_OVERHEAD.load(Ordering::Relaxed),
+    )
+}
+
+/// P1-4 §4.2 执行侧：按 spec 对 envelope 帧求填充决策并产填充帧 payload。
+///
+/// - 决策 = M2 策略引擎 `decide_padding`（overhead cap 在策略层，§2.6；
+///   envelope 为每流一帧，frame_seq 恒 0——多样性来自 flow_id，§2.2）；
+/// - 帧总长精确命中目标形态：`pad_len` 字段自身占字节，固定点迭代使
+///   `json' + K == padded_len`（未收敛=字段开销吃尽填充 → 不填充）；
+/// - E4：payload 超既有头部上限（`MAX_HEADER_BYTES`）→ 不填充 + 计数；
+/// - InPlace/Skip/超限/未收敛 → `None`（不填充，连通性优先，§6 E4/E10）。
+fn pad_envelope_frame(
+    env: &MeshEnvelope,
+    spec: &seep_core::PaddingSpec,
+    flow_id: &seep_core::FlowId,
+) -> Result<Option<Vec<u8>>> {
+    let base = serde_json::to_vec(env)?;
+    let decision = seep_protocols::middleware::decide_padding(spec, base.len(), flow_id, 0);
+    let target = match decision {
+        seep_protocols::middleware::PadDecision::Pad { padded_len, .. } => padded_len,
+        seep_protocols::middleware::PadDecision::InPlace => return Ok(None),
+        seep_protocols::middleware::PadDecision::Skip {
+            reason: seep_protocols::middleware::PadSkipReason::TooLarge,
+        } => {
+            PAD_SKIPPED_TOO_LARGE.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+        seep_protocols::middleware::PadDecision::Skip {
+            reason: seep_protocols::middleware::PadSkipReason::OverheadCap,
+        } => {
+            PAD_SKIPPED_OVERHEAD.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+    };
+    if target + 4 > MAX_HEADER_BYTES {
+        PAD_SKIPPED_TOO_LARGE.fetch_add(1, Ordering::Relaxed);
+        return Ok(None);
+    }
+    // 固定点：声明 K 使 json'(含 pad_len 字段) + K == target
+    let mut declared = target.saturating_sub(base.len());
+    for _ in 0..3 {
+        let mut env2 = env.clone();
+        env2.version = PAD_ENVELOPE_VERSION;
+        env2.pad_len = declared as u32;
+        let json = serde_json::to_vec(&env2)?;
+        match target.checked_sub(json.len()) {
+            Some(k) if k == declared => {
+                let mut payload = json;
+                payload.resize(target, 0);
+                PAD_FRAMES.fetch_add(1, Ordering::Relaxed);
+                PAD_BYTES_ADDED.fetch_add(declared as u64, Ordering::Relaxed);
+                return Ok(Some(payload));
+            }
+            Some(k) => declared = k,
+            None => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// P1-4 §2.4 接收侧：解填充帧——尾部 0x00 计数与 `pad_len` 声明一致性校验
+/// （E7：不符 → Err 丢帧）；version=1 帧携带填充亦按 E7 拒（旧形无此态）。
+/// 未填充帧（无尾部 0x00、无 pad_len 字段）走纯 JSON 解析，与旧行为一致。
+fn decode_envelope_payload(buf: &[u8]) -> Result<MeshEnvelope> {
+    let zeros = buf.iter().rev().take_while(|&&b| b == 0).count();
+    let env: MeshEnvelope = serde_json::from_slice(&buf[..buf.len() - zeros])?;
+    if env.pad_len as usize != zeros {
+        anyhow::bail!(
+            "mesh envelope pad_len {} 与帧尾 {zeros} 字节 0x00 不一致（E7，丢弃帧）",
+            env.pad_len
+        );
+    }
+    if zeros > 0 && env.version < PAD_ENVELOPE_VERSION {
+        anyhow::bail!(
+            "mesh envelope version {} 携带填充（E7，须 ≥ {PAD_ENVELOPE_VERSION}）",
+            env.version
+        );
+    }
+    Ok(env)
 }
 
 // ── P0-4 §2：UDP 面二进制 envelope（与 TCP 面 JSON MeshEnvelope 同文件；纯函数，单测钉住）──
@@ -886,7 +1004,9 @@ impl MeshDataPlane {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         let env = read_envelope(&mut inbound).await?;
-        if env.version != 1 {
+        // P1-4 §2.4 版本门：1 = 既有帧形，2 = 填充能力版本（PAD_ENVELOPE_VERSION）；
+        // 中继转发帧不追加填充（对齐 UDP 面 D-16 裁决），下游重编码为 version=1
+        if env.version != MESH_ENVELOPE_VERSION && env.version != PAD_ENVELOPE_VERSION {
             return Err(anyhow!("unsupported mesh envelope version {}", env.version));
         }
         if env.path.is_empty() {
@@ -1033,6 +1153,8 @@ impl MeshDataPlane {
         next_hop: &NodeId,
         envelope: &MeshEnvelope,
         io: &mut dyn IoStream,
+        pad_spec: Option<&seep_core::PaddingSpec>,
+        flow_id: &seep_core::FlowId,
     ) -> Result<()> {
         let addr = self
             .registry
@@ -1048,7 +1170,16 @@ impl MeshDataPlane {
                 return Err(e);
             }
         };
-        write_envelope(&mut stream, envelope).await?;
+        // P1-4 §4.2：执行点=序列化后、写 wire 前——spec 缺席（未选中/解析失败
+        // E9）即旧行为 write_envelope；命中则写填充帧（帧长命中目标形态）
+        let payload = match pad_spec {
+            Some(spec) => pad_envelope_frame(envelope, spec, flow_id)?,
+            None => None,
+        };
+        match payload {
+            Some(padded) => write_frame(&mut stream, &padded).await?,
+            None => write_envelope(&mut stream, envelope).await?,
+        }
         let (up, down) = match copy_bidirectional(io, &mut stream).await {
             Ok(v) => v,
             Err(e) => {
@@ -1431,7 +1562,8 @@ where
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
-    Ok(serde_json::from_slice(&buf)?)
+    // P1-4 §2.4：接收侧解填充（未填充帧走纯 JSON 解析，与旧行为一致）
+    decode_envelope_payload(&buf)
 }
 
 async fn write_envelope<W>(stream: &mut W, env: &MeshEnvelope) -> Result<()>
@@ -1439,11 +1571,19 @@ where
     W: tokio::io::AsyncWrite + Unpin,
 {
     let buf = serde_json::to_vec(env)?;
-    if buf.len() > MAX_HEADER_BYTES {
-        return Err(anyhow!("mesh header too large: {} bytes", buf.len()));
+    write_frame(stream, &buf).await
+}
+
+/// P1-4 §2.4：`[len: u32][payload]` 帧写入（envelope 与填充帧共用）。
+async fn write_frame<W>(stream: &mut W, payload: &[u8]) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    if payload.len() > MAX_HEADER_BYTES {
+        return Err(anyhow!("mesh header too large: {} bytes", payload.len()));
     }
-    stream.write_u32(buf.len() as u32).await?;
-    stream.write_all(&buf).await?;
+    stream.write_u32(payload.len() as u32).await?;
+    stream.write_all(payload).await?;
     Ok(())
 }
 
@@ -1798,6 +1938,261 @@ mod tests {
         assert_eq!(buf, [1, 2, 3, 4]);
         drop(exit_plane);
         drop(relay_plane);
+    }
+
+    // ── P1-4 §2.4/§4.2：MeshEnvelope 帧 pad/strip（§7.1 golden + §7.2 全链路）──
+
+    fn pad_env_fixture() -> MeshEnvelope {
+        MeshEnvelope::new(
+            "flow-1".into(),
+            "example.com".into(),
+            443,
+            vec!["relay1".into(), "exit1".into()],
+        )
+    }
+
+    fn fixed_spec(target: usize) -> seep_core::PaddingSpec {
+        seep_core::PaddingSpec {
+            mode: seep_core::PaddingMode::Fixed,
+            target,
+            buckets: vec![],
+            min: 0,
+            max: 0,
+            max_overhead_ratio: 0.5,
+        }
+    }
+
+    /// §7.1 golden：fixed 模式填充帧总长精确命中 target（pad_len 字段自身
+    /// 占字节，固定点迭代收敛）；尾部 K×0x00 与 pad_len 声明一致；decode
+    /// 还原全部字段（envelope 即 payload，strip 后语义相等）；版本升 2。
+    #[test]
+    fn envelope_pad_strip_golden_fixed() {
+        let env = pad_env_fixture();
+        let base = serde_json::to_vec(&env).unwrap();
+        // ratio 放开隔离固定点逻辑（+120B 超 0.5 cap——cap 路径归 skip 测钉）
+        let mut spec = fixed_spec(base.len() + 120);
+        spec.max_overhead_ratio = 100.0;
+        let payload = pad_envelope_frame(&env, &spec, &seep_core::FlowId::new())
+            .unwrap()
+            .expect("应产生填充帧");
+        assert_eq!(payload.len(), base.len() + 120, "帧总长精确命中 target");
+        let zeros = payload.iter().rev().take_while(|&&b| b == 0).count();
+        assert!(
+            zeros > 0 && zeros < 120,
+            "填充字节 = 120 - 字段开销：{zeros}"
+        );
+
+        let decoded = decode_envelope_payload(&payload).unwrap();
+        assert_eq!(decoded.pad_len as usize, zeros);
+        assert_eq!(decoded.version, PAD_ENVELOPE_VERSION);
+        assert_eq!(decoded.flow_id, env.flow_id);
+        assert_eq!(decoded.target_host, env.target_host);
+        assert_eq!(decoded.target_port, env.target_port);
+        assert_eq!(decoded.path, env.path);
+    }
+
+    /// §7.1：pad_len=0 不序列化——未填充帧与旧行为字节一致（关闭对照的
+    /// 字节级口径）；write → read 全往返经 strip 路径还原。
+    #[tokio::test]
+    async fn envelope_unpadded_bytes_match_legacy_and_roundtrip() {
+        let env = pad_env_fixture();
+        let json = serde_json::to_vec(&env).unwrap();
+        assert!(
+            !json.windows(b"pad_len".len()).any(|w| w == b"pad_len"),
+            "0 值字段不序列化"
+        );
+        assert_eq!(env.version, MESH_ENVELOPE_VERSION);
+
+        // wire 字节级：长度前缀 = json 字节数，帧体逐字节等于旧序列化形
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        write_envelope(&mut client, &env).await.unwrap();
+        let len = server.read_u32().await.unwrap() as usize;
+        assert_eq!(len, json.len());
+        let mut buf = vec![0u8; len];
+        server.read_exact(&mut buf).await.unwrap();
+        assert_eq!(buf, json, "wire 字节与旧序列化形逐字节一致");
+
+        // strip 路径往返（read_envelope 内走 decode_envelope_payload）
+        let (mut c2, mut s2) = tokio::io::duplex(4096);
+        write_envelope(&mut c2, &env).await.unwrap();
+        let decoded = read_envelope(&mut s2).await.unwrap();
+        assert_eq!(decoded, env);
+        assert_eq!(decoded.pad_len, 0);
+    }
+
+    /// §6 E7：pad_len 声明与帧尾 0x00 数不符 / version=1 携带填充 → 丢帧。
+    #[test]
+    fn envelope_pad_e7_mismatch_rejected() {
+        let env = pad_env_fixture();
+        let mut env2 = env.clone();
+        env2.version = PAD_ENVELOPE_VERSION;
+        env2.pad_len = 99;
+        let mut frame = serde_json::to_vec(&env2).unwrap();
+        frame.resize(frame.len() + 3, 0); // 实际 3 字节 ≠ 声明 99
+        let err = decode_envelope_payload(&frame).unwrap_err();
+        assert!(err.to_string().contains("E7"), "{err}");
+
+        let mut env3 = env.clone();
+        env3.version = MESH_ENVELOPE_VERSION;
+        env3.pad_len = 3;
+        let mut frame3 = serde_json::to_vec(&env3).unwrap();
+        frame3.resize(frame3.len() + 3, 0); // version=1 携带填充
+        let err = decode_envelope_payload(&frame3).unwrap_err();
+        assert!(err.to_string().contains("E7"), "{err}");
+    }
+
+    /// §2.6/E10 + §6 E4：InPlace（恰为 target）→ None；overhead cap（策略层
+    /// 放弃）与帧上限（执行层放弃）→ None 且对应计数递增。
+    #[test]
+    fn envelope_pad_skip_paths_and_counters() {
+        let env = pad_env_fixture();
+        let base = serde_json::to_vec(&env).unwrap();
+        let id = seep_core::FlowId::new();
+
+        // 恰为 target → InPlace → None
+        let spec = fixed_spec(base.len());
+        assert!(pad_envelope_frame(&env, &spec, &id).unwrap().is_none());
+
+        // E10：r=0、min=0 → cap=len < target → 策略层放弃 + overhead 计数
+        let mut spec = fixed_spec(base.len() + 10);
+        spec.max_overhead_ratio = 0.0;
+        let (_, _, _, o0) = obfs_pad_snapshot();
+        assert!(pad_envelope_frame(&env, &spec, &id).unwrap().is_none());
+        let (_, _, _, o1) = obfs_pad_snapshot();
+        assert!(o1 > o0, "overhead 计数递增");
+
+        // E4：target 超 MAX_HEADER_BYTES → 执行层放弃 + too_large 计数
+        //（ratio 放开让策略层放行——cap 是比例上界，65636/96≈684 倍开销，
+        // 100 仍不够；overhead cap 归策略层，帧上限归执行层，两层各自拦截）
+        let mut spec = fixed_spec(MAX_HEADER_BYTES + 100);
+        spec.max_overhead_ratio = 10000.0;
+        let (_, _, t0, _) = obfs_pad_snapshot();
+        assert!(pad_envelope_frame(&env, &spec, &id).unwrap().is_none());
+        let (_, _, t1, _) = obfs_pad_snapshot();
+        assert!(t1 > t0, "too_large 计数递增");
+    }
+
+    /// §7.2 chain 填充全链路：client 经真实 `dial_and_tunnel` 打填充帧 →
+    /// 对端读 wire：帧长 ∈ buckets（bucket 对齐 512）、尾部 0x00 ==
+    /// pad_len、strip 还原字段；随后载荷回显，证明链路未被填充破坏。
+    #[tokio::test]
+    async fn padded_dial_wire_frame_hits_bucket_and_roundtrips() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = listener.local_addr().unwrap();
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(1);
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let len = s.read_u32().await.unwrap() as usize;
+            let mut frame = vec![0u8; len];
+            s.read_exact(&mut frame).await.unwrap();
+            frame_tx.send((len, frame)).await.unwrap();
+            // 充当 exit：回显后续载荷
+            let mut buf = [0u8; 4];
+            s.read_exact(&mut buf).await.unwrap();
+            s.write_all(&buf).await.unwrap();
+        });
+
+        let registry = Arc::new(MeshRegistry::new());
+        registry
+            .register_node(NodeRecord::new("exit1".into(), NodeRole::Exit, peer_addr))
+            .unwrap();
+        let plane = MeshDataPlane::new("client1".into(), registry);
+
+        let flow_id = seep_core::FlowId::new();
+        let env = MeshEnvelope::new(
+            flow_id.as_uuid().to_string(),
+            "127.0.0.1".into(),
+            peer_addr.port(),
+            vec!["exit1".into()],
+        );
+        let spec = seep_core::PaddingSpec {
+            mode: seep_core::PaddingMode::Bucket,
+            target: 0,
+            buckets: vec![512, 1024],
+            min: 0,
+            max: 0,
+            // 放宽上限：帧长 ~120B 对齐 512 桶需 r ≥ ~3.3
+            max_overhead_ratio: 100.0,
+        };
+
+        let (mut client_io, mut io_peer) = tokio::io::duplex(4096);
+        let dial = {
+            let plane = plane;
+            tokio::spawn(async move {
+                plane
+                    .dial_and_tunnel(&"exit1".into(), &env, &mut client_io, Some(&spec), &flow_id)
+                    .await
+            })
+        };
+
+        let (wire_len, frame) = frame_rx.recv().await.unwrap();
+        assert_eq!(wire_len, 512, "bucket 对齐：wire 帧长命中 512 桶");
+        let decoded = decode_envelope_payload(&frame).unwrap();
+        assert_eq!(decoded.version, PAD_ENVELOPE_VERSION);
+        assert_eq!(
+            decoded.pad_len as usize,
+            frame.iter().rev().take_while(|&&b| b == 0).count(),
+            "尾部填充与声明一致"
+        );
+        assert_eq!(decoded.target_host, "127.0.0.1");
+        assert_eq!(decoded.path, vec!["exit1".to_string()]);
+
+        io_peer.write_all(&[1, 2, 3, 4]).await.unwrap();
+        let mut echo = [0u8; 4];
+        io_peer.read_exact(&mut echo).await.unwrap();
+        assert_eq!(echo, [1, 2, 3, 4], "填充帧后链路载荷回显不受影响");
+        dial.abort();
+    }
+
+    /// §7.2 关闭对照：无 spec（enabled=false / 未选中 / E9）→ wire 帧长与
+    /// 旧序列化形完全一致（零字节差异，§2.5）。
+    #[tokio::test]
+    async fn unpadded_dial_wire_frame_byte_identical_baseline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = listener.local_addr().unwrap();
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(1);
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let len = s.read_u32().await.unwrap() as usize;
+            let mut frame = vec![0u8; len];
+            s.read_exact(&mut frame).await.unwrap();
+            frame_tx.send((len, frame)).await.unwrap();
+            let mut buf = [0u8; 4];
+            s.read_exact(&mut buf).await.unwrap();
+            s.write_all(&buf).await.unwrap();
+        });
+
+        let registry = Arc::new(MeshRegistry::new());
+        registry
+            .register_node(NodeRecord::new("exit1".into(), NodeRole::Exit, peer_addr))
+            .unwrap();
+        let plane = MeshDataPlane::new("client1".into(), registry);
+
+        let flow_id = seep_core::FlowId::new();
+        let env = MeshEnvelope::new(
+            flow_id.as_uuid().to_string(),
+            "127.0.0.1".into(),
+            peer_addr.port(),
+            vec!["exit1".into()],
+        );
+        let legacy = serde_json::to_vec(&env).unwrap();
+
+        let (mut client_io, mut io_peer) = tokio::io::duplex(4096);
+        let dial = tokio::spawn(async move {
+            plane
+                .dial_and_tunnel(&"exit1".into(), &env, &mut client_io, None, &flow_id)
+                .await
+        });
+
+        let (wire_len, frame) = frame_rx.recv().await.unwrap();
+        assert_eq!(wire_len, legacy.len());
+        assert_eq!(frame, legacy, "wire 字节与旧行为逐字节一致（零差异）");
+
+        io_peer.write_all(&[5, 6, 7, 8]).await.unwrap();
+        let mut echo = [0u8; 4];
+        io_peer.read_exact(&mut echo).await.unwrap();
+        assert_eq!(echo, [5, 6, 7, 8]);
+        dial.abort();
     }
 
     #[tokio::test]

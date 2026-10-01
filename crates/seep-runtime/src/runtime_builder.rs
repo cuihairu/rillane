@@ -1559,7 +1559,20 @@ impl FlowOutputRouter {
                         mesh_path.clone(),
                     );
 
-                    match plane.dial_and_tunnel(&next_hop, &env, &mut *flow.io).await {
+                    // P1-4 §4.2/E9：注解缺 spec 即 None（旧行为）；命中则填充帧
+                    let pad_spec = crate::obfs_config::padding_spec_from_annotations(
+                        &flow.metadata.annotations,
+                    );
+                    match plane
+                        .dial_and_tunnel(
+                            &next_hop,
+                            &env,
+                            &mut *flow.io,
+                            pad_spec.as_ref(),
+                            &flow.id,
+                        )
+                        .await
+                    {
                         Ok(()) => return Ok(FlowReport::default()),
                         Err(e) => {
                             tracing::warn!(
@@ -1649,11 +1662,16 @@ impl FlowOutputRouter {
                                                             flow.target.port,
                                                             mesh_path,
                                                         );
+                                                        let pad_spec = crate::obfs_config::padding_spec_from_annotations(
+                                                            &flow.metadata.annotations,
+                                                        );
                                                         plane
                                                             .dial_and_tunnel(
                                                                 &new_next,
                                                                 &env,
                                                                 &mut *flow.io,
+                                                                pad_spec.as_ref(),
+                                                                &flow.id,
                                                             )
                                                             .await?;
                                                         return Ok(FlowReport::default());

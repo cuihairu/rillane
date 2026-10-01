@@ -5,6 +5,7 @@
 //! spec 映射）；M1 本文件补链构造（`PaddingMiddleware` 消费 `PaddingPolicy`，
 //! 选择器闭包固化，§8 分步）。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -12,7 +13,7 @@ use tracing::warn;
 
 use seep_config::{ApplyTo, ObfuscationConfig, PaddingBlockConfig};
 use seep_core::{FlowMiddleware, MiddlewareChain, PaddingMode, PaddingSpec};
-use seep_protocols::middleware::{LatencyProbe, PadSelector, PaddingMiddleware};
+use seep_protocols::middleware::{LatencyProbe, PadSelector, PaddingMiddleware, ANN_OBFS_PADDING};
 
 /// 解析后的 padding 策略（选择器 + spec）：M1 构建 middleware 链、M2
 /// `PaddingMiddleware` 的构造输入。选择器按 §1.4 注解值匹配（`seep.route.kind`
@@ -101,6 +102,17 @@ fn padding_block_to_spec(block: &PaddingBlockConfig) -> Result<PaddingSpec> {
         max: block.max,
         max_overhead_ratio: block.max_overhead_ratio,
     })
+}
+
+/// P1-4 §4.2/E9：从 `seep.obfs.padding` 注解提取 spec——注解缺失或非法
+/// JSON 一律 `None`（不填充：伪装是增益，不得破坏转发）。帧执行侧
+/// （`forward_chain` → `dial_and_tunnel`）的消费入口。
+pub fn padding_spec_from_annotations(
+    annotations: &BTreeMap<String, String>,
+) -> Option<PaddingSpec> {
+    annotations
+        .get(ANN_OBFS_PADDING)
+        .and_then(|json| serde_json::from_str(json).ok())
 }
 
 /// `ObfuscationConfig` → `MiddlewareChain`（§3.2 表行 1：MVP 至多一个
@@ -340,5 +352,34 @@ mod tests {
         cfg.middleware = vec!["bogus".to_string()];
         let err = build_middleware_chain(Some(&cfg), &[]).unwrap_err();
         assert!(err.to_string().contains("bogus"), "{err}");
+    }
+
+    /// §4.2/E9：`seep.obfs.padding` 注解提取 spec——缺失/非法 JSON → None
+    /// （不填充：伪装是增益，不得破坏转发）；合法 JSON 还原 spec。
+    #[test]
+    fn padding_spec_annotation_extraction_e9() {
+        let spec = PaddingSpec {
+            mode: PaddingMode::Fixed,
+            target: 512,
+            buckets: vec![],
+            min: 0,
+            max: 0,
+            max_overhead_ratio: 0.5,
+        };
+
+        // 注解缺席 → None（空链关闭态 / 未选中流）
+        let mut ann = BTreeMap::new();
+        assert_eq!(padding_spec_from_annotations(&ann), None);
+
+        // 非法 JSON → None（E9：静默放弃填充，不 Err）
+        ann.insert(ANN_OBFS_PADDING.to_string(), "not json".to_string());
+        assert_eq!(padding_spec_from_annotations(&ann), None);
+
+        // 合法 JSON（= PaddingMiddleware 写入形）→ 还原 spec
+        ann.insert(
+            ANN_OBFS_PADDING.to_string(),
+            serde_json::to_string(&spec).unwrap(),
+        );
+        assert_eq!(padding_spec_from_annotations(&ann), Some(spec));
     }
 }
