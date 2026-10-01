@@ -35,7 +35,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
 uuid = { version = "1.8", features = ["serde", "v4"] }
 rand = "0.8"
-hyper = { version = "0.14", features = ["full"] }
+# hyper 1.x（待派 2026-10-02 迁移：hyper 0.14 唯一引入路径 h2 0.3 <0.4.16
+# RUSTSEC-2026-0258 空帧放大；control plane 仅用 http1 server 面）
+hyper = { version = "1.5", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["http1", "server", "server-auto", "server-graceful", "tokio"] }
+http-body-util = "0.1"
 serde_urlencoded = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 notify = { version = "8.0", features = ["serde"] }

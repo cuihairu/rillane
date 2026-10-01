@@ -102,10 +102,9 @@ jobs:
       run: cargo install cargo-audit
 
     - name: Run security audit
-      # RUSTSEC-2026-0258（h2 <0.4.16 空 DATA 帧放大）：唯一引入路径是 hyper 0.14
-      # （seepd control plane，仅 loopback 绑定 + Bearer 鉴权）；修复需 hyper 1.x
-      # 迁移连带 h2 0.4，另立轮次处理
-      run: cargo audit --ignore RUSTSEC-2026-0258
+      # RUSTSEC-2026-0258（h2 <0.4.16 空 DATA 帧放大）已随 hyper 0.14 → 1.x
+      # 迁移清零（h2 ≥0.4.16 入锁），无 ignore 项；新告警出现时按条目定向处理
+      run: cargo audit
 
   msrv:
     name: Check MSRV

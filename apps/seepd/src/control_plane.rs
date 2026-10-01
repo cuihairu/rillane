@@ -6,11 +6,12 @@ use std::{
     time::Instant,
 };
 
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
 use hyper::{
-    body,
     header::{AUTHORIZATION, CONTENT_TYPE},
-    service::{make_service_fn, service_fn},
-    Body, Method, Request, Response, Server, StatusCode,
+    service::service_fn,
+    Method, Request, Response, StatusCode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,14 @@ use seep_core::udp::{TableSnapshot, UdpIngressMetrics, UdpIngressSnapshot};
 use seep_mesh::{LinkState, MeshRegistry, NodeCapability, NodeRecord, NodeRole};
 use seep_runtime::{ChainConstraints, ConfigMergeStats, Runtime, RuntimeEvent, SwitchReason};
 use seep_subscription::{Subscription, SubscriptionConverter, SubscriptionType};
+
+/// 请求体统一形（hyper 1.x 迁移）：产线路径 `Incoming`（服务）与测试
+/// 直调 `Full<Bytes>`（`Incoming` 无公开构造）共用 handle/路由/read_json。
+trait RequestBody: hyper::body::Body<Data = Bytes> + Unpin + Send + 'static {}
+impl<T: hyper::body::Body<Data = Bytes> + Unpin + Send + 'static> RequestBody for T {}
+
+/// 响应体统一形：全部端点均为内存完结体（无流式响应），`Full<Bytes>` 即够。
+type RespBody = Full<Bytes>;
 
 #[derive(Clone)]
 pub struct ControlPlane {
@@ -52,26 +61,59 @@ impl ControlPlane {
     ) -> anyhow::Result<()> {
         self.spawn_event_log_task();
 
-        let make = make_service_fn(move |_conn| {
-            let state = self.clone();
-            async move {
-                Ok::<_, Infallible>(service_fn(move |req| {
-                    let state = state.clone();
-                    async move { Ok::<_, Infallible>(state.handle(req).await) }
-                }))
+        // hyper 1.x：`hyper::Server` 已移除，监听/连接循环显式化——hyper-util
+        // auto Builder + 每连接 `serve_connection_with_shutdown`；oneshot 关桥
+        // 转 watch 广播（Receiver 不可克隆）给在途连接，停止 accept 后存量
+        // 请求排空再返回，语义对齐旧 `with_graceful_shutdown`。
+        let listener = tokio::net::TcpListener::bind(bind).await?;
+        let mut shutdown = shutdown;
+        let builder =
+            hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+        let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+        let mut conns = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => break,
+                accepted = listener.accept() => {
+                    let (stream, _) = match accepted {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "seep::control",
+                                error = %e,
+                                "control plane accept 失败，继续"
+                            );
+                            continue;
+                        }
+                    };
+                    let state = self.clone();
+                    let service = service_fn(move |req| {
+                        let state = state.clone();
+                        async move { Ok::<_, Infallible>(state.handle(req).await) }
+                    });
+                    let conn = builder
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .into_owned();
+                    let watcher = graceful.watcher();
+                    conns.spawn(async move {
+                        if let Err(e) = watcher.watch(conn).await {
+                            tracing::debug!(
+                                target: "seep::control",
+                                error = %e,
+                                "control plane connection closed"
+                            );
+                        }
+                    });
+                }
             }
-        });
-
-        Server::bind(&bind)
-            .serve(make)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown.await;
-            })
-            .await?;
+        }
+        // 停止 accept 后等待在途请求排空（语义对齐旧 with_graceful_shutdown）
+        graceful.shutdown().await;
+        while conns.join_next().await.is_some() {}
         Ok(())
     }
 
-    async fn handle(&self, req: Request<Body>) -> Response<Body> {
+    async fn handle(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
         let method = req.method().clone();
         let path = req.uri().path().to_string();
 
@@ -200,7 +242,7 @@ impl ControlPlane {
         });
     }
 
-    fn is_authorized(&self, req: &Request<Body>) -> bool {
+    fn is_authorized(&self, req: &Request<impl RequestBody>) -> bool {
         let Some(expected) = self.admin_token.as_deref() else {
             return true;
         };
@@ -228,7 +270,7 @@ impl ControlPlane {
 
     // Err = 错误响应体（handler ? 早退惯例），不装箱
     #[allow(clippy::result_large_err)]
-    fn mesh(&self) -> Result<Arc<MeshRegistry>, Response<Body>> {
+    fn mesh(&self) -> Result<Arc<MeshRegistry>, Response<RespBody>> {
         self.runtime
             .get_mesh_registry()
             .ok_or_else(|| text(StatusCode::SERVICE_UNAVAILABLE, "mesh not enabled"))
@@ -236,7 +278,7 @@ impl ControlPlane {
 
     // Err = 错误响应体（handler ? 早退惯例），不装箱
     #[allow(clippy::result_large_err)]
-    fn chain_mgr(&self) -> Result<Arc<seep_runtime::ChainManager>, Response<Body>> {
+    fn chain_mgr(&self) -> Result<Arc<seep_runtime::ChainManager>, Response<RespBody>> {
         self.runtime
             .get_chain_manager()
             .ok_or_else(|| text(StatusCode::SERVICE_UNAVAILABLE, "chain not enabled"))
@@ -246,13 +288,13 @@ impl ControlPlane {
     #[allow(clippy::result_large_err)]
     fn subscription_mgr(
         &self,
-    ) -> Result<Arc<seep_subscription::SubscriptionManager>, Response<Body>> {
+    ) -> Result<Arc<seep_subscription::SubscriptionManager>, Response<RespBody>> {
         self.runtime
             .get_subscription_manager()
             .ok_or_else(|| text(StatusCode::SERVICE_UNAVAILABLE, "subscription not enabled"))
     }
 
-    async fn handle_metrics(&self) -> Response<Body> {
+    async fn handle_metrics(&self) -> Response<RespBody> {
         if !self.metrics_enabled {
             return text(StatusCode::NOT_FOUND, "metrics disabled");
         }
@@ -1011,14 +1053,14 @@ impl ControlPlane {
         Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "text/plain; version=0.0.4")
-            .body(Body::from(out))
-            .unwrap_or_else(|_| Response::new(Body::from("internal error")))
+            .body(RespBody::new(Bytes::from(out)))
+            .unwrap_or_else(|_| Response::new(RespBody::new(Bytes::from("internal error"))))
     }
 
     /// P0-5 §3.1/§9-1：UDP 观测 JSON。`table`/`ingress` 恒在（UDP 关闭时全零，
     /// §6-2）；`mesh` 仅面启用时为对象、否则 null（两态可区分）；
     /// `mesh_client` 仅 chain+udp client 桥装配时出现（§2.4 收编裁决：键省略）。
-    async fn handle_udp_stats(&self) -> Response<Body> {
+    async fn handle_udp_stats(&self) -> Response<RespBody> {
         let (table, ingress) = match self.runtime.get_udp_service() {
             Some(svc) => (svc.table().snapshot(), svc.ingress_snapshot()),
             None => (
@@ -1042,7 +1084,7 @@ impl ControlPlane {
 
     /// P1-5 §6.2 `GET /egress/pool/stats`：池快照 + 每键 idle + 计数族。
     /// 块缺席/未启用 = enabled:false 零值响应（形态稳定，脚本好消费）。
-    async fn handle_egress_pool_stats(&self) -> Response<Body> {
+    async fn handle_egress_pool_stats(&self) -> Response<RespBody> {
         let block = self.runtime.get_config().egress_pool;
         let (enabled, tls_resumption) = match &block {
             Some(b) => (b.enabled, b.tls_resumption()),
@@ -1079,7 +1121,7 @@ impl ControlPlane {
         json(StatusCode::OK, &dto)
     }
 
-    async fn handle_nodes(&self) -> Response<Body> {
+    async fn handle_nodes(&self) -> Response<RespBody> {
         let registry = match self.mesh() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1101,23 +1143,23 @@ impl ControlPlane {
         json(StatusCode::OK, &nodes)
     }
 
-    async fn handle_flows(&self) -> Response<Body> {
+    async fn handle_flows(&self) -> Response<RespBody> {
         let stats = self.runtime.get_flow_stats();
         json(StatusCode::OK, &stats)
     }
 
-    async fn handle_runtime_stats(&self) -> Response<Body> {
+    async fn handle_runtime_stats(&self) -> Response<RespBody> {
         let stats = self.runtime.get_stats();
         let dto = RuntimeStatsDto::from(stats);
         json(StatusCode::OK, &dto)
     }
 
-    async fn handle_runtime_config(&self) -> Response<Body> {
+    async fn handle_runtime_config(&self) -> Response<RespBody> {
         let cfg = self.runtime.get_config();
         json(StatusCode::OK, &cfg)
     }
 
-    async fn handle_events(&self) -> Response<Body> {
+    async fn handle_events(&self) -> Response<RespBody> {
         let guard = self.event_log.lock().await;
         let mut out = String::new();
         for line in guard.iter() {
@@ -1126,7 +1168,7 @@ impl ControlPlane {
         text(StatusCode::OK, &out)
     }
 
-    async fn handle_logs(&self, req: Request<Body>) -> Response<Body> {
+    async fn handle_logs(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
         let lines = req
             .uri()
             .query()
@@ -1150,7 +1192,7 @@ impl ControlPlane {
         }
     }
 
-    async fn handle_register_node(&self, req: Request<Body>) -> Response<Body> {
+    async fn handle_register_node(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
         let registry = match self.mesh() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1185,7 +1227,7 @@ impl ControlPlane {
         json(StatusCode::OK, &serde_json::json!({ "ok": true }))
     }
 
-    async fn handle_update_link_state(&self, req: Request<Body>) -> Response<Body> {
+    async fn handle_update_link_state(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
         let registry = match self.mesh() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1218,7 +1260,7 @@ impl ControlPlane {
     /// P2-1 §5：最近链路变更事件（切换/终止按因留痕，cap 100 最新保留）。
     /// 门控随 mesh 能力存在性（§5 未启用 503 同 /nodes 先例——账本宿主链路
     /// 管理器在 mesh 关闭的构建形态下也存在，mesh 注册表才是能力边界）。
-    async fn handle_mesh_switches(&self) -> Response<Body> {
+    async fn handle_mesh_switches(&self) -> Response<RespBody> {
         if let Err(r) = self.mesh() {
             return r;
         }
@@ -1229,7 +1271,7 @@ impl ControlPlane {
         json(StatusCode::OK, &MeshSwitchesDto { events })
     }
 
-    async fn handle_chain_dry_run(&self, req: Request<Body>) -> Response<Body> {
+    async fn handle_chain_dry_run(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
         let dto: ChainDryRunRequest = match read_json(req).await {
             Ok(v) => v,
             Err(r) => return r,
@@ -1247,7 +1289,7 @@ impl ControlPlane {
         }
     }
 
-    async fn handle_chain_create(&self, req: Request<Body>) -> Response<Body> {
+    async fn handle_chain_create(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
         let mgr = match self.chain_mgr() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1280,7 +1322,7 @@ impl ControlPlane {
         }
     }
 
-    async fn handle_chain_get(&self, path: &str) -> Response<Body> {
+    async fn handle_chain_get(&self, path: &str) -> Response<RespBody> {
         let mgr = match self.chain_mgr() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1297,7 +1339,7 @@ impl ControlPlane {
         }
     }
 
-    async fn handle_chain_delete(&self, path: &str) -> Response<Body> {
+    async fn handle_chain_delete(&self, path: &str) -> Response<RespBody> {
         let mgr = match self.chain_mgr() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1314,7 +1356,7 @@ impl ControlPlane {
         }
     }
 
-    async fn handle_chain_stats(&self) -> Response<Body> {
+    async fn handle_chain_stats(&self) -> Response<RespBody> {
         let mgr = match self.chain_mgr() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1323,7 +1365,7 @@ impl ControlPlane {
         json(StatusCode::OK, &stats)
     }
 
-    async fn handle_subscriptions_list(&self) -> Response<Body> {
+    async fn handle_subscriptions_list(&self) -> Response<RespBody> {
         let mgr = match self.subscription_mgr() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1334,7 +1376,7 @@ impl ControlPlane {
         json(StatusCode::OK, &dtos)
     }
 
-    async fn handle_subscription_add(&self, req: Request<Body>) -> Response<Body> {
+    async fn handle_subscription_add(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
         let mgr = match self.subscription_mgr() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1371,7 +1413,7 @@ impl ControlPlane {
         json(StatusCode::OK, &serde_json::json!({ "ok": true }))
     }
 
-    async fn handle_subscription_remove(&self, path: &str) -> Response<Body> {
+    async fn handle_subscription_remove(&self, path: &str) -> Response<RespBody> {
         let mgr = match self.subscription_mgr() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1391,7 +1433,7 @@ impl ControlPlane {
         json(StatusCode::OK, &serde_json::json!({ "ok": true }))
     }
 
-    async fn handle_subscription_refresh(&self, path: &str) -> Response<Body> {
+    async fn handle_subscription_refresh(&self, path: &str) -> Response<RespBody> {
         let mgr = match self.subscription_mgr() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1467,7 +1509,7 @@ impl ControlPlane {
         )
     }
 
-    async fn handle_subscriptions_refresh_all(&self) -> Response<Body> {
+    async fn handle_subscriptions_refresh_all(&self) -> Response<RespBody> {
         let mgr = match self.subscription_mgr() {
             Ok(v) => v,
             Err(r) => return r,
@@ -1812,31 +1854,36 @@ impl From<seep_core::ChainContext> for ChainContextDto {
 
 // Err = 错误响应体（handler ? 早退惯例），不装箱
 #[allow(clippy::result_large_err)]
-async fn read_json<T: for<'de> Deserialize<'de>>(req: Request<Body>) -> Result<T, Response<Body>> {
-    let bytes = body::to_bytes(req.into_body())
+async fn read_json<T: for<'de> Deserialize<'de>>(
+    req: Request<impl RequestBody>,
+) -> Result<T, Response<RespBody>> {
+    let bytes = req
+        .into_body()
+        .collect()
         .await
-        .map_err(|_| text(StatusCode::BAD_REQUEST, "invalid body"))?;
+        .map_err(|_| text(StatusCode::BAD_REQUEST, "invalid body"))?
+        .to_bytes();
     serde_json::from_slice::<T>(&bytes)
         .map_err(|e| text(StatusCode::BAD_REQUEST, &format!("invalid json: {e}")))
 }
 
-fn json<T: Serialize>(status: StatusCode, value: &T) -> Response<Body> {
+fn json<T: Serialize>(status: StatusCode, value: &T) -> Response<RespBody> {
     match serde_json::to_vec(value) {
         Ok(buf) => Response::builder()
             .status(status)
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(buf))
+            .body(RespBody::new(Bytes::from(buf)))
             .unwrap_or_else(|_| text(StatusCode::INTERNAL_SERVER_ERROR, "internal error")),
         Err(_) => text(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     }
 }
 
-fn text(status: StatusCode, msg: &str) -> Response<Body> {
+fn text(status: StatusCode, msg: &str) -> Response<RespBody> {
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Body::from(msg.to_string()))
-        .unwrap_or_else(|_| Response::new(Body::from("internal error")))
+        .body(RespBody::new(Bytes::from(msg.to_string())))
+        .unwrap_or_else(|_| Response::new(RespBody::new(Bytes::from("internal error"))))
 }
 
 fn push_gauge(out: &mut String, name: &str, help: &str, value: f64) {
@@ -2157,10 +2204,49 @@ mod tests {
         let req = Request::builder()
             .method(Method::GET)
             .uri("/nodes")
-            .body(Body::empty())
+            .body(RespBody::new(Bytes::new()))
             .unwrap();
         let resp = cp.handle(req).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// hyper 1.x serve() 冒烟（迁移新增面：显式 accept 循环 + GracefulShutdown
+    /// 排空路径——旧 hyper::Server 无直测，迁移轮补上真 socket 往返）：
+    /// /health 200 返回 + oneshot 触发后 serve 任务在时限内排空退出。
+    #[tokio::test]
+    async fn serve_serves_health_and_shuts_down_gracefully() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, false);
+        let bind: std::net::SocketAddr = free_bind().parse().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(cp.serve(bind, rx));
+
+        // bind 在 serve() 内——轮询等监听就绪
+        let mut ready = false;
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(bind).await.is_ok() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(ready, "serve 应在端口就绪");
+
+        let mut s = tokio::net::TcpStream::connect(bind).await.unwrap();
+        s.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).await.unwrap();
+        let head = String::from_utf8_lossy(&buf);
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "health 应 200: {head}");
+
+        let _ = tx.send(());
+        timeout(Duration::from_secs(5), task)
+            .await
+            .expect("serve 应排空后退出")
+            .expect("join")
+            .expect("serve 无错误");
     }
 
     #[tokio::test]
@@ -2171,11 +2257,11 @@ mod tests {
         let req = Request::builder()
             .method(Method::GET)
             .uri("/metrics")
-            .body(Body::empty())
+            .body(RespBody::new(Bytes::new()))
             .unwrap();
         let resp = cp.handle(req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
         let s = String::from_utf8(body.to_vec()).unwrap();
         assert!(s.contains("seep_uptime_seconds"));
     }
@@ -2188,7 +2274,7 @@ mod tests {
         let req = Request::builder()
             .method(Method::GET)
             .uri("/metrics")
-            .body(Body::empty())
+            .body(RespBody::new(Bytes::new()))
             .unwrap();
         let resp = cp.handle(req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -2203,7 +2289,7 @@ mod tests {
             .method(Method::POST)
             .uri("/mesh/nodes/register")
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(
+            .body(RespBody::from(
                 r#"{"id":"n1","role":"relay","addr":"127.0.0.1:10001"}"#,
             ))
             .unwrap();
@@ -2222,7 +2308,7 @@ mod tests {
                 .method(Method::POST)
                 .uri("/mesh/nodes/register")
                 .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(format!(
+                .body(RespBody::from(format!(
                     r#"{{"id":"{id}","role":"{role}","addr":"127.0.0.1:{port}"}}"#
                 )))
                 .unwrap()
@@ -2241,7 +2327,7 @@ mod tests {
             .method(Method::POST)
             .uri("/mesh/link-states")
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(
+            .body(RespBody::from(
                 r#"{"source":"client1","target":"exit1","latency_ms":20,"bandwidth_mbps":100,"packet_loss_rate":0.0}"#,
             ))
             .unwrap();
@@ -2252,11 +2338,11 @@ mod tests {
             .method(Method::POST)
             .uri("/chains/dry-run")
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"source":"client1","target":"exit1"}"#))
+            .body(RespBody::from(r#"{"source":"client1","target":"exit1"}"#))
             .unwrap();
         let resp = cp.handle(dry).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v.get("success").and_then(|x| x.as_bool()), Some(true));
 
@@ -2265,11 +2351,11 @@ mod tests {
             .method(Method::POST)
             .uri("/chains")
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"source":"client1","target":"exit1"}"#))
+            .body(RespBody::from(r#"{"source":"client1","target":"exit1"}"#))
             .unwrap();
         let resp = cp.handle(create).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let chain_id = v
             .get("chain_id")
@@ -2280,7 +2366,7 @@ mod tests {
         let get = Request::builder()
             .method(Method::GET)
             .uri(format!("/chains/{chain_id}"))
-            .body(Body::empty())
+            .body(RespBody::new(Bytes::new()))
             .unwrap();
         let resp = cp.handle(get).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2301,7 +2387,7 @@ mod tests {
                 .method(Method::POST)
                 .uri("/mesh/nodes/register")
                 .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(format!(
+                .body(RespBody::from(format!(
                     r#"{{"id":"{id}","role":"{role}","addr":"127.0.0.1:{port}"}}"#
                 )))
                 .unwrap()
@@ -2318,7 +2404,7 @@ mod tests {
             .method(Method::POST)
             .uri("/mesh/link-states")
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(
+            .body(RespBody::from(
                 r#"{"source":"client1","target":"exit1","latency_ms":20,"bandwidth_mbps":100,"packet_loss_rate":0.0}"#,
             ))
             .unwrap();
@@ -2328,11 +2414,11 @@ mod tests {
             .method(Method::POST)
             .uri("/chains")
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"source":"client1","target":"exit1"}"#))
+            .body(RespBody::from(r#"{"source":"client1","target":"exit1"}"#))
             .unwrap();
         let resp = cp.handle(create).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let chain_id = v
             .get("chain_id")
@@ -2361,11 +2447,11 @@ mod tests {
         let get = Request::builder()
             .method(Method::GET)
             .uri("/mesh/switches")
-            .body(Body::empty())
+            .body(RespBody::new(Bytes::new()))
             .unwrap();
         let resp = cp.handle(get).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let events = v.get("events").and_then(|x| x.as_array()).unwrap();
         assert_eq!(events.len(), 1, "单事件（健康巡检 30s 间隔未触发）");
@@ -2391,11 +2477,11 @@ mod tests {
         let get = Request::builder()
             .method(Method::GET)
             .uri("/metrics")
-            .body(Body::empty())
+            .body(RespBody::new(Bytes::new()))
             .unwrap();
         let resp = cp.handle(get).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
         let s = String::from_utf8(body.to_vec()).unwrap();
 
         // RTT 分位：单样本 20ms → p50 = p95 = 20
@@ -2433,11 +2519,11 @@ mod tests {
         let get = Request::builder()
             .method(Method::GET)
             .uri("/metrics")
-            .body(Body::empty())
+            .body(RespBody::new(Bytes::new()))
             .unwrap();
         let resp = cp.handle(get).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
         let s = String::from_utf8(body.to_vec()).unwrap();
         assert!(!s.contains("seep_mesh_link_rtt_ms"));
         assert!(!s.contains("seep_mesh_link_loss_ratio"));
@@ -2446,7 +2532,7 @@ mod tests {
         let get = Request::builder()
             .method(Method::GET)
             .uri("/mesh/switches")
-            .body(Body::empty())
+            .body(RespBody::new(Bytes::new()))
             .unwrap();
         let resp = cp.handle(get).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -2462,7 +2548,7 @@ mod tests {
             .method(Method::POST)
             .uri("/subscriptions")
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(
+            .body(RespBody::from(
                 r#"{"name":"sub1","url":"https://example.com/sub.yaml","type":"clash"}"#,
             ))
             .unwrap();
@@ -2473,11 +2559,11 @@ mod tests {
         let list = Request::builder()
             .method(Method::GET)
             .uri("/subscriptions")
-            .body(Body::empty())
+            .body(RespBody::new(Bytes::new()))
             .unwrap();
         let resp = cp.handle(list).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let arr = v.as_array().expect("subscription list array");
         assert!(arr
@@ -2488,7 +2574,7 @@ mod tests {
         let remove = Request::builder()
             .method(Method::DELETE)
             .uri("/subscriptions/sub1")
-            .body(Body::empty())
+            .body(RespBody::new(Bytes::new()))
             .unwrap();
         let resp = cp.handle(remove).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2625,11 +2711,11 @@ mod tests {
         let req = Request::builder()
             .method(Method::GET)
             .uri(path)
-            .body(Body::empty())
+            .body(RespBody::new(Bytes::new()))
             .unwrap();
         let resp = cp.handle(req).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body::to_bytes(resp.into_body()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8(body.to_vec()).unwrap()
     }
 
