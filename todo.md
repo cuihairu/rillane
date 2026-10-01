@@ -102,8 +102,10 @@
   验收：模拟链路劣化时自动切换且记录切换原因；`ChainContext` fallback 路径生效。
   实现级设计：[docs/design/slo-scoring.md](docs/design/slo-scoring.md)（2026-10-02 设计稿就绪并同轮落地；D-1 score = p95_ms + loss_ratio × loss_penalty_ms（缺省 1000ms/单位）、D-2 SLO 门只拦真实数据成员（unknown/legacy 合规、门全破不 dead-end）、D-3 成员级来源优先级 link_quality（TTL 60s）→ legacy latency_stats → 首个健康成员、D-4 零依赖（seep-routing 不依赖 seep-mesh，数据推进式 update_link_quality）、D-5 chain 侧 SloWatch watcher 越门即 handle_chain_failure(SloDegraded)、D-6 YAML 面本步仅组级 `slo`，`slo_watch` 程序化面（YAML 归 P2-3））。
   进度（2026-10-02 落地）：**M1–M2 全部完成**（M1 SloPolicy+评分核心 `067577b` / M2 桥+watcher 本提交）；组策略 `slo:` 门内最低分选路（真数据在场 latency 从最后样本 min 升为 p95 分位 min——模拟源部署行为不变）；seep-runtime 10s 周期 mesh→routing 质量桥（节点 worst-hop p95 + Σerrors/Σconnections 聚合 loss）+ ChainManager `slo_watch` watcher（末跳越门即切换，账本 `reason="slo_degraded"`，P2-1 `seep_mesh_switch_total{reason}` 自动可见）；§7 五测全绿（评分翻转/门不 dead-end/来源优先级/桥聚合/watcher 切换+账本+提升）。「游戏 profile 默认启用」归 P2-3。
-- [ ] **P2-3 场景 profile 预设**：`proxy` / `game` / `web` 三套配置模板（路由规则 + 混淆开关 + 调度目标），底层同一引擎。
+- [x] **P2-3 场景 profile 预设**：`proxy` / `game` / `web` 三套配置模板（路由规则 + 混淆开关 + 调度目标），底层同一引擎。
   验收：示例配置三选一即可运行；profile 间仅策略差异，无独立代码路径。
+  实现级设计：[docs/design/scenario-profiles.md](docs/design/scenario-profiles.md)（2026-10-02 设计稿就绪并同轮落地；D-1 顶层单字段 `profile: proxy|game|web`、D-2 语义=缺省填充显式恒优先（不覆盖不删除，天然幂等）、D-3 展开点=`SeepConfig::from_str` 尾部唯一入口（运行期零分支=「无独立代码路径」）、D-4 未指定判定面（groups/rules 空 + obfuscation/egress_pool None；udp 非 Option 不在面内）、D-5 组模板成员=[default_node] 可运行最低形、D-6 三场景=策略矩阵行）。
+  进度（2026-10-02 落地）：**M0–M1 全部完成**（M0 机制+单测 `2369c0d` / M1 示例+集成测 本提交）；game=game-auto 组（latency+slo p95 80ms/loss 2%）+ 游戏平台域模板规则 + obfuscation bucket 填充（QoS 包长打散）+ 示例显式 UDP 长局（§9-1）；web=web-auto 组 + egress_pool enabled（短连接复用）；proxy=auto 组 + cn 规则（基线形）；examples/profile-{proxy,game,web}.yaml 三选一 `SEEP_CONFIG=<path> seepd` 即运行（集成测走 load_from_path 全链路 + 四同构块全等钉「仅策略差异」）。O-prof1 `seepctl profile` 骨架生成归按需。
 - [ ] **P2-4 混淆中间件扩展（timing/shaping）**：微抖动注入、流形状归一。
   验收：与 P1-4 同一统计方法验证时序特征偏移；延迟代价可量化（p95 增幅 ≤ 配置上限）。
 - [ ] **P2-5 客户端 TLS 指纹模拟**：uTLS 类能力挂载到出站 TLS 公共层（`tls.rs`）。
@@ -156,7 +158,7 @@
 |--------|------|---------|------|
 | P0 | 5 | S1 UDP 全链路 | 5/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷、P0-4 mesh UDP 面、P0-5 观测与配置——S0–S6 全部落地） |
 | P1 | 5 | S2 TUN + S3 前半 | 1/5（**P1-5 完成**——M0–M5 全部落地 2026-10-02；P1-1 T2/P1-3 R0/P1-4 M0 部分步已落地（另会话在途推进）；设计稿就绪 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5 已落地）） |
-| P2 | 8 | S3 后半 + S4 | 2/8（**P2-1/P2-2 完成**——均 M1–M2 全部落地 2026-10-02；P2-4 阻塞于 P1-4 M1+ 另会话在途） |
+| P2 | 8 | S3 后半 + S4 | 3/8（**P2-1/P2-2/P2-3 完成**——均 2026-10-02 全步落地；P2-4 阻塞于 P1-4 M1+ 另会话在途） |
 | P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
 
 已完成底座（S0）9 大项见上文归档清单；原 19 条清单中 10 项核实为真实完成、3 项勘误重开、其余并入 P0–P3 对应条目。

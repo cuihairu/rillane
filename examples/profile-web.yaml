@@ -1,0 +1,45 @@
+# Seep 场景示例 —— web（网页加速，P2-3 scenario-profiles.md §4 矩阵行）
+# 用法：SEEP_CONFIG=examples/profile-web.yaml seepd
+#
+# 三份场景示例（profile-proxy / profile-game / profile-web）间仅策略块
+# 差异（routing / obfuscation / egress_pool / udp / profile 行），
+# ingress / egress / control / telemetry 同构——把 egress 占位换成你的
+# 节点即可运行。多成员组写法见 docs/design/scenario-profiles.md §2-D5。
+#
+# profile: web 展开效果（routing.groups/rules 留空时）：
+#   组 web-auto = latency 策略，成员 [default_node]，无 SLO 目标
+#   规则 cn     = geoip CN → web-auto（未命中落 default_node）
+#   连接池      = egress_pool enabled（网页短连接复用 + TLS 会话恢复，
+#                 P1-5；其余参数缺省）
+
+control:
+  api_bind: 127.0.0.1:9090
+  uds_path: null
+  admin_token: seep
+
+telemetry:
+  log_level: info
+  enable_metrics: true
+  enable_tracing: false
+
+ingress:
+  - name: socks-in
+    type: socks5
+    bind: 127.0.0.1:7890
+
+egress:
+  - name: direct-main
+    type: direct
+  # - name: relay-1
+  #   type: trojan
+  #   server: relay1.example.com
+  #   port: 443
+  #   password: your_password
+  #   sni: relay1.example.com
+
+routing:
+  default_node: direct-main
+  groups: []   # 留空 = 由 profile 展开场景组模板；显式组恒优先（不覆盖）
+  rules: []    # 留空 = 由 profile 展开场景规则模板；显式规则恒优先
+
+profile: web

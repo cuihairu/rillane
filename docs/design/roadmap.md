@@ -1,7 +1,7 @@
 # Seep 分阶段路线图
 
 > 状态：设计文档（2026-09）· 定位依据：[positioning.md](positioning.md) · 可执行条目：[todo.md](../../todo.md)
-> 进度速览（2026-10-02）：S0 ✅ ｜ S1 进行中 4/5（P0-4 已完成；P0-5 实现级设计与派工拆解 S0–S6 就绪）｜ S2/S3 进行中（P1-5 出站连接池**已完成** M0–M5；P1-1 T2/P1-3 R0/P1-4 M0 部分步落地、推进中；P1-2 设计就绪）｜ S4 进行中（P2-1 per-link 指标**已完成** M1–M2；P2-2 SLO 打分选路**已完成** M1–M2）
+> 进度速览（2026-10-02）：S0 ✅ ｜ S1 进行中 4/5（P0-4 已完成；P0-5 实现级设计与派工拆解 S0–S6 就绪）｜ S2/S3 进行中（P1-5 出站连接池**已完成** M0–M5；P1-1 T2/P1-3 R0/P1-4 M0 部分步落地、推进中；P1-2 设计就绪）｜ S4 进行中（P2-1 per-link 指标**已完成** M1–M2；P2-2 SLO 打分选路**已完成** M1–M2；P2-3 场景 profile 预设**已完成** M0–M1）
 
 ## 执行摘要
 
@@ -84,7 +84,7 @@
 - **新增**：
   1. per-link 时延分布/丢包/切换原因指标（todo 遗留项收口；**已完成 2026-10，P2-1**——`seep_mesh_link_rtt_ms`/`seep_mesh_link_loss_ratio`/`seep_mesh_switch_total` + `GET /mesh/switches`，见 [mesh-link-observability.md](mesh-link-observability.md)）；
   2. 调度策略升级：以 SLO（如 p95 RTT）为目标打分选路，游戏 profile 默认启用（选路/watcher **已完成 2026-10，P2-2**——组策略 `slo:` 门内最低分 + chain `slo_watch` 劣化切换，见 [slo-scoring.md](slo-scoring.md)；游戏 profile 接线归 P2-3）；
-  3. 场景 profile：`proxy`/`game`/`web` 三套配置预设（路由模板 + 混淆开关 + 调度目标），见 positioning.md §2.5；
+  3. 场景 profile：`proxy`/`game`/`web` 三套配置预设（路由模板 + 混淆开关 + 调度目标），见 positioning.md §2.5（**已完成 2026-10，P2-3**——`profile:` 缺省填充展开 + `examples/profile-*.yaml` 三选一，见 [scenario-profiles.md](scenario-profiles.md)）；
   4. 高级安全收尾：CRL/OCSP、mesh 端到端 MAC/防重放（mesh.md「Security Notes」遗留）；
   5. 平台打包：systemd/launchd/Windows Service/OpenWrt；移动端 FFI 骨架。
 - **退出标准**：游戏 profile 下链路切换由 SLO 打分驱动且有切换原因指标；三平台（Linux/macOS/Windows）出二进制产物；OpenWrt 出 musl 包。

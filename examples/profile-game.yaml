@@ -1,0 +1,57 @@
+# Seep 场景示例 —— game（游戏加速，P2-3 scenario-profiles.md §4 矩阵行）
+# 用法：SEEP_CONFIG=examples/profile-game.yaml seepd
+#
+# 三份场景示例（profile-proxy / profile-game / profile-web）间仅策略块
+# 差异（routing / obfuscation / egress_pool / udp / profile 行），
+# ingress / egress / control / telemetry 同构——把 egress 占位换成你的
+# 节点即可运行。多成员组写法见 docs/design/scenario-profiles.md §2-D5。
+#
+# profile: game 展开效果（routing.groups/rules 留空时）：
+#   组 game-auto = latency 策略，成员 [default_node]，
+#                  SLO 目标 p95≤80ms 且丢包≤2%（slo-scoring.md 组级 slo:
+#                  ——mesh 真链路数据在场时按门内最低分选路）
+#   规则        = 常见游戏平台域（steampowered/epicgames/riotgames 等
+#                  domain_suffix，示例性非穷举）→ game-auto
+#   混淆        = obfuscation enabled + bucket 填充（128/256/512/1024，
+#                  QoS 包长打散，positioning §2.4；帧载体 = mesh chain）
+#
+# game 场景的 UDP 由本文件显式承载（§9-1：udp 非 Option，机制不碰 udp 块
+# ——显式 enabled: true + 长局寿命；无 UDP 的游戏加速等于没加速）。
+
+control:
+  api_bind: 127.0.0.1:9090
+  uds_path: null
+  admin_token: seep
+
+telemetry:
+  log_level: info
+  enable_metrics: true
+  enable_tracing: false
+
+ingress:
+  - name: socks-in
+    type: socks5
+    bind: 127.0.0.1:7890
+
+egress:
+  - name: direct-main
+    type: direct
+  # - name: relay-1
+  #   type: trojan
+  #   server: relay1.example.com
+  #   port: 443
+  #   password: your_password
+  #   sni: relay1.example.com
+
+routing:
+  default_node: direct-main
+  groups: []   # 留空 = 由 profile 展开场景组模板；显式组恒优先（不覆盖）
+  rules: []    # 留空 = 由 profile 展开场景规则模板；显式规则恒优先
+
+profile: game
+
+# game 显式承载的 UDP 面（长局不断流；其余参数缺省见 config/seep.yaml 注释）
+udp:
+  enabled: true
+  session_idle_secs: 300
+  session_lifetime_secs: 3600

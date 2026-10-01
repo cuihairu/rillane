@@ -49,7 +49,7 @@ pub struct SeepConfig {
 }
 
 /// UDP 数据面配置（udp-dataplane.md §5.2 / udp-relay-path.md §2）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct UdpConfig {
     /// 总开关：false 时 socks5 ASSOCIATE 应答 0x07（udp-relay-path.md §2.1）
@@ -727,35 +727,35 @@ fn profile_cn_rule(target: &str) -> RouteRule {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlConfig {
     pub api_bind: String,
     pub uds_path: Option<PathBuf>,
     pub admin_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TelemetryConfig {
     pub log_level: String,
     pub enable_metrics: bool,
     pub enable_tracing: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IngressDescriptor {
     pub name: String,
     #[serde(flatten)]
     pub spec: IngressConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EgressDescriptor {
     pub name: String,
     #[serde(flatten)]
     pub spec: EgressConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IngressConfig {
     Socks5 {
@@ -777,13 +777,13 @@ pub enum IngressConfig {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Credential {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EgressConfig {
     Direct,

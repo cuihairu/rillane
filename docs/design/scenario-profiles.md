@@ -4,6 +4,10 @@
 > 开关 + 调度目标），底层同一引擎。positioning.md §2.5：三场景差异 =
 > 路由策略模板 + 中间件组合 + 出站协议选择，全部是配置层组合，不需要
 > 分支代码路径。
+>
+> **落地状态**：✅ 已实现（M0 2369c0d：ProfileKind + apply_profile 缺省
+> 填充 + 单测 §7-1..5；M1 本提交：examples/ 三份示例 + §7-6 集成测 +
+> 文档回填）。
 
 ## 0. 范围与验收口径
 
@@ -16,7 +20,8 @@
    示例，任选一份 `SEEP_CONFIG=<path> seepd` 即通过配置解析与运行时
    构建（集成测读取三份文件走 `load_from_path` 全链路断言）；
 2. **仅策略差异**：三份示例 diff 仅落在 routing（组/规则）、obfuscation、
-   egress_pool、`profile:` 一行——ingress/egress/control/telemetry 同构；
+   egress_pool、udp（game 显式承载，§9-1）、`profile:` 一行——
+   ingress/egress/control/telemetry 同构（集成测全等钉住）；
 3. **无独立代码路径**：profile 是**配置期展开**（seep-config 纯函数把
    预设填入既有块），运行期不出现 `profile` 字段、不加任何运行时分支——
    展开产物与手写等价配置走完全相同的 build()/转换链。

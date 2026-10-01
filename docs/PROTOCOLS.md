@@ -2,7 +2,7 @@
 
 Seep 是一个高性能的网络路由代理系统，支持多种主流的网络协议。
 
-> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态；2026-10-02 回填 P1-4/P1-5/P2-1 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
+> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态；2026-10-02 回填 P1-4/P1-5/P2-1..P2-3 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
 >
 > | 能力 | 状态 | 落地去向 |
 > |------|------|---------|
@@ -19,6 +19,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 > | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `seep_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
 > | mesh 链路可观测（per-link RTT 分位 / 观测形丢包 / 切换原因账本） | **已实现（2026-10，P2-1）**：`seep_mesh_link_rtt_ms{from,to,quantile}` + `seep_mesh_link_loss_ratio{from,to}` + `seep_mesh_switch_total{reason}`（chain 启用时恒渲染）+ `GET /mesh/switches` 最近 100 事件；mesh 未启用三族与端点均缺席 | [mesh-link-observability.md](design/mesh-link-observability.md) |
 > | SLO 打分选路（组策略 `slo:` 门 + penalty 评分 + chain 侧 `slo_watch` 劣化切换） | **已实现（2026-10，P2-2）**：`latency` 策略真数据在场时 = 门内最低分（score = p95 + loss × penalty）；chain watcher 越门即切换，账本 `reason="slo_degraded"`；无真数据部署行为不变；`slo_watch` YAML 面归 P2-3 | [slo-scoring.md](design/slo-scoring.md) |
+> | 场景 profile 预设（`profile: proxy\|game\|web` 配置期展开） | **已实现（2026-10，P2-3）**：缺省填充语义（显式恒优先，运行期零分支）；game = SLO 目标 + 域名模板 + bucket 混淆；web = 连接池；`examples/profile-*.yaml` 三选一即运行 | [scenario-profiles.md](design/scenario-profiles.md) |
 > | obfs/salamander 插件 / TLS 指纹模拟 / timing/shaping 扰动 | 未实现 | P2-4 / P2-5（[positioning.md](design/positioning.md) §2.4） |
 >
 > 各节标注中的「超前」指：本文保留了设计目标描述，但当前代码不包含对应实现。
