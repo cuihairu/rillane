@@ -1,11 +1,12 @@
 use std::{
+    collections::BTreeMap,
     fs,
     net::IpAddr,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +23,10 @@ pub struct SeepConfig {
     /// 网络虚拟化（P1-3 network-route.md §1；缺省 None = 整块关闭，行为零差异）
     #[serde(default)]
     pub network: Option<NetworkBlockConfig>,
+    /// 流量混淆（P1-4 obfuscation-middleware.md §3；缺省 None = 整块关闭，
+    /// 构建期零 middleware 零注解注入，行为零差异 §2.5）
+    #[serde(default)]
+    pub obfuscation: Option<ObfuscationConfig>,
 }
 
 /// UDP 数据面配置（udp-dataplane.md §5.2 / udp-relay-path.md §2）。
@@ -247,6 +252,259 @@ impl NetworkBlockConfig {
             }
         }
         Ok(())
+    }
+}
+
+/// obfuscation 区块（obfuscation-middleware.md §3.1）：seep-config 镜像 serde 类型，
+/// 到 `PaddingSpec`/中间件链的转换在 seep-runtime（§3.2 裁决镜像而非加依赖，
+/// `UdpConfig`/`NetworkBlockConfig` 先例）。deny_unknown_fields = 新块无存量
+/// 负担（§3.4，B2 定向收口）；enabled 缺省 false（§2.5 零开销旁路）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObfuscationConfig {
+    /// 总开关；false = 构建期不构造任何 middleware、不注入注解（§2.5）
+    #[serde(default)]
+    pub enabled: bool,
+    /// 引用 profiles 中的名字；与内联 padding 互斥（§3.3-2）
+    #[serde(default)]
+    pub default_padding: Option<String>,
+    /// 选择器（chain | single | all | "egress:<name>"，匹配 §1.4 注解）；
+    /// 缺省 chain——MVP 帧执行侧仅 chain 帧（§2.3），单跳 no-op 少生注解
+    #[serde(default)]
+    pub apply_to: ApplyTo,
+    /// 声明链顺序（MVP 已知名 = padding / latency_probe，§3.3-5 + §4.1；
+    /// timing/shaping 归 P2-4）
+    #[serde(default = "default_obfs_middleware")]
+    pub middleware: Vec<String>,
+    /// 命名策略集（P2-3 三场景预设的落点容器，§3.5；本文 schema 为其真子集）
+    #[serde(default)]
+    pub profiles: BTreeMap<String, ObfsProfileConfig>,
+    /// 内联策略（无 default_padding 时生效；两者互斥，§3.3-2）
+    #[serde(default)]
+    pub padding: Option<PaddingBlockConfig>,
+}
+
+impl Default for ObfuscationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_padding: None,
+            apply_to: ApplyTo::default(),
+            middleware: default_obfs_middleware(),
+            profiles: BTreeMap::new(),
+            padding: None,
+        }
+    }
+}
+
+fn default_obfs_middleware() -> Vec<String> {
+    vec!["padding".to_string()]
+}
+
+impl ObfuscationConfig {
+    /// §3.3 构建期校验（六条）。E5（apply_to 指向不存在 egress 名 → warning +
+    /// 降级不生效）不在此处：validate 只见本块，egress 名集在调用侧，
+    /// 落 seep-runtime `to_padding_policy`（§6 E5）。
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(()); // §3.3-1：关闭容忍半成品配置
+        }
+        anyhow::ensure!(
+            !(self.default_padding.is_some() && self.padding.is_some()),
+            "obfuscation.default_padding 与内联 obfuscation.padding 互斥（§3.3-2）"
+        );
+        anyhow::ensure!(
+            self.default_padding.is_some() || self.padding.is_some(),
+            "obfuscation.enabled=true 但未配策略（default_padding 或内联 padding 任选其一，E1）"
+        );
+        if let Some(name) = &self.default_padding {
+            let profile = self.profiles.get(name).ok_or_else(|| {
+                anyhow::anyhow!("obfuscation.default_padding 指向未定义 profile：{name:?}（E3）")
+            })?;
+            anyhow::ensure!(
+                profile.padding.is_some(),
+                "profile {name:?} 未定义 padding（E1：开了但没有策略）"
+            );
+        }
+        // §3.3-4/5：全部 padding 块逐个校验——未选中的坏 profile 也构建期拦截
+        if let Some(inline) = &self.padding {
+            inline.validate()?;
+        }
+        for (name, profile) in &self.profiles {
+            if let Some(block) = &profile.padding {
+                block
+                    .validate()
+                    .with_context(|| format!("profile {name:?}"))?;
+            }
+        }
+        for mw in &self.middleware {
+            anyhow::ensure!(
+                matches!(mw.as_str(), "padding" | "latency_probe"),
+                "obfuscation.middleware 含未知名字 {mw:?}（E2/§4.1：MVP 仅 padding，调试可 latency_probe；timing/shaping 归 P2-4）"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// obfuscation.profiles 条目（§3.1）：命名策略集；MVP 仅 padding 一维（P2-3
+/// 在此扩字段如 routing_template，本文 schema 为其真子集，§3.5）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObfsProfileConfig {
+    /// 该 profile 的 padding 策略；None + 被引用 = E1（开了没有策略）
+    #[serde(default)]
+    pub padding: Option<PaddingBlockConfig>,
+}
+
+/// obfuscation.padding 块（§3.1 内联 / profiles 内嵌共用形状）：mode 必填
+/// 字符串（fixed|bucket|range），各模式字段缺省 0/空；validate 按所属模式
+/// 校验（§3.3-4）。mode 字符串 → `PaddingMode` 枚举在 seep-runtime 转换（§3.2）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaddingBlockConfig {
+    /// fixed | bucket | range（E2）
+    pub mode: String,
+    /// fixed：目标长度（须非 0）；bucket/range 忽略
+    #[serde(default)]
+    pub target: usize,
+    /// bucket：候选桶（升序非空）；对齐到最近上界桶
+    #[serde(default)]
+    pub buckets: Vec<usize>,
+    /// range：下界
+    #[serde(default)]
+    pub min: usize,
+    /// range：上界（min ≤ max）
+    #[serde(default)]
+    pub max: usize,
+    /// overhead 保护上限（§2.6：len' > max(len*(1+ratio), min) 则放弃填充）
+    #[serde(default = "default_max_overhead_ratio")]
+    pub max_overhead_ratio: f32,
+}
+
+const fn default_max_overhead_ratio() -> f32 {
+    0.5
+}
+
+impl Default for PaddingBlockConfig {
+    fn default() -> Self {
+        Self {
+            mode: "fixed".to_string(),
+            target: 0,
+            buckets: Vec::new(),
+            min: 0,
+            max: 0,
+            max_overhead_ratio: default_max_overhead_ratio(),
+        }
+    }
+}
+
+impl PaddingBlockConfig {
+    /// §3.3-4/5：mode 三值 + 按模式参数 + ratio ≥ 0，带原值报错（E2）。
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            matches!(self.mode.as_str(), "fixed" | "bucket" | "range"),
+            "obfuscation.padding.mode 非法：{:?}（E2，须为 fixed|bucket|range）",
+            self.mode
+        );
+        anyhow::ensure!(
+            self.max_overhead_ratio >= 0.0,
+            "obfuscation.padding.max_overhead_ratio 须 ≥ 0（当前 {}）",
+            self.max_overhead_ratio
+        );
+        match self.mode.as_str() {
+            "fixed" => anyhow::ensure!(
+                self.target != 0,
+                "fixed 模式 target 须非 0（E2，当前 {}）",
+                self.target
+            ),
+            "bucket" => {
+                anyhow::ensure!(
+                    !self.buckets.is_empty(),
+                    "bucket 模式 buckets 非空（E2）"
+                );
+                anyhow::ensure!(
+                    self.buckets.windows(2).all(|w| w[0] < w[1]),
+                    "bucket 模式 buckets 须严格升序（E2）：{:?}",
+                    self.buckets
+                );
+            }
+            "range" => anyhow::ensure!(
+                self.min <= self.max,
+                "range 模式须 min ≤ max（E2）：min={}, max={}",
+                self.min,
+                self.max
+            ),
+            _ => unreachable!("上方 ensure 已拦非三值 mode"),
+        }
+        Ok(())
+    }
+}
+
+/// obfuscation.apply_to 选择器（§3.1/§3.2 表行 2）：匹配 §1.4 注解
+/// `seep.route.kind`（"chain"/"single"）与 `seep.route.egress`（最终节点名）。
+/// serde 呈现为扁平字符串：`chain` / `single` / `all` / `egress:<name>`
+/// （§3.1 样例形态），未知值构建期解析报错。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyTo {
+    Chain,
+    Single,
+    All,
+    Egress(String),
+}
+
+impl Default for ApplyTo {
+    fn default() -> Self {
+        ApplyTo::Chain
+    }
+}
+
+impl ApplyTo {
+    /// 扁平字符串形（serde 序列化值；`egress:<name>` 带名展开）
+    pub fn as_config_str(&self) -> String {
+        match self {
+            ApplyTo::Chain => "chain".to_string(),
+            ApplyTo::Single => "single".to_string(),
+            ApplyTo::All => "all".to_string(),
+            ApplyTo::Egress(name) => format!("egress:{name}"),
+        }
+    }
+
+    /// 解析扁平字符串形（serde 反序列化路径）：未知值 / `egress:` 空名报错。
+    pub fn parse_config_str(s: &str) -> Result<Self> {
+        match s {
+            "chain" => Ok(ApplyTo::Chain),
+            "single" => Ok(ApplyTo::Single),
+            "all" => Ok(ApplyTo::All),
+            _ => {
+                if let Some(name) = s.strip_prefix("egress:") {
+                    anyhow::ensure!(
+                        !name.is_empty(),
+                        "apply_to = {s:?} 非法：egress 名为空（形如 egress:<name>）"
+                    );
+                    Ok(ApplyTo::Egress(name.to_string()))
+                } else {
+                    anyhow::bail!(
+                        "apply_to = {s:?} 非法：须为 chain | single | all | egress:<name>"
+                    )
+                }
+            }
+        }
+    }
+}
+
+impl Serialize for ApplyTo {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.as_config_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ApplyTo {
+    fn deserialize<D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        ApplyTo::parse_config_str(&s).map_err(serde::de::Error::custom)
     }
 }
 

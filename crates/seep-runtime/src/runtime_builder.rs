@@ -2317,6 +2317,7 @@ mod tests {
             },
             udp: seep_config::UdpConfig::default(),
             network: None,
+            obfuscation: None,
         };
 
         let runtime = RuntimeBuilder::new(cfg)
@@ -2357,6 +2358,7 @@ mod tests {
             },
             udp: seep_config::UdpConfig::default(),
             network: None,
+            obfuscation: None,
         };
 
         let stats = runtime
@@ -2400,6 +2402,7 @@ mod tests {
             },
             udp: seep_config::UdpConfig::default(),
             network: None,
+            obfuscation: None,
         };
 
         let delta = SeepConfig {
@@ -2464,6 +2467,7 @@ mod tests {
             },
             udp: seep_config::UdpConfig::default(),
             network: None,
+            obfuscation: None,
         };
 
         let stats = merge_config_delta_in_place(&mut target, &delta);
@@ -2538,6 +2542,7 @@ mod tests {
                 ..Default::default()
             },
             network: None,
+            obfuscation: None,
         }
     }
 
@@ -2923,6 +2928,7 @@ mod tests {
             },
             udp,
             network: None,
+            obfuscation: None,
         }
     }
 

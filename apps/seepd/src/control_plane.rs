@@ -2044,6 +2044,7 @@ mod tests {
                 ..Default::default()
             },
             network: None,
+            obfuscation: None,
         }
     }
 

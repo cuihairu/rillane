@@ -237,6 +237,36 @@ pub trait FlowMiddleware: Send + Sync {
     async fn handle(&self, flow: Flow) -> Result<Flow>;
 }
 
+/// padding 三模式（obfuscation-middleware.md §2.2 表）：
+/// Fixed 一律补到定长 / Bucket 对齐最近上界桶 / Range 确定性伪随机长度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaddingMode {
+    Fixed,
+    Bucket,
+    Range,
+}
+
+/// padding 策略形态（obfuscation-middleware.md §2.2）——策略/执行分离的"策略"侧：
+/// 由 padding middleware 写入 `seep.obfs.padding` 注解（§1.4），帧执行侧读取实施
+/// （§2.3）。serde 序列化进注解，故落 core（与注解契约同文件；core 不依赖 runtime）。
+/// 非本模式字段保持 0/空，由策略引擎按 mode 取用（M2）；overhead 上限判定在
+/// 策略层（§2.6），执行侧只按 spec 办事。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaddingSpec {
+    pub mode: PaddingMode,
+    /// Fixed：目标长度；Bucket/Range：忽略
+    pub target: usize,
+    /// Bucket：候选桶（升序非空）；Fixed/Range：忽略
+    pub buckets: Vec<usize>,
+    /// Range：下界；其余忽略
+    pub min: usize,
+    /// Range：上界；其余忽略
+    pub max: usize,
+    /// overhead 保护上限（§2.6，默认 0.5）
+    pub max_overhead_ratio: f32,
+}
+
 /// 流量会话信息
 #[derive(Debug, Clone)]
 pub struct FlowSession {
