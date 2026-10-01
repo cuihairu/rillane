@@ -324,14 +324,18 @@ async fn test_health_check_integration() -> Result<()> {
         engine_clone.perform_health_checks().await;
     });
 
-    // 等待健康检查完成（轮询至截止——固定 sleep 在 CPU 饱和下漏调度会假失败）
+    // 等待健康检查完成（轮询至截止——固定 sleep 在 CPU 饱和下漏调度会假失败；
+    // healthy>0 同入轮询条件——check_node_health 为随机 10% 不健康，首个入表
+    // 节点恰抽中即 total>0 先现而 healthy==0，立即断言会假失败，等后续节点覆盖）
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while engine_arc.get_health_stats().1 == 0 && std::time::Instant::now() < deadline {
+    let mut stats = engine_arc.get_health_stats();
+    while (stats.0 == 0 || stats.1 == 0) && std::time::Instant::now() < deadline {
         sleep(Duration::from_millis(20)).await;
+        stats = engine_arc.get_health_stats();
     }
 
     // 再次获取健康统计
-    let (healthy, total) = engine_arc.get_health_stats();
+    let (healthy, total) = stats;
 
     // 应该有健康检查记录
     assert!(total > 0);
