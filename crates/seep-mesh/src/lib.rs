@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fmt,
     net::SocketAddr,
     sync::{Arc, RwLock},
@@ -112,6 +112,56 @@ pub struct NodeACL {
     pub denied_target_ports: Vec<(u16, u16)>,
 }
 
+/// per-link RTT 样本环容量（P2-1 §3.1：尾进尾出，覆盖最旧）
+pub const RTT_RING_CAP: usize = 256;
+
+/// per-link RTT 样本环（P2-1 §3.1）：分位数快照时就地排序取最近秩
+/// （256 样本开销可忽略，不引直方图桶配置）；环空返回 None（E3：无样本
+/// 链路不渲染序列——画 0ms 是误导）。
+#[derive(Debug, Default)]
+pub struct RttRing {
+    samples: VecDeque<u32>,
+}
+
+impl RttRing {
+    pub fn record(&mut self, rtt_ms: u32) {
+        if self.samples.len() == RTT_RING_CAP {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(rtt_ms);
+    }
+
+    /// 最近秩分位：排序副本后 `idx = ceil(p * n) - 1`（p∈(0,1]）
+    pub fn quantile(&self, p: f64) -> Option<u32> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<u32> = self.samples.iter().copied().collect();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        let idx = ((p * n as f64).ceil() as usize).clamp(1, n) - 1;
+        sorted.get(idx).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+}
+
+/// 链路 RTT 分位快照（P2-1 §5 控制面数据源）
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkRttSnapshot {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub p50_ms: u32,
+    pub p95_ms: u32,
+    pub samples: usize,
+}
+
 /// 链路状态信息
 #[derive(Debug, Clone)]
 pub struct LinkState {
@@ -186,6 +236,8 @@ pub struct MeshRegistry {
     link_states: DashMap<(NodeId, NodeId), LinkState>,
     /// 链路流量统计（按方向）
     link_traffic: DashMap<(NodeId, NodeId), LinkTrafficStats>,
+    /// per-link RTT 样本环（P2-1 D-1）
+    link_rtt: DashMap<(NodeId, NodeId), RttRing>,
     /// 网络拓扑
     topology: RwLock<MeshTopology>,
     /// 统计信息
@@ -252,6 +304,7 @@ impl MeshRegistry {
             sessions: DashMap::new(),
             link_states: DashMap::new(),
             link_traffic: DashMap::new(),
+            link_rtt: DashMap::new(),
             topology: RwLock::new(Graph::new()),
             stats: RwLock::new(MeshStats::default()),
         }
@@ -294,6 +347,14 @@ impl MeshRegistry {
     /// 更新链路状态
     pub fn update_link_state(&self, link_state: LinkState) -> Result<()> {
         let key = (link_state.source.clone(), link_state.target.clone());
+        // P2-1 D-1 采样源：上报值即样本（0 值 = 上报方未测，不入环避免
+        // 拉偏分位数；真 RTT 待探测源 O-link-obs1）
+        if link_state.latency_ms > 0 {
+            self.link_rtt
+                .entry(key.clone())
+                .or_default()
+                .record(link_state.latency_ms);
+        }
         self.link_states.insert(key, link_state.clone());
         self.rebuild_topology();
         debug!(
@@ -443,6 +504,35 @@ impl MeshRegistry {
                 last_updated_epoch_seconds: now,
                 ..LinkTrafficStats::default()
             });
+    }
+
+    /// 记录链路 RTT 样本（P2-1 D-1 公开写点：探测源接线预留，O-link-obs1）
+    pub fn record_link_rtt(&self, from: &NodeId, to: &NodeId, rtt_ms: u32) {
+        if rtt_ms == 0 {
+            return;
+        }
+        self.link_rtt
+            .entry((from.clone(), to.clone()))
+            .or_default()
+            .record(rtt_ms);
+    }
+
+    /// 全部链路 RTT 分位快照（环空链路不产出，E3）
+    pub fn get_all_link_rtt(&self) -> Vec<LinkRttSnapshot> {
+        self.link_rtt
+            .iter()
+            .filter(|e| !e.value().is_empty())
+            .map(|e| {
+                let ((from, to), ring) = (e.key(), e.value());
+                LinkRttSnapshot {
+                    from: from.clone(),
+                    to: to.clone(),
+                    p50_ms: ring.quantile(0.5).unwrap_or(0),
+                    p95_ms: ring.quantile(0.95).unwrap_or(0),
+                    samples: ring.len(),
+                }
+            })
+            .collect()
     }
 
     /// 记录链路错误
@@ -997,6 +1087,76 @@ mod tests {
         assert_eq!(s.bytes_total, 100);
         assert_eq!(s.connections_total, 1);
         assert_eq!(s.errors_total, 1);
+    }
+
+    /// P2-1 §7-1：分位数数学（奇偶 n、边界、cap 覆写）
+    #[test]
+    fn rtt_ring_quantile_math_and_cap() {
+        let mut ring = RttRing::default();
+        assert!(ring.quantile(0.5).is_none(), "空环 E3：None");
+        assert!(ring.is_empty());
+
+        // 奇数 n=5：p50 = 中位
+        for ms in [30, 10, 20, 50, 40] {
+            ring.record(ms);
+        }
+        assert_eq!(ring.quantile(0.5), Some(30));
+        assert_eq!(ring.quantile(0.95), Some(50));
+        assert_eq!(ring.quantile(1.0), Some(50));
+
+        // 偶数 n=6：最近秩（ceil(0.5*6)-1 = 2 → 第三小）
+        let mut ring = RttRing::default();
+        for ms in [10, 20, 30, 40, 50, 60] {
+            ring.record(ms);
+        }
+        assert_eq!(ring.quantile(0.5), Some(30));
+        // ceil(0.95*6)-1 = ceil(5.7)-1 = 5 → 最大
+        assert_eq!(ring.quantile(0.95), Some(60));
+
+        // p 边界钳制：p→0 取最小
+        assert_eq!(ring.quantile(0.01), Some(10));
+
+        // cap 覆写：cap+1 个样本后最旧被逐出
+        let mut ring = RttRing::default();
+        for i in 0..(RTT_RING_CAP + 1) as u32 {
+            ring.record(i);
+        }
+        assert_eq!(ring.len(), RTT_RING_CAP);
+        // p=0.001 → ceil(0.256)=1 → idx 0 = 最小值 1（样本 0 已被覆写逐出）
+        assert_eq!(ring.quantile(0.001), Some(1), "样本 0 已被覆写逐出");
+        assert_eq!(ring.quantile(1.0), Some(RTT_RING_CAP as u32));
+    }
+
+    /// P2-1 §7-2：采样源两路——update_link_state 上报入环（0 值不入）+
+    /// record_link_rtt 直写；环空链路快照不产出
+    #[test]
+    fn registry_rtt_sampling_sources() {
+        let registry = MeshRegistry::new();
+
+        // 上报源：latency>0 入环；0 值不入环
+        let mut ls = LinkState::new("a".into(), "b".into());
+        ls.latency_ms = 42;
+        registry.update_link_state(ls.clone()).unwrap();
+        ls.latency_ms = 58;
+        registry.update_link_state(ls.clone()).unwrap();
+        ls.latency_ms = 0;
+        registry.update_link_state(ls.clone()).unwrap();
+
+        // 直写源
+        registry.record_link_rtt(&"a".to_string(), &"b".to_string(), 100);
+        registry.record_link_rtt(&"a".to_string(), &"b".to_string(), 0); // E：0 拒收
+
+        let snaps = registry.get_all_link_rtt();
+        assert_eq!(snaps.len(), 1, "环空链路（0 值单上报）不产出");
+        let s = &snaps[0];
+        assert_eq!(s.from, "a");
+        assert_eq!(s.to, "b");
+        assert_eq!(s.samples, 3, "42/58/100 三样本，0 值两处均不入环");
+        assert_eq!(s.p50_ms, 58);
+        assert_eq!(s.p95_ms, 100);
+
+        // 无样本链路整体无序列
+        assert!(registry.get_all_link_rtt().iter().all(|x| x.samples > 0));
     }
 
     #[test]

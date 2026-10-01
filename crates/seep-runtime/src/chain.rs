@@ -3,8 +3,8 @@
 //! 支持 source → relay → exit 多跳链路的构建、优化和故障转移。
 
 use std::{
-    collections::HashMap,
-    sync::Arc,
+    collections::{BTreeMap, HashMap, VecDeque},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -678,6 +678,48 @@ pub struct ChainDryRunResult {
     pub error: Option<String>,
 }
 
+/// 链路变更原因（P2-1 §2 D-3 枚举化；自由文本降为 [`SwitchEvent::detail`]）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchReason {
+    /// 流错误触发切换到备用路径
+    FailureReported,
+    /// 备用路径耗尽，链路终止
+    FallbackExhausted,
+    /// 健康巡检：TTL 到期终止
+    TtlExpired,
+    /// 健康巡检：链路已处终止态清理
+    TerminatedUnhealthy,
+}
+
+impl SwitchReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SwitchReason::FailureReported => "failure_reported",
+            SwitchReason::FallbackExhausted => "fallback_exhausted",
+            SwitchReason::TtlExpired => "ttl_expired",
+            SwitchReason::TerminatedUnhealthy => "terminated_unhealthy",
+        }
+    }
+}
+
+/// 链路变更事件（P2-1 §3.2）：账本 cap 100 最新保留
+#[derive(Debug, Clone, Serialize)]
+pub struct SwitchEvent {
+    pub chain_id: String,
+    /// 切换前路径（终止事件 = 终止时路径）
+    pub from_path: Vec<String>,
+    /// 切换后路径（终止事件 = None）
+    pub to_path: Option<Vec<String>>,
+    /// [`SwitchReason::as_str()`]
+    pub reason: String,
+    /// 自由文本细节（原 failure_reason 透传等）
+    pub detail: String,
+    pub epoch_seconds: u64,
+}
+
+/// 切换账本容量（P2-1 §2 D-3）
+pub const SWITCH_LEDGER_CAP: usize = 100;
+
 /// 链路管理器
 ///
 /// 管理活跃链路的生命周期、故障转移和统计
@@ -691,6 +733,10 @@ pub struct ChainManager {
     session_chain_map: DashMap<SessionId, String>,
     /// 链路统计
     stats: RwLock<ChainManagerStats>,
+    /// 切换原因账本（P2-1 §3.2，cap 100 最新保留）
+    switch_ledger: Mutex<VecDeque<SwitchEvent>>,
+    /// 按原因计数（/metrics seep_mesh_switch_total{reason} 数据源）
+    switch_counters: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 impl ChainManager {
@@ -707,6 +753,8 @@ impl ChainManager {
             active_chains: DashMap::new(),
             session_chain_map: DashMap::new(),
             stats: RwLock::new(ChainManagerStats::default()),
+            switch_ledger: Mutex::new(VecDeque::new()),
+            switch_counters: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -770,8 +818,18 @@ impl ChainManager {
             "链路故障"
         );
 
+        // P2-1：切换前取当前路径（账本 from_path 口径）
+        let path_before = chain.get_current_path().unwrap_or_default();
+
         // 尝试切换到备用路径
         if chain.switch_fallback_path() {
+            self.record_switch(
+                chain_id,
+                path_before,
+                chain.get_current_path(),
+                SwitchReason::FailureReported,
+                failure_reason,
+            );
             info!(
                 target: "seep::chain",
                 chain_id = %chain_id,
@@ -789,7 +847,19 @@ impl ChainManager {
             Ok(Some(chain.clone()))
         } else {
             // 没有更多备用路径
+            self.record_switch(
+                chain_id,
+                path_before,
+                None,
+                SwitchReason::FallbackExhausted,
+                failure_reason,
+            );
             chain.status = ChainStatus::Terminated;
+
+            // 存量缺陷修缮（P2-1 账本测试首度覆盖本路径时暴露）：RefMut 尚持
+            // 有时调 active_chains.len()——DashMap len() 对全部分片取读锁，
+            // 与本线程已持有的分片写锁互斥即自锁。先释放分片守卫再更新统计。
+            drop(chain);
 
             // 更新统计
             {
@@ -882,25 +952,33 @@ impl ChainManager {
 
     /// 检查所有链路健康状态
     async fn check_chains_health(&self) {
-        let mut chains_to_terminate: Vec<String> = Vec::new();
+        // (chain_id, 终止原因, 终止时路径)——P2-1 §4：终止按因留痕
+        let mut chains_to_terminate: Vec<(String, SwitchReason)> = Vec::new();
 
         for entry in self.active_chains.iter() {
             let chain = entry.value();
 
-            // 检查链路是否过期
-            if chain.created_at.elapsed() > self.config.chain_ttl {
-                chains_to_terminate.push(entry.key().clone());
+            // 检查链路状态（先于 TTL：已终止链的死因归其自身状态，TTL 只
+            // 解释仍存活链的过期——ZERO TTL 巡检时二者同时成立，顺序即归因）
+            if chain.status == ChainStatus::Terminated {
+                chains_to_terminate.push((entry.key().clone(), SwitchReason::TerminatedUnhealthy));
                 continue;
             }
 
-            // 检查链路状态
-            if chain.status == ChainStatus::Terminated {
-                chains_to_terminate.push(entry.key().clone());
+            // 检查链路是否过期
+            if chain.created_at.elapsed() > self.config.chain_ttl {
+                chains_to_terminate.push((entry.key().clone(), SwitchReason::TtlExpired));
             }
         }
 
         // 终止过期链路
-        for chain_id in chains_to_terminate {
+        for (chain_id, cause) in chains_to_terminate {
+            let from_path = self
+                .active_chains
+                .get(&chain_id)
+                .and_then(|c| c.get_current_path())
+                .unwrap_or_default();
+            self.record_switch(&chain_id, from_path, None, cause, "健康巡检终止");
             if let Err(e) = self.terminate_chain(&chain_id).await {
                 warn!(
                     target: "seep::chain",
@@ -916,6 +994,52 @@ impl ChainManager {
             active_chains = self.active_chains.len(),
             "健康检查完成"
         );
+    }
+
+    /// 记录链路变更事件（P2-1 §3.2：账本尾进头出 cap 100 + 按原因计数）
+    fn record_switch(
+        &self,
+        chain_id: &str,
+        from_path: Vec<String>,
+        to_path: Option<Vec<String>>,
+        reason: SwitchReason,
+        detail: &str,
+    ) {
+        let event = SwitchEvent {
+            chain_id: chain_id.to_string(),
+            from_path,
+            to_path,
+            reason: reason.as_str().to_string(),
+            detail: detail.to_string(),
+            epoch_seconds: current_epoch_seconds(),
+        };
+        let mut ledger = self.switch_ledger.lock().expect("switch ledger poisoned");
+        if ledger.len() == SWITCH_LEDGER_CAP {
+            ledger.pop_front();
+        }
+        ledger.push_back(event);
+        *self
+            .switch_counters
+            .lock()
+            .expect("switch counters poisoned")
+            .entry(reason.as_str())
+            .or_insert(0) += 1;
+    }
+
+    /// 最近 N 条变更事件（时间升序；n=0 → 空）
+    pub fn get_recent_switches(&self, n: usize) -> Vec<SwitchEvent> {
+        let ledger = self.switch_ledger.lock().expect("switch ledger poisoned");
+        ledger.iter().rev().take(n).rev().cloned().collect()
+    }
+
+    /// 按原因计数快照（/metrics 数据源）
+    pub fn switch_counters_snapshot(&self) -> BTreeMap<String, u64> {
+        self.switch_counters
+            .lock()
+            .expect("switch counters poisoned")
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), *v))
+            .collect()
     }
 
     /// 获取统计信息
@@ -969,5 +1093,129 @@ mod tests {
             reliability: 0.95,
         };
         assert!(weight.cost > 0.0);
+    }
+
+    /// 直构 ChainManager（builder 不参与：active_chains 私有字段同模块
+    /// 测试可直插，路径切换语义不依赖真实拓扑）
+    fn ledger_manager() -> ChainManager {
+        let registry = Arc::new(MeshRegistry::new());
+        let builder = Arc::new(ChainBuilder::new(ChainConfig::default(), registry.clone()));
+        ChainManager::new(ChainConfig::default(), builder, registry)
+    }
+
+    /// 带两条备用路径的链直插 active_chains
+    fn insert_chain(mgr: &ChainManager, chain_id: &str) {
+        let mut ctx = ChainContext::new(chain_id.to_string(), "c1".into(), "exit1".into());
+        ctx.update_path(vec!["c1".into(), "relay1".into(), "exit1".into()]);
+        ctx.add_fallback_path(vec!["c1".into(), "relay2".into(), "exit1".into()]);
+        ctx.add_fallback_path(vec!["c1".into(), "relay3".into(), "exit1".into()]);
+        mgr.active_chains.insert(chain_id.to_string(), ctx);
+    }
+
+    /// P2-1 §7-3：handle_chain_failure 两分支事件形——切换成功 =
+    /// FailureReported{from=切换前路径,to=新 fallback, detail 透传}；
+    /// 备用耗尽 = FallbackExhausted{to=None}；计数器同步聚合。
+    #[tokio::test]
+    async fn switch_ledger_records_failure_and_exhaustion() {
+        let mgr = ledger_manager();
+        insert_chain(&mgr, "ch1");
+
+        // 首次故障：切换到 fallback[0]
+        let out = mgr
+            .handle_chain_failure("ch1", "upstream reset")
+            .await
+            .unwrap();
+        assert!(out.is_some(), "仍有备用路径应切换成功");
+        let events = mgr.get_recent_switches(10);
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.chain_id, "ch1");
+        assert_eq!(ev.reason, "failure_reported");
+        assert_eq!(
+            ev.from_path,
+            vec!["c1".to_string(), "relay1".to_string(), "exit1".to_string()]
+        );
+        assert_eq!(
+            ev.to_path,
+            Some(vec![
+                "c1".to_string(),
+                "relay2".to_string(),
+                "exit1".to_string()
+            ])
+        );
+        assert_eq!(ev.detail, "upstream reset", "自由文本降 detail 透传");
+
+        // 连续两故障耗尽两条备用：第二次切换 + 第三次 FallbackExhausted
+        let out = mgr.handle_chain_failure("ch1", "timeout").await.unwrap();
+        assert!(out.is_some());
+        let out = mgr
+            .handle_chain_failure("ch1", "timeout again")
+            .await
+            .unwrap();
+        assert!(out.is_none(), "备用耗尽返回 None");
+        let events = mgr.get_recent_switches(10);
+        assert_eq!(events.len(), 3);
+        let last = events.last().unwrap();
+        assert_eq!(last.reason, "fallback_exhausted");
+        assert_eq!(last.to_path, None);
+        assert_eq!(last.detail, "timeout again");
+
+        let counters = mgr.switch_counters_snapshot();
+        assert_eq!(counters.get("failure_reported"), Some(&2));
+        assert_eq!(counters.get("fallback_exhausted"), Some(&1));
+    }
+
+    /// P2-1 §7-3：账本 cap 环绕（最新保留）+ get_recent_switches(n) 截取
+    #[tokio::test]
+    async fn switch_ledger_cap_ring_and_tail() {
+        let mgr = ledger_manager();
+        // 无备用路径 → 每次故障都是 FallbackExhausted 事件（免切换路径纯计数）
+        for i in 0..(SWITCH_LEDGER_CAP + 10) {
+            let id = format!("ch-{i}");
+            let mut ctx = ChainContext::new(id.clone(), "c1".into(), "exit1".into());
+            ctx.update_path(vec!["c1".into(), "exit1".into()]);
+            mgr.active_chains.insert(id.clone(), ctx);
+            mgr.handle_chain_failure(&id, "e").await.unwrap();
+        }
+        let ledger = mgr.get_recent_switches(usize::MAX);
+        assert_eq!(ledger.len(), SWITCH_LEDGER_CAP, "cap 100 最新保留");
+        assert_eq!(ledger.last().unwrap().chain_id, "ch-109", "最新在尾");
+        assert_eq!(ledger.first().unwrap().chain_id, "ch-10", "最旧被逐出");
+        assert_eq!(mgr.get_recent_switches(3).len(), 3);
+    }
+
+    /// P2-1 §7-3：健康巡检终止按因留痕——TTL 归零全量过期 =
+    /// TtlExpired；状态本就 Terminated 的 = TerminatedUnhealthy。
+    #[tokio::test]
+    async fn switch_ledger_health_sweep_causes() {
+        let registry = Arc::new(MeshRegistry::new());
+        let builder = Arc::new(ChainBuilder::new(ChainConfig::default(), registry.clone()));
+        let config = ChainConfig {
+            chain_ttl: Duration::ZERO, // 全量过期
+            ..ChainConfig::default()
+        };
+        let mgr = ChainManager::new(config, builder, registry);
+
+        let mut ctx = ChainContext::new("ch-a".into(), "c1".into(), "exit1".into());
+        ctx.update_path(vec!["c1".into(), "exit1".into()]);
+        mgr.active_chains.insert("ch-a".into(), ctx);
+        // ch-b 直插即 Terminated → TerminatedUnhealthy 分支
+        let mut ctx_b = ChainContext::new("ch-b".into(), "c1".into(), "exit1".into());
+        ctx_b.update_path(vec!["c1".into(), "exit1".into()]);
+        ctx_b.status = ChainStatus::Terminated;
+        mgr.active_chains.insert("ch-b".into(), ctx_b);
+
+        mgr.check_chains_health().await;
+
+        let counters = mgr.switch_counters_snapshot();
+        assert_eq!(counters.get("ttl_expired"), Some(&1), "TTL 归零过期");
+        assert_eq!(counters.get("terminated_unhealthy"), Some(&1), "终止态清理");
+        let events = mgr.get_recent_switches(10);
+        assert_eq!(events.len(), 2);
+        assert!(
+            events.iter().all(|e| e.to_path.is_none()),
+            "终止事件 to=None"
+        );
+        assert_eq!(mgr.active_chains.len(), 0, "两链均被巡检终止移除");
     }
 }

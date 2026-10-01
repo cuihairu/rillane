@@ -653,21 +653,25 @@ impl ChainContext {
     }
 
     /// 获取当前使用的路径
+    ///
+    /// 单一口径：`current_path` 恒为当前生效路径（主路径或被提升的备用）。
+    /// 存量缺陷修缮（P2-1 切换账本测试首度覆盖暴露）：旧实现 fallback 非空时
+    /// 恒读 `fallback_paths[current_fallback_index]`——从未切换过的链路谎报
+    /// fallback[0] 为当前路径，且首次故障转移跳过 fallback[0] 直取 [1]。
     pub fn get_current_path(&self) -> Option<Vec<String>> {
-        if self.fallback_paths.is_empty() {
-            Some(self.current_path.clone())
-        } else {
-            self.fallback_paths
-                .get(self.current_fallback_index)
-                .cloned()
-        }
+        Some(self.current_path.clone())
     }
 
     /// 切换到下一个备用路径
+    ///
+    /// 提升语义：`fallback_paths[current_fallback_index]` 升为 current_path
+    /// （复用 update_path 同步 hop_count/时延带宽向量），索引后移；无备用可切
+    /// 返回 false（备用耗尽）。
     pub fn switch_fallback_path(&mut self) -> bool {
-        if self.current_fallback_index + 1 < self.fallback_paths.len() {
+        if self.current_fallback_index < self.fallback_paths.len() {
+            let next = self.fallback_paths[self.current_fallback_index].clone();
             self.current_fallback_index += 1;
-            self.last_updated = Instant::now();
+            self.update_path(next);
             self.status = ChainStatus::FailingOver;
             true
         } else {
@@ -725,4 +729,58 @@ pub trait IngressEndpoint: Send + Sync {
         router: Arc<dyn FlowRouter>,
         output: Arc<dyn FlowOutput>,
     ) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P2-1 修缮钉子：路径语义单口径——current_path 恒为生效路径，切换
+    /// 按 fallback 声明序逐一提升（fallback[0] 不再被首跳跳过），耗尽返回
+    /// false 且路径停在最后一条备用上。
+    #[test]
+    fn chain_context_fallback_promotes_in_declaration_order() {
+        let mut ctx = ChainContext::new("ch".into(), "c1".into(), "exit1".into());
+        ctx.update_path(vec!["c1".into(), "relay1".into(), "exit1".into()]);
+        ctx.add_fallback_path(vec!["c1".into(), "relay2".into(), "exit1".into()]);
+        ctx.add_fallback_path(vec!["c1".into(), "relay3".into(), "exit1".into()]);
+
+        // 有 fallback 在册时当前路径仍是主路径（旧实现此处谎报 fallback[0]）
+        assert_eq!(
+            ctx.get_current_path(),
+            Some(vec!["c1".into(), "relay1".into(), "exit1".into()])
+        );
+
+        assert!(ctx.switch_fallback_path(), "首切提升 fallback[0]");
+        assert_eq!(ctx.current_fallback_index, 1);
+        assert_eq!(
+            ctx.get_current_path(),
+            Some(vec!["c1".into(), "relay2".into(), "exit1".into()])
+        );
+
+        assert!(ctx.switch_fallback_path(), "次切提升 fallback[1]");
+        assert_eq!(
+            ctx.get_current_path(),
+            Some(vec!["c1".into(), "relay3".into(), "exit1".into()])
+        );
+
+        assert!(!ctx.switch_fallback_path(), "备用耗尽");
+        assert_eq!(
+            ctx.get_current_path(),
+            Some(vec!["c1".into(), "relay3".into(), "exit1".into()]),
+            "耗尽后路径停在最后一条备用"
+        );
+    }
+
+    /// 无备用链路：get 恒回主路径，切换恒 false。
+    #[test]
+    fn chain_context_without_fallbacks_stays_on_primary() {
+        let mut ctx = ChainContext::new("ch".into(), "c1".into(), "exit1".into());
+        ctx.update_path(vec!["c1".into(), "exit1".into()]);
+        assert_eq!(
+            ctx.get_current_path(),
+            Some(vec!["c1".into(), "exit1".into()])
+        );
+        assert!(!ctx.switch_fallback_path());
+    }
 }
