@@ -88,6 +88,8 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 
 这三者作为 `FlowMiddleware` 实现挂在 egress 之前/之后，**对三种场景统一生效**：代理用它过 DPI，游戏加速用它过 QoS，网页加速用它维持 TLS 正常形态。
 
+> **现状（2026-10，P1-4 落地，M0–M4）**：三者中的 `padding` 已以首个 `FlowMiddleware`（`PaddingMiddleware`）落地——策略/执行分离（`PaddingSpec` 策略引擎纯函数 + 帧载体执行侧），MVP 帧载体 = mesh chain 的 `MeshEnvelope` 帧（fixed/bucket/range 三形态、overhead 比例闸门、`seep_obfs_*` 指标族恒渲染 + `scripts/obfs_padding_dist.py` 分布检查脚本）；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 帧载体预留同 `PaddingSpec` 钩子（详见 [obfuscation-middleware.md](obfuscation-middleware.md)，验收口径 §0）。`timing`/`shaping` 待 P2-4；obfs/salamander 插件与 TLS 指纹模拟待 P2-4/P2-5。
+
 ### 2.5 数据通路视角的结论
 
 - 三场景的差异 = **路由策略模板 + 中间件组合 + 出站协议选择**，全部是配置层组合，不需要分支代码路径；
@@ -100,7 +102,7 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 |---|------|------|------|
 | G1 | 协议层零 UDP（`seep-protocols` 无任何 UDP 转发路径） | 游戏加速不可用 | roadmap S1 |
 | G2 | TUN/系统路由为占位实现（`seep-platform::network::platform.rs` 各 Provider 均返回"未实现"，runtime 未接线） | 系统级接管/进程分流不可用 | roadmap S2 |
-| G3 | 无独立混淆横切层（仅协议自带伪装） | 抗 QoS/DPI 能力受限 | roadmap S3 |
+| G3 | 无独立混淆横切层（仅协议自带伪装）**——2026-10 P1-4 padding 已落地**（`padding` 一项；`timing`/`shaping` 仍缺，见 §2.4 现状注记） | 抗 QoS/DPI 能力受限 | roadmap S3 |
 | G4 | 无出站连接复用/池化 | 网页短连接开销高 | roadmap S3 |
 | G5 | mesh data-plane 仅 TCP（JSON envelope 明文头） | 多跳 UDP 不可用；envelope 可优化为二进制 | roadmap S1/S3 |
 | G6 | per-link 时延分布/切换原因等细粒度指标缺失 | 调度缺少数据闭环 | roadmap S4 |

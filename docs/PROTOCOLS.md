@@ -2,7 +2,7 @@
 
 Seep 是一个高性能的网络路由代理系统，支持多种主流的网络协议。
 
-> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
+> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态；2026-10-02 回填 P1-4 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
 >
 > | 能力 | 状态 | 落地去向 |
 > |------|------|---------|
@@ -16,7 +16,8 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 > | 出站 vmess 连接器 | 未实现（配置 schema 与订阅转换已支持，运行时构建期报错） | todo「VMess 出站」条目 |
 > | hysteria v1 | 未实现 | 无计划（仅 hy2） |
 > | 出站连接池 / TLS 会话恢复 | 未实现 | P1-5 |
-> | 混淆插件（obfs/salamander）/ TLS 指纹 | 未实现 | P1-4 / P2-4 / P2-5（[positioning.md](design/positioning.md) §2.4） |
+> | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `seep_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
+> | obfs/salamander 插件 / TLS 指纹模拟 / timing/shaping 扰动 | 未实现 | P2-4 / P2-5（[positioning.md](design/positioning.md) §2.4） |
 >
 > 各节标注中的「超前」指：本文保留了设计目标描述，但当前代码不包含对应实现。
 
@@ -168,7 +169,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 低延迟传输
 
 ### Hysteria2
-> 状态：部分实现——TCP over QUIC、密码认证、`mport`/`server_name`/`alpn`/`skip_cert_verify` 配置生效（`hysteria2` crate 承载）；拥塞控制算法选择、**UDP 中继/首包优化未实现**——V1 核查结论（2026-09）：`hysteria2` 0.1.6 公开 API 仅 connect/tcp_connect、`quic_connection` 为 pub(crate)，无 UDP 出口，非静默缩水，移 P0-4 的改判在 **P0-4 完成时维持**（2026-09，todo P0-4 §0.1-③——hy2 UDP 终态 = V2，载具 quinn 未决，见 todo.md P0-3/P0-4 条目与 [udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)）；salamander 混淆未实现（配置无该字段，混淆层见 todo P1-4/P2-4）。
+> 状态：部分实现——TCP over QUIC、密码认证、`mport`/`server_name`/`alpn`/`skip_cert_verify` 配置生效（`hysteria2` crate 承载）；拥塞控制算法选择、**UDP 中继/首包优化未实现**——V1 核查结论（2026-09）：`hysteria2` 0.1.6 公开 API 仅 connect/tcp_connect、`quic_connection` 为 pub(crate)，无 UDP 出口，非静默缩水，移 P0-4 的改判在 **P0-4 完成时维持**（2026-09，todo P0-4 §0.1-③——hy2 UDP 终态 = V2，载具 quinn 未决，见 todo.md P0-3/P0-4 条目与 [udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)）；salamander 混淆未实现（配置无该字段；包长填充横切层已落 P1-4，salamander 归 P2-4/P2-5）。
 
 - **协议**: Hysteria 的改进版本
 - **改进**:
@@ -244,7 +245,7 @@ impl EgressConnector for MyProtocol {
 
 ## 安全特性
 
-> 状态：mesh 层 CA 轮换/双信任窗口/最小撤销列表已实现（[mesh.md](mesh.md)）；「自动定期更新密钥」「多因素认证」「JWT/Token 管理」**未实现**——超前描述；「TLS 伪装」中 Trojan/VLESS+TLS 形态已实现，「协议混淆/域前置」待混淆横切层（[positioning.md](design/positioning.md) §2.4、todo P1-4/P2-4/P2-5）。
+> 状态：mesh 层 CA 轮换/双信任窗口/最小撤销列表已实现（[mesh.md](mesh.md)）；「自动定期更新密钥」「多因素认证」「JWT/Token 管理」**未实现**——超前描述；「TLS 伪装」中 Trojan/VLESS+TLS 形态已实现，「协议混淆/域前置」待 P2（包长填充横切层已落 P1-4，见 [positioning.md](design/positioning.md) §2.4 现状注记、todo P2-4/P2-5）。
 
 ### 加密支持
 - **端到端加密**: 所有协议支持强加密
