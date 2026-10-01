@@ -36,8 +36,9 @@ use seep_platform::network::{NetworkConfig, NetworkManager};
 use seep_protocols::middleware::{ANN_ROUTE_EGRESS, ANN_ROUTE_KIND};
 use seep_protocols::{
     DirectConnector, HttpConnector, HttpIngress, Hysteria2Connector, MixedIngress,
-    ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress, TrojanConnector,
-    VlessConnector, WireguardConnector, WireguardUdpConnector,
+    ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress,
+    TlsConnectorFactory, TransportKey, TransportPool, TrojanConnector, VlessConnector,
+    WireguardConnector, WireguardUdpConnector,
 };
 use seep_routing::RoutingEngine;
 use seep_subscription::SubscriptionConverter;
@@ -120,9 +121,32 @@ impl RuntimeBuilder {
         // UDP 会话表的 FlowRouter 构造即固化，S5 需把 mesh_registry/chain_manager
         // 注入 RuntimeFlowRouter，早构造晚替换不可行——原位置即此处）。
 
+        // P1-5 §4.1 装配：池/工厂进程级单例（D-10——只在此构造一次，热更新
+        // 两路只传句柄不重建；参数烧在构造期，变更需重启，§4.3）。
+        // 块缺席 = 双 None（不构池不注工厂，D-9 零差异）；块存在即按
+        // enabled/tls_resumption 独立构池/注工厂。
+        let egress_pool_policy = match &config_snapshot.egress_pool {
+            Some(block) => Some(crate::to_pool_policy(
+                block,
+                self.runtime_config.connection_pool_size.unwrap_or(1024),
+            )?),
+            None => None,
+        };
+        let tls_factory = egress_pool_policy
+            .as_ref()
+            .filter(|p| p.tls_resumption)
+            .map(|p| Arc::new(TlsConnectorFactory::new(p.session_cache_size)));
+        let transport_pool = egress_pool_policy
+            .filter(|p| p.enabled)
+            .map(|p| TransportPool::new(p, tls_factory.clone()));
+
         // 出口默认实现（入口默认实现是 udp_service 唯一消费点，随 UDP 块顺延，见下）
         if self.flow_outputs.is_empty() {
-            let (outputs, connectors) = build_egress_outputs(&config_snapshot.egress)?;
+            let (outputs, connectors) = build_egress_outputs(
+                &config_snapshot.egress,
+                transport_pool.clone(),
+                tls_factory.clone(),
+            )?;
             self.flow_outputs = outputs;
             if self.egress_connectors.is_empty() {
                 self.egress_connectors = connectors;
@@ -379,6 +403,8 @@ impl RuntimeBuilder {
             // P0-5 §4 观测接缝②③：mesh 面 OnceLock（start 回填）+ client 计数
             mesh_plane: OnceLock::new(),
             udp_client_metrics,
+            transport_pool,
+            tls_factory,
             network_manager,
             subscription_manager,
             event_tx,
@@ -646,6 +672,10 @@ pub struct Runtime {
     mesh_plane: OnceLock<Arc<MeshDataPlane>>,
     /// P0-5 §4 观测接缝③：client 出站侧进程级计数（build() 从 bridge 抽出）
     udp_client_metrics: Option<Arc<UdpClientMetrics>>,
+    /// P1-5 §4.1：出站连接池单例（D-10 跨热更新共享；None = 块缺席/未启用）
+    transport_pool: Option<Arc<TransportPool>>,
+    /// P1-5 §4.1：TLS 连接器工厂单例（tls_resumption 独立于池生效）
+    tls_factory: Option<Arc<TlsConnectorFactory>>,
     network_manager: Option<Arc<Mutex<NetworkManager>>>,
     subscription_manager: Option<Arc<SubscriptionManager>>,
     event_tx: broadcast::Sender<RuntimeEvent>,
@@ -673,6 +703,23 @@ impl Runtime {
     pub async fn start(&self) -> Result<Vec<JoinHandle<Result<()>>>> {
         let mut tasks = Vec::new();
         *self.running.write().expect("running lock poisoned") = true;
+
+        // P1-5 §4.1 装配尾：warm（D-7，配置内 TLS 出站逐键预拨）+ 周期
+        // sweeper。池单例在 build() 构造；后台任务在此挂载（build() 无
+        // tokio 上下文约束）。warm 是优化不是前置条件——prewarm 内部即
+        // spawn 后台填充，失败退避不阻塞启动。
+        if let Some(pool) = &self.transport_pool {
+            let egress = self
+                .config
+                .read()
+                .expect("config lock poisoned")
+                .egress
+                .clone();
+            for key in derive_tls_warm_keys(&egress) {
+                pool.prewarm(&key, pool.policy().max_idle_per_key);
+            }
+            pool.spawn_sweeper();
+        }
 
         // 创建流量输出路由器（支持多跳链路）
         let mesh_tls = self
@@ -791,6 +838,9 @@ impl Runtime {
                 let router = self.router.clone();
                 let flow_outputs = self.flow_outputs.clone();
                 let egress_connectors = self.egress_connectors.clone();
+                // D-10：池/工厂单例句柄（订阅热更新重连装配用）
+                let transport_pool = self.transport_pool.clone();
+                let tls_factory = self.tls_factory.clone();
                 let tx = self.event_tx.clone();
                 let running = self.running.clone();
                 let check_interval = self
@@ -880,7 +930,12 @@ impl Runtime {
                             let merge_stats =
                                 merge_config_delta_in_place(&mut merged, &converted.config);
 
-                            let (outputs, connectors) = match build_egress_outputs(&merged.egress) {
+                            // D-10：传同一池/工厂句柄重连装配（不重建单例）
+                            let (outputs, connectors) = match build_egress_outputs(
+                                &merged.egress,
+                                transport_pool.clone(),
+                                tls_factory.clone(),
+                            ) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     let _ = tx.send(RuntimeEvent::SubscriptionEvent {
@@ -1095,7 +1150,13 @@ impl Runtime {
 
     pub async fn update_config(&self, new_config: SeepConfig) -> Result<()> {
         // Build egress outputs/connectors before mutating runtime state.
-        let (outputs, connectors) = build_egress_outputs(&new_config.egress)?;
+        // D-10/§4.3：传同一池/工厂句柄重连装配（新块的池参数不热生效——
+        // 烧在构造期，变更需重启；键作用域自失效覆盖 egress 集变更）。
+        let (outputs, connectors) = build_egress_outputs(
+            &new_config.egress,
+            self.transport_pool.clone(),
+            self.tls_factory.clone(),
+        )?;
 
         *self.config.write().expect("config lock poisoned") = new_config.clone();
         self.router.reload(new_config.routing.clone());
@@ -1144,6 +1205,17 @@ impl Runtime {
     /// 获取 Mesh 注册表
     pub fn get_mesh_registry(&self) -> Option<Arc<MeshRegistry>> {
         self.mesh_registry.clone()
+    }
+
+    /// 获取出站连接池（P1-5 §4.1：控制面 `/egress/pool/stats` 与指标渲染
+    /// 取数入口；None = egress_pool 块缺席或 enabled=false）
+    pub fn get_transport_pool(&self) -> Option<Arc<TransportPool>> {
+        self.transport_pool.clone()
+    }
+
+    /// 获取 TLS 连接器工厂（P1-5 §4.1；None = 块缺席或 tls_resumption=false）
+    pub fn get_tls_factory(&self) -> Option<Arc<TlsConnectorFactory>> {
+        self.tls_factory.clone()
     }
 
     /// 获取 UDP 入站服务（P0-5 §4 观测接缝①：控制面 /udp/stats 取数入口；
@@ -1935,14 +2007,112 @@ type EgressBuildPair = (
     HashMap<String, Arc<dyn EgressConnector>>,
 );
 
-fn build_egress_outputs(descriptors: &[EgressDescriptor]) -> Result<EgressBuildPair> {
+/// D-7 warm 键推导：配置内 TLS 出站逐键预拨（与各连接器 `forward_pooled`
+/// 的传输键同源）。vless ws 网络补 ws 分支键（实际 SNI = sni ∥ host 首值
+/// ∥ server）；重复键去重。tcp 主键恒推——同 server 预热无害（warm 是
+/// 优化不是前置条件，miss 走前台拨号）。
+fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Vec<TransportKey> {
+    let mut keys: Vec<TransportKey> = Vec::new();
+    for desc in egress {
+        match &desc.spec {
+            EgressConfig::Trojan {
+                server,
+                port,
+                tls,
+                skip_cert_verify,
+                sni,
+                ..
+            } => {
+                if *tls {
+                    keys.push(TransportKey::tls(
+                        server,
+                        *port,
+                        sni.as_deref(),
+                        *skip_cert_verify,
+                        &[],
+                    ));
+                }
+            }
+            EgressConfig::Http {
+                server,
+                port,
+                tls: true,
+                skip_cert_verify,
+                sni,
+                ..
+            } => {
+                keys.push(TransportKey::tls(
+                    server,
+                    *port,
+                    sni.as_deref(),
+                    *skip_cert_verify,
+                    &[],
+                ));
+            }
+            EgressConfig::Vless {
+                server,
+                port,
+                network,
+                tls: true,
+                skip_cert_verify,
+                sni,
+                alpn,
+                host,
+                ..
+            } => {
+                let empty: Vec<String> = Vec::new();
+                let alpn = alpn.as_ref().unwrap_or(&empty);
+                // tcp 主键实际 SNI = sni ∥ server（与 forward_pooled tcp 分支同源）
+                let tcp_sni = sni.clone().unwrap_or_else(|| server.clone());
+                keys.push(TransportKey::tls(
+                    server,
+                    *port,
+                    Some(&tcp_sni),
+                    *skip_cert_verify,
+                    alpn,
+                ));
+                if network == "ws" || network == "websocket" {
+                    let ws_sni = sni
+                        .clone()
+                        .or_else(|| host.as_ref().and_then(|v| v.first().cloned()))
+                        .unwrap_or_else(|| server.clone());
+                    keys.push(TransportKey::tls(
+                        server,
+                        *port,
+                        Some(&ws_sni),
+                        *skip_cert_verify,
+                        alpn,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    // 非相邻重复也去重（同键多 egress 条目 / vless tcp-ws 同键）
+    let mut seen = std::collections::HashSet::new();
+    keys.retain(|k| seen.insert(k.clone()));
+    keys
+}
+
+fn build_egress_outputs(
+    descriptors: &[EgressDescriptor],
+    transport_pool: Option<Arc<TransportPool>>,
+    tls_factory: Option<Arc<TlsConnectorFactory>>,
+) -> Result<EgressBuildPair> {
     let mut outputs = HashMap::new();
     let mut connectors = HashMap::new();
 
     for desc in descriptors {
         match &desc.spec {
             EgressConfig::Direct => {
-                let connector: Arc<dyn EgressConnector> = Arc::new(DirectConnector::new());
+                // §2.5/D-6：direct 仅 pre_dial_direct 时带池（投机预拨默认关）
+                let connector: Arc<dyn EgressConnector> = match transport_pool
+                    .as_ref()
+                    .filter(|p| p.policy().pre_dial_direct)
+                {
+                    Some(pool) => Arc::new(DirectConnector::with_pool(pool.clone())),
+                    None => Arc::new(DirectConnector::new()),
+                };
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
                     connector.clone(),
@@ -1986,8 +2156,8 @@ fn build_egress_outputs(descriptors: &[EgressDescriptor]) -> Result<EgressBuildP
                     *tls,
                     *skip_cert_verify,
                     sni.clone(),
-                    None,
-                    None,
+                    transport_pool.clone(),
+                    tls_factory.clone(),
                 ));
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
@@ -2045,8 +2215,8 @@ fn build_egress_outputs(descriptors: &[EgressDescriptor]) -> Result<EgressBuildP
                     password.clone(),
                     sni.clone(),
                     *skip_cert_verify,
-                    None,
-                    None,
+                    transport_pool.clone(),
+                    tls_factory.clone(),
                 ));
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
@@ -2109,8 +2279,8 @@ fn build_egress_outputs(descriptors: &[EgressDescriptor]) -> Result<EgressBuildP
                     *skip_cert_verify,
                     sni.clone(),
                     alpn.clone(),
-                    None,
-                    None,
+                    transport_pool.clone(),
+                    tls_factory.clone(),
                 ));
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
@@ -2576,7 +2746,8 @@ mod tests {
             },
         }];
 
-        let (outputs, connectors) = build_egress_outputs(&egress).expect("build egress outputs");
+        let (outputs, connectors) =
+            build_egress_outputs(&egress, None, None).expect("build egress outputs");
         assert!(outputs.contains_key("hy2"));
         assert_eq!(
             connectors.get("hy2").expect("connector").name(),
@@ -3371,5 +3542,262 @@ mod tests {
         for t in tasks {
             t.abort();
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // P1-5 §4.1/§8.1 装配两态 + D-10 单例（M3）
+    // -----------------------------------------------------------------------
+
+    fn pool_assembly_config(egress_pool: Option<seep_config::EgressPoolBlock>) -> SeepConfig {
+        SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![IngressDescriptor {
+                name: "in1".to_string(),
+                spec: IngressConfig::Socks5 {
+                    bind: "127.0.0.1:0".to_string(),
+                    auth: None,
+                    udp_enabled: None,
+                },
+            }],
+            egress: vec![
+                EgressDescriptor {
+                    name: "direct".to_string(),
+                    spec: EgressConfig::Direct,
+                },
+                EgressDescriptor {
+                    name: "tr".to_string(),
+                    spec: EgressConfig::Trojan {
+                        server: "e.example".to_string(),
+                        port: 443,
+                        password: "pw".to_string(),
+                        network: "tcp".to_string(),
+                        path: None,
+                        host: None,
+                        tls: true,
+                        skip_cert_verify: false,
+                        sni: Some("sni.example".to_string()),
+                        alpn: None,
+                    },
+                },
+            ],
+            routing: seep_config::RoutingConfig {
+                default_node: "direct".to_string(),
+                groups: vec![],
+                rules: vec![],
+            },
+            udp: seep_config::UdpConfig::default(),
+            network: None,
+            obfuscation: None,
+            egress_pool,
+        }
+    }
+
+    fn pool_block(yaml: &str) -> seep_config::EgressPoolBlock {
+        serde_yaml::from_str(yaml).expect("解析 egress_pool 块")
+    }
+
+    /// §4.1：块存在且 enabled → 池+工厂单例就位；getter 句柄同实例。
+    #[test]
+    fn egress_pool_enabled_builds_pool_and_factory_singletons() {
+        let cfg = pool_assembly_config(Some(pool_block(
+            "enabled: true\nmax_idle_per_key: 3\nmax_idle_global: 128\n",
+        )));
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(RuntimeConfig {
+                enable_hot_reload: false,
+                ..RuntimeConfig::default()
+            })
+            .build()
+            .expect("build runtime");
+
+        let pool = runtime.get_transport_pool().expect("池应就位");
+        let factory = runtime.get_tls_factory().expect("工厂应就位");
+        let pool_again = runtime.get_transport_pool().expect("池应就位");
+        assert!(
+            Arc::ptr_eq(&pool, &pool_again),
+            "getter 返回同实例（D-10 单例）"
+        );
+        // D-8 映射 + 策略挂池
+        assert_eq!(pool.policy().max_idle_per_key, 3);
+        assert_eq!(pool.policy().max_idle_global, 128);
+        drop(pool_again);
+
+        // 池借出对象键由 trojan 出站推导（此处仅验装配，dial 归连接器测试）
+        drop(pool);
+        drop(factory);
+    }
+
+    /// D-9：块缺席 → 双 None（不构池不注工厂）。
+    #[test]
+    fn egress_pool_absent_yields_none_handles() {
+        let runtime = RuntimeBuilder::new(pool_assembly_config(None))
+            .with_runtime_config(RuntimeConfig {
+                enable_hot_reload: false,
+                ..RuntimeConfig::default()
+            })
+            .build()
+            .expect("build runtime");
+        assert!(runtime.get_transport_pool().is_none());
+        assert!(runtime.get_tls_factory().is_none());
+    }
+
+    /// §3.1「块存在即生效，独立于 enabled」：enabled=false 仅构工厂不构池。
+    #[test]
+    fn egress_pool_disabled_still_builds_factory() {
+        let cfg = pool_assembly_config(Some(pool_block("enabled: false\n")));
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(RuntimeConfig {
+                enable_hot_reload: false,
+                ..RuntimeConfig::default()
+            })
+            .build()
+            .expect("build runtime");
+        assert!(runtime.get_transport_pool().is_none(), "未启用不构池");
+        assert!(runtime.get_tls_factory().is_some(), "恢复半边独立生效");
+    }
+
+    /// D-10/§4.3：update_config 重连装配不重建池（实例 ptr 断言，warmth 存续）。
+    #[tokio::test]
+    async fn update_config_keeps_pool_singleton_alive() {
+        let cfg = pool_assembly_config(Some(pool_block("enabled: true\n")));
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(RuntimeConfig {
+                enable_hot_reload: false,
+                ..RuntimeConfig::default()
+            })
+            .build()
+            .expect("build runtime");
+        let before = runtime.get_transport_pool().expect("池应就位");
+
+        let mut new_cfg = pool_assembly_config(Some(pool_block("enabled: true\n")));
+        new_cfg.egress.push(EgressDescriptor {
+            name: "tr2".to_string(),
+            spec: EgressConfig::Trojan {
+                server: "e2.example".to_string(),
+                port: 443,
+                password: "pw".to_string(),
+                network: "tcp".to_string(),
+                path: None,
+                host: None,
+                tls: true,
+                skip_cert_verify: false,
+                sni: None,
+                alpn: None,
+            },
+        });
+        runtime.update_config(new_cfg).await.expect("update");
+
+        let after = runtime.get_transport_pool().expect("池应就位");
+        assert!(Arc::ptr_eq(&before, &after), "热更新后池单例不重建");
+        assert!(
+            runtime.get_egress_connectors().contains_key("tr2"),
+            "新出站已装配"
+        );
+    }
+
+    /// D-7 warm 键推导：trojan/http-tls 主键、vless ws 双键（ws SNI 归host），
+    /// 平文/无关出站不产键，跨条目同键去重。
+    #[test]
+    fn derive_tls_warm_keys_matches_connector_keys() {
+        let egress = vec![
+            EgressDescriptor {
+                name: "tr".to_string(),
+                spec: EgressConfig::Trojan {
+                    server: "e.example".to_string(),
+                    port: 443,
+                    password: "pw".to_string(),
+                    network: "tcp".to_string(),
+                    path: None,
+                    host: None,
+                    tls: true,
+                    skip_cert_verify: false,
+                    sni: Some("sni.example".to_string()),
+                    alpn: None,
+                },
+            },
+            EgressDescriptor {
+                name: "vlws".to_string(),
+                spec: EgressConfig::Vless {
+                    server: "w.example".to_string(),
+                    port: 443,
+                    uuid: "00000000-0000-0000-0000-000000000000".to_string(),
+                    flow: None,
+                    network: "ws".to_string(),
+                    path: Some("/ws".to_string()),
+                    host: Some(vec!["cdn.example".to_string()]),
+                    tls: true,
+                    skip_cert_verify: false,
+                    sni: None,
+                    alpn: None,
+                },
+            },
+            EgressDescriptor {
+                name: "plain".to_string(),
+                spec: EgressConfig::Http {
+                    server: "p.example".to_string(),
+                    port: 8080,
+                    username: None,
+                    password: None,
+                    tls: false,
+                    skip_cert_verify: false,
+                    sni: None,
+                },
+            },
+            EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            },
+        ];
+        let keys = derive_tls_warm_keys(&egress);
+        assert_eq!(keys.len(), 3, "trojan 主键 + vless tcp/ws 双键");
+        assert!(
+            keys.contains(&TransportKey::tls(
+                "e.example",
+                443,
+                Some("sni.example"),
+                false,
+                &[]
+            )),
+            "trojan 键与 forward_pooled 同源"
+        );
+        assert!(
+            keys.contains(&TransportKey::tls(
+                "w.example",
+                443,
+                Some("w.example"),
+                false,
+                &[]
+            )),
+            "vless tcp 主键（sni 缺省 = server）"
+        );
+        assert!(
+            keys.contains(&TransportKey::tls(
+                "w.example",
+                443,
+                Some("cdn.example"),
+                false,
+                &[]
+            )),
+            "vless ws 分支键（实际 SNI = host 首值）"
+        );
+
+        // 同键多 egress 条目去重
+        let dup = vec![
+            egress[0].clone(),
+            EgressDescriptor {
+                name: "tr-again".to_string(),
+                spec: egress[0].spec.clone(),
+            },
+        ];
+        assert_eq!(derive_tls_warm_keys(&dup).len(), 1, "跨条目同键去重");
     }
 }
