@@ -2021,7 +2021,7 @@ mod tests {
         // §5：{mode=fixed} 帧计数与新增字节计数联动（进程级 statics 与同
         // 二进制并行测试共享——本帧贡献恰 +1/+zeros，他测只增不减，故断下界）
         let post = obfs_pad_snapshot();
-        assert!(post.frames_fixed >= pre.frames_fixed + 1, "fixed 帧计数递增");
+        assert!(post.frames_fixed > pre.frames_fixed, "fixed 帧计数递增");
         assert!(
             post.bytes_added >= pre.bytes_added + zeros as u64,
             "新增字节计数 ≥ 本帧填充量"
