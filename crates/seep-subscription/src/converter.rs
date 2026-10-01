@@ -1651,6 +1651,7 @@ proxies:
                 udp: seep_config::UdpConfig::default(),
                 network: None,
                 obfuscation: None,
+                egress_pool: None,
             },
             stats: ConversionStats {
                 input: InputStats {

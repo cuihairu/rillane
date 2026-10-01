@@ -15,6 +15,7 @@ pub mod hot_reload;
 pub mod mesh_transport;
 pub mod network_config;
 pub mod obfs_config;
+pub mod pool_config;
 pub mod runtime_builder;
 mod udp_chain; // P0-4 §5 客户端出站（私有：消费点 = runtime_builder UDP 块，S5 接线）
 
@@ -26,6 +27,7 @@ pub use hot_reload::{HotReloadConfig, HotReloadManager, ReloadEvent, ReloadStats
 pub use mesh_transport::{MeshDataPlane, MeshEnvelope, ObfsPadSnapshot, UdpFaceSnapshot};
 pub use network_config::network_block_to_platform;
 pub use obfs_config::{build_middleware_chain, to_padding_policy, PaddingPolicy};
+pub use pool_config::to_pool_policy;
 pub use runtime_builder::{
     ConfigMergeStats, FlowStatItem, MeshConfig, MeshEventType, NetworkEventType, Runtime,
     RuntimeBuilder, RuntimeConfig, RuntimeEvent, RuntimeStats, SubscriptionEventType,

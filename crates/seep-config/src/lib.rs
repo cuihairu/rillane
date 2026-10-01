@@ -27,6 +27,10 @@ pub struct SeepConfig {
     /// 构建期零 middleware 零注解注入，行为零差异 §2.5）
     #[serde(default)]
     pub obfuscation: Option<ObfuscationConfig>,
+    /// 出站连接池（P1-5 egress-connection-pool.md §3；缺省 None = 整块关闭，
+    /// 不构池不注工厂，行为零差异 §3.4）
+    #[serde(default)]
+    pub egress_pool: Option<EgressPoolBlock>,
 }
 
 /// UDP 数据面配置（udp-dataplane.md §5.2 / udp-relay-path.md §2）。
@@ -494,6 +498,88 @@ impl<'de> Deserialize<'de> for ApplyTo {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         ApplyTo::parse_config_str(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// egress_pool 区块（egress-connection-pool.md §3.1）：seep-config 镜像 serde
+/// 类型，到 `PoolPolicy` 的转换在 seep-runtime `to_pool_policy`（§3.2 裁决
+/// 镜像而非加依赖，`ObfuscationConfig`/`NetworkBlockConfig` 先例）。
+/// deny_unknown_fields = 新块无存量负担（§3.4）；除 enabled 外全 Option
+/// （§3.2 表），其中 max_idle_global 缺席有独立语义：取 runtime
+/// `connection_pool_size`（D-8 孤儿字段收编），其余缺席 = §3.1 缺省值。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressPoolBlock {
+    /// 池总开关（§3.1 缺省关 = 对齐 udp:/obfuscation: 先例，D-9 零差异）
+    #[serde(default)]
+    pub enabled: bool,
+    /// 共享 ClientConfig + 会话缓存；块存在即生效，独立于 enabled（§3.1；缺省 true）
+    #[serde(default)]
+    pub tls_resumption: Option<bool>,
+    /// 每键 idle 上限（预热/补充目标；缺省 2）
+    #[serde(default)]
+    pub max_idle_per_key: Option<usize>,
+    /// 全局 idle 上限；缺省取 runtime.connection_pool_size（D-8）
+    #[serde(default)]
+    pub max_idle_global: Option<usize>,
+    /// 借出后 idle 低于此值即触发补充（≤ max_idle_per_key；缺省 1）
+    #[serde(default)]
+    pub low_watermark: Option<usize>,
+    /// idle 条目寿命（秒，自入池起算；缺省 30）
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
+    /// 单次拨号超时（TCP+TLS 全程；缺省 5）
+    #[serde(default)]
+    pub dial_timeout_secs: Option<u64>,
+    /// ClientSessionMemoryCache 容量（缺省 256）
+    #[serde(default)]
+    pub session_cache_size: Option<usize>,
+    /// direct 按 target 投机预拨（默认关；对外观感风险 R-pool2，开启者显式承担）
+    #[serde(default)]
+    pub pre_dial_direct: Option<bool>,
+}
+
+impl EgressPoolBlock {
+    /// 块存在即生效的 TLS 会话恢复开关（§4.1 装配 filter 取用；缺省 true）
+    pub fn tls_resumption(&self) -> bool {
+        self.tls_resumption.unwrap_or(true)
+    }
+
+    /// 投机预拨开关（缺省 false）
+    pub fn pre_dial_direct(&self) -> bool {
+        self.pre_dial_direct.unwrap_or(false)
+    }
+
+    /// §3.3 构建期校验（四条）。规则 3（idle_timeout_secs < dial_timeout_secs
+    /// → warning 不 Err）不在此处：seep-config 无 tracing 依赖（network E5
+    /// 「warning 落转换处」先例），warning 落 seep-runtime `to_pool_policy`。
+    pub fn validate(&self) -> Result<()> {
+        // §3.3-1：池与 TLS 恢复全关 → 后续容量/水位字段无视（容忍半成品配置）
+        if !self.enabled && !self.tls_resumption() {
+            return Ok(());
+        }
+        if self.max_idle_per_key == Some(0) {
+            anyhow::bail!("egress_pool.max_idle_per_key 须 ≥ 1（当前 0，E1/§3.3-2）");
+        }
+        if let Some(low) = self.low_watermark {
+            let per_key = self.max_idle_per_key.unwrap_or(2);
+            if low > per_key {
+                anyhow::bail!(
+                    "egress_pool.low_watermark ({low}) 不应大于 max_idle_per_key ({per_key}，E1/§3.3-2)"
+                );
+            }
+        }
+        if self.tls_resumption() && self.session_cache_size == Some(0) {
+            anyhow::bail!(
+                "egress_pool.session_cache_size 须 ≥ 1（tls_resumption 开启时，当前 0，E1/§3.3-2）"
+            );
+        }
+        if self.pre_dial_direct() && !self.enabled {
+            anyhow::bail!(
+                "egress_pool.pre_dial_direct=true 须搭配 egress_pool.enabled=true（无池则无从预拨，§3.3-4）"
+            );
+        }
+        Ok(())
     }
 }
 

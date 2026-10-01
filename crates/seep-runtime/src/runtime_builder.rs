@@ -2611,6 +2611,7 @@ mod tests {
             udp: seep_config::UdpConfig::default(),
             network: None,
             obfuscation: None,
+            egress_pool: None,
         };
 
         let runtime = RuntimeBuilder::new(cfg)
@@ -2652,6 +2653,7 @@ mod tests {
             udp: seep_config::UdpConfig::default(),
             network: None,
             obfuscation: None,
+            egress_pool: None,
         };
 
         let stats = runtime
@@ -2696,6 +2698,7 @@ mod tests {
             udp: seep_config::UdpConfig::default(),
             network: None,
             obfuscation: None,
+            egress_pool: None,
         };
 
         let delta = SeepConfig {
@@ -2761,6 +2764,7 @@ mod tests {
             udp: seep_config::UdpConfig::default(),
             network: None,
             obfuscation: None,
+            egress_pool: None,
         };
 
         let stats = merge_config_delta_in_place(&mut target, &delta);
@@ -2836,6 +2840,7 @@ mod tests {
             },
             network: None,
             obfuscation: None,
+            egress_pool: None,
         }
     }
 
@@ -3222,6 +3227,7 @@ mod tests {
             udp,
             network: None,
             obfuscation: None,
+            egress_pool: None,
         }
     }
 

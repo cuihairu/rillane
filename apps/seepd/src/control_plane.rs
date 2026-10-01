@@ -2120,6 +2120,7 @@ mod tests {
             },
             network: None,
             obfuscation: None,
+            egress_pool: None,
         }
     }
 
