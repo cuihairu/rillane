@@ -47,6 +47,9 @@ pub struct ChainConfig {
     pub health_check_interval: Duration,
     /// 链路过期时间
     pub chain_ttl: Duration,
+    /// SLO 劣化 watcher（slo-scoring.md §2 D-5）：None = 不启（缺省）
+    #[serde(default)]
+    pub slo_watch: Option<SloWatch>,
 }
 
 impl Default for ChainConfig {
@@ -59,8 +62,22 @@ impl Default for ChainConfig {
             optimization_strategy: PathOptimizationStrategy::BalancedLatencyBandwidth,
             health_check_interval: Duration::from_secs(30),
             chain_ttl: Duration::from_secs(300),
+            slo_watch: None,
         }
     }
+}
+
+/// SLO 劣化 watcher 配置（slo-scoring.md §3）：当前路径末跳 p95/loss 任一
+/// 越门即触发 `handle_chain_failure`（原因 SloDegraded）。程序化装配面
+/// （`RuntimeBuilder.chain_config`）；YAML 面随 P2-3 profile。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SloWatch {
+    /// p95 RTT 门（ms）
+    pub p95_ms: u32,
+    /// 丢包率门（0.0-1.0）
+    pub loss_ratio: f64,
+    /// 评估周期（秒）
+    pub interval_secs: u64,
 }
 
 /// 路径优化策略
@@ -689,15 +706,18 @@ pub enum SwitchReason {
     TtlExpired,
     /// 健康巡检：链路已处终止态清理
     TerminatedUnhealthy,
+    /// SLO 劣化触发切换（slo-scoring.md §2 D-5；P2-2）
+    SloDegraded,
 }
 
 impl SwitchReason {
     /// 全部原因值（控制面 `seep_mesh_switch_total{reason}` 恒渲染零值用）
-    pub const ALL: [SwitchReason; 4] = [
+    pub const ALL: [SwitchReason; 5] = [
         SwitchReason::FailureReported,
         SwitchReason::FallbackExhausted,
         SwitchReason::TtlExpired,
         SwitchReason::TerminatedUnhealthy,
+        SwitchReason::SloDegraded,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -706,6 +726,7 @@ impl SwitchReason {
             SwitchReason::FallbackExhausted => "fallback_exhausted",
             SwitchReason::TtlExpired => "ttl_expired",
             SwitchReason::TerminatedUnhealthy => "terminated_unhealthy",
+            SwitchReason::SloDegraded => "slo_degraded",
         }
     }
 }
@@ -808,11 +829,13 @@ impl ChainManager {
         Ok(build_result.chain_context)
     }
 
-    /// 处理链路故障
+    /// 处理链路故障（`reason` = 触发因：流错误 FailureReported / SLO 劣化
+    /// SloDegraded——P2-2 §2 D-5；备用耗尽终态恒记 FallbackExhausted）
     pub async fn handle_chain_failure(
         &self,
         chain_id: &str,
         failure_reason: &str,
+        reason: SwitchReason,
     ) -> Result<Option<ChainContext>> {
         let mut chain = self
             .active_chains
@@ -835,7 +858,7 @@ impl ChainManager {
                 chain_id,
                 path_before,
                 chain.get_current_path(),
-                SwitchReason::FailureReported,
+                reason,
                 failure_reason,
             );
             info!(
@@ -955,6 +978,64 @@ impl ChainManager {
         loop {
             ticker.tick().await;
             self.check_chains_health().await;
+        }
+    }
+
+    /// 启动 SLO 劣化 watcher（slo-scoring.md §2 D-5）：仅
+    /// `config.slo_watch` 配置时有实义，未配置直接返回（spawn 侧零判）。
+    pub async fn start_slo_watch_task(self: Arc<Self>) {
+        let Some(watch) = self.config.slo_watch.clone() else {
+            return;
+        };
+        let mut ticker = tokio::time::interval(Duration::from_secs(watch.interval_secs.max(1)));
+
+        loop {
+            ticker.tick().await;
+            self.slo_watch_sweep(&watch).await;
+        }
+    }
+
+    /// 单轮 SLO 劣化评估（§4 接线点）：各活跃链路当前路径末跳质量越门 →
+    /// `handle_chain_failure`（SloDegraded）；切换/终止由其按 fallback 余量
+    /// 分记。快照先行——RefMut 不跨 await（P2-1 死锁修缮同律）。
+    async fn slo_watch_sweep(&self, watch: &SloWatch) {
+        let active: Vec<(String, Vec<String>)> = self
+            .active_chains
+            .iter()
+            .map(|c| {
+                (
+                    c.key().clone(),
+                    c.value().get_current_path().unwrap_or_default(),
+                )
+            })
+            .collect();
+
+        for (chain_id, path) in active {
+            if path.len() < 2 {
+                continue;
+            }
+            let (from, to) = (&path[path.len() - 2], &path[path.len() - 1]);
+            // 无该链路观测数据 → 跳过（§6 E3：unknown 不触发误切）
+            let Some((p95, loss)) = link_quality_between(&self.mesh_registry, from, to) else {
+                continue;
+            };
+            if p95 <= watch.p95_ms && loss <= watch.loss_ratio {
+                continue;
+            }
+            let detail = format!(
+                "slo degraded: p95={p95}ms loss={loss:.3} (门 p95={}ms loss={:.3})",
+                watch.p95_ms, watch.loss_ratio
+            );
+            warn!(
+                target: "seep::chain",
+                chain_id = %chain_id,
+                detail = %detail,
+                "SLO 劣化触发切换"
+            );
+            // 链路竞态消失等错误忽略（§6 E3：巡检快照外的 chain_id 即略）
+            let _ = self
+                .handle_chain_failure(&chain_id, &detail, SwitchReason::SloDegraded)
+                .await;
         }
     }
 
@@ -1080,6 +1161,29 @@ pub struct ChainManagerStats {
     pub last_failover_epoch_seconds: Option<u64>,
 }
 
+/// 末跳质量点查（slo-scoring.md §2 D-5 数据面）：双向匹配（上报方向与路径
+/// 方向可能相反）；p95 取 RTT 环、loss 取 errors/connections（分母 0 视 0
+/// ——无观测即无罚分）。无 RTT 样本 → None（watcher 跳过，§6 E3）。
+fn link_quality_between(registry: &MeshRegistry, from: &str, to: &str) -> Option<(u32, f64)> {
+    let p95 = registry
+        .get_all_link_rtt()
+        .into_iter()
+        .find(|r| (r.from == from && r.to == to) || (r.from == to && r.to == from))
+        .map(|r| r.p95_ms)?;
+    let (conns, errs) = registry
+        .get_all_link_traffic()
+        .into_iter()
+        .find(|t| (t.from == from && t.to == to) || (t.from == to && t.to == from))
+        .map(|t| (t.connections_total, t.errors_total))
+        .unwrap_or((0, 0));
+    let loss = if conns > 0 {
+        errs as f64 / conns as f64
+    } else {
+        0.0
+    };
+    Some((p95, loss))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1130,7 +1234,7 @@ mod tests {
 
         // 首次故障：切换到 fallback[0]
         let out = mgr
-            .handle_chain_failure("ch1", "upstream reset")
+            .handle_chain_failure("ch1", "upstream reset", SwitchReason::FailureReported)
             .await
             .unwrap();
         assert!(out.is_some(), "仍有备用路径应切换成功");
@@ -1154,10 +1258,13 @@ mod tests {
         assert_eq!(ev.detail, "upstream reset", "自由文本降 detail 透传");
 
         // 连续两故障耗尽两条备用：第二次切换 + 第三次 FallbackExhausted
-        let out = mgr.handle_chain_failure("ch1", "timeout").await.unwrap();
+        let out = mgr
+            .handle_chain_failure("ch1", "timeout", SwitchReason::FailureReported)
+            .await
+            .unwrap();
         assert!(out.is_some());
         let out = mgr
-            .handle_chain_failure("ch1", "timeout again")
+            .handle_chain_failure("ch1", "timeout again", SwitchReason::FailureReported)
             .await
             .unwrap();
         assert!(out.is_none(), "备用耗尽返回 None");
@@ -1183,7 +1290,9 @@ mod tests {
             let mut ctx = ChainContext::new(id.clone(), "c1".into(), "exit1".into());
             ctx.update_path(vec!["c1".into(), "exit1".into()]);
             mgr.active_chains.insert(id.clone(), ctx);
-            mgr.handle_chain_failure(&id, "e").await.unwrap();
+            mgr.handle_chain_failure(&id, "e", SwitchReason::FailureReported)
+                .await
+                .unwrap();
         }
         let ledger = mgr.get_recent_switches(usize::MAX);
         assert_eq!(ledger.len(), SWITCH_LEDGER_CAP, "cap 100 最新保留");
@@ -1225,5 +1334,90 @@ mod tests {
             "终止事件 to=None"
         );
         assert_eq!(mgr.active_chains.len(), 0, "两链均被巡检终止移除");
+    }
+
+    /// P2-2 §7-4：SLO watcher——当前路径末跳质量越门 → SloDegraded 触发
+    /// handle_chain_failure，账本事件 reason=slo_degraded 且 fallback 按声明
+    /// 序提升；数据合规（§7-4a）与无观测数据（§7-4b）均不动作。
+    #[tokio::test]
+    async fn slo_watch_degradation_triggers_failover_and_ledger() {
+        let registry = Arc::new(MeshRegistry::new());
+        let builder = Arc::new(ChainBuilder::new(ChainConfig::default(), registry.clone()));
+        let config = ChainConfig {
+            slo_watch: Some(SloWatch {
+                p95_ms: 100,
+                loss_ratio: 0.1,
+                interval_secs: 1,
+            }),
+            ..ChainConfig::default()
+        };
+        let mgr = ChainManager::new(config, builder, registry.clone());
+        insert_chain(&mgr, "ch1");
+        let watch = SloWatch {
+            p95_ms: 100,
+            loss_ratio: 0.1,
+            interval_secs: 1,
+        };
+
+        // (b) 无观测数据：link_quality_between 为 None → sweep 不动作
+        mgr.slo_watch_sweep(&watch).await;
+        assert!(mgr.get_recent_switches(10).is_empty(), "无数据不触发误切");
+
+        // (a) 合规数据：末跳 (relay1→exit1) p95=20 < 门 100 → 不动作
+        registry
+            .update_link_state(LinkState {
+                source: "relay1".into(),
+                target: "exit1".into(),
+                latency_ms: 20,
+                bandwidth_mbps: 100,
+                packet_loss_rate: 0.0,
+                last_updated: Instant::now(),
+            })
+            .unwrap();
+        mgr.slo_watch_sweep(&watch).await;
+        assert!(mgr.get_recent_switches(10).is_empty(), "合规不切换");
+
+        // 越门：p95=300 > 100 → SloDegraded，fallback[0] (relay2) 按声明序提升
+        registry
+            .update_link_state(LinkState {
+                source: "relay1".into(),
+                target: "exit1".into(),
+                latency_ms: 300,
+                bandwidth_mbps: 100,
+                packet_loss_rate: 0.0,
+                last_updated: Instant::now(),
+            })
+            .unwrap();
+        mgr.slo_watch_sweep(&watch).await;
+
+        let events = mgr.get_recent_switches(10);
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.reason, "slo_degraded");
+        assert_eq!(ev.chain_id, "ch1");
+        assert_eq!(
+            ev.from_path,
+            vec!["c1".to_string(), "relay1".to_string(), "exit1".to_string()]
+        );
+        assert_eq!(
+            ev.to_path,
+            Some(vec![
+                "c1".to_string(),
+                "relay2".to_string(),
+                "exit1".to_string()
+            ])
+        );
+        assert!(
+            ev.detail.contains("p95=300ms"),
+            "detail 携带实测值与门限：{}",
+            ev.detail
+        );
+        assert_eq!(mgr.switch_counters_snapshot().get("slo_degraded"), Some(&1));
+        let ctx = mgr.active_chains.get("ch1").unwrap();
+        assert_eq!(
+            ctx.get_current_path().unwrap(),
+            vec!["c1".to_string(), "relay2".to_string(), "exit1".to_string()],
+            "fallback 提升后 current_path 单源更新"
+        );
     }
 }

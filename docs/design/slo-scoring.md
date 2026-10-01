@@ -3,6 +3,14 @@
 > 2026-10-02 就绪。以 p95 RTT/丢包为目标给组策略打分，升级 `latency`
 > 策略；mesh 劣化时 chain 侧自动切换且原因入账本（P2-1）。「游戏 profile
 > 默认启用」归 P2-3（profile 预设落地时接线，本稿交付能力面）。
+>
+> **落地状态**：✅ 已实现（M1 a9c7e11：SloPolicy 配置 + 评分核心/门/
+> 来源优先级；M2 本提交：mesh→routing 质量桥 + ChainManager SLO
+> watcher + `SwitchReason::SloDegraded` + `slo_watch` 程序化配置面）。
+> YAML 面归 P2-3（D-6/O-slo2）；`slo_watch` 当前仅程序化构造
+> `ChainConfig` 可达（serde 反序列化已支持，`seepd` 不透传）。
+> §6 E2 偏差注记：零连接链路 loss 记 0.0（观测 API 无原子
+> 「errors/connections 同快照」面，纯 RTT 节点不应被疑似丢包放大）。
 
 ## 0. 范围与验收口径
 

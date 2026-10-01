@@ -5,7 +5,7 @@
 //! 支持多跳链路构建与故障转移。
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     net::SocketAddr,
     sync::{Arc, OnceLock, RwLock},
     time::{Duration, Instant},
@@ -44,7 +44,7 @@ use seep_routing::RoutingEngine;
 use seep_subscription::SubscriptionConverter;
 use seep_subscription::SubscriptionManager;
 
-use crate::chain::{ChainBuilder, ChainConfig, ChainConstraints, ChainManager};
+use crate::chain::{ChainBuilder, ChainConfig, ChainConstraints, ChainManager, SwitchReason};
 use crate::mesh_transport::{
     MeshDataPlane, MeshEnvelope, MeshTlsConfig, MeshUdpGate, UdpFaceSnapshot, UDP_FACE_DEFAULT_MAX,
 };
@@ -993,6 +993,13 @@ impl Runtime {
                     mgr_clone.start_health_check_task().await;
                 });
 
+                // P2-2 §2 D-5：SLO 劣化 watcher（config.slo_watch 未配置时
+                // 首轮即返，零开销）
+                let mgr_slo = mgr.clone();
+                tokio::spawn(async move {
+                    mgr_slo.start_slo_watch_task().await;
+                });
+
                 // 定期报告链路统计
                 let mut ticker = time::interval(Duration::from_secs(30));
                 loop {
@@ -1008,6 +1015,24 @@ impl Runtime {
                         value: stats.failover_count as f64,
                         tags: HashMap::new(),
                     });
+                }
+            }));
+        }
+
+        // P2-2 §4：mesh→routing 质量桥（D-4）——周期聚合 MeshRegistry 链路
+        // 质量（节点 p95 = 相邻链路最差跳 max；loss = Σerrors/Σconnections）
+        // 推进组策略（seep-routing 零 seep-mesh 依赖，数据推进式）。10s 周期
+        // 同 routing 健康巡检节奏。
+        if let Some(registry) = &self.mesh_registry {
+            let registry = registry.clone();
+            let router = self.router.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut ticker = time::interval(Duration::from_secs(10));
+                loop {
+                    ticker.tick().await;
+                    for (node, p95, loss) in aggregate_link_quality(&registry) {
+                        router.update_link_quality(&node, p95, loss);
+                    }
                 }
             }));
         }
@@ -1676,7 +1701,11 @@ impl FlowOutputRouter {
                                 {
                                     let chain_id = chain_ctx.chain_id.clone();
                                     if let Ok(Some(new_ctx)) = chain_mgr
-                                        .handle_chain_failure(&chain_id, &format!("{e}"))
+                                        .handle_chain_failure(
+                                            &chain_id,
+                                            &format!("{e}"),
+                                            SwitchReason::FailureReported,
+                                        )
                                         .await
                                     {
                                         let new_decision = chain_mgr.build_route_decision(&new_ctx);
@@ -2364,6 +2393,43 @@ fn register_local_mesh_node(mesh_cfg: MeshConfig) -> Result<Arc<MeshRegistry>> {
     });
 
     Ok(registry)
+}
+
+/// P2-2 §4：mesh→routing 质量桥聚合——节点视角 p95 = 相邻链路最差跳（max），
+/// loss = 相邻链路 errors 总和 / connections 总和（零连接记 0.0，见设计稿 §9 偏差）。
+/// 仅产出有 RTT 样本的节点，保证下游 update_link_quality 只喂真实数据（D-3 来源优先级）。
+pub fn aggregate_link_quality(registry: &MeshRegistry) -> Vec<(String, u32, f64)> {
+    let mut p95: BTreeMap<String, u32> = BTreeMap::new();
+    let mut traffic: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for r in registry.get_all_link_rtt() {
+        let e = p95.entry(r.from.clone()).or_insert(r.p95_ms);
+        if r.p95_ms > *e {
+            *e = r.p95_ms;
+        }
+        let e = p95.entry(r.to.clone()).or_insert(r.p95_ms);
+        if r.p95_ms > *e {
+            *e = r.p95_ms;
+        }
+    }
+    for t in registry.get_all_link_traffic() {
+        let e = traffic.entry(t.from.clone()).or_insert((0, 0));
+        e.0 += t.connections_total;
+        e.1 += t.errors_total;
+        let e = traffic.entry(t.to.clone()).or_insert((0, 0));
+        e.0 += t.connections_total;
+        e.1 += t.errors_total;
+    }
+    p95.into_iter()
+        .map(|(node, worst)| {
+            let (conns, errs) = traffic.get(&node).copied().unwrap_or((0, 0));
+            let loss = if conns > 0 {
+                errs as f64 / conns as f64
+            } else {
+                0.0
+            };
+            (node, worst, loss)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -3807,5 +3873,46 @@ mod tests {
             },
         ];
         assert_eq!(derive_tls_warm_keys(&dup).len(), 1, "跨条目同键去重");
+    }
+
+    /// P2-2 §7-3：mesh→routing 质量桥聚合——节点 p95 取相邻链路最差跳
+    /// （max），loss 按 Σerrors/Σconnections 跨链路聚合，零连接记 0.0；
+    /// 无 RTT 样本的节点不产出（D-3 只喂真实数据）。
+    #[test]
+    fn aggregate_link_quality_worst_hop_and_loss() {
+        let registry = MeshRegistry::new();
+        let link = |source: &str, target: &str, latency_ms: u32| seep_mesh::LinkState {
+            source: source.into(),
+            target: target.into(),
+            latency_ms,
+            bandwidth_mbps: 100,
+            packet_loss_rate: 0.0,
+            last_updated: std::time::Instant::now(),
+        };
+        registry
+            .update_link_state(link("client1", "relay1", 10))
+            .unwrap();
+        registry
+            .update_link_state(link("relay1", "exit1", 80))
+            .unwrap();
+        registry
+            .update_link_state(link("client1", "exit1", 30))
+            .unwrap();
+        registry.record_link_connection(&"relay1".to_string(), &"exit1".to_string());
+        registry.record_link_connection(&"relay1".to_string(), &"exit1".to_string());
+        registry.record_link_error(&"relay1".to_string(), &"exit1".to_string());
+
+        let rows = aggregate_link_quality(&registry);
+        let by_node: HashMap<String, (u32, f64)> =
+            rows.into_iter().map(|(n, p, l)| (n, (p, l))).collect();
+
+        // relay1 相邻链路 p95 = max(10, 80) = 80（最差跳），loss = 1/2
+        assert_eq!(by_node.get("relay1"), Some(&(80, 0.5)));
+        // client1 相邻链路 p95 = max(10, 30) = 30，无连接样本 → loss 0.0
+        assert_eq!(by_node.get("client1"), Some(&(30, 0.0)));
+        // exit1 相邻链路 p95 = max(80, 30) = 80，loss = 1/2（链路记双向节点）
+        assert_eq!(by_node.get("exit1"), Some(&(80, 0.5)));
+        // 未出现节点不产出
+        assert_eq!(by_node.len(), 3);
     }
 }

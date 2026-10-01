@@ -2344,7 +2344,11 @@ mod tests {
         runtime
             .get_chain_manager()
             .unwrap()
-            .handle_chain_failure(&chain_id, "test failure")
+            .handle_chain_failure(
+                &chain_id,
+                "test failure",
+                seep_runtime::SwitchReason::FailureReported,
+            )
             .await
             .unwrap();
 

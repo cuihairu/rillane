@@ -18,6 +18,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 > | 出站连接池 / TLS 会话恢复 | **已实现（2026-10，P1-5）**：`egress_pool:` 配置块 + 预建立/借出即消费池（trojan/http/vless + direct 选通）+ TLS 会话恢复（进程级共享 ClientConfig）+ `seep_pool_*`/`seep_tls_*` 指标 + `GET /egress/pool/stats` | — |
 > | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `seep_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
 > | mesh 链路可观测（per-link RTT 分位 / 观测形丢包 / 切换原因账本） | **已实现（2026-10，P2-1）**：`seep_mesh_link_rtt_ms{from,to,quantile}` + `seep_mesh_link_loss_ratio{from,to}` + `seep_mesh_switch_total{reason}`（chain 启用时恒渲染）+ `GET /mesh/switches` 最近 100 事件；mesh 未启用三族与端点均缺席 | [mesh-link-observability.md](design/mesh-link-observability.md) |
+> | SLO 打分选路（组策略 `slo:` 门 + penalty 评分 + chain 侧 `slo_watch` 劣化切换） | **已实现（2026-10，P2-2）**：`latency` 策略真数据在场时 = 门内最低分（score = p95 + loss × penalty）；chain watcher 越门即切换，账本 `reason="slo_degraded"`；无真数据部署行为不变；`slo_watch` YAML 面归 P2-3 | [slo-scoring.md](design/slo-scoring.md) |
 > | obfs/salamander 插件 / TLS 指纹模拟 / timing/shaping 扰动 | 未实现 | P2-4 / P2-5（[positioning.md](design/positioning.md) §2.4） |
 >
 > 各节标注中的「超前」指：本文保留了设计目标描述，但当前代码不包含对应实现。
@@ -244,6 +245,7 @@ impl EgressConnector for MyProtocol {
 - **会话保持**: 保持同一连接的路由一致性
 - **故障转移**: 自动检测故障并切换备用路径
 - **链路可观测**: per-link RTT p50/p95 分位、观测形丢包比、切换原因账本与计数（2026-10，P2-1，`/metrics` 三族 + `GET /mesh/switches`）
+- **SLO 打分选路**: `latency` 策略以 p95 RTT/丢包为目标打分（`slo:` 门 + penalty），chain 侧 `slo_watch` 劣化自动切换且原因入账本（2026-10，P2-2，见 [slo-scoring.md](design/slo-scoring.md)）
 
 ## 安全特性
 

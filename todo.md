@@ -98,8 +98,10 @@
   验收：Grafana 可按 link 维度查询 p50/p95 RTT 与最近 N 次切换原因。
   实现级设计：[docs/design/mesh-link-observability.md](docs/design/mesh-link-observability.md)（2026-10-02 设计稿就绪并同轮落地；D-1 RTT 样本环 per-link cap 256 最近秩就地分位（采样源 MVP = `update_link_state` 上报流 + `record_link_rtt` 公开写点，探测源后接 O-link-obs1）、D-2 丢包 = 观测派生 errors/connections（上报形语义不同不合并）、D-3 切换原因枚举化 + 账本 cap 100 + 按因计数、D-4 零 trait 变更零新依赖、D-5 关闭态三族与端点均缺席——随 mesh 能力存在性开落；§9 偏差载明终止事件同账本/就地排序分位/loss 以 connections 为分母）。
   进度（2026-10-02 落地）：**M1–M2 全部完成**（M1 样本环+账本+存量缺陷修缮 `a9c7e11` / M2 控制面+文档回填 本提交）；`/metrics` `seep_mesh_link_rtt_ms{from,to,quantile}`（环空链路不出序列）+ `seep_mesh_link_loss_ratio{from,to}`（connections=0 不出序列）+ `seep_mesh_switch_total{reason}`（chain 块内恒渲染四因零值也在）+ `GET /mesh/switches`（最近 100 事件 JSON，未启用 503 同 /nodes 先例）；**存量缺陷修缮三处**（M1 账本测试首度覆盖暴露）：handle_chain_failure 备用耗尽分支 RefMut+`DashMap::len()` 同线程分片锁自锁死锁、seep-core ChainContext 路径语义（fallback 非空时谎报 fallback[0] 且首跳跳过 fallback[0]，路由决策同源污染——修为单口径 current_path+按声明序提升）、check_chains_health 归因顺序（状态先于 TTL）；节点间流量 = P0-5 已交付 `seep_mesh_link_{bytes,connections,errors}_total` 即验收面不重复建设。
-- [ ] **P2-2 SLO 打分选路**：以 p95 RTT/丢包为目标打分，升级 `latency` 组策略；游戏 profile 默认启用。
+- [x] **P2-2 SLO 打分选路**：以 p95 RTT/丢包为目标打分，升级 `latency` 组策略；游戏 profile 默认启用。
   验收：模拟链路劣化时自动切换且记录切换原因；`ChainContext` fallback 路径生效。
+  实现级设计：[docs/design/slo-scoring.md](docs/design/slo-scoring.md)（2026-10-02 设计稿就绪并同轮落地；D-1 score = p95_ms + loss_ratio × loss_penalty_ms（缺省 1000ms/单位）、D-2 SLO 门只拦真实数据成员（unknown/legacy 合规、门全破不 dead-end）、D-3 成员级来源优先级 link_quality（TTL 60s）→ legacy latency_stats → 首个健康成员、D-4 零依赖（seep-routing 不依赖 seep-mesh，数据推进式 update_link_quality）、D-5 chain 侧 SloWatch watcher 越门即 handle_chain_failure(SloDegraded)、D-6 YAML 面本步仅组级 `slo`，`slo_watch` 程序化面（YAML 归 P2-3））。
+  进度（2026-10-02 落地）：**M1–M2 全部完成**（M1 SloPolicy+评分核心 `067577b` / M2 桥+watcher 本提交）；组策略 `slo:` 门内最低分选路（真数据在场 latency 从最后样本 min 升为 p95 分位 min——模拟源部署行为不变）；seep-runtime 10s 周期 mesh→routing 质量桥（节点 worst-hop p95 + Σerrors/Σconnections 聚合 loss）+ ChainManager `slo_watch` watcher（末跳越门即切换，账本 `reason="slo_degraded"`，P2-1 `seep_mesh_switch_total{reason}` 自动可见）；§7 五测全绿（评分翻转/门不 dead-end/来源优先级/桥聚合/watcher 切换+账本+提升）。「游戏 profile 默认启用」归 P2-3。
 - [ ] **P2-3 场景 profile 预设**：`proxy` / `game` / `web` 三套配置模板（路由规则 + 混淆开关 + 调度目标），底层同一引擎。
   验收：示例配置三选一即可运行；profile 间仅策略差异，无独立代码路径。
 - [ ] **P2-4 混淆中间件扩展（timing/shaping）**：微抖动注入、流形状归一。
@@ -154,7 +156,7 @@
 |--------|------|---------|------|
 | P0 | 5 | S1 UDP 全链路 | 5/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷、P0-4 mesh UDP 面、P0-5 观测与配置——S0–S6 全部落地） |
 | P1 | 5 | S2 TUN + S3 前半 | 1/5（**P1-5 完成**——M0–M5 全部落地 2026-10-02；P1-1 T2/P1-3 R0/P1-4 M0 部分步已落地（另会话在途推进）；设计稿就绪 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5 已落地）） |
-| P2 | 8 | S3 后半 + S4 | 1/8（**P2-1 完成**——M1–M2 全部落地 2026-10-02；P2-4 阻塞于 P1-4 M1+ 另会话在途） |
+| P2 | 8 | S3 后半 + S4 | 2/8（**P2-1/P2-2 完成**——均 M1–M2 全部落地 2026-10-02；P2-4 阻塞于 P1-4 M1+ 另会话在途） |
 | P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
 
 已完成底座（S0）9 大项见上文归档清单；原 19 条清单中 10 项核实为真实完成、3 项勘误重开、其余并入 P0–P3 对应条目。
