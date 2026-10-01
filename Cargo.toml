@@ -59,7 +59,10 @@ webpki-roots = "0.26"
 rustls-pemfile = "2.2"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 tokio-socks = "0.5"
-shadowsocks = "1.21"
+# default-features=false：弃默认 hickory-dns（DNS 子系统）——出口连接器只用
+# config/context/crypto/relay 核心，hostname 解析走 shadowsocks 内建 tokio 回退；
+# 顺带 hickory-resolver/hickory-proto 出锁（Dependabot GHSA-3v94-mw7p-v465 / GHSA-q2qq-hmj6-3wpp）
+shadowsocks = { version = "1.21", default-features = false, features = ["aead-cipher"] }
 httparse = "1.9"
 http = "1.1"
 pin-project-lite = "0.2"

@@ -127,6 +127,9 @@
 
 ## 待派任务（杂项，未入优先级序列）
 
+- [ ] **hyper 0.14 → 1.x 迁移（连带 h2 0.4，清 RUSTSEC-2026-0258）**（2026-10-01 登记）：`.github/workflows/ci.yml` audit 步现为 `cargo audit --ignore RUSTSEC-2026-0258`——h2 <0.4.16 空 DATA 帧放大（DoS），唯一引入路径 hyper 0.14（seepd `control_plane.rs` 直依；seep-runtime Cargo.toml 亦有声明但 src 零 `use hyper`，疑似残留一并清理），0.3.x 无回补版；control plane 仅 loopback 绑定 + Bearer 鉴权，实际暴露面有限故定向 ignore 而非阻塞门禁。迁移面：seepd control_plane.rs（hyper 0.14 server/client API → hyper 1.x + hyper-util + http-body-util）+ seep-runtime 依赖声明清理。
+  验收：h2 ≥0.4.16 入锁、ci.yml 去除 `--ignore` 后 `cargo audit` 全绿。
+
 - [x] **修 CI Docker 镜像构建**（2026-09-30 登记；2026-10-01 落地）：`.github/workflows/ci.yml` 的 docker job 现红——`Dockerfile:17` `COPY seep-routing/Cargo.toml` 起整段依赖缓存块（`COPY seep-config/… seep-core/… seep-routing/…` 与假源桩 `src/main.rs`）仍按旧扁平布局（仓库根 `seep-*/`），工作区实际已是 `crates/seep-config`、`crates/seep-core`、`crates/seep-routing` 等双层布局（`crates/` + `apps/`）。
   落地（按登记修法"枚举 COPY + 虚拟源桩"经典方案——曾试 BuildKit cache mount 免枚举清单，本地 docker 缺 buildx 组件回落；经典方案任何构建器可跑，成员清单枚举按根 `Cargo.toml` members 核对，新增成员需同步 Dockerfile 预热层）：①Dockerfile 重写——`rust:1-bookworm` 滚动稳定工具链（对齐 CI 其余 job 的 stable；MSRV 验证归 msrv job 独立覆盖，镜像构建目标是产物而非 MSRV 验证）；依赖预热层 = 根清单 + 锁文件 + 11 成员清单（`crates/` 9 lib + `apps/` 2 bin）+ 虚拟源桩（lib 空桩 / bin `fn main` 桩）→ `COPY . .` 真实构建 `--bin seepd --bin seepctl`；产物双拷（旧 `target/release/seep` 名自始不存在）；运行镜像补 `iproute2`（seep-platform TUN/路由 shell-out 依赖 `ip`）；`ENV SEEP_CONFIG=/etc/seep/config.yaml`（seepd 无 `--config` 参数面，路径经环境变量注入）+ 内置样例配置；`HEALTHCHECK seepd --version` / `EXPOSE 7890 9090`（socks-in / control api）。②新增 `.dockerignore`（target/、.git/、docs 构建产物不进上下文与镜像）。③`apps/seepd/src/main.rs` 增最小 `--version`/`-V` 参数面（`version_flag_response` 助手 + 配置加载前短路 + 单测）——此前 `docker run seep:test --version` 的参数被 seepd 无视而直接启动 daemon，冒烟步骤会挂死；现短路输出版本行退出 0。
   验收：本地 `docker build`（seep:test 190MB）+ `docker run --rm seep:test --version` 冒烟通过（退出 0、输出 `seepd 0.1.0`）；CI docker job 绿以 GitHub Actions 实跑为准（本地已等价验证）。
