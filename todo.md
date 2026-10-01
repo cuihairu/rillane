@@ -18,7 +18,7 @@
 | 配置新增 network 区块（mode: tun/redir；bypass/include）+ CLI `route apply/route clear` | `SeepConfig` 无顶层 network 区块；`seepctl` 无 route 子命令 | → P1 |
 | FlowMiddleware 支持 WASM/动态库加载，示例（限速、统计、内容过滤） | 仅有 `LatencyProbe` 一个实现，无动态加载机制 | → P3（降级） |
 
-另：`docs/PROTOCOLS.md` 部分描述超前于实现——**SOCKS5 UDP ASSOCIATE 已随 P0-2 落地并于 2026-09-30 回填状态**（总表与 SOCKS5 节均为"已实现"）；VMess 出站（归「VMess 出站」条目）、连接池（归 P1-5）、零拷贝/批量收发（2026-09-30 降级登记 **P3-5**）维持超前/未实现口径，各自落地后回填。
+另：`docs/PROTOCOLS.md` 部分描述超前于实现——**SOCKS5 UDP ASSOCIATE 已随 P0-2 落地并于 2026-09-30 回填状态；出站连接池/TLS 会话恢复已随 P1-5 落地并于 2026-10-02 回填状态**（总表与 SOCKS5 节均为"已实现"）；VMess 出站（归「VMess 出站」条目）、零拷贝/批量收发（2026-09-30 降级登记 **P3-5**）维持超前/未实现口径，各自落地后回填。
 
 ---
 
@@ -86,11 +86,11 @@
   **验收口径改写（§0，对齐 P0-3 显式改判做法，非缩水）**：TCP 线上分段由内核决定，逐包长度伪装在 TCP 面不可字面达成——可测口径 = seep 自有帧（chain 的 `MeshEnvelope` 帧，真 wire 字节）；单跳 TCP no-op；UDP 数据报填充（游戏主场）随 P0-4 `UdpEnvelope` 帧载体落地，本文预留同 `PaddingSpec` 钩子。
   落地：`seep-config`（M0 `obfuscation:` 块 deny_unknown_fields + validate 六规则 + `to_padding_policy()` 转换/E5 降级）+ `seep-core`（M1 `MiddlewareChain` 静态管线 + M2 `PaddingSpec` 定形 + M4 `middleware_invocations()` 调用即计数）+ `seep-protocols`（M2 `PaddingMiddleware` + 策略引擎纯函数 decide_padding，fixed/bucket/range 三形态 + overhead 比例闸门）+ `seep-runtime`（M1 forward 三段接线/注解注入 + M3 `MeshEnvelope` pad_len 字段（0 不序列化=关闭态线级零差异）+ pad/strip 固定点迭代 + version 1|2 门 + E4/E7 执行侧 + M4 `ObfsPadSnapshot` 进程级计数 + no_frame 单跳记账）+ `apps/seepd`（M4 `/metrics` `seep_obfs_*` 序列族恒渲染）+ `scripts/obfs_padding_dist.py`（M4 §7.2 分布检查脚本，raw/pcap 双模式 + E7 剥离校验 + `--require-padding` 判定）。测试 37 项新增（189 基线 → 226 全绿；M0 11 / M3 7 / M4 4，余为 M1/M2——含关闭态 wire 字节级对照与 metrics 全零族两枚"关闭零开销"钉子）。
   验收逐条核对（§8 M5）：①分布偏离且可配置目标形态——`envelope_pad_range_mode_distribution_shifts`（40 流 Range[300,600] 帧长 ≥5 取值全落界内）+ `padded_dial_wire_frame_hits_bucket_and_roundtrips`（bucket 对齐 512 真 wire 全链路）+ 脚本 `--require-padding` 判定 ✅；②关闭时零开销旁路——`unpadded_dial_wire_frame_byte_identical_baseline`（wire 逐字节一致）+ 空链 run noop + `forward_empty_chain_skips_route_annotations`（零注解零调用）+ `/metrics` 关闭态全零恒渲染 ✅；③E11/`peer_version`/`disabled` 计数 MVP 恒 0 恒渲染（R-obfs2 同版部署假设，§10）✅。
-- [ ] **P1-5 出站连接池**：同出口同 SNI keep-alive 复用 + TLS 会话恢复（网页加速核心项）。
+- [x] **P1-5 出站连接池**：同出口同 SNI keep-alive 复用 + TLS 会话恢复（网页加速核心项）。
   实现级设计：[docs/design/egress-connection-pool.md](docs/design/egress-connection-pool.md)（**2026-09-30 设计稿就绪，实施未开始**；§1 结构约束——全部出站连接器绑定即消费（copy_bidirectional 双向 EOF 后连接终态），池形态 = 预建立未绑定传输层连接 + 借出即消费、不归还（D-1）；键 = 传输身份 (server,port,tls,sni,skip,alpn) 非出站名、热更新键自失效（D-2/D-10）；策略/执行分离——PoolPolicy（配置期）/TransportPool（运行期零协议知识）/协议绑定留连接器，零 trait 变更（D-3/D-4）；恢复根因 = tls.rs 每流重建 ClientConfig 使默认会话缓存随流销毁 → 进程级共享 TlsConnectorFactory + `HandshakeKind` 公开 API 计数（D-5）；MVP 矩阵 trojan/http/vless + direct 选通 pre_dial（D-6）；`connection_pool_size` 孤儿字段收编全局容量缺省（D-8）；§9 清单 M0–M5）。
   验收：重复请求同目标握手次数下降，`/metrics` 有连接复用率指标；现有配置无破坏性变更。
   **验收口径注记（设计稿 §0.2，对齐 P0-3/P1-4 显式改写做法，非缩水）**：可测口径 = 请求路径阻塞握手（命中借出零拨号零握手）+ 全量 TLS 握手被 Resumed 取代（`seep_tls_handshakes_total{type}` 对比）；总拨号次数 ≈ 流数不降（每流消耗一条连接——降总连接数需多路复用 = V2），统计脚本同时输出三组数避免歧义。
-  进度（2026-09-30 文档回填轮）：PROTOCOLS.md 性能节已按现状标注（连接池未实现、超前描述保留设计口径）；设计稿同日就绪（见上），实施未开始。
+  进度（2026-10-02 落地）：**M0–M5 全部完成**（M0 池核心+工厂 `0ecb477` / M1 egress_pool 配置块 `d1d0478` / M2 连接器两态接入 `97dbdf7` / M3 build() 装配+热更新句柄 `1e90d04` / M4 控制面+TLS 集成验收+统计脚本 `54df7cc` / M5 文档回填）；实施期偏差（acquire_bound 装箱闭包习语、direct 无 stale 重拨、warm 挂 start()、rustls 双提供方 panic 缺陷修复、spawn_fill 有界重试等）逐条回填设计稿 §10-11..§10-17；判据 1–3 经 loopback TLS 集成测复现（N=12：hit 11/miss 1/前台拨号 1，握手观测 2 full/11 resumed）；PROTOCOLS.md 总表与性能节、roadmap 同步回填。
 
 ## P2 — 调度闭环与高级安全（roadmap S3 后半 + S4）
 
@@ -151,7 +151,7 @@
 | 优先级 | 条目 | 对应阶段 | 状态 |
 |--------|------|---------|------|
 | P0 | 5 | S1 UDP 全链路 | 5/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷、P0-4 mesh UDP 面、P0-5 观测与配置——S0–S6 全部落地） |
-| P1 | 5 | S2 TUN + S3 前半 | 0/5（设计稿就绪 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5）；实施未开始） |
+| P1 | 5 | S2 TUN + S3 前半 | 1/5（**P1-5 完成**——M0–M5 全部落地 2026-10-02；P1-1 T2/P1-3 R0/P1-4 M0 部分步已落地（另会话在途推进）；设计稿就绪 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5 已落地）） |
 | P2 | 8 | S3 后半 + S4 | 未开始 |
 | P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
 

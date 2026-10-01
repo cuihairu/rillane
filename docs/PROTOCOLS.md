@@ -15,7 +15,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 > | 出站 UDP 承载（hy2） | 未实现（`hysteria2` 0.1.6 公开 API 无 UDP 出口；P0-4 已完成且**维持改判**） | V2（quinn 载具，未决） |
 > | 出站 vmess 连接器 | 未实现（配置 schema 与订阅转换已支持，运行时构建期报错） | todo「VMess 出站」条目 |
 > | hysteria v1 | 未实现 | 无计划（仅 hy2） |
-> | 出站连接池 / TLS 会话恢复 | 未实现 | P1-5 |
+> | 出站连接池 / TLS 会话恢复 | **已实现（2026-10，P1-5）**：`egress_pool:` 配置块 + 预建立/借出即消费池（trojan/http/vless + direct 选通）+ TLS 会话恢复（进程级共享 ClientConfig）+ `seep_pool_*`/`seep_tls_*` 指标 + `GET /egress/pool/stats` | — |
 > | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `seep_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
 > | obfs/salamander 插件 / TLS 指纹模拟 / timing/shaping 扰动 | 未实现 | P2-4 / P2-5（[positioning.md](design/positioning.md) §2.4） |
 >
@@ -230,11 +230,11 @@ impl EgressConnector for MyProtocol {
 
 ## 性能优化
 
-> 状态：异步 I/O（tokio）已实现；**零拷贝与批量处理未实现**（描述为设计口径，无近期落地计划，降级登记 todo **P3-5**）；**连接池未实现**（P1-5，网页加速核心项）；「智能选择/故障转移」部分成立——组策略选路（7 种策略）与 mesh chain 故障回退已实现；「会话保持」在 UDP 侧已成立（2026-09，P0-1 会话表：进程/五元组粘滞键 + 空闲/生命周期回收，`seep-core/src/udp/`），TCP 连接复用仍归 P1-5。
+> 状态：异步 I/O（tokio）已实现；**零拷贝与批量处理未实现**（描述为设计口径，无近期落地计划，降级登记 todo **P3-5**）；**连接池已实现**（2026-10，P1-5：预建立/借出即消费池 + TLS 会话恢复，`egress_pool:` 块，`seep_pool_reuse_ratio` 等指标可见——总拨号 ≈ 流数不降系每流消耗一条连接的结构约束，降总连接数归 V2 多路复用）；「智能选择/故障转移」部分成立——组策略选路（7 种策略）与 mesh chain 故障回退已实现；「会话保持」在 UDP 侧已成立（2026-09，P0-1 会话表：进程/五元组粘滞键 + 空闲/生命周期回收，`seep-core/src/udp/`），TCP 侧连接复用以池形态成立（2026-10，P1-5）。
 
 ### 协议层优化
 - **零拷贝**: 使用 Rust 的所有权系统避免不必要的内存拷贝
-- **连接池**: 复用 TCP 连接减少握手开销
+- **连接池**: 复用 TCP 连接减少握手开销（**已实现**，2026-10 P1-5——池形态 = 预建立 + 借出即消费：命中借出的请求零拨号零握手，预热/补充拨号的握手被 TLS 会话恢复取代；总拨号 ≈ 流数不降为结构约束，降总连接数归 V2 多路复用）
 - **异步 I/O**: 基于 Tokio 的非阻塞 I/O
 - **批量处理**: 支持批量发送和接收
 

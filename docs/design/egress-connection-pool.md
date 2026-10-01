@@ -309,6 +309,8 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；Ha
 
 提交节奏循 P0-4 §9.1.1 / tun-dataplane §5 铁律：每步 `cargo build` + `cargo test` 全绿 → 单条 commit（引用本文 §节）→ `git fetch origin main` + rebase → push → 下一步；禁 tag/release/force push。
 
+> **落地注记（2026-10-02）**：M0–M5 已全部落地（M0 `0ecb477` / M1 `d1d0478` / M2 `97dbdf7` / M3 `1e90d04` / M4 `54df7cc` / M5 本提交），实施期偏差逐条记入 §10-11..§10-17；门禁基线 `cargo test --workspace --all-features` 259 项全绿。
+
 | 步 | 内容与落点 | 依赖 | 验收 |
 |----|-----------|------|------|
 | M0 | seep-protocols `pool.rs`：`PoolPolicy`/`TransportKey`/`TransportPool`（acquire/acquire_fresh/水位补充/idle sweep/驱逐/退避/计数/LeaseGuard）+ `tls.rs` `TlsConnectorFactory`（共享 ClientConfig + `in_memory_sessions` + HandshakeKind 计数） | — | 8.1 池核心与工厂全绿 |
@@ -330,8 +332,15 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；Ha
 | 6 | 裁决 | 池/工厂进程级单例跨热更新共享；参数变更重启生效（D-10，先例 network-route O-hot） |
 | 7 | 裁决 | `connection_pool_size` 收编为全局容量缺省（D-8）——孤儿字段首个消费者，关闭态仍零消费零行为 |
 | 8 | 裁决 | stale = 一次性前台重拨，不做主动探活（D-11）：预建立连接上主动 read 有消费边界歧义（TLS post-handshake 消息），重试以更低复杂度覆盖同场景 |
-| 9 | 假设 | 集成测试自签证书生成方式（rcgen dev-dep 或内嵌静态 PEM）实施时二选一 |
-| 10 | 假设 | 预热/补充拨号的并发有界性由每键不变式保证（§5.2），不做全局拨号速率限流——压测确认记入 M4 |
+| 9 | 假设（已收口） | 集成测试自签证书生成方式 → **实施选定 rcgen dev-dep**（`generate_simple_self_signed` + rustls-pemfile 解析，M4 `54df7cc`）；并发验收面（判据 1–3 串行形态）已可复现 |
+| 10 | 假设（部分收口） | 预热/补充拨号的并发有界性由每键不变式保证（§5.2），不做全局拨号速率限流——串行验收已过（M4）；真并发压测依赖真实出口流量形态，本仓 loopback 集成测不构造，R-pool3 观测面（dials/idle/leased gauge）已备，登记待真实流量期核 |
+| 11 | 偏差 | §6.2 `keys[]` 不含 per-key `leased`：D-1 借出即消费下 leased 归全局 gauge 记账（`seep_pool_leased_connections`），分键 leased 无运营动作，`KeySnapshot{key,idle}` 即终形（M4） |
+| 12 | 偏差 | `acquire_bound` 的 bind 闭包取 `FnMut(&mut dyn IoStream) -> Pin<Box<dyn Future>>` 装箱形而非 `AsyncFnMut`：当前 rustc（1.99）对 async 闭包 HRTB 泛化不过（"AsyncFnMut is not general enough"），装箱 future + `&mut dyn`（非 `&mut BoxedIo`——Box 内层 'static 固定）为稳定习语（tower service 同形，M2） |
+| 13 | 裁决 | direct 无 stale 一次性重拨：bind 语义 = 首写首读，direct 无协议握手期 → 无 stale 判定点，死闲连接暴露为流错误由 idle_timeout 兜底（M2 注释载明） |
+| 14 | 偏差 | warm 预热 + 周期 sweeper 挂 `Runtime::start()` 而非 `build()`：build() 为同步装配无 tokio 上下文，spawn/prewarm 须运行时在位（M3） |
+| 15 | 缺陷修复 | 实施期发现既有出站 TLS 首拨即崩的潜在生产缺陷：依赖图特征统一后 rustls 同持 ring 与 aws_lc_rs 两特征，`ClientConfig::builder()` 在双提供方歧义下运行时 panic（rustls crypto/mod.rs）——修复 = `tls.rs` OnceLock 显式安装 ring 默认提供方 + `builder_with_provider` 构造（M0）；mock 服务端同法（M4 测试） |
+| 16 | 偏差 | 水位补充拨号失败退避 + 有界重试：`spawn_fill` 单轮至多 `MAX_FILL_ATTEMPTS=5` 次尝试（退避 1s 起指数 30s 封顶，成功复位），防服务端持续不可达时的空转拨号风暴（M0） |
+| 17 | 观测注记 | rustls 对无 close_notify 的裸 EOF 视 `UnexpectedEof`（严格校验，0.22+ 行为）：`copy_bidirectional` 以 Err 收场——既有内联路径同形非池化引入；真实 trojan/http 上游普遍发送 close_notify，mock 服务端收尾显式 shutdown 发 close_notify（M4 测试注记） |
 
 ## 11. 风险与未决
 

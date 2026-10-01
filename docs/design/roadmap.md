@@ -1,7 +1,7 @@
 # Seep 分阶段路线图
 
 > 状态：设计文档（2026-09）· 定位依据：[positioning.md](positioning.md) · 可执行条目：[todo.md](../../todo.md)
-> 进度速览（2026-09-30）：S0 ✅ ｜ S1 进行中 4/5（P0-4 已完成；P0-5 实现级设计与派工拆解 S0–S6 就绪）｜ S2 设计启动（P1-1/P1-2 实现级设计就绪，实施未开始）｜ S3/S4 未开始
+> 进度速览（2026-10-02）：S0 ✅ ｜ S1 进行中 4/5（P0-4 已完成；P0-5 实现级设计与派工拆解 S0–S6 就绪）｜ S2/S3 进行中（P1-5 出站连接池**已完成** M0–M5；P1-1 T2/P1-3 R0/P1-4 M0 部分步落地、推进中；P1-2 设计就绪）｜ S4 未开始
 
 ## 执行摘要
 
@@ -52,7 +52,7 @@
 
 **目标**：系统级流量接管 + 进程/端口分流，游戏流量不依赖代理入站即可进入数据通路。
 
-> **进度（2026-09）**：实施未开始；P1-1/P1-2/P1-3 实现级设计稿就绪——[tun-dataplane.md](tun-dataplane.md)（T0–T5 分步清单、错误路径 E1–E16、§6 假设 11 项）、[network-route.md](network-route.md)（R0–R4 分步清单、NetworkManager 让路裁决、幂等/回滚状态机）；P1-4 / P1-5 未启动（P1-4 前置 = 中间件挂载点，见 S3 注记）。
+> **进度（2026-10）**：推进中；P1-1/P1-2/P1-3 实现级设计稿就绪——[tun-dataplane.md](tun-dataplane.md)（T0–T5 分步清单、错误路径 E1–E16、§6 假设 11 项；T2 已落地）、[network-route.md](network-route.md)（R0–R4 分步清单、NetworkManager 让路裁决、幂等/回滚状态机；R0 已落地）；P1-5 已完成（M0–M5 全部落地，见 S3）；P1-4 M0 已落地、余步推进中（前置 = 中间件挂载点，见 S3 注记）。
 
 - **复用**：`seep-platform::network` 已有的 `TunProvider`/`RouteManager`/`PacketFilter` trait 与 TunConfig/规则模型（trait 与规则模型已成型——编译内约 3588 行；`platform.rs` 237 行未参与编译且仅含 macOS 草稿，见 [status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §1.2）；`seep-core` 路由决策不变——TUN 只是新增一种 ingress。
 - **新增**：
@@ -72,7 +72,7 @@
   1. 混淆中间件（`seep-protocols::middleware`）：`padding`（包长分布对齐）、`timing`（微抖动）、`shaping`（流形状归一），按 profile 开关；
   2. 客户端 TLS 指纹模拟（uTLS 类能力，优先挂在 TLS 出站公共层 `tls.rs`）；
   3. obfs 插件兼容（simple-obfs http/tls；salamander 随 hy2 配置暴露）；
-  4. 出站连接池：同出口 keep-alive 复用 + TLS 会话恢复，服务于网页短连接；
+  4. 出站连接池：同出口 keep-alive 复用 + TLS 会话恢复，服务于网页短连接（**已完成**，2026-10-02 P1-5 M0–M5——[egress-connection-pool.md](egress-connection-pool.md)，验收判据 1–3 经 TLS 集成测复现）；
   5. mesh envelope 二进制化（替换 JSON 头，压缩固定开销）。
 - **退出标准**：混淆开关开启后，包长/时序特征经统计脚本验证偏离默认分布；连接池使同目标重复请求握手次数下降（有指标佐证）；现有订阅/配置无破坏性变更。
 
