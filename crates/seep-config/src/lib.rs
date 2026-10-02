@@ -877,14 +877,21 @@ impl SeepConfig {
             };
         }
         // game：QoS 包长打散（positioning §2.4；apply_to 缺省 chain = MVP
-        // 帧执行侧，obfuscation-middleware.md §2.3）
+        // 帧执行侧，obfuscation-middleware.md §2.3）+ P2-4 M2 启动抖动演示
+        // （fixed 10ms ≤ 闸门 20ms 对 p95 80ms SLO 可量化余量）
         if kind == ProfileKind::Game && self.obfuscation.is_none() {
             self.obfuscation = Some(ObfuscationConfig {
                 default_timing: None,
-                timing: None,
+                timing: Some(TimingBlockConfig {
+                    mode: "fixed".to_string(),
+                    fixed_ms: 10,
+                    max_delay_ms: 20,
+                    ..TimingBlockConfig::default()
+                }),
                 default_shaping: None,
                 shaping: None,
                 enabled: true,
+                middleware: vec!["padding".to_string(), "timing".to_string()],
                 padding: Some(PaddingBlockConfig {
                     mode: "bucket".to_string(),
                     buckets: vec![128, 256, 512, 1024],

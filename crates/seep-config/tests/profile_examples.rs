@@ -41,6 +41,15 @@ fn three_examples_load_and_expand() {
     assert!(obfs.enabled);
     let padding = obfs.padding.as_ref().expect("bucket 内联 padding");
     assert_eq!(padding.mode, "bucket");
+    // P2-4 M2：game 预设连带 timing 启动抖动
+    assert_eq!(
+        obfs.timing.as_ref().map(|t| (t.mode.as_str(), t.fixed_ms)),
+        Some(("fixed", 10))
+    );
+    assert_eq!(
+        obfs.middleware,
+        vec!["padding".to_string(), "timing".to_string()]
+    );
     assert!(game.udp.enabled, "game 示例显式承载 UDP（§9-1）");
     assert_eq!(game.udp.session_lifetime_secs, Some(3600));
     assert_eq!(game.egress_pool, None);

@@ -74,6 +74,16 @@ fn profile_expansion_matrix_three_kinds() {
     let padding = obfs.padding.as_ref().expect("game 预设应带内联 padding");
     assert_eq!(padding.mode, "bucket");
     assert_eq!(padding.buckets, vec![128, 256, 512, 1024]);
+    // P2-4 M2：game 预设连带 timing 启动抖动（对称概览注释 + 单测钉住）
+    let timing = obfs.timing.as_ref().expect("game 预设应带内联 timing");
+    assert_eq!(timing.mode, "fixed");
+    assert_eq!(timing.fixed_ms, 10);
+    assert_eq!(timing.max_delay_ms, 20);
+    assert_eq!(
+        obfs.middleware,
+        vec!["padding".to_string(), "timing".to_string()],
+        "game 预设 middleware 链 = padding + timing"
+    );
     assert_eq!(cfg.egress_pool, None, "game 不碰连接池");
 
     // web：web-auto 组（latency 无 slo）+ cn 规则；pool enabled；obfs 不动

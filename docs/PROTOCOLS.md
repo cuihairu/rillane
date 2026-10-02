@@ -2,7 +2,7 @@
 
 Seep 是一个高性能的网络路由代理系统，支持多种主流的网络协议。
 
-> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态；2026-10-02 回填 P1-4/P1-5/P2-1..P2-3/P2-5/P2-6 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
+> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态；2026-10-02 回填 P1-4/P1-5/P2-1..P2-6 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
 >
 > | 能力 | 状态 | 落地去向 |
 > |------|------|---------|
@@ -19,9 +19,11 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 > | 出站连接池 / TLS 会话恢复 | **已实现（2026-10，P1-5）**：`egress_pool:` 配置块 + 预建立/借出即消费池（trojan/http/vless + direct 选通）+ TLS 会话恢复（进程级共享 ClientConfig）+ `seep_pool_*`/`seep_tls_*` 指标 + `GET /egress/pool/stats` | — |
 > | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `seep_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
 > | mesh 链路可观测（per-link RTT 分位 / 观测形丢包 / 切换原因账本） | **已实现（2026-10，P2-1）**：`seep_mesh_link_rtt_ms{from,to,quantile}` + `seep_mesh_link_loss_ratio{from,to}` + `seep_mesh_switch_total{reason}`（chain 启用时恒渲染）+ `GET /mesh/switches` 最近 100 事件；mesh 未启用三族与端点均缺席 | [mesh-link-observability.md](design/mesh-link-observability.md) |
+> | timing/shaping 扰动（启动抖动 + 写网格归一） | **已实现（2026-10，P2-4）**：`TimingMiddleware` handle 内 sleep（fixed/uniform，max_delay_ms 闸门）、`ShapingMiddleware` 包装 `flow.io` 为 `PacedIo`（interval 网格 + jitter，读侧不包装）；注解可观测 `seep.obfs.timing`/`seep.obfs.shaping`；game 预设接线演示 | [obfuscation-timing-shaping.md](design/obfuscation-timing-shaping.md) |
 > | SLO 打分选路（组策略 `slo:` 门 + penalty 评分 + chain 侧 `slo_watch` 劣化切换） | **已实现（2026-10，P2-2）**：`latency` 策略真数据在场时 = 门内最低分（score = p95 + loss × penalty）；chain watcher 越门即切换，账本 `reason="slo_degraded"`；无真数据部署行为不变；`slo_watch` YAML 面归 P2-3 | [slo-scoring.md](design/slo-scoring.md) |
 > | 场景 profile 预设（`profile: proxy\|game\|web` 配置期展开） | **已实现（2026-10，P2-3）**：缺省填充语义（显式恒优先，运行期零分支）；game = SLO 目标 + 域名模板 + bucket 混淆；web = 连接池；`examples/profile-*.yaml` 三选一即运行 | [scenario-profiles.md](design/scenario-profiles.md) |
-> | obfs/salamander 插件 / timing/shaping 扰动 | 未实现 | P2-4（[positioning.md](design/positioning.md) §2.4） |
+> | obfs/salamander 插件 | 未实现（salamander 伪态不在本仓路线） | V2 备选 |
+> | timing/shaping 扰动 | **已实现（2026-10，P2-4）** | [obfuscation-timing-shaping.md](design/obfuscation-timing-shaping.md) |
 > | 客户端 TLS 指纹形态（none/chrome/ios/safari 预设 + 池键/工厂键扩展） | **已实现（2026-10，P2-5）**：按 egress `tls_fingerprint` 配置选择，QUIC 面不在内 | [tls-fingerprint.md](design/tls-fingerprint.md) |
 >
 > 各节标注中的「超前」指：本文保留了设计目标描述，但当前代码不包含对应实现。
@@ -174,7 +176,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 低延迟传输
 
 ### Hysteria2
-> 状态：部分实现——TCP over QUIC、密码认证、`mport`/`server_name`/`alpn`/`skip_cert_verify` 配置生效（`hysteria2` crate 承载）；拥塞控制算法选择、**UDP 中继/首包优化未实现**——V1 核查结论（2026-09）：`hysteria2` 0.1.6 公开 API 仅 connect/tcp_connect、`quic_connection` 为 pub(crate)，无 UDP 出口，非静默缩水，移 P0-4 的改判在 **P0-4 完成时维持**（2026-09，todo P0-4 §0.1-③——hy2 UDP 终态 = V2，载具 quinn 未决，见 todo.md P0-3/P0-4 条目与 [udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)）；salamander 混淆未实现（配置无该字段；包长填充横切层已落 P1-4，salamander 归 P2-4/P2-5）。
+> 状态：部分实现——TCP over QUIC、密码认证、`mport`/`server_name`/`alpn`/`skip_cert_verify` 配置生效（`hysteria2` crate 承载）；拥塞控制算法选择、**UDP 中继/首包优化未实现**——V1 核查结论（2026-09）：`hysteria2` 0.1.6 公开 API 仅 connect/tcp_connect、`quic_connection` 为 pub(crate)，无 UDP 出口，非静默缩水，移 P0-4 的改判在 **P0-4 完成时维持**（2026-09，todo P0-4 §0.1-③——hy2 UDP 终态 = V2，载具 quinn 未决，见 todo.md P0-3/P0-4 条目与 [udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)）；salamander 混淆未实现（配置无该字段；包长填充横切层已落 P1-4，timing/shaping 扰动已落 P2-4，salamander 归 V2 备选）。
 
 - **协议**: Hysteria 的改进版本
 - **改进**:
@@ -253,7 +255,7 @@ impl EgressConnector for MyProtocol {
 
 ## 安全特性
 
-> 状态：mesh 层 CA 轮换/双信任窗口/最小撤销列表已实现（[mesh.md](mesh.md)）；「自动定期更新密钥」「多因素认证」「JWT/Token 管理」**未实现**——超前描述；「TLS 伪装」中 Trojan/VLESS+TLS 形态已实现，「协议混淆/域前置」待 P2（包长填充横切层已落 P1-4，见 [positioning.md](design/positioning.md) §2.4 现状注记、todo P2-4/P2-5）。
+> 状态：mesh 层 CA 轮换/双信任窗口/最小撤销列表已实现（[mesh.md](mesh.md)）；「自动定期更新密钥」「多因素认证」「JWT/Token 管理」**未实现**——超前描述；「TLS 伪装」中 Trojan/VLESS+TLS 形态已实现，「协议混淆/域前置」：包长填充横切层已落 P1-4 + timing/shaping 扰动已落 P2-4（见 [positioning.md](design/positioning.md) §2.4 现状注记、todo P2-4/P2-5）。
 
 ### 加密支持
 - **端到端加密**: 所有协议支持强加密

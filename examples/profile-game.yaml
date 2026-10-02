@@ -14,6 +14,8 @@
 #                  domain_suffix，示例性非穷举）→ game-auto
 #   混淆        = obfuscation enabled + bucket 填充（128/256/512/1024，
 #                  QoS 包长打散，positioning §2.4；帧载体 = mesh chain）
+#                  + timing 启动抖动（fixed 10ms ≤ 闸门 20ms，对
+#                  p95≤80ms 的 SLO 余量可量化，P2-4 obfuscation-timing-shaping.md）
 #
 # game 场景的 UDP 由本文件显式承载（§9-1：udp 非 Option，机制不碰 udp 块
 # ——显式 enabled: true + 长局寿命；无 UDP 的游戏加速等于没加速）。

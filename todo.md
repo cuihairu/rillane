@@ -106,8 +106,10 @@
   验收：示例配置三选一即可运行；profile 间仅策略差异，无独立代码路径。
   实现级设计：[docs/design/scenario-profiles.md](docs/design/scenario-profiles.md)（2026-10-02 设计稿就绪并同轮落地；D-1 顶层单字段 `profile: proxy|game|web`、D-2 语义=缺省填充显式恒优先（不覆盖不删除，天然幂等）、D-3 展开点=`SeepConfig::from_str` 尾部唯一入口（运行期零分支=「无独立代码路径」）、D-4 未指定判定面（groups/rules 空 + obfuscation/egress_pool None；udp 非 Option 不在面内）、D-5 组模板成员=[default_node] 可运行最低形、D-6 三场景=策略矩阵行）。
   进度（2026-10-02 落地）：**M0–M1 全部完成**（M0 机制+单测 `2369c0d` / M1 示例+集成测 本提交）；game=game-auto 组（latency+slo p95 80ms/loss 2%）+ 游戏平台域模板规则 + obfuscation bucket 填充（QoS 包长打散）+ 示例显式 UDP 长局（§9-1）；web=web-auto 组 + egress_pool enabled（短连接复用）；proxy=auto 组 + cn 规则（基线形）；examples/profile-{proxy,game,web}.yaml 三选一 `SEEP_CONFIG=<path> seepd` 即运行（集成测走 load_from_path 全链路 + 四同构块全等钉「仅策略差异」）。O-prof1 `seepctl profile` 骨架生成归按需。
-- [ ] **P2-4 混淆中间件扩展（timing/shaping）**：微抖动注入、流形状归一。
+- [x] **P2-4 混淆中间件扩展（timing/shaping）**：微抖动注入、流形状归一。
   验收：与 P1-4 同一统计方法验证时序特征偏移；延迟代价可量化（p95 增幅 ≤ 配置上限）。
+  实现级设计：[docs/design/obfuscation-timing-shaping.md](docs/design/obfuscation-timing-shaping.md)（2026-10-02 落地；D-1 timing=启动抖动、D-2 shaping=写侧网格归一、D-3 确定性同源 hash、D-4 双 max_delay_ms 硬闸门、D-5 配置形与 padding 三件套对称、D-6 白名单 M1 扩、D-7 指标族 M1 不定）。
+  进度（2026-10-02 落地）：**M0–M2 全部完成**（M0 配置镜像+转换`7d56d06` / M1 两 middleware + PacedIo + 链接线`16d9eb2` / M2 示例接入+文档回填 本提交）；`TimingMiddleware` handle 内 sleep（fixed/uniform，闸门截断）+ `ShapingMiddleware` 包装 `flow.io` 为 `PacedIo`（interval 网格+jitter，读侧不包装）；game 预设内联 timing(fixed 10ms ≤ 20ms 闸门) + middleware [padding, timing]；§0 三口径逐条可测（注解决策可观测 / burst 网格间隔真度量 / 闸门 ≤ 配置上限）。
 - [x] **P2-5 客户端 TLS 指纹模拟**：uTLS 类能力挂载到出站 TLS 公共层（`tls.rs`）。
   验收：对外握手指纹可按配置选择（chrome/ios 等），指纹检测工具可区分。
   实现级设计：[docs/design/tls-fingerprint.md](docs/design/tls-fingerprint.md)（2026-10-02 设计稿就绪并同轮落地；D-1 预设=参数表非新栈、D-2 单漏斗挂载、D-3 sig_schemes 验证器包装、D-4 池键扩展、D-5 预设 none/chrome/ios/safari、D-6 不做新指标族）。
@@ -163,7 +165,7 @@
 |--------|------|---------|------|
 | P0 | 5 | S1 UDP 全链路 | 5/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷、P0-4 mesh UDP 面、P0-5 观测与配置——S0–S6 全部落地） |
 | P1 | 5 | S2 TUN + S3 前半 | 1/5（**P1-5 完成**——M0–M5 全部落地 2026-10-02；P1-1 T2/P1-3 R0/P1-4 M0 部分步已落地（另会话在途推进）；设计稿就绪 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5 已落地）） |
-| P2 | 8 | S3 后半 + S4 | 5/8（**P2-1/P2-2/P2-3/P2-5/P2-6 完成**——均 2026-10-02 全步落地；P2-4 阻塞于 P1-4 M1+ 另会话在途） |
+| P2 | 8 | S3 后半 + S4 | 6/8（**P2-1/P2-2/P2-3/P2-4/P2-5/P2-6 完成**——均 2026-10-02 全步落地） |
 | P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
 
 已完成底座（S0）9 大项见上文归档清单；原 19 条清单中 10 项核实为真实完成、3 项勘误重开、其余并入 P0–P3 对应条目。
