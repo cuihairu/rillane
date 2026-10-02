@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 pub mod dns;
+pub mod dns_engine;
 pub mod filter;
 pub mod route;
 pub mod tun;
@@ -25,6 +26,11 @@ pub mod linux;
 
 pub use dns::{
     DnsConfig, DnsFilterAction, DnsHandler, DnsRecordType, DomainPattern as DnsDomainPattern,
+};
+pub use dns_engine::{
+    AntiPoison, DnsAnswer, DnsAnswerData, DnsPartition, DnsResolver, DnsStatsCounters,
+    DnsStatsSnapshot, EngineDnsHandler, LocalDnsServer, PartitionPattern, ResolveError,
+    ResolverConfig, UpstreamGroup,
 };
 pub use filter::{
     ApplicationRule, DomainPattern as FilterDomainPattern, FilterAction, FilterResult, FilterStats,
@@ -340,11 +346,12 @@ fn create_packet_filter(_config: &FilteringConfig) -> Result<Box<dyn PacketFilte
     ))
 }
 
-/// 创建平台特定的 DNS 处理器——恒 Err：DNS 劫持归 P2-8（tun-dataplane.md §1.4）
-fn create_dns_handler(_config: &DnsConfig) -> Result<Box<dyn DnsHandler>> {
-    Err(anyhow::anyhow!(
-        "DNS 处理器真实现归 P2-8（tun-dataplane.md §1.4）"
-    ))
+/// 创建 DNS 处理器——P2-8 切真实现：UDP 直连上游引擎（dns-partition.md
+/// §2-D-6）；加密上游/零上游由引擎装配期 Err 带指引
+fn create_dns_handler(config: &DnsConfig) -> Result<Box<dyn DnsHandler>> {
+    Ok(Box::new(dns_engine::EngineDnsHandler::from_dns_config(
+        config,
+    )?))
 }
 
 #[cfg(test)]
@@ -377,9 +384,10 @@ mod tests {
         assert_eq!(route.config().mode, RoutingMode::Global);
     }
 
-    /// T0：filter/dns 工厂保持 Err——错误信息指向进程内规则 / P2-8
+    /// T0：filter 工厂保持 Err（进程内规则）；DNS 工厂切 P2-8 引擎——
+    /// UDP 上游可用、加密/零上游 Err（dns-partition.md §2-D-6 口径转换）
     #[test]
-    fn filter_and_dns_factories_stay_err() {
+    fn filter_factory_stays_err_and_dns_factory_dispatches() {
         let filtering = FilteringConfig {
             mode: FilteringMode::Blacklist,
             applications: vec![],
@@ -396,18 +404,29 @@ mod tests {
             "错误应指向进程内规则：{err}"
         );
 
-        let dns = DnsConfig {
+        let dns_cfg = |servers: Vec<dns::DnsServer>| DnsConfig {
             mode: dns::DnsMode::Direct,
-            servers: vec![],
+            servers,
             cache: None,
             filters: vec![],
             enabled: true,
-            local_port: 53,
+            local_port: 15353,
             local_address: "127.0.0.1".parse().unwrap(),
             timeout: std::time::Duration::from_secs(5),
             retries: 2,
         };
-        let err = create_dns_handler(&dns).unwrap_err();
-        assert!(err.to_string().contains("P2-8"), "错误应指向 P2-8：{err}");
+        let udp = dns::DnsServer::new(
+            "udp".to_string(),
+            "223.5.5.5:53".parse().unwrap(),
+            dns::DnsServerType::Udp,
+        );
+        let handler = create_dns_handler(&dns_cfg(vec![udp])).expect("UDP 上游应装配引擎（P2-8）");
+        assert_eq!(handler.config().local_port, 15353);
+
+        let err = create_dns_handler(&dns_cfg(vec![])).unwrap_err();
+        assert!(
+            err.to_string().contains("UDP"),
+            "零上游错误应指引 UDP 面：{err}"
+        );
     }
 }
