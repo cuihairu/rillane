@@ -38,7 +38,7 @@ use seep_protocols::{
     DirectConnector, HttpConnector, HttpIngress, Hysteria2Connector, MixedIngress,
     ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress,
     TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool, TrojanConnector,
-    VlessConnector, WireguardConnector, WireguardUdpConnector,
+    VlessConnector, VmessConnector, VmessSecurity, WireguardConnector, WireguardUdpConnector,
 };
 use seep_routing::RoutingEngine;
 use seep_subscription::SubscriptionConverter;
@@ -2186,6 +2186,46 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Result<Vec<TransportKey>
                     ));
                 }
             }
+            EgressConfig::Vmess {
+                server,
+                port,
+                network,
+                tls: true,
+                skip_cert_verify,
+                sni,
+                alpn,
+                host,
+                tls_fingerprint,
+                ..
+            } => {
+                let empty: Vec<String> = Vec::new();
+                let alpn = alpn.as_ref().unwrap_or(&empty);
+                let fp = parse_egress_fingerprint(tls_fingerprint, &desc.name)?;
+                // tcp 主键实际 SNI = sni ∥ server
+                let tcp_sni = sni.clone().unwrap_or_else(|| server.clone());
+                keys.push(TransportKey::tls(
+                    server,
+                    *port,
+                    Some(&tcp_sni),
+                    *skip_cert_verify,
+                    alpn,
+                    fp,
+                ));
+                if network == "ws" || network == "websocket" {
+                    let ws_sni = sni
+                        .clone()
+                        .or_else(|| host.as_ref().and_then(|v| v.first().cloned()))
+                        .unwrap_or_else(|| server.clone());
+                    keys.push(TransportKey::tls(
+                        server,
+                        *port,
+                        Some(&ws_sni),
+                        *skip_cert_verify,
+                        alpn,
+                        fp,
+                    ));
+                }
+            }
             _ => {}
         }
     }
@@ -2378,6 +2418,58 @@ fn build_egress_outputs(
                     *port,
                     uuid.clone(),
                     flow.clone(),
+                    network.clone(),
+                    path.clone(),
+                    host.clone(),
+                    *tls,
+                    *skip_cert_verify,
+                    sni.clone(),
+                    alpn.clone(),
+                    parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
+                    transport_pool.clone(),
+                    tls_factory.clone(),
+                ));
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Vmess {
+                server,
+                port,
+                uuid,
+                alter_id,
+                security,
+                network,
+                path,
+                host,
+                tls,
+                skip_cert_verify,
+                sni,
+                alpn,
+                tls_fingerprint,
+            } => {
+                // build-time validation: security parse, alter_id==0, network tcp/ws only
+                // （clash 侧 network 只产 tcp/ws，见 clash.rs convert 方；"websocket"
+                // 长形与 vless 口径一致予以兼容）
+                let parsed_security = VmessSecurity::parse(security)?;
+                if *alter_id != 0 {
+                    return Err(anyhow!(
+                        "VMess AEAD 仅支持 alter_id=0（legacy MD5 认证已不支持），节点: {}",
+                        desc.name
+                    ));
+                }
+                if network != "tcp" && network != "ws" && network != "websocket" {
+                    return Err(anyhow!("VMess network 仅支持 tcp/ws，当前: {}", network));
+                }
+                let connector: Arc<dyn EgressConnector> = Arc::new(VmessConnector::new(
+                    server.clone(),
+                    *port,
+                    uuid.clone(),
+                    *alter_id,
+                    parsed_security,
                     network.clone(),
                     path.clone(),
                     host.clone(),
@@ -2896,6 +2988,128 @@ mod tests {
         assert_eq!(
             connectors.get("hy2").expect("connector").name(),
             "hysteria2"
+        );
+    }
+
+    #[test]
+    fn build_egress_outputs_supports_vmess() {
+        let egress = vec![node("vm", vmess_spec())];
+        let (outputs, connectors) =
+            build_egress_outputs(&egress, None, None).expect("build egress outputs");
+        assert!(outputs.contains_key("vm"));
+        assert_eq!(connectors.get("vm").expect("connector").name(), "vmess");
+    }
+
+    #[test]
+    fn build_egress_outputs_rejects_vmess_misconfig() {
+        // 非法 security 构建期报错
+        let mut bad_security = vmess_spec();
+        if let EgressConfig::Vmess { security, .. } = &mut bad_security {
+            *security = "none".to_string();
+        }
+        let egress = vec![node("vm-bad-sec", bad_security)];
+        let err = build_egress_outputs(&egress, None, None)
+            .err()
+            .expect("非法 security 必须报错");
+        assert!(err.to_string().contains("security"), "实际：{err}");
+
+        // alter_id != 0（legacy 认证）构建期报错
+        let mut bad_alter = vmess_spec();
+        if let EgressConfig::Vmess { alter_id, .. } = &mut bad_alter {
+            *alter_id = 1;
+        }
+        let egress = vec![node("vm-bad-alter", bad_alter)];
+        let err = build_egress_outputs(&egress, None, None)
+            .err()
+            .expect("alter_id=1 必须报错");
+        assert!(err.to_string().contains("alter_id"), "实际：{err}");
+
+        // 非法 network 构建期报错
+        let mut bad_network = vmess_spec();
+        if let EgressConfig::Vmess { network, .. } = &mut bad_network {
+            *network = "grpc".to_string();
+        }
+        let egress = vec![node("vm-bad-net", bad_network)];
+        let err = build_egress_outputs(&egress, None, None)
+            .err()
+            .expect("非法 network 必须报错");
+        assert!(err.to_string().contains("network"), "实际：{err}");
+    }
+
+    #[test]
+    fn derive_tls_warm_keys_covers_vmess() {
+        let egress = vec![
+            EgressDescriptor {
+                name: "vm-tcp".to_string(),
+                spec: EgressConfig::Vmess {
+                    server: "v.example".to_string(),
+                    port: 443,
+                    uuid: "00000000-0000-0000-0000-000000000000".to_string(),
+                    alter_id: 0,
+                    security: "auto".to_string(),
+                    network: "tcp".to_string(),
+                    path: None,
+                    host: None,
+                    tls: true,
+                    skip_cert_verify: false,
+                    sni: Some("sni.example".to_string()),
+                    alpn: None,
+                    tls_fingerprint: None,
+                },
+            },
+            EgressDescriptor {
+                name: "vm-ws".to_string(),
+                spec: EgressConfig::Vmess {
+                    server: "w.example".to_string(),
+                    port: 443,
+                    uuid: "00000000-0000-0000-0000-000000000000".to_string(),
+                    alter_id: 0,
+                    security: "chacha20-poly1305".to_string(),
+                    network: "ws".to_string(),
+                    path: Some("/vm".to_string()),
+                    host: Some(vec!["cdn.example".to_string()]),
+                    tls: true,
+                    skip_cert_verify: false,
+                    sni: None,
+                    alpn: None,
+                    tls_fingerprint: None,
+                },
+            },
+        ];
+        let keys = derive_tls_warm_keys(&egress).expect("REASON");
+        assert_eq!(keys.len(), 3, "vmess tcp 主键 + vmess ws 双键");
+        assert!(
+            keys.contains(&TransportKey::tls(
+                "v.example",
+                443,
+                Some("sni.example"),
+                false,
+                &[],
+                TlsFingerprint::None,
+            )),
+            "vmess tcp 主键（实际 SNI = sni）"
+        );
+        assert!(
+            keys.contains(&TransportKey::tls(
+                "w.example",
+                443,
+                Some("w.example"),
+                false,
+                &[],
+                TlsFingerprint::None,
+            )),
+            "vmess ws 主键（sni 缺省 = server）"
+        );
+        assert!(
+            keys.contains(&TransportKey::tls(
+                "w.example",
+                443,
+                Some("cdn.example"),
+                false,
+                &[],
+                TlsFingerprint::None,
+            )),
+            "vmess ws 分支键（实际 SNI = host 首值）"
         );
     }
 
