@@ -98,8 +98,10 @@ pub struct ClashProxy {
     /// TLS
     #[serde(default)]
     pub tls: bool,
-    /// Skip-cert-verify
-    #[serde(default)]
+    /// Skip-cert-verify（Clash 规范键为 kebab-case `skip-cert-verify`，
+    /// 缺别名时该键被 serde 静默丢弃 → 转换结果恒为 false，自签/私有 CA
+    /// 证书握手必败；保留 snake 键名兼容存量配置）
+    #[serde(default, alias = "skip-cert-verify")]
     pub skip_cert_verify: bool,
     /// Alpn
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -164,6 +166,39 @@ pub struct ClashProxy {
     /// MTU (WireGuard)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
+    /// WebSocket 传输选项（Clash 规范块键；path/Host 头在真实发行版里
+    /// 恒在块内，平铺 `path`/`host` 仅少数变体使用——块缺失时回落实铺键）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "ws-opts",
+        alias = "ws_opts",
+        alias = "wsOptions"
+    )]
+    pub ws_opts: Option<ClashWsOpts>,
+}
+
+/// Clash `ws-opts` 子块（vmess/vless 的 ws 传输）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClashWsOpts {
+    /// 请求路径
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// 请求头（Host 伪装位）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<ClashWsHeaders>,
+}
+
+/// Clash `ws-opts.headers`（Host 头键大小写各发行版不一，三形兼容）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClashWsHeaders {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "Host",
+        alias = "HOST"
+    )]
+    pub host: Option<String>,
 }
 
 /// Clash 代理组类型
@@ -200,6 +235,33 @@ pub struct ClashProxyGroup {
     /// 负载均衡策略
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<String>,
+}
+
+impl ClashProxy {
+    /// ws 请求路径：平铺 `path` 优先（少数变体口径），否则 `ws-opts.path`
+    /// （真实发行版口径）。空串按缺省处理（ws 节点 path 缺失即 `/`）。
+    pub fn ws_path(&self) -> Option<String> {
+        self.path
+            .clone()
+            .filter(|p| !p.is_empty())
+            .or_else(|| self.ws_opts.as_ref().and_then(|w| w.path.clone()))
+            .filter(|p| !p.is_empty())
+    }
+
+    /// ws Host 伪装头：平铺 `host` 优先，否则 `ws-opts.headers.host`
+    /// （大小写三形由 serde 别名覆盖）。sni 回落由连接器侧负责。
+    pub fn ws_host(&self) -> Option<String> {
+        self.host
+            .clone()
+            .filter(|h| !h.is_empty())
+            .or_else(|| {
+                self.ws_opts
+                    .as_ref()
+                    .and_then(|w| w.headers.as_ref())
+                    .and_then(|h| h.host.clone())
+            })
+            .filter(|h| !h.is_empty())
+    }
 }
 
 /// Clash 规则
@@ -729,8 +791,8 @@ impl ClashConverter {
                     alter_id,
                     security: proxy.encrypt.clone().unwrap_or_else(|| "auto".to_string()),
                     network: proxy.network.clone().unwrap_or_else(|| "tcp".to_string()),
-                    path: proxy.path.clone(),
-                    host: proxy.host.clone().map(|h| vec![h]),
+                    path: proxy.ws_path(),
+                    host: proxy.ws_host().map(|h| vec![h]),
                     tls: proxy.tls,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),
@@ -754,8 +816,8 @@ impl ClashConverter {
                     uuid,
                     flow: None, // Clash VLESS 通常不使用 flow
                     network: proxy.network.clone().unwrap_or_else(|| "tcp".to_string()),
-                    path: proxy.path.clone(),
-                    host: proxy.host.clone().map(|h| vec![h]),
+                    path: proxy.ws_path(),
+                    host: proxy.ws_host().map(|h| vec![h]),
                     tls: proxy.tls,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),
@@ -1222,6 +1284,148 @@ rules: []
                 assert_eq!(mport.as_deref(), Some("35000-39000"));
             }
             other => panic!("unexpected egress config: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_vmess_ws_opts_path_and_host_converted() {
+        // 回归：Clash vmess/vless 的 ws 传输参数在规范里位于 `ws-opts` 块
+        // （path / headers.Host），平铺 `path`/`host` 仅少数变体使用——结构体
+        // 无该块时 serde 静默丢弃 → 转换后 path/host 恒 None，ws 节点只能连
+        // `/` 且无 Host 伪装，ws+tls 节点与真实服务端握手即败。
+        let yaml_content = r#"
+proxies:
+  - name: "vm-wsopts"
+    type: vmess
+    server: 127.0.0.1
+    port: 8443
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    alterId: 0
+    cipher: auto
+    network: ws
+    tls: true
+    servername: vm.test
+    skip-cert-verify: true
+    ws-opts:
+      path: /vmws
+      headers:
+        Host: vm.test
+  - name: "vl-wsopts"
+    type: vless
+    server: 127.0.0.1
+    port: 8444
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    network: ws
+    tls: true
+    servername: vm.test
+    ws-opts:
+      path: /vl
+      headers:
+        host: lower.test
+  - name: "vm-flat"
+    type: vmess
+    server: 127.0.0.1
+    port: 8445
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    network: ws
+    path: /flat
+    host: flat.test
+
+proxy-groups: []
+rules: []
+        "#;
+
+        let converter = ClashConverter::new();
+        let clash = converter.parse(yaml_content).unwrap();
+        let seep = converter.convert_to_seep(&clash).unwrap();
+
+        let grab = |name: &str| -> (Option<String>, Option<Vec<String>>) {
+            let egress = seep
+                .egress
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("缺少出口 {name}"));
+            match &egress.spec {
+                EgressConfig::Vmess { path, host, .. } => (path.clone(), host.clone()),
+                EgressConfig::Vless { path, host, .. } => (path.clone(), host.clone()),
+                other => panic!("unexpected egress config: {other:?}"),
+            }
+        };
+
+        assert_eq!(
+            grab("vm-wsopts"),
+            (Some("/vmws".into()), Some(vec!["vm.test".into()]))
+        );
+        assert_eq!(
+            grab("vl-wsopts"),
+            (Some("/vl".into()), Some(vec!["lower.test".into()]))
+        );
+        // 平铺键（存量变体）继续生效，且优先于块内同名键
+        assert_eq!(
+            grab("vm-flat"),
+            (Some("/flat".into()), Some(vec!["flat.test".into()]))
+        );
+
+        // ws-opts 内无 path 时回落 None（连接器侧补 `/`）
+        let only_headers = "proxies:\n  - name: n\n    type: vmess\n    server: h\n    port: 1\n    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3\n    network: ws\n    ws-opts:\n      headers:\n        Host: h.test\nproxy-groups: []\nrules: []\n";
+        let c2 = converter.parse(only_headers).unwrap();
+        assert_eq!(c2.proxies[0].ws_path(), None);
+        assert_eq!(c2.proxies[0].ws_host(), Some("h.test".to_string()));
+    }
+
+    #[test]
+    fn test_vmess_skip_cert_verify_kebab_key_not_dropped() {
+        // 回归：Clash 规范键为 kebab-case `skip-cert-verify`，struct 无
+        // rename_all 且字段缺别名时该键被 serde 静默丢弃 → 转换恒为
+        // false，自签证书握手必败。别名修复后 kebab 键必须生效，snake
+        // 键（存量）保持兼容。
+        let yaml_content = r#"
+proxies:
+  - name: "vm-kebab"
+    type: vmess
+    server: 127.0.0.1
+    port: 8443
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    alterId: 0
+    cipher: auto
+    udp: true
+    tls: true
+    servername: 127.0.0.1
+    network: ws
+    ws-opts:
+      path: /vws
+    skip-cert-verify: true
+  - name: "vm-snake"
+    type: vmess
+    server: 127.0.0.1
+    port: 8443
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    tls: true
+    skip_cert_verify: true
+
+proxy-groups: []
+rules: []
+        "#;
+
+        let converter = ClashConverter::new();
+        let clash_config = converter.parse(yaml_content).unwrap();
+        assert_eq!(clash_config.proxies.len(), 2);
+        assert!(clash_config.proxies[0].skip_cert_verify);
+        assert!(clash_config.proxies[1].skip_cert_verify);
+
+        let seep_config = converter.convert_to_seep(&clash_config).unwrap();
+        for name in ["vm-kebab", "vm-snake"] {
+            let egress = seep_config
+                .egress
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("缺少出口 {name}"));
+            match &egress.spec {
+                EgressConfig::Vmess {
+                    skip_cert_verify, ..
+                } => assert!(skip_cert_verify, "{name} 的 skip_cert_verify 未透传"),
+                other => panic!("unexpected egress config: {:?}", other),
+            }
         }
     }
 
