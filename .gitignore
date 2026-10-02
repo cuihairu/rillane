@@ -3,3 +3,6 @@ target/
 docs/node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+
+# 交叉/打包产物（platforms/*/build.sh 产 dist/，不入库）
+/dist/

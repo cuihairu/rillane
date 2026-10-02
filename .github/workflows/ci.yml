@@ -144,6 +144,12 @@ jobs:
           - x86_64-pc-windows-gnu
           - aarch64-unknown-linux-gnu
           - armv7-unknown-linux-gnueabihf
+          # P3-3 OpenWrt musl 面（musl 静态包产线，platforms/openwrt）；
+          # mips/mipsel 不入列——rust 1.8x 起无 32 位 mips musl 预编译 std，
+          # 且 aws-lc-sys 不支持该架构（见 platforms/openwrt/README.md）
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
 
     steps:
     - name: Checkout source code

@@ -1,0 +1,58 @@
+# SEEP 最小可运行配置（OpenWrt 装机模板——ipk 落位 /etc/seep.yaml）
+#
+# 结构同 config/seep.yaml；最小面 = socks 入口 + direct 出口 + DNS 分流。
+# 按设备情况改：api_bind/入口 bind 建议仅内网（路由器上也可 loopback + ssh 隧道）。
+
+control:
+  api_bind: 127.0.0.1:9090
+  uds_path: null
+  admin_token: change-me
+
+telemetry:
+  log_level: info
+  enable_metrics: true
+  enable_tracing: false
+
+ingress:
+  - name: socks-in
+    type: socks5
+    bind: 0.0.0.0:7890
+
+egress:
+  - name: direct-main
+    type: direct
+
+routing:
+  default_node: direct-main
+  groups: []
+  rules: []
+
+# 网络虚拟化（TUN 面）：需 kmod-tun；不接管设备时整块删除（本例仅登记
+# 设备网段与 DNS 回落源——network.dns.domestic 缺省回落 tun.dns_servers:53）
+network:
+  tun:
+    name: seep0
+    ipv4: 10.255.0.1/24
+    dns_servers:
+      - 192.168.1.1
+  # DNS 分流（P2-8）：本地监听 15353，设备侧 resolv.conf 指向 127.0.0.1:15353
+  # 或 dnsmasq转发；.cn 走国内网关 DNS，其余默认 domestic，境外名单走 trusted
+  dns:
+    domestic: []
+    trusted:
+      - 1.1.1.1:53
+    rules:
+      - pattern: .cn
+        group: domestic
+      - pattern: .google.com
+        group: trusted
+    default_group: domestic
+    anti_poison: cross_check
+    cache:
+      max_entries: 4096
+      min_ttl: 60
+      max_ttl: 3600
+      enable_negative_cache: true
+      negative_ttl: 60
+    listen_address: 127.0.0.1
+    listen_port: 15353

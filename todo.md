@@ -136,6 +136,7 @@
   验收：外部编译的示例插件可加载并生效，崩溃/超时有隔离。
 - [ ] **P3-3 平台打包**（原 §6）：systemd / launchd / Windows Service / OpenWrt init.d 模板与脚本，`platforms/` 样板完善。
   验收：Linux/macOS/Windows 三平台产出可安装二进制；OpenWrt 出 musl 静态包。
+  本轮注记（2026-10-02，**OpenWrt 半边已落地**，systemd/launchd/Windows 模板留后续）：`platforms/openwrt/` 四件——`build.sh`（三目标 musl 静态交叉 `cross build --release` + file/readelf 静态核验 + ipk ar 三成员组装 + `.build-log.txt` 核验记录；OpenWrt DISTRIB_ARCH 映射带 `ROUTER_ARCH_*` 覆盖）、`init.d/seep`（procd 托管 respawn + UCI 开关钩子）、`seep.yaml.example`（装机最小可运行模板，含 DNS 分流块）、`README.md`（矩阵/用法/**mips 边界**：rustc 1.99 无 mips musl 预编译 std 且 aws-lc-sys 不支持，需 nightly build-std + ring 供给改造另落）；CI cross-compile 矩阵补三 musl 目标。实况验收：三 ipk 产出（aarch64_generic/arm_cortex-a7_neon-vfpv4/x86_64），打包原件 seepd/seepctl 三目标冒烟全过（x86_64 原生 + aarch64/armv7 qemu-user 仿真 `seepd 0.1.0`）；真机 opkg/procd/TUN 面未验（README「验证边界」如实登记）。
 - [ ] **P3-4 移动端 FFI 骨架**：Android（VpnService）/ iOS（NEPacketTunnel）cdylib + C ABI 最小通路。
   验收：Android demo 通过 VpnService 建立 tun 并经内核代理一轮流量。
 - [ ] **P3-5 零拷贝/批量收发**（2026-09-30 降级登记）：PROTOCOLS.md「性能优化」节的零拷贝与批量处理描述超前于实现且无近期落地计划，自"设计口径"降级为本登记项，避免超前描述无主。
