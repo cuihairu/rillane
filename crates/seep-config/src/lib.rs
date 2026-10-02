@@ -1554,7 +1554,7 @@ impl GroupDescriptor {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub enum GroupMember {
     /// 直接节点引用
     Node { name: String },
@@ -1564,6 +1564,31 @@ pub enum GroupMember {
     WeightedNode { name: String, weight: u32 },
     /// 带权重的组
     WeightedGroup { name: String, weight: u32 },
+}
+
+/// 手写序列化（internally-tagged `{type, name, weight?}` 形）：derive 出的
+/// externally-tagged `!Node` 形与 `GroupMemberRepr` 反序列化面（字符串
+/// 简写 / `type:` 标签形）互不相认——serde_yaml 序列化的 SeepConfig
+/// （如 seepctl import-clash）seepd 读不回。此实现与 Tagged 反序列化
+/// 镜像，保证往返自洽。
+impl Serialize for GroupMember {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let (tag, name, weight) = match self {
+            GroupMember::Node { name } => ("node", name, None),
+            GroupMember::Group { name } => ("group", name, None),
+            GroupMember::WeightedNode { name, weight } => ("weighted_node", name, Some(*weight)),
+            GroupMember::WeightedGroup { name, weight } => ("weighted_group", name, Some(*weight)),
+        };
+        let mut st =
+            serializer.serialize_struct("GroupMember", if weight.is_some() { 3 } else { 2 })?;
+        st.serialize_field("type", tag)?;
+        st.serialize_field("name", name)?;
+        if let Some(w) = weight {
+            st.serialize_field("weight", &w)?;
+        }
+        st.end()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
