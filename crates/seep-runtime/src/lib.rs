@@ -11,6 +11,7 @@
 //! - Mesh 数据平面传输
 
 pub mod chain;
+pub mod dns_config;
 pub mod hot_reload;
 pub mod mesh_transport;
 pub mod network_config;
@@ -23,6 +24,7 @@ pub use chain::{
     ChainBuildResult, ChainBuilder, ChainConfig, ChainConstraints, ChainDryRunResult, ChainManager,
     ChainManagerStats, PathOptimizationStrategy, SwitchEvent, SwitchReason,
 };
+pub use dns_config::{dns_block_to_resolver_config, DnsService};
 pub use hot_reload::{HotReloadConfig, HotReloadManager, ReloadEvent, ReloadStats};
 pub use mesh_transport::{MeshDataPlane, MeshEnvelope, ObfsPadSnapshot, UdpFaceSnapshot};
 pub use network_config::network_block_to_platform;

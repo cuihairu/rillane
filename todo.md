@@ -120,8 +120,10 @@
   进度（2026-10-02 落地）：**M0–M1 同步完成**（UDP 面 P0-4 已是同款二进制，本步补齐 TCP 面）：`MeshEnvelope` 二进制编解码（流长降约一半——固定头 8B+len 字段 vs JSON 键名重复，golden 测试钉字节）+ 接收侧嗅探（`{`→旧 JSON 兼容解码，P1-4 pad/strip 语义双格式同门 E5/E6）+ `pad_len` 进二进制头（P1-4 迁移无损）+ `write_envelope`/`pad_envelope_frame` 切换；旧 JSON E7 拒帧用例保留 + 二进制 E5/E6 拒帧新增。
 - [ ] **P2-7 mesh 高级安全**（原 §4 遗留）：CRL/OCSP、多跳端到端 MAC/防重放。
   验收：撤销节点无需重启即可被拒（文件热加载已有，补 CRL 分发）；重放报文被丢弃并有计数。
-- [ ] **P2-8 DNS 分流**（网页加速）：国内外 DNS 分流、缓存、防污染，对接 `seep-platform::network::dns` 设计。
+- [x] **P2-8 DNS 分流**（网页加速）：国内外 DNS 分流、缓存、防污染，对接 `seep-platform::network::dns` 设计。
   验收：分流解析正确且缓存命中率有指标；被污染域名返回可信结果。
+  实现级设计：[docs/design/dns-partition.md](docs/design/dns-partition.md)（2026-10-02 落地；D-1 手写 RFC1035 最小 wire 零新依赖、D-2 exact/suffix 规则→domestic/trusted 两组先到先得、D-3 防污染二态 off/cross_check 并发双查集合不相交判分歧、D-4 TTL 钳位缓存+NXDOMAIN 负缓存、D-8 引擎落 dns_engine.rs 不膨胀数据模型层）。
+  进度（2026-10-02 落地）：**M0–M1 完成**。M0 750de34：dns_engine.rs 全量（wire 纯函数/分流判定/缓存钳位/AtomicU64 统计/DnsResolver/LocalDnsServer/EngineDnsHandler 工厂桥）+ mod.rs `create_dns_handler` 切真实现 + 17 测（mock 双上游防污染三面钉死验收口径 3）。M1 本提交：seep-config `network.dns` 子块镜像（DnsBlockConfig/groups/rules/cache/listen，deny_unknown_fields + validate E1 矩阵）+ seep-runtime `dns_config.rs` 转换（domestic 缺省回落 tun.dns_servers:53——dns_servers 消费兑现）+ `DnsService` 监听生命周期（start/stop oneshot 关桥）+ runtime_builder 装配（块缺席/关闭 None 零差异，独立于网络虚拟化开关 §9-4）+ 控制面 `GET /dns/stats`（enabled/listen/七计数含 cache_hit_rate——验收「命中率有指标」）+ 15 测（config 8/runtime 8 内 dns 面 5/builder 装配 3/seepd 端点 2）。偏差（§9）：DoT/DoH/DoQ 上游归 V2、TUN 劫持集成待 P1-2 落地（本地监听即独立可用面）、filter 规则面挂起。
 
 ## P3 — 文档、插件与平台发布（roadmap S4 收尾）
 
@@ -165,7 +167,7 @@
 |--------|------|---------|------|
 | P0 | 5 | S1 UDP 全链路 | 5/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷、P0-4 mesh UDP 面、P0-5 观测与配置——S0–S6 全部落地） |
 | P1 | 5 | S2 TUN + S3 前半 | 1/5（**P1-5 完成**——M0–M5 全部落地 2026-10-02；P1-1 T2/P1-3 R0/P1-4 M0 部分步已落地（另会话在途推进）；设计稿就绪 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5 已落地）） |
-| P2 | 8 | S3 后半 + S4 | 6/8（**P2-1/P2-2/P2-3/P2-4/P2-5/P2-6 完成**——均 2026-10-02 全步落地） |
+| P2 | 8 | S3 后半 + S4 | 7/8（**P2-1..P2-6 + P2-8 完成**——均 2026-10-02 全步落地；余 P2-7 归 twin 会话在途） |
 | P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
 
 已完成底座（S0）9 大项见上文归档清单；原 19 条清单中 10 项核实为真实完成、3 项勘误重开、其余并入 P0–P3 对应条目。

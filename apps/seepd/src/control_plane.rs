@@ -141,6 +141,7 @@ impl ControlPlane {
             (Method::GET, "/metrics") => self.handle_metrics().await,
             (Method::GET, "/udp/stats") => self.handle_udp_stats().await,
             (Method::GET, "/egress/pool/stats") => self.handle_egress_pool_stats().await,
+            (Method::GET, "/dns/stats") => self.handle_dns_stats().await,
             (Method::GET, "/runtime/stats") => self.handle_runtime_stats().await,
             (Method::GET, "/runtime/config") => self.handle_runtime_config().await,
             (Method::GET, "/events") => self.handle_events().await,
@@ -1121,6 +1122,42 @@ impl ControlPlane {
         json(StatusCode::OK, &dto)
     }
 
+    /// P2-8 M1 dns-partition.md §6 `GET /dns/stats`：引擎统计快照（验收
+    /// 「缓存命中率有指标」）。块缺席/关闭 = enabled:false 零值响应
+    /// （形态稳定，脚本好消费——§4 观测先例同款）。
+    async fn handle_dns_stats(&self) -> Response<RespBody> {
+        let dto = match self.runtime.get_dns_service() {
+            Some(svc) => {
+                let s = svc.stats_snapshot();
+                DnsStatsDto {
+                    enabled: true,
+                    listen: Some(svc.listen().to_string()),
+                    total_queries: s.total_queries,
+                    cache_hits: s.cache_hits,
+                    cache_misses: s.cache_misses,
+                    cache_hit_rate: s.cache_hit_rate,
+                    upstream_failures: s.upstream_failures,
+                    pollution_suspected: s.pollution_suspected,
+                    domestic_queries: s.domestic_queries,
+                    trusted_queries: s.trusted_queries,
+                }
+            }
+            None => DnsStatsDto {
+                enabled: false,
+                listen: None,
+                total_queries: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+                cache_hit_rate: 0.0,
+                upstream_failures: 0,
+                pollution_suspected: 0,
+                domestic_queries: 0,
+                trusted_queries: 0,
+            },
+        };
+        json(StatusCode::OK, &dto)
+    }
+
     async fn handle_nodes(&self) -> Response<RespBody> {
         let registry = match self.mesh() {
             Ok(v) => v,
@@ -1590,6 +1627,22 @@ struct UdpStatsDto {
 #[derive(Debug, Clone, Serialize)]
 struct UdpClientDroppedDto {
     dropped: u64,
+}
+
+/// P2-8 M1 dns-partition.md §6 `/dns/stats` 响应体（引擎 `DnsStatsSnapshot`
+/// 逐字段镜像 + 装配态；listen None 序列化为 null——关闭与启用两态可区分）
+#[derive(Debug, Clone, Serialize)]
+struct DnsStatsDto {
+    enabled: bool,
+    listen: Option<String>,
+    total_queries: u64,
+    cache_hits: u64,
+    cache_misses: u64,
+    cache_hit_rate: f64,
+    upstream_failures: u64,
+    pollution_suspected: u64,
+    domestic_queries: u64,
+    trusted_queries: u64,
 }
 
 /// P1-5 §6.2 响应体（keys = 每键 idle 快照；leased 全局 gauge 不分键记账）
@@ -2872,6 +2925,83 @@ mod tests {
             !m.contains("seep_tls_handshakes"),
             "无块 → 无 seep_tls_* 序列"
         );
+    }
+
+    /// P2-8 M1 dns-partition.md §6：network.dns 缺席 → `/dns/stats` 报
+    /// enabled:false 零值形（形态稳定，脚本好消费）。
+    #[tokio::test]
+    async fn dns_stats_absent_block_renders_disabled_zero_shape() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let s = get_body(&cp, "/dns/stats").await;
+        assert!(
+            s.contains("\"enabled\":false") && s.contains("\"listen\":null"),
+            "缺席态应报 enabled:false / listen null：{s}"
+        );
+        assert!(
+            s.contains("\"total_queries\":0") && s.contains("\"cache_hit_rate\":0"),
+            "零值计数应齐备：{s}"
+        );
+    }
+
+    /// P2-8 M1 §6：块启用 → enabled:true + listen 承接配置 + 七计数键齐备
+    /// （装配期零流量 → 全零；命中率口径由引擎单测钉，此处钉暴露面）。
+    #[tokio::test]
+    async fn dns_stats_present_block_renders_enabled_shape() {
+        let mut cfg = {
+            let path =
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/seep.yaml");
+            SeepConfig::load_from_path(path).unwrap()
+        };
+        cfg.network = Some(seep_config::NetworkBlockConfig {
+            mode: seep_config::NetworkBlockMode::Tun,
+            tun: None,
+            routing: None,
+            dns: Some(seep_config::DnsBlockConfig {
+                enabled: true,
+                domestic: vec![],
+                trusted: vec!["1.1.1.1:53".to_string()],
+                rules: vec![],
+                default_group: seep_config::DnsGroup::Trusted,
+                anti_poison: seep_config::DnsAntiPoisonMode::Off,
+                timeout_ms: 5_000,
+                retries: 2,
+                cache: None,
+                listen_address: "127.0.0.1".parse().unwrap(),
+                listen_port: 15_353,
+            }),
+        });
+        let rt_cfg = RuntimeConfig {
+            enable_mesh: false,
+            enable_chain: false,
+            mesh_config: None,
+            ..RuntimeConfig::default()
+        };
+        let runtime = Arc::new(
+            RuntimeBuilder::new(cfg)
+                .with_runtime_config(rt_cfg)
+                .build()
+                .unwrap(),
+        );
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let s = get_body(&cp, "/dns/stats").await;
+        assert!(
+            s.contains("\"enabled\":true") && s.contains("\"listen\":\"127.0.0.1:15353\""),
+            "启用态应报 enabled:true 与配置监听：{s}"
+        );
+        for key in [
+            "\"total_queries\":0",
+            "\"cache_hits\":0",
+            "\"cache_misses\":0",
+            "\"upstream_failures\":0",
+            "\"pollution_suspected\":0",
+            "\"domestic_queries\":0",
+            "\"trusted_queries\":0",
+        ] {
+            assert!(s.contains(key), "应含 {key}：{s}");
+        }
     }
 
     /// P1-5 §6.1/§6.2：块启用 → 池/工厂句柄在位，stats 报 enabled=true 且

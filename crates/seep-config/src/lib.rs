@@ -171,6 +171,9 @@ pub struct NetworkBlockConfig {
     /// 路由块（include 语义）
     #[serde(default)]
     pub routing: Option<RoutingBlockConfig>,
+    /// DNS 分流块（P2-8 M1，dns-partition.md §4-3；None = 整体关闭零差异）
+    #[serde(default)]
+    pub dns: Option<DnsBlockConfig>,
 }
 
 /// network.mode（serde 名随 platform 枚举：transparent 弃 "redir"，§1.3 B4 收口）
@@ -201,7 +204,9 @@ pub struct TunBlockConfig {
     /// IPv6 地址 CIDR（可选）
     #[serde(default)]
     pub ipv6: Option<String>,
-    /// 仅记录（消费归 P2-8）
+    /// DNS 服务器列表（P2-8 M1 消费：network.dns.domestic 缺省回落此列表
+    /// 加 53 端口，见 seep-runtime `dns_config.rs`；device 层透传
+    /// TunConfig.dns_servers）
     #[serde(default)]
     pub dns_servers: Vec<IpAddr>,
 }
@@ -269,6 +274,205 @@ impl NetworkBlockConfig {
                 parse_cidr_pair(cidr)?;
             }
         }
+        if let Some(dns) = &self.dns {
+            dns.validate()?;
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// network.dns 块（P2-8 M1，dns-partition.md §2/§4-3）：分流上游两组 + 规则 +
+// 防污染 + 缓存 + 本地监听面。seep-config 只镜像 serde 形（到引擎
+// `ResolverConfig` 的转换在 seep-runtime `dns_config.rs`，§1.2 裁决同
+// `NetworkBlockConfig` 先例）；deny_unknown_fields = 新块无存量负担。
+// ---------------------------------------------------------------------------
+
+/// DNS 上游组（镜像引擎 `UpstreamGroup`）：domestic=地理就近组，
+/// trusted=部署者信任面（可信性由部署者保证，dns-partition.md §10-R-dns1）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum DnsGroup {
+    #[default]
+    Domestic,
+    Trusted,
+}
+
+/// 防污染模式（镜像引擎 `AntiPoison`，D-3 二态；不设 TrustedOnly——§9-3）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum DnsAntiPoisonMode {
+    /// 纯分流：选中组单查直答
+    #[default]
+    Off,
+    /// domestic 选中项并发双查，应答集合不相交判分歧 → 取 trusted +
+    /// `pollution_suspected` 计数
+    CrossCheck,
+}
+
+/// 分流规则（D-2）：pattern 前导点 = suffix 匹配（`.cn` 收 `x.cn` 不收 `cn`），
+/// 其余 = exact；对规范化（小写折叠+剔尾点）后的域名先到先得，配置序即优先级
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsRuleConfig {
+    pub pattern: String,
+    pub group: DnsGroup,
+}
+
+/// 缓存块（D-4：TTL 逐应答钳位 [min_ttl, max_ttl]、ttl=0 不缓存、NXDOMAIN
+/// 负缓存、满员逐出最旧）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsCacheBlockConfig {
+    /// 满员逐出阈值
+    #[serde(default = "default_dns_cache_entries")]
+    pub max_entries: usize,
+    #[serde(default = "default_dns_min_ttl")]
+    pub min_ttl: u32,
+    #[serde(default = "default_dns_max_ttl")]
+    pub max_ttl: u32,
+    /// NXDOMAIN 负缓存开关
+    #[serde(default = "default_true")]
+    pub enable_negative_cache: bool,
+    #[serde(default = "default_dns_negative_ttl")]
+    pub negative_ttl: u32,
+}
+
+const fn default_dns_cache_entries() -> usize {
+    10_000
+}
+const fn default_dns_min_ttl() -> u32 {
+    60
+}
+const fn default_dns_max_ttl() -> u32 {
+    86_400
+}
+const fn default_dns_negative_ttl() -> u32 {
+    300
+}
+const fn default_dns_timeout_ms() -> u64 {
+    5_000
+}
+const fn default_dns_retries() -> u32 {
+    2
+}
+fn default_dns_listen_address() -> IpAddr {
+    IpAddr::from([127, 0, 0, 1])
+}
+const fn default_dns_listen_port() -> u16 {
+    15_353
+}
+
+/// network.dns 块：两组上游 + 分流规则 + 防污染 + 缓存 + 本地监听。
+/// 块在场缺省启用（与 obfuscation 的 enabled=false 缺省相反——DNS 监听是
+/// 显式 opt-in 配置块，场即意图；false 供临时下线，容忍半配置）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsBlockConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// domestic 组上游 `ip:port` 列表；缺省（空）回落 `network.tun.dns_servers`
+    /// 加 53 端口（回落落转换处——validate 只见本块，dns-partition.md §4-4）
+    #[serde(default)]
+    pub domestic: Vec<String>,
+    /// trusted 组上游；可信性由部署者保证（§10-R-dns1），不设回落
+    #[serde(default)]
+    pub trusted: Vec<String>,
+    /// 分流规则（配置序即优先级，先到先得）
+    #[serde(default)]
+    pub rules: Vec<DnsRuleConfig>,
+    /// 未命中兜底组；缺省 domestic（网页加速场景：未列名域走地理就近）
+    #[serde(default)]
+    pub default_group: DnsGroup,
+    /// 防污染；缺省 off
+    #[serde(default)]
+    pub anti_poison: DnsAntiPoisonMode,
+    /// 单次上游查询超时（毫秒）
+    #[serde(default = "default_dns_timeout_ms")]
+    pub timeout_ms: u64,
+    /// 每服务器重试次数
+    #[serde(default = "default_dns_retries")]
+    pub retries: u32,
+    /// 缓存块；None = 不缓存
+    #[serde(default)]
+    pub cache: Option<DnsCacheBlockConfig>,
+    /// 本地监听地址（LocalDnsServer 交付形 §2-D-7；TUN 劫持归 P1-2 落地后集成，
+    /// §9-4——监听即独立可用面）
+    #[serde(default = "default_dns_listen_address")]
+    pub listen_address: IpAddr,
+    /// 本地监听端口；0 构建期拒绝（同 M0 工厂口径）
+    #[serde(default = "default_dns_listen_port")]
+    pub listen_port: u16,
+}
+
+impl DnsBlockConfig {
+    /// dns-partition.md §5-E1 构建期校验。domestic 空回落 tun.dns_servers 的
+    /// 可满足性不在此判（validate 只见本块）——回落后仍空且被引用的拦截在
+    /// seep-runtime 转换处；enabled=false 首位短路容忍半配置（§2.5 口径）。
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        for (group, servers) in [("domestic", &self.domestic), ("trusted", &self.trusted)] {
+            for s in servers {
+                let addr: std::net::SocketAddr = s
+                    .parse()
+                    .with_context(|| format!("network.dns.{group} 上游须为 ip:port 形式:{s:?}"))?;
+                anyhow::ensure!(
+                    addr.port() != 0,
+                    "network.dns.{group} 上游端口不能为 0:{s:?}"
+                );
+            }
+        }
+        for rule in &self.rules {
+            anyhow::ensure!(
+                !rule.pattern.trim().is_empty(),
+                "network.dns.rules[].pattern 不能为空"
+            );
+            if let Some(suffix) = rule.pattern.strip_prefix('.') {
+                anyhow::ensure!(
+                    !suffix.is_empty(),
+                    "network.dns.rules[].pattern 裸 \".\" 不构成 suffix 规则:{:?}",
+                    rule.pattern
+                );
+            }
+        }
+        // 重复 pattern = 配置错误：先到先得语义下后者永不生效（静默覆盖不可测）
+        for (i, a) in self.rules.iter().enumerate() {
+            for b in &self.rules[i + 1..] {
+                anyhow::ensure!(
+                    a.pattern != b.pattern,
+                    "network.dns.rules pattern 重复:{:?}",
+                    a.pattern
+                );
+            }
+        }
+        if self.anti_poison == DnsAntiPoisonMode::CrossCheck {
+            anyhow::ensure!(
+                !self.trusted.is_empty(),
+                "network.dns.anti_poison = cross_check 需要 trusted 组非空（E1,dns-partition.md §5）"
+            );
+        }
+        if let Some(cache) = &self.cache {
+            anyhow::ensure!(
+                cache.min_ttl <= cache.max_ttl,
+                "network.dns.cache.min_ttl ({}) 不应大于 max_ttl ({})",
+                cache.min_ttl,
+                cache.max_ttl
+            );
+            anyhow::ensure!(
+                cache.max_entries >= 1,
+                "network.dns.cache.max_entries 必须 ≥ 1"
+            );
+            anyhow::ensure!(
+                cache.negative_ttl >= 1,
+                "network.dns.cache.negative_ttl 必须 ≥ 1"
+            );
+        }
+        anyhow::ensure!(self.timeout_ms >= 1, "network.dns.timeout_ms 必须 ≥ 1");
+        anyhow::ensure!(self.listen_port != 0, "network.dns.listen_port 不能为 0");
         Ok(())
     }
 }

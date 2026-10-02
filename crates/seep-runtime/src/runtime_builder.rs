@@ -187,6 +187,36 @@ impl RuntimeBuilder {
             None
         };
 
+        // P2-8 M1 §4-4：DNS 分流服务（块缺席/关闭 = None 零开销）。监听独立于
+        // 网络虚拟化开关——本地监听即独立可用面（dns-partition.md §9-4，
+        // resolv.conf 指向即生效；TUN 劫持归 P1-2 落地后集成）。
+        let dns_service = match config_snapshot
+            .network
+            .as_ref()
+            .and_then(|n| n.dns.as_ref())
+            .filter(|d| d.enabled)
+        {
+            Some(dns_cfg) => {
+                dns_cfg.validate().context("network.dns 校验失败（E1）")?;
+                let tun_dns = config_snapshot
+                    .network
+                    .as_ref()
+                    .and_then(|n| n.tun.as_ref())
+                    .map(|t| t.dns_servers.as_slice())
+                    .unwrap_or(&[]);
+                let resolver_cfg =
+                    crate::dns_config::dns_block_to_resolver_config(dns_cfg, tun_dns)?;
+                let resolver = seep_platform::network::DnsResolver::new(resolver_cfg)
+                    .map_err(|e| anyhow!("network.dns 引擎装配失败（E1）: {e}"))?;
+                let listen = SocketAddr::new(dns_cfg.listen_address, dns_cfg.listen_port);
+                Some(Arc::new(crate::dns_config::DnsService::new(
+                    Arc::new(resolver),
+                    listen,
+                )))
+            }
+            None => None,
+        };
+
         let local_node_id = if self.runtime_config.enable_mesh {
             // Persist mesh_config back into runtime_config for later (listener bind, etc).
             if self.runtime_config.mesh_config.is_none() {
@@ -410,6 +440,7 @@ impl RuntimeBuilder {
             transport_pool,
             tls_factory,
             network_manager,
+            dns_service,
             subscription_manager,
             event_tx,
             stats: Arc::new(RwLock::new(RuntimeStats::new())),
@@ -681,6 +712,9 @@ pub struct Runtime {
     /// P1-5 §4.1：TLS 连接器工厂单例（tls_resumption 独立于池生效）
     tls_factory: Option<Arc<TlsConnectorFactory>>,
     network_manager: Option<Arc<Mutex<NetworkManager>>>,
+    /// P2-8 M1 观测接缝：DNS 分流服务单例（start/stop 消费 + 控制面
+    /// /dns/stats 经 getter 取数；None = network.dns 块缺席/关闭）
+    dns_service: Option<Arc<crate::dns_config::DnsService>>,
     subscription_manager: Option<Arc<SubscriptionManager>>,
     event_tx: broadcast::Sender<RuntimeEvent>,
     stats: Arc<RwLock<RuntimeStats>>,
@@ -815,6 +849,12 @@ impl Runtime {
                 let mut guard = mgr.lock().await;
                 guard.start().await
             }));
+        }
+
+        // P2-8 M1：本地 DNS 监听（bind 失败在任务内浮出 → rt_task 呈现）
+        if let Some(dns) = &self.dns_service {
+            let dns = dns.clone();
+            tasks.push(tokio::spawn(async move { dns.start().await }));
         }
 
         if let Some(mesh) = &self.mesh_registry {
@@ -1162,6 +1202,11 @@ impl Runtime {
             let mut guard = manager.lock().await;
             guard.stop().await.ok();
         }
+        if let Some(dns) = &self.dns_service {
+            if let Err(e) = dns.stop().await {
+                tracing::warn!(target: "seep::runtime", error = %e, "停止 DNS 服务失败");
+            }
+        }
         Ok(())
     }
 
@@ -1251,6 +1296,12 @@ impl Runtime {
     /// None = UDP 全关且无 per-ingress 显式开）
     pub fn get_udp_service(&self) -> Option<Arc<seep_core::udp::UdpAssociateService>> {
         self.udp_service.clone()
+    }
+
+    /// P2-8 M1 观测接缝：DNS 服务单例（控制面 /dns/stats 取数；
+    /// None = network.dns 块缺席/关闭）
+    pub fn get_dns_service(&self) -> Option<Arc<crate::dns_config::DnsService>> {
+        self.dns_service.clone()
     }
 
     /// 获取 mesh UDP 面快照（P0-5 §4 观测接缝②：start() 在 spawn_udp 后回填；
@@ -3193,6 +3244,103 @@ mod tests {
             .expect("关 udp 的 chain 构建应零差异");
         assert!(runtime.mesh_udp_gate.is_none());
         assert!(runtime.chain_failure_tx.is_none());
+    }
+
+    // ---------- P2-8 M1 dns-partition.md §4-4 DNS 服务装配 ----------
+
+    /// network.dns 块在场（enabled）→ `get_dns_service()` Some 且监听地址 =
+    /// 配置形；块缺席 → None 零差异。启停生命周期与端到端查询归
+    /// dns_config.rs 单测（builder 层只钉装配面）。
+    #[tokio::test]
+    async fn dns_block_builds_service_and_absent_is_none() {
+        let present = {
+            let mut cfg = s5_udp_config(true);
+            cfg.network = Some(seep_config::NetworkBlockConfig {
+                mode: seep_config::NetworkBlockMode::Tun,
+                tun: None,
+                routing: None,
+                dns: Some(
+                    serde_yaml::from_str::<seep_config::DnsBlockConfig>(
+                        "trusted: ['1.1.1.1:53']\ndefault_group: trusted\nlisten_port: 15353",
+                    )
+                    .expect("dns 块应可解析"),
+                ),
+            });
+            cfg
+        };
+        let runtime = RuntimeBuilder::new(present)
+            .with_runtime_config(s5_runtime_config(false, false))
+            .build()
+            .expect("dns 块在场应 build 成功");
+        let svc = runtime
+            .get_dns_service()
+            .expect("dns 块在场应装配 DnsService");
+        assert_eq!(
+            svc.listen().to_string(),
+            "127.0.0.1:15353",
+            "监听地址应承接配置"
+        );
+        assert!(
+            svc.stats_snapshot().total_queries == 0,
+            "装配期零查询（不拨上游）"
+        );
+
+        let runtime = RuntimeBuilder::new(s5_udp_config(true))
+            .with_runtime_config(s5_runtime_config(false, false))
+            .build()
+            .expect("无 dns 块应 build 成功");
+        assert!(
+            runtime.get_dns_service().is_none(),
+            "块缺席应 None（零差异）"
+        );
+    }
+
+    /// enabled=false 的 dns 块 → 装配 None（临时下线语义，dns-partition.md
+    /// §2.5 口径对齐 obfuscation）。
+    #[tokio::test]
+    async fn dns_block_disabled_builds_none() {
+        let mut cfg = s5_udp_config(true);
+        cfg.network = Some(seep_config::NetworkBlockConfig {
+            mode: seep_config::NetworkBlockMode::Tun,
+            tun: None,
+            routing: None,
+            dns: Some(
+                serde_yaml::from_str::<seep_config::DnsBlockConfig>(
+                    "enabled: false\ndomestic: ['not-an-addr']",
+                )
+                .expect("半配置应可解析"),
+            ),
+        });
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(s5_runtime_config(false, false))
+            .build()
+            .expect("关闭态半配置应零差异 build 成功");
+        assert!(runtime.get_dns_service().is_none(), "关闭态应 None");
+    }
+
+    /// build 期拦截：enabled 块 + 双空 domestic 引用（无 tun 回落）→ Err
+    /// 带指引（E1 面在 build() 前置，不带病启动）。
+    #[tokio::test]
+    async fn dns_block_referenced_empty_group_rejected_at_build() {
+        let mut cfg = s5_udp_config(true);
+        cfg.network = Some(seep_config::NetworkBlockConfig {
+            mode: seep_config::NetworkBlockMode::Tun,
+            tun: None,
+            routing: None,
+            dns: Some(
+                serde_yaml::from_str::<seep_config::DnsBlockConfig>("trusted: ['1.1.1.1:53']")
+                    .expect("dns 块应可解析"),
+            ),
+        });
+        let err = RuntimeBuilder::new(cfg)
+            .with_runtime_config(s5_runtime_config(false, false))
+            .build()
+            .err()
+            .expect("default=domestic 双空应 build 期拒绝");
+        assert!(
+            format!("{err:#}").contains("tun.dns_servers"),
+            "错误应指引回落面: {err:#}"
+        );
     }
 
     // ---------- P0-5 §10-S3 mesh 面观测装配 ----------

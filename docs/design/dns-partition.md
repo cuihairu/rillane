@@ -1,6 +1,7 @@
 # P2-8 DNS 分流解析（设计稿）
 
-> 2026-10-02 就绪；M0 落地（引擎 + 工厂切换）。定位依据：positioning.md
+> 2026-10-02 就绪；**M0–M1 已落地**（M0 750de34 引擎 + 工厂切换；M1 配置
+> 镜像 + 转换 + 监听装配 + 控制面指标）。定位依据：positioning.md
 > 「DNS 分流（网页加速）」行——国内外 DNS 分流、缓存、防污染。
 
 ## 0. 范围与验收口径
@@ -166,8 +167,25 @@ pollution_suspected/组内 per-server 计数）。无新端点（复用 stats �
 
 | 步 | 内容与落点 | 依赖 | 验收 |
 |----|-----------|------|------|
-| M0 | 设计稿 + dns_engine.rs 全量（§3）+ mod.rs 工厂切换 + §7-1..7 测 | — | §7 全绿；mock 双上游防污染三面成立 |
-| M1 | seep-config dns 子块 + validate + runtime 转换/listener 接线 + 控制面指标 + 文档回填 | M0 | 控制面可见命中率；本地 dig 形端到端 |
+| M0 ✅ 750de34 | 设计稿 + dns_engine.rs 全量（§3）+ mod.rs 工厂切换 + §7-1..7 测 | — | §7 全绿；mock 双上游防污染三面成立（17 测） |
+| M1 ✅ | seep-config dns 子块（`DnsBlockConfig`/groups/rules/cache/listen，deny_unknown_fields + validate E1）+ runtime `dns_config.rs` 转换（domestic 缺省回落 tun.dns_servers:53——dns_servers 消费兑现）/`DnsService` 监听启停 + runtime_builder 装配（独立于网络虚拟化开关，§9-4）+ 控制面 `GET /dns/stats` + 文档回填 | M0 | 控制面可见命中率（端点测试钉暴露面）；dig 形端到端（dns_config 生命周期测钉） |
+
+## 8.1 M1 落地补充（2026-10-02）
+
+- **配置面**：`DnsBlockConfig.enabled` 缺省 **true**（与 obfuscation 的
+  false 缺省相反——DNS 监听是显式 opt-in 配置块，场即意图；false 供临时
+  下线并短路 validate 容忍半配置）；`default_group` 缺省 domestic；
+  规则 pattern 前导点即 suffix 判别式（无独立 mode 字段）；重复 pattern
+  构建期拒绝（先到先得语义下后者永不生效）；
+- **回落语义**：`network.dns.domestic` 空 → 回落 `network.tun.dns_servers`
+  加 53 端口（`TunBlockConfig.dns_servers` 的 P2-8 消费承诺在此兑现）；
+  回落后仍空且被 default/rules 引用 → build 期 Err 带指引；trusted 不设
+  回落（§10-R-dns1 可信性部署者保证）；
+- **装配语义**：runtime_builder 读 `config.network.dns` 直接装配（不经
+  `RuntimeConfig.network_config`/`enable_network_virtualization`——监听
+  独立面 §9-4）；`DnsService` start/stop oneshot 关桥，stop 失败 warn 不
+  中断；控制面 `get_dns_service()` getter + `/dns/stats` DTO（缺席 =
+  enabled:false 零值形）。
 
 ## 9. 偏差与假设
 

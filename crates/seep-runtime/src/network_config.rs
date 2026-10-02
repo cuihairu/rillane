@@ -165,6 +165,7 @@ mod tests {
                     "198.51.100.7/32".to_string(),
                 ],
             }),
+            dns: None,
         }
     }
 
@@ -295,6 +296,7 @@ mod tests {
                 mode: block_mode,
                 tun: None,
                 routing: None,
+                dns: None,
             };
             let out = network_block_to_platform(&cfg).expect("空块转换应成功");
             assert!(out.tun.is_none() && out.routing.is_none());

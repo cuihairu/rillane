@@ -98,6 +98,7 @@ fn network_block_serde_roundtrip() {
                 "198.51.100.7/32".to_string(),
             ],
         }),
+        dns: None,
     };
     let rendered = serde_yaml::to_string(&cfg).expect("应可序列化");
     let reparsed: NetworkBlockConfig = serde_yaml::from_str(&rendered).expect("序列化结果应可往返");
@@ -116,6 +117,7 @@ fn network_block_rejects_non_tun_modes() {
             mode,
             tun: None,
             routing: None,
+            dns: None,
         };
         let err = cfg.validate().expect_err("非 tun mode 应被拒绝");
         assert!(
@@ -128,6 +130,7 @@ fn network_block_rejects_non_tun_modes() {
         mode: NetworkBlockMode::Tun,
         tun: None,
         routing: None,
+        dns: None,
     }
     .validate()
     .expect("空 tun 块应通过");
@@ -148,6 +151,7 @@ fn network_block_validate_rejects_illegal_values() {
         routing: Some(RoutingBlockConfig {
             include: vec!["203.0.113.0/24".to_string()],
         }),
+        dns: None,
     };
 
     // mtu 下界（68 = 最小 IPv4 MTU，TunConfig::validate 口径）
