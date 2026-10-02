@@ -290,8 +290,7 @@ pub struct ObfuscationConfig {
     /// 缺省 chain——MVP 帧执行侧仅 chain 帧（§2.3），单跳 no-op 少生注解
     #[serde(default)]
     pub apply_to: ApplyTo,
-    /// 声明链顺序（MVP 已知名 = padding / latency_probe，§3.3-5 + §4.1；
-    /// timing/shaping 名白名单在 P2-4 M1 一并扩展）
+    /// 声明链顺序（已知名 = padding / latency_probe / timing / shaping，§3.3-5 + §4.1，P2-4 扩）
     #[serde(default = "default_obfs_middleware")]
     pub middleware: Vec<String>,
     /// 命名策略集（P2-3 三场景预设的落点容器，§3.5；本文 schema 为其真子集）
@@ -420,8 +419,8 @@ impl ObfuscationConfig {
         }
         for mw in &self.middleware {
             anyhow::ensure!(
-                matches!(mw.as_str(), "padding" | "latency_probe"),
-                "obfuscation.middleware 含未知名字 {mw:?}（E2/§4.1：MVP 仅 padding，调试可 latency_probe；timing/shaping 归 P2-4）"
+                matches!(mw.as_str(), "padding" | "latency_probe" | "timing" | "shaping"),
+                "obfuscation.middleware 含未知名字 {mw:?}（E2/§4.1：padding|latency_probe|timing|shaping）"
             );
         }
         Ok(())

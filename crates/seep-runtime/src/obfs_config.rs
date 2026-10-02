@@ -18,7 +18,10 @@ use seep_core::{
     FlowMiddleware, MiddlewareChain, PaddingMode, PaddingSpec, ShapingMode, ShapingSpec,
     TimingMode, TimingSpec,
 };
-use seep_protocols::middleware::{LatencyProbe, PadSelector, PaddingMiddleware, ANN_OBFS_PADDING};
+use seep_protocols::middleware::{
+    LatencyProbe, PadSelector, PaddingMiddleware, ShapingMiddleware, ShapingSelector,
+    TimingMiddleware, TimingSelector, ANN_OBFS_PADDING,
+};
 
 /// 解析后的 padding 策略（选择器 + spec）：M1 构建 middleware 链、M2
 /// `PaddingMiddleware` 的构造输入。选择器按 §1.4 注解值匹配（`seep.route.kind`
@@ -79,7 +82,9 @@ pub fn to_padding_policy(
         (None, Some(inline)) => inline,
         // validate（§3.3-2）已拦互斥/皆缺；此处防御未过 validate 的直调
         (Some(_), Some(_)) => anyhow::bail!("default_padding 与内联 padding 互斥（§3.3-2）"),
-        (None, None) => anyhow::bail!("enabled=true 但未配策略（E1）"),
+        // P2-4 调整：enabled 时 padding 维可缺（由 timing/shaping 维承载策略）——
+        // 「 enabled 且三维皆缺」由 config validate E1 兜底；本函数维间语义对称（None = 未启用本维）
+        (None, None) => return Ok(None),
     };
     let spec = padding_block_to_spec(block)?;
     Ok(Some(PaddingPolicy {
@@ -296,6 +301,8 @@ pub fn build_middleware_chain(
         return Ok(MiddlewareChain::default());
     }
     let padding_policy = to_padding_policy(cfg, known_egress)?;
+    let timing_policy = to_timing_policy(cfg, known_egress)?;
+    let shaping_policy = to_shaping_policy(cfg, known_egress)?;
     let mut mws: Vec<Arc<dyn FlowMiddleware>> = Vec::new();
     for name in &cfg.middleware {
         match name.as_str() {
@@ -308,8 +315,24 @@ pub fn build_middleware_chain(
                 }
             }
             "latency_probe" => mws.push(Arc::new(LatencyProbe::new())),
+            "timing" => {
+                if let Some(policy) = timing_policy.clone() {
+                    let spec = policy.spec.clone();
+                    let selector: TimingSelector =
+                        Box::new(move |kind, egress| policy.matches(kind, egress));
+                    mws.push(Arc::new(TimingMiddleware::new(spec, selector)));
+                }
+            }
+            "shaping" => {
+                if let Some(policy) = shaping_policy.clone() {
+                    let spec = policy.spec.clone();
+                    let selector: ShapingSelector =
+                        Box::new(move |kind, egress| policy.matches(kind, egress));
+                    mws.push(Arc::new(ShapingMiddleware::new(spec, selector)));
+                }
+            }
             other => anyhow::bail!(
-                "obfuscation.middleware 含未知名字 {other:?}（须为 padding|latency_probe，§3.3-5）"
+                "obfuscation.middleware 含未知名字 {other:?}（须为 padding|latency_probe|timing|shaping，§3.3-5）"
             ),
         }
     }
@@ -594,14 +617,14 @@ mod tests {
         assert!(to_padding_policy(&cfg, &["hk-1"]).unwrap().is_some());
     }
 
-    /// 直调防御面（validate 未前置时）：E1 皆缺 / E1 profile 无 padding /
-    /// 互斥 / E2 非法 mode 逐条 Err。
+    /// 直调防御面（validate 未前置时）：E3 profile 无 padding /
+    /// 互斥 / E2 非法 mode 逐条 Err；皆缺 padding 维 → Ok(None)（P2-4 维间
+    /// 对称语义；全三维皆缺由 validate E1 兜底）。
     #[test]
     fn defensive_bails_without_validate() {
         let mut cfg = profile_cfg();
         cfg.default_padding = None;
-        let err = to_padding_policy(&cfg, &[]).unwrap_err();
-        assert!(err.to_string().contains("E1"), "{err}");
+        assert_eq!(to_padding_policy(&cfg, &[]).unwrap(), None);
 
         let mut cfg = profile_cfg();
         cfg.profiles.get_mut("game").unwrap().padding = None;
@@ -654,6 +677,40 @@ mod tests {
         cfg.middleware = vec!["latency_probe".to_string(), "padding".to_string()];
         let chain = build_middleware_chain(Some(&cfg), &[]).unwrap();
         assert_eq!(chain.len(), 1, "E5 降级：padding 不挂，latency_probe 照挂");
+    }
+
+    /// P2-4 M1：timing/shaping 名进白名单，四名字混排声明序挂载。
+    #[test]
+    fn build_chain_mounts_all_four_in_declaration_order() {
+        let mut cfg = profile_cfg();
+        cfg.timing = Some(TimingBlockConfig {
+            mode: "fixed".to_string(),
+            fixed_ms: 1,
+            max_delay_ms: 1,
+            ..Default::default()
+        });
+        cfg.shaping = Some(ShapingBlockConfig {
+            mode: "interval".to_string(),
+            interval_ms: 1,
+            max_delay_ms: 1,
+            ..Default::default()
+        });
+        cfg.middleware = vec![
+            "shaping".to_string(),
+            "padding".to_string(),
+            "timing".to_string(),
+            "latency_probe".to_string(),
+        ];
+        let chain = build_middleware_chain(Some(&cfg), &[]).unwrap();
+        assert_eq!(chain.len(), 4);
+        let names = format!("{:?}", chain);
+        let pos = |name: &str| names.find(name).unwrap();
+        assert!(
+            pos("shaping") < pos("padding")
+                && pos("padding") < pos("timing")
+                && pos("timing") < pos("latency_probe"),
+            "声明序即执行序：{names}"
+        );
     }
 
     /// §3.3-5 直调防御：未知 middleware 名 Err（带原值）。

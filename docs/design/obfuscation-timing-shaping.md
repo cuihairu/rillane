@@ -4,8 +4,9 @@
 > timing（微抖动注入）与 shaping（流形状归一），沿用 obfuscation-
 > middleware.md §2 的「策略/执行分离」与 §3 的配置镜像 + 转换模式。
 >
-> **落地状态**：M0 进行中（本提交 = 设计稿 + seep-config 镜像 +
-> seep-runtime 转换 + 测试）。
+> **落地状态**：M0（设计稿 + seep-config 镜像 + seep-runtime 转换 + 测试）
+> 已落地；M1（本步：两 middleware + PacedIo + 白名单扩 + 链接线 +
+> §7-3/4/5 测）已落地。
 
 ## 0. 范围与验收口径
 

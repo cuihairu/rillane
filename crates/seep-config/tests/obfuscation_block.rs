@@ -230,8 +230,12 @@ fn obfuscation_validate_matrix() {
     cfg.validate()
         .expect("padding + latency_probe 应通过（§4.1）");
     cfg.middleware = vec!["timing".to_string()];
+    cfg.validate().expect("timing 白名单成员（P2-4 M1）应通过");
+    cfg.middleware = vec!["shaping".to_string()];
+    cfg.validate().expect("shaping 白名单成员（P2-4 M1）应通过");
+    cfg.middleware = vec!["bogus_mw".to_string()];
     let err = cfg.validate().expect_err("未知 middleware 应报错");
-    assert!(err.to_string().contains("timing"), "{err}");
+    assert!(err.to_string().contains("bogus_mw"), "{err}");
 
     // §3.3-4：padding 块 E2 矩阵
     for (block, expect) in [
