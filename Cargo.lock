@@ -2690,6 +2690,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "seep-ffi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jni",
+ "libc",
+ "seep-config",
+ "seep-runtime",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+]
+
+[[package]]
 name = "seep-mesh"
 version = "0.1.0"
 dependencies = [

@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# ---- 依赖预热：只复制清单与锁文件，虚拟源桩占位（9 lib 桩 + 2 bin 桩）----
+# ---- 依赖预热：只复制清单与锁文件，虚拟源桩占位（10 lib 桩 + 2 bin 桩）----
 COPY Cargo.toml Cargo.lock ./
 COPY crates/seep-config/Cargo.toml      crates/seep-config/Cargo.toml
 COPY crates/seep-core/Cargo.toml        crates/seep-core/Cargo.toml
@@ -25,11 +25,12 @@ COPY crates/seep-platform/Cargo.toml    crates/seep-platform/Cargo.toml
 COPY crates/seep-runtime/Cargo.toml     crates/seep-runtime/Cargo.toml
 COPY crates/seep-mesh/Cargo.toml        crates/seep-mesh/Cargo.toml
 COPY crates/seep-subscription/Cargo.toml crates/seep-subscription/Cargo.toml
+COPY crates/seep-ffi/Cargo.toml          crates/seep-ffi/Cargo.toml
 COPY apps/seepd/Cargo.toml              apps/seepd/Cargo.toml
 COPY apps/seepctl/Cargo.toml            apps/seepctl/Cargo.toml
 
 RUN for c in seep-config seep-core seep-routing seep-protocols seep-telemetry \
-             seep-platform seep-runtime seep-mesh seep-subscription; do \
+             seep-platform seep-runtime seep-mesh seep-subscription seep-ffi; do \
         mkdir -p "crates/$c/src" && touch "crates/$c/src/lib.rs"; \
     done \
     && mkdir -p apps/seepd/src apps/seepctl/src \
@@ -44,7 +45,8 @@ RUN touch crates/seep-config/src/lib.rs crates/seep-core/src/lib.rs \
       crates/seep-routing/src/lib.rs crates/seep-protocols/src/lib.rs \
       crates/seep-telemetry/src/lib.rs crates/seep-platform/src/lib.rs \
       crates/seep-runtime/src/lib.rs crates/seep-mesh/src/lib.rs \
-      crates/seep-subscription/src/lib.rs apps/seepd/src/main.rs apps/seepctl/src/main.rs \
+      crates/seep-subscription/src/lib.rs crates/seep-ffi/src/lib.rs \
+      apps/seepd/src/main.rs apps/seepctl/src/main.rs \
     && cargo build --release --bin seepd --bin seepctl \
     && cp target/release/seepd target/release/seepctl /usr/local/bin/
 

@@ -1,0 +1,46 @@
+# seep-ffi android 交叉镜像（cross 自定义 target 镜像，Cross.toml 引用）
+#
+# 背景：cross 0.2.5 的 *-linux-android 官方镜像内置 NDK（gcc 4.9 时代），
+# 缺 rustc 1.99 android std 链接所需 libunwind（-lunwind 失败，实测）——
+# 在镜像内换装 NDK r27c（LLVM 工具链，自带 libunwind.a）并钉 linker。
+# cc-rs（ring）经 ANDROID_NDK_ROOT 探测同一工具链；cmake 面（aws-lc-sys）
+# 由 ANDROID_PLATFORM 锁 API。
+#
+# cross 0.2.5 对自定义 dockerfile 不做模板渲染（src/docker/custom.rs 实读），
+# 仅自动传 CROSS_BASE_IMAGE（= 目标对应官方镜像）+ Cross.toml dockerfile
+# build-args——故 arch 差异（基镜像 / 链接器三元组名）分别走这俩通道：
+# 基镜像 CROSS_BASE_IMAGE、三元组 Cross.toml 逐 target 传 ANDROID_TRIPLE。
+
+ARG CROSS_BASE_IMAGE
+FROM ${CROSS_BASE_IMAGE}
+
+# 三元组（aarch64-linux-android / x86_64-linux-android），Cross.toml 逐 target 注入
+ARG ANDROID_TRIPLE
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl unzip \
+    && curl -fsSL -o /tmp/ndk.zip \
+        https://dl.google.com/android/repository/android-ndk-r27c-linux.zip \
+    && unzip -q /tmp/ndk.zip -d /opt \
+    && rm /tmp/ndk.zip \
+    && mkdir -p /usr/local/cargo \
+    && printf '[target.%s]\nlinker = "/opt/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/%s24-clang"\n' \
+        "$ANDROID_TRIPLE" "$ANDROID_TRIPLE" >> /usr/local/cargo/config.toml
+
+# 镜像 ENV 的 CARGO_TARGET_*_LINKER / CC_* / CXX_* 全指 `*-gcc`/`*-g++`，
+# 且 env 优先级压过 config 文件（cargo 配置层级实测）——该名经 PATH 解析到
+# 末端 /android-ndk/bin（旧 NDK，无 libunwind）。在 PATH 前段 /usr/local/bin
+# 落同名转发脚本指到新 NDK clang。NDK wrapper 按 dirname $0 定位本体，软链
+# 会断（实测），故写绝对路径脚本；过滤入参 --target 统一钉 API 24（cc-rs
+# 也会带 --target，避免双值取后者），-cc1 自调不经过本脚本。
+RUN printf '#!/bin/bash\na=(); for x in "$@"; do case "$x" in --target*) ;; *) a+=("$x");; esac; done\nexec /opt/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --target=%s24 "${a[@]}"\n' \
+        "$ANDROID_TRIPLE" > "/usr/local/bin/${ANDROID_TRIPLE}-gcc" \
+    && printf '#!/bin/bash\na=(); for x in "$@"; do case "$x" in --target*) ;; *) a+=("$x");; esac; done\nexec /opt/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=%s24 "${a[@]}"\n' \
+        "$ANDROID_TRIPLE" > "/usr/local/bin/${ANDROID_TRIPLE}-g++" \
+    && chmod +x "/usr/local/bin/${ANDROID_TRIPLE}-gcc" "/usr/local/bin/${ANDROID_TRIPLE}-g++"
+
+ENV ANDROID_NDK_ROOT=/opt/android-ndk-r27c \
+    ANDROID_NDK_HOME=/opt/android-ndk-r27c \
+    ANDROID_API=24 \
+    ANDROID_PLATFORM=android-24 \
+    PATH=/opt/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH

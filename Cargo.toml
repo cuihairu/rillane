@@ -11,6 +11,7 @@ members = [
     "apps/seepctl",
     "crates/seep-mesh",
     "crates/seep-subscription",
+    "crates/seep-ffi",
 ]
 resolver = "2"
 

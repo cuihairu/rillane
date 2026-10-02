@@ -6,3 +6,9 @@ docs/.vitepress/dist/
 
 # 交叉/打包产物（platforms/*/build.sh 产 dist/，不入库）
 /dist/
+# Android demo 构建产物（build.sh 产 jniLibs/.so 与 gradle build/，不入库）
+platforms/android/app/src/main/jniLibs/
+platforms/android/.gradle/
+platforms/android/app/build/
+platforms/android/build/
+platforms/android/local.properties

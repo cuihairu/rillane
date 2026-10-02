@@ -1,0 +1,16 @@
+# cross 自定义 target 镜像配置（仅 android 目标；其余目标走官方镜像）
+# 见 platforms/android/cross/Dockerfile.android —— cross 0.2.5 官方 android
+# 镜像的 NDK 过老（缺 libunwind，rustc 1.99 链接失败），换装 NDK r27c。
+# cross 对自定义 dockerfile 不做模板渲染，arch 差异经 build-args 注入
+#（ANDROID_TRIPLE 供镜像内钉 linker；基镜像本身由 cross 自动传
+# CROSS_BASE_IMAGE）。CI cross-compile 矩阵不含 android 目标，本配置不触 CI。
+[target.aarch64-linux-android]
+dockerfile = { file = "platforms/android/cross/Dockerfile.android", build-args = { ANDROID_TRIPLE = "aarch64-linux-android" } }
+
+[target.x86_64-linux-android]
+dockerfile = { file = "platforms/android/cross/Dockerfile.android", build-args = { ANDROID_TRIPLE = "x86_64-linux-android" } }
+
+# armv7 不入列：cross 官方镜像名（armv7-linux-androideabi）与 ANDROID_TRIPLE
+# 的 clang 命名（armv7-linux-androideabi24-clang）一致本可走通，但默认构建
+# 矩阵（arm64-v8a + x86_64）不含 armeabi-v7a——需要时补
+# [target.armv7-linux-androideabi] 段（file 同款 + ANDROID_TRIPLE=armv7-linux-androideabi）。
