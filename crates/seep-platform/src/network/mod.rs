@@ -16,6 +16,8 @@ use tracing::{error, info, warn};
 pub mod dns;
 pub mod dns_engine;
 pub mod filter;
+// IP/UDP/TCP 报文编解码纯函数（tun-dataplane.md §2.3/§4.1）
+pub mod ipcodec;
 pub mod route;
 pub mod tun;
 // Linux TUN 真实现（tun-dataplane.md §1.4）；其余平台待落地

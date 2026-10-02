@@ -18,6 +18,9 @@ pub mod network_config;
 pub mod obfs_config;
 pub mod pool_config;
 pub mod runtime_builder;
+// TUN 入口 + /proc 进程归因（tun-dataplane.md §2；Linux 数据面）
+pub mod tun_ingress;
+pub mod tun_process;
 mod udp_chain; // P0-4 §5 客户端出站（私有：消费点 = runtime_builder UDP 块，S5 接线）
 
 pub use chain::{
@@ -37,6 +40,8 @@ pub use runtime_builder::{
     ConfigMergeStats, FlowStatItem, MeshConfig, MeshEventType, NetworkEventType, Runtime,
     RuntimeBuilder, RuntimeConfig, RuntimeEvent, RuntimeStats, SubscriptionEventType,
 };
+pub use tun_ingress::{Proto as TunProto, TunIngress, TunIngressConfig, TunIngressStats};
+pub use tun_process::{ProcessAttributor, ProcessInfo, SockProto};
 // P0-5 §2.4：client 出站侧 UDP 计数（模块私有，观测 getter 的返回类型经此公开）
 pub use udp_chain::UdpClientMetrics;
 

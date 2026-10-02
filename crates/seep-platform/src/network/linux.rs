@@ -28,8 +28,7 @@ use tokio::{io::unix::AsyncFd, process::Command};
 use tracing::debug;
 
 use super::route::{
-    default_bypass_rules, parse_cidr, BypassCondition, RouteDestination, RouteManager,
-    RouteMonitor, RouteRule, RouteStats, RoutingConfig,
+    parse_cidr, RouteDestination, RouteManager, RouteMonitor, RouteRule, RouteStats, RoutingConfig,
 };
 use super::tun::{InterfaceStats, PacketInfo, PacketType, TunConfig, TunProvider};
 
@@ -532,15 +531,9 @@ fn compute_auto_bypass(
 ) -> Vec<RouteDestination> {
     let mut bypass = Vec::new();
 
-    // 默认 bypass：private/loopback/multicast（复用既有）
-    for rule in default_bypass_rules() {
-        if let BypassCondition::IpRange { start, end } = &rule.condition {
-            if let (IpAddr::V4(_s), IpAddr::V4(_e)) = (start, end) {
-                // 简化：PrivateIp/LanIp 已在进程内 BypassRule 匹配，这里只收集显式 CIDR
-                // 实际 auto-bypass 以进程内 rules 为准；本函数仅收集可表达为 CIDR 的项
-            }
-        }
-    }
+    // 注：private/loopback/multicast 默认 bypass 不在本集——它们由包循环②
+    // 的 BypassRule::matches（default_bypass_rules）承担，本集只收 §2.7
+    // 「不写入 include 路由」的显式前缀（tun 网段 + 运行时注入 extra）。
 
     // tun 自身网段（若配置了地址）
     if let Some(tun) = tun_config {
@@ -569,28 +562,34 @@ fn compute_auto_bypass(
     bypass
 }
 
-/// 判断目标是否在 auto-bypass 集（排除不写入路由）
-fn is_auto_bypass(destination: &RouteDestination, auto_bypass: &[RouteDestination]) -> bool {
-    auto_bypass.iter().any(|b| match (destination, b) {
-        (
-            RouteDestination::Ipv4Network { network, prefix },
-            RouteDestination::Ipv4Network {
-                network: bn,
-                prefix: bp,
-            },
-        ) => network == bn && prefix == bp,
-        (
-            RouteDestination::Ipv6Network { network, prefix },
-            RouteDestination::Ipv6Network {
-                network: bn,
-                prefix: bp,
-            },
-        ) => network == bn && prefix == bp,
-        (RouteDestination::Host { address }, RouteDestination::Host { address: ba }) => {
-            address == ba
+/// 取目标的「头地址」（Host 即自身、网络即其 network 字段）；Default 无头
+fn destination_head(d: &RouteDestination) -> Option<IpAddr> {
+    match d {
+        RouteDestination::Ipv4Network { network, .. } => Some(IpAddr::V4(*network)),
+        RouteDestination::Ipv6Network { network, .. } => Some(IpAddr::V6(*network)),
+        RouteDestination::Host { address } => Some(*address),
+        RouteDestination::Default => None,
+    }
+}
+
+/// 两个路由目标是否重叠（§2.7：include 规则与 auto-bypass 集的排除判定）。
+/// - CIDR 两两关系必为「嵌套或不交」→ 查一方头地址落在对方掩码内即精确；
+/// - Host 与网络查包含（双向经同一臂折叠）；
+/// - Default 与一切重叠（`0.0.0.0/0` 类纳入在有 auto-bypass 在场时恒跳过）。
+fn overlaps(a: &RouteDestination, b: &RouteDestination) -> bool {
+    use RouteDestination::*;
+    match (a, b) {
+        (Default, _) | (_, Default) => true,
+        (Host { address }, Host { address: b_addr }) => address == b_addr,
+        (Host { address }, net) | (net, Host { address }) => net.matches(*address),
+        (Ipv4Network { .. }, Ipv6Network { .. }) | (Ipv6Network { .. }, Ipv4Network { .. }) => {
+            false
         }
-        _ => false,
-    })
+        (net_a, net_b) => match (destination_head(net_a), destination_head(net_b)) {
+            (Some(ha), Some(hb)) => net_a.matches(hb) || net_b.matches(ha),
+            _ => false,
+        },
+    }
 }
 
 /// Linux 系统路由管理器（tun-dataplane.md §1.3）
@@ -606,6 +605,10 @@ pub struct LinuxRouteManager {
     tun_config: Option<TunConfig>,
     /// 实际接口名（create_interface 后由 TUNGETIFF 读回，供路由操作使用）
     interface_name: Option<String>,
+    /// §2.7 extra auto-bypass（构建期注入：egress 字面量地址 + api_bind +
+    /// mesh listen；run() 起始处再并入域名解析结果）——与 tun 网段合并后
+    /// 即完整 auto-bypass 集
+    extra_auto_bypass: Vec<RouteDestination>,
 }
 
 impl LinuxRouteManager {
@@ -616,6 +619,7 @@ impl LinuxRouteManager {
             applied: Mutex::new(Vec::new()),
             tun_config: None,
             interface_name: None,
+            extra_auto_bypass: Vec::new(),
         }
     }
 
@@ -623,6 +627,30 @@ impl LinuxRouteManager {
     pub fn with_tun_config(mut self, tun_config: TunConfig) -> Self {
         self.tun_config = Some(tun_config);
         self
+    }
+
+    /// 注入 §2.7 auto-bypass 追加集（builder 形）
+    pub fn with_auto_bypass(mut self, v: Vec<RouteDestination>) -> Self {
+        self.extra_auto_bypass = v;
+        self
+    }
+
+    /// 覆写 §2.7 auto-bypass 追加集（run() 起始处并入域名解析结果时用）
+    pub fn set_auto_bypass(&mut self, v: Vec<RouteDestination>) {
+        self.extra_auto_bypass = v;
+    }
+
+    /// 完整 auto-bypass 集 = compute_auto_bypass（tun 网段）∪ extra 注入集
+    pub fn merged_auto_bypass(&self) -> Vec<RouteDestination> {
+        let mut all = compute_auto_bypass(&self.config, self.tun_config.as_ref());
+        all.extend(self.extra_auto_bypass.iter().cloned());
+        all
+    }
+
+    /// §2.7 进程内兜底：目标 IP 是否落在 auto-bypass 集（含 tun 网段与
+    /// 运行时注入集；包循环②处命中即丢 + 计数）
+    pub fn is_auto_bypass_ip(&self, ip: IpAddr) -> bool {
+        self.merged_auto_bypass().iter().any(|d| d.matches(ip))
     }
 
     /// 设置实际接口名（create_interface 后调用，TUNGETIFF 读回的名字）
@@ -708,7 +736,7 @@ impl RouteManager for LinuxRouteManager {
             return Ok(());
         }
 
-        let auto_bypass = compute_auto_bypass(&self.config, self.tun_config.as_ref());
+        let auto_bypass = self.merged_auto_bypass();
         let mut temp_applied = Vec::new();
 
         // 1. 先应用地址（若有 tun_config，configure_ip 已在 LinuxTunProvider 做；
@@ -750,8 +778,8 @@ impl RouteManager for LinuxRouteManager {
             if !rule.enabled {
                 continue;
             }
-            if is_auto_bypass(&rule.destination, &auto_bypass) {
-                debug!(target: "seep::route", name = %rule.name, dest = %rule.destination.as_string(), "跳过 auto-bypass 目标");
+            if auto_bypass.iter().any(|b| overlaps(&rule.destination, b)) {
+                debug!(target: "seep::route", name = %rule.name, dest = %rule.destination.as_string(), "跳过与 auto-bypass 重叠的 include 目标");
                 continue;
             }
             let interface = rule
@@ -803,10 +831,10 @@ impl RouteManager for LinuxRouteManager {
     }
 
     async fn add_route(&self, rule: RouteRule) -> Result<()> {
-        let auto_bypass = compute_auto_bypass(&self.config, self.tun_config.as_ref());
-        if is_auto_bypass(&rule.destination, &auto_bypass) {
+        let auto_bypass = self.merged_auto_bypass();
+        if auto_bypass.iter().any(|b| overlaps(&rule.destination, b)) {
             return Err(anyhow!(
-                "目标 {} 在 auto-bypass 集，不写入路由",
+                "目标 {} 与 auto-bypass 集重叠，不写入路由",
                 rule.destination.as_string()
             ));
         }
@@ -973,6 +1001,101 @@ mod tests {
             ip_argv_addr_replace("10.66.0.1/24", "tun0"),
             ["ip", "addr", "replace", "10.66.0.1/24", "dev", "tun0"]
         );
+    }
+
+    /// §2.7 overlaps 判定：Host 等值/网络包含双向、CIDR 嵌套或不交、
+    /// 版本错配不交、Default 与一切重叠（`0.0.0.0/0` 类纳入恒跳过）
+    #[test]
+    fn auto_bypass_overlap_semantics() {
+        let host = |s: &str| RouteDestination::host(s.parse().unwrap());
+        let v4net = |s: &str| {
+            let (a, p) = s.split_once('/').unwrap();
+            RouteDestination::ipv4(a.parse().unwrap(), p.parse().unwrap()).unwrap()
+        };
+        let v6net = |s: &str| {
+            let (a, p) = s.split_once('/').unwrap();
+            RouteDestination::ipv6(a.parse().unwrap(), p.parse().unwrap()).unwrap()
+        };
+
+        // Host vs Host：等值重叠、异值不交
+        assert!(overlaps(&host("1.1.1.1"), &host("1.1.1.1")));
+        assert!(!overlaps(&host("1.1.1.1"), &host("1.1.1.2")));
+
+        // Host vs 网络：双向包含（包入网段即重叠）
+        assert!(overlaps(&host("10.1.2.3"), &v4net("10.0.0.0/8")));
+        assert!(overlaps(&v4net("10.0.0.0/8"), &host("10.1.2.3")));
+        assert!(!overlaps(&host("192.0.2.1"), &v4net("10.0.0.0/8")));
+
+        // CIDR：嵌套双向（include 更宽 / auto 更宽）皆重叠——egress 宿主
+        // 落在更宽 include 内必须整条跳过（防环，§2.7）
+        assert!(overlaps(&v4net("10.0.0.0/8"), &v4net("10.1.2.3/32")));
+        assert!(overlaps(&v4net("10.1.2.3/32"), &v4net("10.0.0.0/8")));
+        assert!(overlaps(&v4net("10.0.0.0/8"), &v4net("10.0.0.0/8")));
+        // 不交 → false
+        assert!(!overlaps(&v4net("10.0.0.0/8"), &v4net("192.168.0.0/16")));
+        assert!(!overlaps(&v4net("10.1.0.0/16"), &v4net("10.2.0.0/16")));
+
+        // 版本错配（v4 vs v6 网络）恒不交
+        assert!(!overlaps(&v4net("0.0.0.0/0"), &v6net("2001:db8::/32")));
+        assert!(overlaps(&v6net("2001:db8::/32"), &v6net("2001:db8:1::/48")));
+
+        // Default 与一切重叠（双序）
+        assert!(overlaps(&RouteDestination::Default, &host("1.1.1.1")));
+        assert!(overlaps(&host("1.1.1.1"), &RouteDestination::Default));
+        assert!(overlaps(&RouteDestination::Default, &v4net("10.0.0.0/8")));
+    }
+
+    /// §2.7 auto-bypass 集组装（§4.1）：tun 网段 ∪ extra 注入集
+    /// （egress 字面量 + api_bind + mesh listen 来源的运行时注入形）+
+    /// `is_auto_bypass_ip` 进程内兜底判定两态
+    #[test]
+    fn merged_auto_bypass_and_ip_check() {
+        let routing = RoutingConfig {
+            enabled: true,
+            ..RoutingConfig::default()
+        };
+        let tun = TunConfig {
+            ipv4_addr: Some(Ipv4Addr::new(10, 255, 0, 1)),
+            ipv4_netmask: Some(Ipv4Addr::new(255, 255, 255, 0)),
+            ..TunConfig::default()
+        };
+        // extra = egress 服务端字面量 + control.api_bind（构建期注入形）
+        let extra = vec![
+            RouteDestination::host("203.0.113.9".parse().unwrap()),
+            RouteDestination::host("127.0.0.1".parse().unwrap()),
+        ];
+        let mgr = LinuxRouteManager::new(routing)
+            .with_tun_config(tun)
+            .with_auto_bypass(extra);
+
+        let merged = mgr.merged_auto_bypass();
+        assert_eq!(merged.len(), 3, "tun 网段 + 2 个注入宿主");
+        assert!(
+            merged
+                .iter()
+                .any(|d| matches!(d, RouteDestination::Ipv4Network { prefix: 24, .. })),
+            "tun 自身网段应入集"
+        );
+
+        // 进程内兜底判定：三者命中、集外不命中
+        assert!(mgr.is_auto_bypass_ip("203.0.113.9".parse().unwrap()));
+        assert!(mgr.is_auto_bypass_ip("127.0.0.1".parse().unwrap()));
+        assert!(
+            mgr.is_auto_bypass_ip("10.255.0.77".parse().unwrap()),
+            "tun 网段内命中"
+        );
+        assert!(
+            !mgr.is_auto_bypass_ip("198.51.100.1".parse().unwrap()),
+            "集外不命中"
+        );
+
+        // set_auto_bypass 覆写形（run() 起始处并入域名解析结果的入口）
+        let mut mgr2 = LinuxRouteManager::new(RoutingConfig::default());
+        assert!(!mgr2.is_auto_bypass_ip("198.51.100.1".parse().unwrap()));
+        mgr2.set_auto_bypass(vec![RouteDestination::host(
+            "198.51.100.1".parse().unwrap(),
+        )]);
+        assert!(mgr2.is_auto_bypass_ip("198.51.100.1".parse().unwrap()));
     }
 
     #[test]

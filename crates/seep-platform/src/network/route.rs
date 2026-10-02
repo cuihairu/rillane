@@ -40,7 +40,9 @@ fn is_ip_link_local(ip: &IpAddr) -> bool {
 }
 
 /// 路由配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///（Default：TunIngressConfig 缺省/`network.routing` 块缺席的转换缺省，
+/// enabled=false = 只建设备不动系统路由）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RoutingConfig {
     /// 路由模式
     pub mode: RoutingMode,

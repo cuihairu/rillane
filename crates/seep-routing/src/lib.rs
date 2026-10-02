@@ -573,6 +573,14 @@ fn matches_rule(rule: &RouteRule, ctx: &FlowContext) -> bool {
             .map(|cidr| cidrs.iter().any(|rule_cidr| rule_cidr == cidr))
             .unwrap_or(false),
         MatchCondition::Port { values } => values.contains(&ctx.target.port),
+        // tun-dataplane.md §2.5：TUN 首包归因注入的 process.name 注解
+        // （= /proc/<pid>/comm，内核截断 15 字节）精确匹配；注解缺席恒不命中
+        MatchCondition::Process { values } => ctx
+            .metadata
+            .annotations
+            .get("process.name")
+            .map(|name| values.iter().any(|v| v == name))
+            .unwrap_or(false),
     })
 }
 
@@ -794,5 +802,59 @@ mod tests {
             ..ok
         };
         assert!(bad_penalty.validate().is_err());
+    }
+
+    /// §2.5 Process 条件钉测（tun-dataplane.md §2.5 实施二选一 = comm 精确匹配）：
+    /// process.name 注解精确相等命中规则；comm 不同 / 注解缺席均不命中（落默认节点）。
+    /// 注解由 TunIngress 首包归因注入——无 TUN 面的 ingress 流恒不命中本条件。
+    #[tokio::test]
+    async fn process_condition_matches_on_process_name_annotation() {
+        use seep_core::{FlowId, FlowMetadata, FlowTarget, TargetProto};
+
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![RouteRule {
+                name: "game".into(),
+                matches: vec![MatchCondition::Process {
+                    values: vec!["cs2".into()],
+                }],
+                target: "game-node".into(),
+            }],
+        });
+        let mut ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "203.0.113.9".into(),
+                port: 27015,
+                proto: TargetProto::Udp,
+            },
+            metadata: FlowMetadata::default(),
+        };
+
+        // 命中：注解 = comm 精确相等
+        ctx.metadata
+            .annotations
+            .insert("process.name".into(), "cs2".into());
+        let decision = engine.route(ctx.clone()).await.expect("route");
+        assert_eq!(decision.final_node(), "game-node", "comm 命中走规则目标");
+
+        // 不命中：comm 不同 → 落默认
+        ctx.metadata
+            .annotations
+            .insert("process.name".into(), "firefox".into());
+        assert_eq!(
+            engine.route(ctx.clone()).await.expect("route").final_node(),
+            "direct",
+            "comm 不匹配应落默认节点"
+        );
+
+        // 不命中：注解缺席（非 TUN 流 / 归因 miss）→ 落默认
+        ctx.metadata.annotations.clear();
+        assert_eq!(
+            engine.route(ctx).await.expect("route").final_node(),
+            "direct",
+            "注解缺席应落默认节点"
+        );
     }
 }

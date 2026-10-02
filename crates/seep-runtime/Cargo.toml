@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true

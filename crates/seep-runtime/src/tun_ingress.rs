@@ -1,0 +1,867 @@
+//! TUN 入口（TunIngress）：UDP NAT 面 + TCP 用户态栈面（tun-dataplane.md §2）
+//!
+//! 所有权裁决：TunIngress 是 TUN 模式的属主——内部组合 LinuxTunProvider + LinuxRouteManager
+//! （创建设备/设址/起路由在 run() 启动时完成，退出时 teardown），**不经 NetworkManager**。
+//!
+//! 运行循环架构（§2.9 死锁分析结论）：tun guard 全程由 run 循环持有（单任务独占
+//! 设备 fd），事件枚举 select——读包/下行写/清扫各自成事件，写发生在 match 臂内
+//! （select 语句结束即释放 guard 借用），读挂起时下行写仍可就绪，无锁竞争；
+//! select 不加 biased（随机轮询防单方向饿死）。
+
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::{
+        atomic::{AtomicU16, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use bytes::Bytes;
+use dashmap::DashMap;
+use seep_core::udp::table::classify_failure;
+use seep_core::udp::{EgressUdpConnector, UdpRelay};
+use seep_core::{
+    FailureType, FlowContext, FlowId, FlowMetadata, FlowOutput, FlowRouter, FlowTarget,
+    IngressEndpoint, RouteDecision, TargetProto,
+};
+use tokio::sync::{mpsc, Mutex as TokioMutex, Notify};
+use tracing::{debug, error, info, warn};
+
+use seep_platform::network::ipcodec::{build_udp_packet, parse_udp_datagram, UdpDatagram};
+use seep_platform::network::linux::{LinuxRouteManager, LinuxTunProvider};
+use seep_platform::network::route::{
+    default_bypass_rules, RouteDestination, RouteManager, RoutingConfig as PlatformRoutingConfig,
+};
+use seep_platform::network::tun::{PacketInfo, TunConfig, TunProvider};
+
+use crate::tun_process::{ProcessAttributor, ProcessInfo, SockProto};
+
+/// 下行通道容量（下行任务 → run 循环写 tun）
+const DOWNLINK_CHANNEL_CAP: usize = 1024;
+/// 清扫周期
+const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// TunIngress 配置
+#[derive(Debug, Clone)]
+pub struct TunIngressConfig {
+    /// TUN 设备配置
+    pub tun: TunConfig,
+    /// 路由配置
+    pub routing: PlatformRoutingConfig,
+    /// UDP 空闲超时（秒）
+    pub udp_idle_secs: u64,
+    /// TCP 空闲超时（秒）
+    pub tcp_idle_secs: u64,
+    /// 最大流条目数
+    pub max_flows: usize,
+    /// 路由规则中是否存在 MatchCondition::Process（§2.5：仅此情形做 /proc
+    /// 归因扫描——fd 扫描贵，不该为无 Process 规则的配置买单）
+    pub has_process_rules: bool,
+    /// §2.7 auto-bypass 字面量集（构建期注入：egress 字面量地址 + api_bind +
+    /// mesh listen/peer 字面量）
+    pub auto_bypass_literals: Vec<RouteDestination>,
+    /// §2.7 auto-bypass 域名集（egress server 为域名时——构建期不解析 DNS，
+    /// run() 起始处解析后并入 set_auto_bypass）
+    pub auto_bypass_hosts: Vec<String>,
+}
+
+impl Default for TunIngressConfig {
+    fn default() -> Self {
+        Self {
+            tun: TunConfig::default(),
+            routing: PlatformRoutingConfig::default(),
+            udp_idle_secs: 60,  // mapping_idle 同源
+            tcp_idle_secs: 180, // session_idle 同源
+            max_flows: 4096,    // P0-4 §3 R10 论证
+            has_process_rules: false,
+            auto_bypass_literals: Vec::new(),
+            auto_bypass_hosts: Vec::new(),
+        }
+    }
+}
+
+/// 流协议类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Proto {
+    Tcp,
+    Udp,
+}
+
+/// 流键（五元组全量：src 归属进程/应用，多应用同目标不同流——dst-only 键
+/// 会把两个进程发往同一 DNS 的流并为一条，归因与拆除面全错）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TunFlowKey {
+    proto: Proto,
+    src: SocketAddr,
+    dst: SocketAddr,
+}
+
+/// 流条目
+struct TunFlowEntry {
+    /// 首包路由决策（粘滞，本流生命周期内不再重路由）
+    decision: RouteDecision,
+    /// UDP 出站 relay（None = 拆除中）
+    relay: Option<Arc<dyn UdpRelay>>,
+    /// 首包进程归因（§2.5；has_process_rules=false 时恒 None）
+    process: Option<ProcessInfo>,
+    last_active: Instant,
+    /// 空闲回收期限（每包触达续期）
+    expiry: Instant,
+    /// 下行任务取消信号（sweep/evict/Route 族失败拆除时 notify）
+    cancel: Arc<Notify>,
+}
+
+/// TunIngress 统计（方向语义：received = tun 上行读入；sent = tun 下行写回——
+/// 与「代理出站发送」无关，后者归 UDP 序列自身的指标）
+#[derive(Debug, Clone, Default)]
+pub struct TunIngressStats {
+    pub packets_received: u64,
+    pub packets_sent: u64,
+    pub bytes_received: u64,
+    pub bytes_sent: u64,
+    pub bypass_dropped: u64,
+    pub parse_errors: u64,
+    pub unknown_flow: u64,
+    pub process_attr_miss: u64,
+}
+
+/// run 循环事件（事件枚举模式：select 产物先物化再 match，写 tun 的可变
+/// 借用发生在 match 臂——借用检查与「读挂起时写可就绪」两全）
+enum LoopEvent {
+    Shutdown,
+    Read(Result<(Bytes, PacketInfo)>),
+    Downlink(Option<Bytes>),
+    Sweep,
+}
+
+/// TunIngress（tun-dataplane.md §2）
+pub struct TunIngress {
+    config: TunIngressConfig,
+    tun: TokioMutex<LinuxTunProvider>,
+    route_manager: TokioMutex<LinuxRouteManager>,
+    flow_table: Arc<DashMap<TunFlowKey, TunFlowEntry>>,
+    udp_connector: Arc<dyn EgressUdpConnector>,
+    /// run() 注入（runtime ingress 循环 @start() 的 router 通道），OnceLock
+    /// 使构造期无需持有 runtime 全件
+    flow_router: OnceLock<Arc<dyn FlowRouter>>,
+    flow_output: OnceLock<Arc<dyn FlowOutput>>,
+    stats: Arc<Mutex<TunIngressStats>>,
+    /// 进程归因器（§2.5，TTL 30s 含负缓存）
+    attributor: Arc<ProcessAttributor>,
+    /// 下行包 IPv4 id 计数器
+    ipv4_id: Arc<AtomicU16>,
+    /// 关闭信号
+    shutdown: Arc<Notify>,
+}
+
+impl TunIngress {
+    /// 创建新的 TunIngress（不触碰设备/路由——I/O 全在 run()）
+    pub fn new(config: TunIngressConfig, udp_connector: Arc<dyn EgressUdpConnector>) -> Self {
+        let route_manager =
+            LinuxRouteManager::new(config.routing.clone()).with_tun_config(config.tun.clone());
+        Self {
+            tun: TokioMutex::new(LinuxTunProvider::new(config.tun.clone())),
+            route_manager: TokioMutex::new(route_manager),
+            flow_table: Arc::new(DashMap::new()),
+            udp_connector,
+            flow_router: OnceLock::new(),
+            flow_output: OnceLock::new(),
+            stats: Arc::new(Mutex::new(TunIngressStats::default())),
+            attributor: Arc::new(ProcessAttributor::new()),
+            ipv4_id: Arc::new(AtomicU16::new(0)),
+            shutdown: Arc::new(Notify::new()),
+            config,
+        }
+    }
+
+    /// 请求关闭（run 循环收到后走 teardown）
+    pub fn shutdown(&self) {
+        self.shutdown.notify_one();
+    }
+
+    /// 配置只读面（控制面/测试：has_process_rules、auto-bypass 集等）
+    pub fn config(&self) -> &TunIngressConfig {
+        &self.config
+    }
+
+    /// 注入路由器/出口（run() 由 IngressEndpoint 调用前；测试也可直注）
+    pub fn set_endpoints(&self, router: Arc<dyn FlowRouter>, output: Arc<dyn FlowOutput>) {
+        let _ = self.flow_router.set(router);
+        let _ = self.flow_output.set(output);
+    }
+
+    fn router(&self) -> Arc<dyn FlowRouter> {
+        self.flow_router
+            .get()
+            .expect("flow_router 未注入——先 set_endpoints/run")
+            .clone()
+    }
+
+    /// 内部运行方法：设备生命周期 + §2.9 包循环 + teardown
+    async fn run_internal(self: Arc<Self>) -> Result<()> {
+        // tun guard 全程持有（单任务独占设备；§2.9 事件枚举模式的基石）
+        let mut tun_guard = self.tun.lock().await;
+        tun_guard
+            .create_interface()
+            .await
+            .context("创建 TUN 接口失败")?;
+        let iface_name = tun_guard.name().to_string();
+
+        // §2.7 auto-bypass 组装：字面量集（构建期）∪ 域名解析集（run 起始处，
+        // 构建期不做 DNS）∪ tun 网段（RouteManager 内置）
+        let mut bypass = self.config.auto_bypass_literals.clone();
+        for host in &self.config.auto_bypass_hosts {
+            match tokio::net::lookup_host((host.as_str(), 0)).await {
+                Ok(addrs) => {
+                    for a in addrs {
+                        bypass.push(RouteDestination::host(a.ip()));
+                    }
+                }
+                Err(e) => {
+                    warn!(target: "seep::tun", host = %host, error = %e, "auto-bypass 域名解析失败（egress 服务器可达性自负）");
+                }
+            }
+        }
+        {
+            let mut rm = self.route_manager.lock().await;
+            rm.set_interface_name(iface_name.clone());
+            rm.set_auto_bypass(bypass);
+        }
+
+        tun_guard
+            .up_interface()
+            .await
+            .context("启动 TUN 接口失败")?;
+        tun_guard.configure_ip().await.context("配置 TUN IP 失败")?;
+        self.route_manager
+            .lock()
+            .await
+            .apply_routing()
+            .await
+            .context("应用路由失败")?;
+
+        info!(target: "seep::tun", name = %iface_name, "TunIngress 已启动");
+
+        let result = self.packet_loop(&mut tun_guard).await;
+
+        // Teardown（逆序回滚；尽力而为不掩盖主结果）
+        for entry in self.flow_table.iter() {
+            entry.cancel.notify_one();
+        }
+        self.flow_table.clear();
+        {
+            let rm = self.route_manager.lock().await;
+            if let Err(e) = rm.clear_routing().await {
+                warn!(target: "seep::tun", error = %e, "清理路由失败");
+            }
+        }
+        if let Err(e) = tun_guard.down_interface().await {
+            warn!(target: "seep::tun", error = %e, "关闭 TUN 接口失败");
+        }
+        if let Err(e) = tun_guard.destroy_interface().await {
+            warn!(target: "seep::tun", error = %e, "销毁 TUN 接口失败");
+        }
+        drop(tun_guard);
+
+        info!(target: "seep::tun", name = %iface_name, "TunIngress 已停止");
+        result
+    }
+
+    /// §2.9 包循环：读 tun / 写下行 / 清扫三事件单循环
+    async fn packet_loop(
+        &self,
+        tun_guard: &mut tokio::sync::MutexGuard<'_, LinuxTunProvider>,
+    ) -> Result<()> {
+        let (downlink_tx, mut downlink_rx) = mpsc::channel::<Bytes>(DOWNLINK_CHANNEL_CAP);
+        let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            // 不加 biased：随机轮询防读/写单方向饿死（guard 已由本循环独占，
+            // 无锁竞争面）
+            let event = tokio::select! {
+                _ = self.shutdown.notified() => LoopEvent::Shutdown,
+                read = tun_guard.read_packet() => LoopEvent::Read(read),
+                pkt = downlink_rx.recv() => LoopEvent::Downlink(pkt),
+                _ = sweep.tick() => LoopEvent::Sweep,
+            };
+            match event {
+                LoopEvent::Shutdown => {
+                    info!(target: "seep::tun", "收到关闭信号，退出包循环");
+                    break;
+                }
+                LoopEvent::Read(Ok((bytes, info))) => {
+                    self.handle_uplink(bytes, info, &downlink_tx).await;
+                }
+                LoopEvent::Read(Err(e)) => {
+                    // E8：设备已关/异常 → 终止（tun-dataplane.md §1.1）
+                    error!(target: "seep::tun", error = %e, "TUN 读包失败（E8），退出包循环");
+                    break;
+                }
+                LoopEvent::Downlink(Some(bytes)) => {
+                    let n = bytes.len();
+                    if let Err(e) = tun_guard.write_packet(bytes).await {
+                        error!(target: "seep::tun", error = %e, "TUN 写包失败（E8），退出包循环");
+                        break;
+                    }
+                    let mut st = self.stats.lock().unwrap();
+                    st.packets_sent += 1;
+                    st.bytes_sent += n as u64;
+                }
+                LoopEvent::Downlink(None) => break, // 下行通道全员撤出（防御分支）
+                LoopEvent::Sweep => self.sweep_expired_flows_at(Instant::now()),
+            }
+        }
+        Ok(())
+    }
+
+    /// 上行包处理：计数 → bypass → 按 proto 分发（TCP T4 前丢弃 + 计数）
+    async fn handle_uplink(&self, pkt: Bytes, info: PacketInfo, downlink_tx: &mpsc::Sender<Bytes>) {
+        {
+            let mut st = self.stats.lock().unwrap();
+            st.packets_received += 1;
+            st.bytes_received += pkt.len() as u64;
+        }
+        let Some(dst_ip) = info.dst_ip else {
+            self.increment_parse_errors();
+            return;
+        };
+        // Bypass（进程内兜底，§2.7）
+        if self.matches_bypass(dst_ip).await {
+            self.increment_bypass_dropped();
+            return;
+        }
+        if info.is_udp() {
+            match parse_udp_datagram(&pkt) {
+                Ok(dgram) => self.handle_udp_packet(dgram, downlink_tx).await,
+                Err(e) => {
+                    debug!(target: "seep::tun", error = %e, "UDP 数据报解析失败，丢弃（E9）");
+                    self.increment_parse_errors();
+                }
+            }
+        } else {
+            // TCP（T4 smoltcp 用户态栈，§2.4）与 ICMP 等：MVP 丢弃 + 计数（E9）
+            debug!(target: "seep::tun", proto = ?info.protocol, "非 UDP 包丢弃（TCP 接线归 T4）");
+            self.increment_parse_errors();
+        }
+    }
+
+    /// Bypass 判定（§2.7 三源）：默认规则（private/loopback/multicast）∪
+    /// 用户 bypass_rules ∪ auto-bypass 集（egress/control/mesh/tun 网段）
+    async fn matches_bypass(&self, dst: IpAddr) -> bool {
+        if default_bypass_rules().iter().any(|r| r.matches(dst, None)) {
+            return true;
+        }
+        if self
+            .config
+            .routing
+            .bypass_rules
+            .iter()
+            .any(|r| r.matches(dst, None))
+        {
+            return true;
+        }
+        self.route_manager.lock().await.is_auto_bypass_ip(dst)
+    }
+
+    /// UDP 上行（§2.2）：已建流直发；首包 归因→路由→associate→驱逐→
+    /// 插入→spawn 下行任务→发送（顺序即此序——注解先于路由，路由能吃
+    /// process.* 条件；关联成功才建条目，失败不残留）
+    async fn handle_udp_packet(&self, dgram: UdpDatagram<'_>, downlink_tx: &mpsc::Sender<Bytes>) {
+        let src = SocketAddr::new(dgram.src, dgram.sport);
+        let dst = SocketAddr::new(dgram.dst, dgram.dport);
+        let key = TunFlowKey {
+            proto: Proto::Udp,
+            src,
+            dst,
+        };
+        let target = udp_target(dst);
+
+        // 已建流：续期 + 直发（DashMap guard 不跨 await——先 clone relay 再放）
+        if let Some(entry) = self.flow_table.get(&key) {
+            let relay = entry.relay.clone();
+            drop(entry);
+            if let Some(relay) = relay {
+                let now = Instant::now();
+                if let Some(mut e) = self.flow_table.get_mut(&key) {
+                    e.last_active = now;
+                    e.expiry = now + Duration::from_secs(self.config.udp_idle_secs);
+                }
+                self.send_uplink(&relay, &key, &target, dgram.payload).await;
+            }
+            // relay = None：条目拆除中，丢弃
+            return;
+        }
+
+        // ---- 首包 ----
+        // ① 进程归因（§2.5：仅 Process 规则在配置时扫描；miss 计数不报错）
+        let process = if self.config.has_process_rules {
+            let p = self.attributor.attribute(src, SockProto::Udp).await;
+            if p.is_none() {
+                self.stats.lock().unwrap().process_attr_miss += 1;
+            }
+            p
+        } else {
+            None
+        };
+        let mut metadata = FlowMetadata::default();
+        if let Some(p) = &process {
+            metadata
+                .annotations
+                .insert("process.name".to_string(), p.comm.clone());
+            metadata
+                .annotations
+                .insert("process.pid".to_string(), p.pid.to_string());
+        }
+
+        // ② 路由（带着 process.* 注解进引擎——MatchCondition::Process 在此生效）
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: target.clone(),
+            metadata,
+        };
+        let decision = match self.router().route(ctx.clone()).await {
+            Ok(d) => d,
+            Err(e) => {
+                error!(target: "seep::tun", error = %e, dst = %dst, "TUN UDP 流路由失败，丢包");
+                return;
+            }
+        };
+
+        // ③ 出站关联（失败不建条目）
+        let relay = match self.udp_connector.associate(ctx, &decision).await {
+            Ok(r) => r,
+            Err(e) => {
+                error!(target: "seep::tun", error = %e, dst = %dst, "TUN UDP associate 失败，丢包");
+                return;
+            }
+        };
+
+        // ④ 流表满 → 逐最早 expiry 驱逐（同 P0-4 R10）
+        if self.flow_table.len() >= self.config.max_flows {
+            self.evict_earliest();
+        }
+
+        // ⑤ 建条目 + 下行任务
+        debug!(
+            target: "seep::tun",
+            dst = %dst,
+            node = ?decision.path,
+            process = ?process.as_ref().map(|p| p.comm.as_str()),
+            "TUN UDP 流建立"
+        );
+        let now = Instant::now();
+        let cancel = Arc::new(Notify::new());
+        self.flow_table.insert(
+            key,
+            TunFlowEntry {
+                decision,
+                relay: Some(relay.clone()),
+                process,
+                last_active: now,
+                expiry: now + Duration::from_secs(self.config.udp_idle_secs),
+                cancel: cancel.clone(),
+            },
+        );
+        let mtu = self.config.tun.mtu as usize;
+        tokio::spawn(downlink_task(
+            key,
+            relay.clone(),
+            cancel,
+            Arc::clone(&self.flow_table),
+            downlink_tx.clone(),
+            Arc::clone(&self.stats),
+            Arc::clone(&self.ipv4_id),
+            mtu,
+        ));
+
+        // ⑥ 首包载荷上行
+        self.send_uplink(&relay, &key, &target, dgram.payload).await;
+    }
+
+    /// 上行发送 + classify_failure 处置（P0-3 §3.6）：Route 族拆映射重路由、
+    /// Timeout/Connection 族保映射待空闲回收
+    async fn send_uplink(
+        &self,
+        relay: &Arc<dyn UdpRelay>,
+        key: &TunFlowKey,
+        target: &FlowTarget,
+        payload: &[u8],
+    ) {
+        if let Err(e) = relay.send_to(target, payload).await {
+            match classify_failure(&e) {
+                FailureType::Route => {
+                    debug!(target: "seep::tun", error = %e, "上行 Route 族失败，拆除映射");
+                    if let Some((_, entry)) = self.flow_table.remove(key) {
+                        entry.cancel.notify_one();
+                    }
+                }
+                ft => {
+                    debug!(target: "seep::tun", error = %e, ?ft, "上行失败，映射保留待空闲回收");
+                }
+            }
+        }
+    }
+
+    /// 清扫过期流（`now` 可注入——单测无需真实时钟）
+    fn sweep_expired_flows_at(&self, now: Instant) {
+        let expired: Vec<TunFlowKey> = self
+            .flow_table
+            .iter()
+            .filter(|e| e.expiry <= now)
+            .map(|e| *e.key())
+            .collect();
+        for k in expired {
+            if let Some((_, entry)) = self.flow_table.remove(&k) {
+                debug!(
+                    target: "seep::tun",
+                    ?k,
+                    node = ?entry.decision.path,
+                    process = ?entry.process.as_ref().map(|p| p.comm.as_str()),
+                    idle = ?now.saturating_duration_since(entry.last_active),
+                    "UDP 流空闲过期回收"
+                );
+                entry.cancel.notify_one();
+            }
+        }
+    }
+
+    /// 驱逐最早过期的流（流表满时）
+    fn evict_earliest(&self) {
+        let victim = self
+            .flow_table
+            .iter()
+            .min_by_key(|e| e.expiry)
+            .map(|e| (*e.key(), e.expiry));
+        if let Some((k, expiry)) = victim {
+            if let Some((_, entry)) = self.flow_table.remove(&k) {
+                warn!(target: "seep::tun", ?k, ?expiry, "流表满，驱逐最早过期流");
+                entry.cancel.notify_one();
+            }
+        }
+    }
+
+    fn increment_bypass_dropped(&self) {
+        self.stats.lock().unwrap().bypass_dropped += 1;
+    }
+
+    fn increment_parse_errors(&self) {
+        self.stats.lock().unwrap().parse_errors += 1;
+    }
+
+    /// 统计快照（T5 指标渲染面）
+    pub fn get_stats(&self) -> TunIngressStats {
+        self.stats.lock().unwrap().clone()
+    }
+
+    /// 活跃流数（T5 seep_tun_flows_active 源）
+    pub fn active_flows(&self) -> usize {
+        self.flow_table.len()
+    }
+}
+
+/// UDP 下行任务（每流一个）：relay.recv → 反向包构造 → 下行通道（run 循环
+/// 写 tun）。流被回收（sweep/evict/Route 族拆除）即 cancel 或 contains_key
+/// 双保险退出；不触碰 tun guard（§2.9：写集中 run 循环）。
+#[allow(clippy::too_many_arguments)]
+async fn downlink_task(
+    key: TunFlowKey,
+    relay: Arc<dyn UdpRelay>,
+    cancel: Arc<Notify>,
+    table: Arc<DashMap<TunFlowKey, TunFlowEntry>>,
+    tx: mpsc::Sender<Bytes>,
+    stats: Arc<Mutex<TunIngressStats>>,
+    ipv4_id: Arc<AtomicU16>,
+    mtu: usize,
+) {
+    let mut buf = vec![0u8; mtu];
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.notified() => break,
+            received = relay.recv_from(&mut buf) => {
+                let Ok((_, n)) = received else {
+                    break; // relay 断（egress 关闭/错误）
+                };
+                if !table.contains_key(&key) {
+                    // 流已回收：迟到的下行包（未知流计数，§2.8）
+                    stats.lock().unwrap().unknown_flow += 1;
+                    break;
+                }
+                let pkt = build_udp_packet(
+                    key.dst.ip(),
+                    key.src.ip(),
+                    key.dst.port(),
+                    key.src.port(),
+                    &buf[..n],
+                    ipv4_id.fetch_add(1, Ordering::Relaxed),
+                );
+                match pkt {
+                    Ok(p) => {
+                        if tx.send(Bytes::from(p)).await.is_err() {
+                            break; // run 循环已退出
+                        }
+                    }
+                    Err(e) => {
+                        debug!(target: "seep::tun", error = %e, "下行包构造失败，丢弃（E9）");
+                    }
+                }
+                if let Some(mut e) = table.get_mut(&key) {
+                    e.last_active = Instant::now();
+                }
+            }
+        }
+    }
+}
+
+/// SocketAddr → UDP FlowTarget（host 字面量 IP 形——TUN 面目标恒为 IP，无域名）
+fn udp_target(dst: SocketAddr) -> FlowTarget {
+    FlowTarget {
+        host: dst.ip().to_string(),
+        port: dst.port(),
+        proto: TargetProto::Udp,
+    }
+}
+
+#[async_trait]
+impl IngressEndpoint for TunIngress {
+    fn name(&self) -> &'static str {
+        "tun"
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        router: Arc<dyn FlowRouter>,
+        output: Arc<dyn FlowOutput>,
+    ) -> Result<()> {
+        self.set_endpoints(router, output);
+        self.run_internal().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex as StdMutex;
+
+    use super::*;
+    use seep_core::udp::relay::MockUdpRelay;
+    use seep_platform::network::route::{BypassAction, BypassCondition, BypassRule};
+    use seep_platform::network::tun::PacketType;
+
+    /// 记录型路由器（断言 ctx 目标与注解进料）
+    struct RecordingRouter {
+        seen: StdMutex<Vec<FlowContext>>,
+        node: &'static str,
+    }
+
+    #[async_trait]
+    impl FlowRouter for RecordingRouter {
+        async fn route(&self, ctx: FlowContext) -> Result<RouteDecision> {
+            self.seen.lock().unwrap().push(ctx);
+            Ok(RouteDecision::direct(self.node.to_string()))
+        }
+    }
+
+    /// 空出口（TUN UDP 面不经 FlowOutput::forward——TCP T4 才用）
+    struct NullOutput;
+
+    #[async_trait]
+    impl FlowOutput for NullOutput {
+        async fn forward(
+            &self,
+            _decision: RouteDecision,
+            _flow: seep_core::Flow,
+        ) -> Result<seep_core::FlowReport> {
+            unreachable!("TUN UDP 面不经 FlowOutput::forward（TCP 归 T4）")
+        }
+    }
+
+    /// Mock 连接器：associate 返回 MockUdpRelay；注入通道留档供测试喂下行
+    struct MockConnector {
+        feeds: StdMutex<Vec<mpsc::Sender<Vec<u8>>>>,
+    }
+
+    #[async_trait]
+    impl EgressUdpConnector for MockConnector {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn associate(
+            &self,
+            ctx: FlowContext,
+            _decision: &RouteDecision,
+        ) -> Result<Arc<dyn UdpRelay>> {
+            let (relay, tx) = MockUdpRelay::new(ctx.target);
+            self.feeds.lock().unwrap().push(tx);
+            Ok(relay)
+        }
+    }
+
+    fn uplink_packet(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> (Bytes, PacketInfo) {
+        let pkt = build_udp_packet(src.ip(), dst.ip(), src.port(), dst.port(), payload, 0).unwrap();
+        let mut info = PacketInfo::new(PacketType::from_ip_version(4), pkt.len());
+        info.parse_ip_header(&pkt).unwrap();
+        (Bytes::from(pkt), info)
+    }
+
+    fn make_ingress(
+        config: TunIngressConfig,
+    ) -> (Arc<TunIngress>, Arc<RecordingRouter>, Arc<MockConnector>) {
+        let router = Arc::new(RecordingRouter {
+            seen: StdMutex::new(Vec::new()),
+            node: "game-node",
+        });
+        let connector = Arc::new(MockConnector {
+            feeds: StdMutex::new(Vec::new()),
+        });
+        let t = Arc::new(TunIngress::new(config, connector.clone()));
+        t.set_endpoints(router.clone(), Arc::new(NullOutput));
+        (t, router, connector)
+    }
+
+    /// §4.1 UDP 全链路（无设备）：应用包 → 归因旁路（无 Process 规则）→ 路由
+    /// → associate → 首包载荷上行 → 下行注入 → 反向包构造 → 下行通道可收。
+    #[tokio::test]
+    async fn udp_full_path_without_device() {
+        let (t, router, connector) = make_ingress(TunIngressConfig::default());
+        let (downlink_tx, mut downlink_rx) = mpsc::channel::<Bytes>(DOWNLINK_CHANNEL_CAP);
+
+        let src: SocketAddr = "10.66.0.1:40000".parse().unwrap();
+        let dst: SocketAddr = "8.8.8.8:53".parse().unwrap();
+        let (pkt, info) = uplink_packet(src, dst, b"dns-query");
+        t.handle_uplink(pkt, info, &downlink_tx).await;
+
+        // 路由进料：目标五元组 + 无归因注解（has_process_rules=false）
+        //（guard 单语句快照即放——不跨 await）
+        assert_eq!(t.active_flows(), 1);
+        let seen: Vec<FlowContext> = router.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        let ctx = &seen[0];
+        assert_eq!(ctx.target.host, "8.8.8.8");
+        assert_eq!(ctx.target.port, 53);
+        assert!(
+            ctx.metadata.annotations.is_empty(),
+            "无 Process 规则时不应归因"
+        );
+
+        // 上行统计（tun 读入口径）
+        let st = t.get_stats();
+        assert_eq!(st.packets_received, 1);
+        assert!(st.bytes_received > 0);
+        assert_eq!(st.bypass_dropped, 0);
+
+        // 下行：mock 注入响应 → downlink_task 反向构造 → 下行通道收到
+        let feed = connector.feeds.lock().unwrap()[0].clone();
+        drop(connector);
+        feed.send(b"dns-response".to_vec()).await.unwrap();
+        let echoed = tokio::time::timeout(Duration::from_secs(2), downlink_rx.recv())
+            .await
+            .expect("下行应在 2s 内回到通道")
+            .expect("run 循环持有发送端（测试场景通道存活）");
+        let dgram = parse_udp_datagram(&echoed).unwrap();
+        assert_eq!(dgram.src, dst.ip(), "下行包源 = 上行目标");
+        assert_eq!(dgram.dst, src.ip(), "下行包目标 = 上行源");
+        assert_eq!(dgram.sport, 53);
+        assert_eq!(dgram.dport, 40000);
+        assert_eq!(dgram.payload, b"dns-response");
+    }
+
+    /// 流键含 src：同目标不同源 = 两条流（归因/拆除面不串流）
+    #[tokio::test]
+    async fn flow_key_distinguishes_sources() {
+        let (t, _router, _connector) = make_ingress(TunIngressConfig::default());
+        let (tx, _rx) = mpsc::channel(DOWNLINK_CHANNEL_CAP);
+        let dst: SocketAddr = "8.8.8.8:53".parse().unwrap();
+        for sport in [40000u16, 40001] {
+            let src: SocketAddr = format!("10.66.0.1:{sport}").parse().unwrap();
+            let (pkt, info) = uplink_packet(src, dst, b"q");
+            t.handle_uplink(pkt, info, &tx).await;
+        }
+        assert_eq!(t.active_flows(), 2, "同目标不同源应为两条流");
+    }
+
+    /// bypass 三源：默认（private）命中丢弃 + 计数；公网目标放行
+    #[tokio::test]
+    async fn bypass_private_dropped_public_forwarded() {
+        // 用户规则：1.2.3.0/24 直连绕过
+        let mut cfg = TunIngressConfig::default();
+        cfg.routing.bypass_rules.push(BypassRule::new(
+            "corp-lan".into(),
+            BypassCondition::IpRange {
+                start: "1.2.3.0".parse().unwrap(),
+                end: "1.2.3.255".parse().unwrap(),
+            },
+            BypassAction::Direct,
+        ));
+        let (t, _router, _connector) = make_ingress(cfg);
+        let (tx, _rx) = mpsc::channel(DOWNLINK_CHANNEL_CAP);
+        let src: SocketAddr = "10.66.0.1:40000".parse().unwrap();
+
+        for (dst, name) in [("192.168.1.1:53", "private"), ("1.2.3.4:53", "用户规则")] {
+            let (pkt, info) = uplink_packet(src, dst.parse().unwrap(), b"q");
+            t.handle_uplink(pkt, info, &tx).await;
+            assert_eq!(t.active_flows(), 0, "{name} 目标应 bypass 丢弃");
+        }
+        assert_eq!(t.get_stats().bypass_dropped, 2);
+
+        let (pkt, info) = uplink_packet(src, "8.8.8.8:53".parse().unwrap(), b"q");
+        t.handle_uplink(pkt, info, &tx).await;
+        assert_eq!(t.active_flows(), 1, "公网目标应建流");
+    }
+
+    /// 清扫与驱逐：过期流回收（cancel 通知到位）+ 流表满逐最早 expiry 驱逐
+    #[tokio::test]
+    async fn sweep_and_evict_semantics() {
+        let (t, _router, _connector) = make_ingress(TunIngressConfig::default());
+        let now = Instant::now();
+
+        let mk_entry = |secs: u64| TunFlowEntry {
+            decision: RouteDecision::direct("n".into()),
+            relay: None,
+            process: None,
+            last_active: now,
+            expiry: now + Duration::from_secs(secs),
+            cancel: Arc::new(Notify::new()),
+        };
+        let k1 = TunFlowKey {
+            proto: Proto::Udp,
+            src: "10.0.0.1:1".parse().unwrap(),
+            dst: "8.8.8.8:53".parse().unwrap(),
+        };
+        let entry1 = mk_entry(0); // 立即过期
+        let c1 = entry1.cancel.clone();
+        t.flow_table.insert(k1, entry1);
+        let k2 = TunFlowKey {
+            proto: Proto::Udp,
+            src: "10.0.0.1:2".parse().unwrap(),
+            dst: "8.8.8.8:53".parse().unwrap(),
+        };
+        t.flow_table.insert(k2, mk_entry(300));
+
+        // now+1s 清扫：k1 过期回收（cancel 通知下行任务退出），k2 保留
+        t.sweep_expired_flows_at(now + Duration::from_secs(1));
+        assert_eq!(t.active_flows(), 1);
+        assert!(!t.flow_table.contains_key(&k1));
+        tokio::time::timeout(Duration::from_millis(500), c1.notified())
+            .await
+            .expect("过期回收应通知 cancel");
+
+        // 驱逐：补 2 条更晚的流，满员驱逐最早（k2）
+        for port in [3u16, 4] {
+            t.flow_table.insert(
+                TunFlowKey {
+                    proto: Proto::Udp,
+                    src: format!("10.0.0.1:{port}").parse().unwrap(),
+                    dst: "8.8.8.8:53".parse().unwrap(),
+                },
+                mk_entry(600),
+            );
+        }
+        t.evict_earliest();
+        assert!(!t.flow_table.contains_key(&k2), "最早 expiry 应被驱逐");
+        assert_eq!(t.active_flows(), 2);
+    }
+}

@@ -1682,11 +1682,27 @@ pub struct RouteRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MatchCondition {
-    DomainSuffix { values: Vec<String> },
-    DomainKeyword { values: Vec<String> },
-    Geoip { country: String },
-    Network { cidrs: Vec<String> },
-    Port { values: Vec<u16> },
+    DomainSuffix {
+        values: Vec<String>,
+    },
+    DomainKeyword {
+        values: Vec<String>,
+    },
+    Geoip {
+        country: String,
+    },
+    Network {
+        cidrs: Vec<String>,
+    },
+    Port {
+        values: Vec<u16>,
+    },
+    /// 按源进程名匹配（tun-dataplane.md §2.5）：值为 `/proc/<pid>/comm` 口径
+    /// 的进程名（内核截断 15 字节），由 TUN 入口首包归因后写入
+    /// `process.name` 注解——仅 TUN 面有该注解，其它 ingress 流恒不命中。
+    Process {
+        values: Vec<String>,
+    },
 }
 
 #[derive(Debug, Error)]

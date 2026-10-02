@@ -6,7 +6,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, OnceLock, RwLock},
     time::{Duration, Instant},
 };
@@ -23,7 +23,7 @@ use tokio::{
 
 use seep_config::{
     resolve_udp_enabled, EgressConfig, EgressDescriptor, GroupMember, IngressConfig,
-    IngressDescriptor, PolicyGroup, RoutingConfig, SeepConfig, UdpConfig,
+    IngressDescriptor, MatchCondition, PolicyGroup, RoutingConfig, SeepConfig, UdpConfig,
 };
 use seep_core::udp::table::chain_id_of;
 use seep_core::udp::{ChainFailureEvent, EgressUdpConnector};
@@ -32,8 +32,11 @@ use seep_core::{
     MiddlewareChain, RouteDecision, RoutePath,
 };
 use seep_mesh::{MeshRegistry, MeshSession, NodeId, SessionId};
-use seep_platform::network::{NetworkConfig, NetworkManager};
+use seep_platform::network::route::RouteDestination;
+use seep_platform::network::{NetworkConfig, NetworkManager, NetworkMode};
 use seep_protocols::middleware::{ANN_ROUTE_EGRESS, ANN_ROUTE_KIND};
+
+use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use seep_protocols::{
     DirectConnector, HttpConnector, HttpIngress, Hysteria2Connector, MixedIngress,
     ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress,
@@ -175,17 +178,26 @@ impl RuntimeBuilder {
             crate::obfs_config::build_middleware_chain(config_snapshot.obfuscation.as_ref(), &refs)?
         };
 
-        let network_manager = if self.runtime_config.enable_network_virtualization {
-            if let Some(network_cfg) = &self.runtime_config.network_config {
-                let mut manager = NetworkManager::new(network_cfg.clone());
-                manager.initialize()?;
-                Some(Arc::new(Mutex::new(manager)))
+        // TUN 模式属主裁决（tun-dataplane.md §2.6）：TunIngress 组合设备+路由
+        // 属主——NetworkManager 在 Tun 模式让位（双设备 = 内核路由互踩）
+        let network_mode_tun = self
+            .runtime_config
+            .network_config
+            .as_ref()
+            .is_some_and(|n| n.mode == NetworkMode::Tun);
+        let tun_enabled = self.runtime_config.enable_network_virtualization && network_mode_tun;
+        let network_manager =
+            if self.runtime_config.enable_network_virtualization && !network_mode_tun {
+                if let Some(network_cfg) = &self.runtime_config.network_config {
+                    let mut manager = NetworkManager::new(network_cfg.clone());
+                    manager.initialize()?;
+                    Some(Arc::new(Mutex::new(manager)))
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
         // P2-8 M1 §4-4：DNS 分流服务（块缺席/关闭 = None 零开销）。监听独立于
         // 网络虚拟化开关——本地监听即独立可用面（dns-partition.md §9-4，
@@ -305,12 +317,17 @@ impl RuntimeBuilder {
         // ④§8 链路故障事件通道（FlowOutputRouter 切换成功后 → 表 handle_chain_failure）。
         let mut mesh_udp_gate: Option<MeshUdpGate> = None;
         let mut chain_failure_tx: Option<mpsc::Sender<ChainFailureEvent>> = None;
+        // TUN UDP 面出站连接器（UDP 块内 clone 于 service 消费前）
+        let mut tun_udp_connector: Option<Arc<dyn EgressUdpConnector>> = None;
         // P0-5 §4 观测接缝③：build() 包装 UdpChainRouter 前从 bridge 抽出（None = 无
         // chain-UDP 桥——udp/chain 未同启或本机 client 桥未构建）
         let mut udp_client_metrics: Option<Arc<UdpClientMetrics>> = None;
         // P0-5 §1.3：per-ingress Some(true) 在全局关时仍要可用——构建条件从
         //「全局 enabled」放宽为「全局 ∨ 任一入口显式开」；服务实例仍全局单例。
+        // T3 §2.2：TUN 入口的 UDP NAT 面同用 UdpAssociateService 的连接器族——
+        // tun_enabled 时 UDP 块必建（clone 连接器给 TunIngress）。
         let udp_needed = config_snapshot.udp.enabled
+            || tun_enabled
             || config_snapshot.ingress.iter().any(|d| {
                 matches!(
                     &d.spec,
@@ -387,6 +404,11 @@ impl RuntimeBuilder {
                 table.attach_chain_events(rx);
                 chain_failure_tx = Some(tx);
             }
+            // TUN UDP 面与 socks5 UDP 面共用同一出站连接器（tun-dataplane.md
+            // §2.2；TUN 流不注册进 UdpSessionTable——流表自治，§2.6）
+            if tun_enabled {
+                tun_udp_connector = Some(Arc::clone(&connector));
+            }
             Some(seep_core::udp::UdpAssociateService::new(
                 table,
                 connector,
@@ -406,6 +428,62 @@ impl RuntimeBuilder {
                 config_snapshot.udp.enabled,
             )?;
         }
+
+        // TUN 入口（tun-dataplane.md §2.6/§2.7）：TunIngress 属主化设备+系统
+        // 路由（Tun 模式下 NetworkManager 已让位，见上）；与 socks5 等入口并列
+        // 注入同一 FlowRouter（start() ingress 循环统一 spawn run()）。
+        // 注：validate() 要求 ≥1 个常规入口——TUN-only 配置被拒（MVP 口径：
+        // egress/UDP 装配面以常规入口为锚，TUN 与 socks5 并存即典型形态）。
+        let tun_ingress = match (tun_enabled, tun_udp_connector) {
+            (true, Some(connector)) => {
+                let network_cfg = self
+                    .runtime_config
+                    .network_config
+                    .as_ref()
+                    .expect("tun_enabled 蕴含 network_config");
+                // §2.7 auto-bypass 字面量半边：egress 字面量地址 + mesh listen +
+                // control.api_bind。域名 server 不在构建期解析（DNS 副作用），
+                // 归 TunIngress::run() 起始处（auto_bypass_hosts）
+                let mut auto_bypass_literals = Vec::new();
+                let mut auto_bypass_hosts = Vec::new();
+                for egress in &config_snapshot.egress {
+                    if let Some(host) = egress_server_host(&egress.spec) {
+                        match host.parse::<IpAddr>() {
+                            Ok(ip) => auto_bypass_literals.push(RouteDestination::host(ip)),
+                            Err(_) => auto_bypass_hosts.push(host.to_string()),
+                        }
+                    }
+                }
+                if self.runtime_config.enable_mesh {
+                    if let Some(mesh_cfg) = &self.runtime_config.mesh_config {
+                        auto_bypass_literals
+                            .push(RouteDestination::host(mesh_cfg.listen_address.ip()));
+                    }
+                }
+                if let Ok(api) = config_snapshot.control.api_bind.parse::<SocketAddr>() {
+                    auto_bypass_literals.push(RouteDestination::host(api.ip()));
+                }
+                let t = Arc::new(TunIngress::new(
+                    TunIngressConfig {
+                        tun: network_cfg.tun.clone().unwrap_or_default(),
+                        routing: network_cfg.routing.clone().unwrap_or_default(),
+                        // §2.5：Process 规则在场才做 /proc 归因扫描
+                        has_process_rules: config_snapshot.routing.rules.iter().any(|r| {
+                            r.matches
+                                .iter()
+                                .any(|m| matches!(m, MatchCondition::Process { .. }))
+                        }),
+                        auto_bypass_literals,
+                        auto_bypass_hosts,
+                        ..TunIngressConfig::default()
+                    },
+                    connector,
+                ));
+                self.ingress_endpoints.insert("tun".to_string(), t.clone());
+                Some(t)
+            }
+            _ => None,
+        };
 
         let subscription_manager = if self.runtime_config.enable_hot_reload {
             Some(Arc::new(SubscriptionManager::new()))
@@ -440,6 +518,7 @@ impl RuntimeBuilder {
             transport_pool,
             tls_factory,
             network_manager,
+            tun_ingress,
             dns_service,
             subscription_manager,
             event_tx,
@@ -712,6 +791,10 @@ pub struct Runtime {
     /// P1-5 §4.1：TLS 连接器工厂单例（tls_resumption 独立于池生效）
     tls_factory: Option<Arc<TlsConnectorFactory>>,
     network_manager: Option<Arc<Mutex<NetworkManager>>>,
+    /// TUN 入口单例（tun-dataplane.md §2.6；None = 未启用/非 Tun 模式）。
+    /// ingress_endpoints 内共享同一 Arc——本字段供 stop() 优雅关停与
+    /// 控制面指标取数（T5）定向寻址
+    tun_ingress: Option<Arc<TunIngress>>,
     /// P2-8 M1 观测接缝：DNS 分流服务单例（start/stop 消费 + 控制面
     /// /dns/stats 经 getter 取数；None = network.dns 块缺席/关闭）
     dns_service: Option<Arc<crate::dns_config::DnsService>>,
@@ -1198,6 +1281,11 @@ impl Runtime {
     /// 停止运行时
     pub async fn stop(&self) -> Result<()> {
         *self.running.write().expect("running lock poisoned") = false;
+        // TUN 优雅关停：通知 run 循环 → teardown（路由回滚/设备销毁在
+        // ingress 任务内完成，tun-dataplane.md §2.6）
+        if let Some(t) = &self.tun_ingress {
+            t.shutdown();
+        }
         if let Some(manager) = &self.network_manager {
             let mut guard = manager.lock().await;
             guard.stop().await.ok();
@@ -1296,6 +1384,12 @@ impl Runtime {
     /// None = UDP 全关且无 per-ingress 显式开）
     pub fn get_udp_service(&self) -> Option<Arc<seep_core::udp::UdpAssociateService>> {
         self.udp_service.clone()
+    }
+
+    /// 获取 TUN 入口（tun-dataplane.md T5 观测面：seep_tun_* 指标与流表
+    /// 状态取数；None = 未启用）
+    pub fn get_tun_ingress(&self) -> Option<Arc<TunIngress>> {
+        self.tun_ingress.clone()
     }
 
     /// P2-8 M1 观测接缝：DNS 服务单例（控制面 /dns/stats 取数；
@@ -1953,6 +2047,23 @@ fn build_ingress_endpoints(
 
 /// P0-5 §10-S2：`UdpConfig` → `UdpSessionConfig` 显式映射（S0 十字段全覆盖，
 /// 禁 `..Default::default()` 兜底——防「字段加了没接线」；lifetime 两态映射）。
+/// egress 出口的 server 主机面（Direct 无远端；Wireguard 为 endpoint 字段，
+/// 其余同名字段）——§2.7 auto-bypass 集的 egress 半边输入（字面量 IP 或域名）
+fn egress_server_host(e: &EgressConfig) -> Option<&str> {
+    match e {
+        EgressConfig::Direct => None,
+        EgressConfig::Socks5 { server, .. }
+        | EgressConfig::Http { server, .. }
+        | EgressConfig::Shadowsocks { server, .. }
+        | EgressConfig::Vmess { server, .. }
+        | EgressConfig::Vless { server, .. }
+        | EgressConfig::Trojan { server, .. }
+        | EgressConfig::Hysteria { server, .. }
+        | EgressConfig::Hysteria2 { server, .. } => Some(server),
+        EgressConfig::Wireguard { endpoint, .. } => Some(endpoint),
+    }
+}
+
 fn udp_session_config(cfg: &UdpConfig) -> seep_core::udp::UdpSessionConfig {
     seep_core::udp::UdpSessionConfig {
         session_idle: Duration::from_secs(cfg.session_idle_secs),
@@ -3402,6 +3513,75 @@ mod tests {
             }),
             ..RuntimeConfig::default()
         }
+    }
+
+    /// T3 装配钉（tun-dataplane.md §2.6/§2.7）：Tun 模式 + 虚拟化开 →
+    /// build() 落 TunIngress（与 socks5 并列注入入口表）、NetworkManager 让位
+    /// （防双设备）、UDP 块必建（TUN NAT 面共享连接器）、Process 规则派生
+    /// has_process_rules、api_bind 入 auto-bypass 字面量集；未启用 → 全缺省。
+    #[test]
+    fn t3_tun_mode_build_wiring() {
+        let tun_platform_cfg = seep_platform::network::NetworkConfig {
+            mode: NetworkMode::Tun,
+            tun: Some(seep_platform::network::TunConfig {
+                name: Some("seepT3".into()),
+                ipv4_addr: Some("10.77.0.1".parse().unwrap()),
+                ipv4_netmask: Some("255.255.255.0".parse().unwrap()),
+                ..Default::default()
+            }),
+            routing: Some(seep_platform::network::RoutingConfig {
+                enabled: true,
+                ..Default::default()
+            }),
+            filtering: None,
+            dns: None,
+        };
+        let mut cfg = s5_udp_config(false);
+        cfg.routing.rules.push(RouteRule {
+            name: "game".into(),
+            matches: vec![MatchCondition::Process {
+                values: vec!["cs2".into()],
+            }],
+            target: "direct".into(),
+        });
+        let rc = RuntimeConfig {
+            enable_network_virtualization: true,
+            network_config: Some(tun_platform_cfg),
+            ..RuntimeConfig::default()
+        };
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(rc)
+            .build()
+            .expect("Tun 模式 build 应成功（设备 I/O 归 start()）");
+
+        let tun = runtime.get_tun_ingress().expect("TunIngress 应装配");
+        assert!(
+            runtime.network_manager.is_none(),
+            "Tun 模式 NetworkManager 让位"
+        );
+        assert!(
+            runtime.udp_service.is_some(),
+            "tun_enabled → UDP 块必建（连接器共享）"
+        );
+        assert!(runtime.ingress_endpoints.contains_key("tun"));
+        assert!(
+            runtime.ingress_endpoints.contains_key("in1"),
+            "socks5 入口与 TUN 并列共存"
+        );
+        assert!(tun.config().has_process_rules, "Process 规则应派生归因开关");
+        // Direct 无远端 server；唯一字面量 = control.api_bind（127.0.0.1:0）
+        let literals = &tun.config().auto_bypass_literals;
+        assert_eq!(literals.len(), 1, "api_bind 半边入集：{literals:?}");
+        assert!(literals[0].matches("127.0.0.1".parse().unwrap()));
+        assert!(tun.config().auto_bypass_hosts.is_empty());
+
+        // 未启用虚拟化 → 全缺省（不建 TUN/NetworkManager，UDP 块随全局关）
+        let plain = RuntimeBuilder::new(s5_udp_config(false))
+            .build()
+            .expect("build");
+        assert!(plain.get_tun_ingress().is_none());
+        assert!(plain.network_manager.is_none());
+        assert!(plain.udp_service.is_none());
     }
 
     /// 口径 1：chain+udp 同启 + 显式允许明文 → build 成功；mesh-chain 装配落位
