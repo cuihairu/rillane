@@ -5,6 +5,11 @@
 //! - [`build_udp_packet`]：TUN 下行反向包构造（IP(src=dst,dst=src) + UDP 反头）
 //!   —— IPv4 头/UDP 校验和真实现（RFC 1071），IPv6 UDP 校验和强制
 //!   （0 非法 → 0xFFFF 兜底），TTL 64、DF 置位、IP id 外置自增、不分片；
+//! - [`parse_tcp_segment`]：TUN 上行 TCP 段提取（§2.4 T4 分流判定用——五元组 +
+//!   控制位 + 序号）——仅 IPv4（smoltcp 栈面 MVP 只开 proto-ipv4），截断/
+//!   头长非法/非首分片一律拒绝；
+//! - [`build_tcp_packet`]：测试/回环侧 TCP 段构造（IPv4 头 + 伪首部校验和全现），
+//!   供 §4.1 无特权全路径测试扮演本机应用；
 //! - 校验和真值向量（§4.1 golden）由独立 Python 参考实现预生成，钉死字节面。
 //!
 //! 纯函数、无 IO、无平台依赖——单测任何环境可跑（§4.1 无特权面）。
@@ -249,6 +254,205 @@ fn udp_checksum_v6(s: Ipv6Addr, d: Ipv6Addr, udp: &[u8]) -> u16 {
     }
 }
 
+/// 已解析的上行 TCP 段（IPv4；载荷借用输入缓冲，零拷贝）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpSegment<'a> {
+    pub src: IpAddr,
+    pub dst: IpAddr,
+    pub sport: u16,
+    pub dport: u16,
+    pub seq: u32,
+    pub ack_seq: u32,
+    pub syn: bool,
+    pub ack: bool,
+    pub rst: bool,
+    pub fin: bool,
+    pub psh: bool,
+    pub payload: &'a [u8],
+}
+
+/// TCP 控制位（构造面：[`build_tcp_packet`] 入参；与解析面字段镜像）
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TcpFlags {
+    pub fin: bool,
+    pub syn: bool,
+    pub rst: bool,
+    pub psh: bool,
+    pub ack: bool,
+}
+
+impl TcpFlags {
+    pub const SYN: Self = Self {
+        fin: false,
+        syn: true,
+        rst: false,
+        psh: false,
+        ack: false,
+    };
+    pub const SYN_ACK: Self = Self {
+        fin: false,
+        syn: true,
+        rst: false,
+        psh: false,
+        ack: true,
+    };
+    pub const ACK: Self = Self {
+        fin: false,
+        syn: false,
+        rst: false,
+        psh: false,
+        ack: true,
+    };
+    pub const PSH_ACK: Self = Self {
+        fin: false,
+        syn: false,
+        rst: false,
+        psh: true,
+        ack: true,
+    };
+    pub const FIN_ACK: Self = Self {
+        fin: true,
+        syn: false,
+        rst: false,
+        psh: false,
+        ack: true,
+    };
+
+    fn to_byte(self) -> u8 {
+        u8::from(self.fin)
+            | (u8::from(self.syn) << 1)
+            | (u8::from(self.rst) << 2)
+            | (u8::from(self.psh) << 3)
+            | (u8::from(self.ack) << 4)
+    }
+}
+
+/// 解析 TUN 上行包为 TCP 段（仅 IPv4；扩展选项载荷按数据偏移切分）。
+/// 非 TCP/截断/头长非法/分片一律 Err——调用方计 parse_errors 丢弃（E9）。
+pub fn parse_tcp_segment(pkt: &[u8]) -> Result<TcpSegment<'_>> {
+    if pkt.is_empty() {
+        bail!("空数据包");
+    }
+    if pkt[0] >> 4 != 4 {
+        bail!(
+            "非 IPv4 TCP 段（版本 {}——T4 MVP 栈面仅 proto-ipv4）",
+            pkt[0] >> 4
+        );
+    }
+    if pkt.len() < 20 {
+        bail!("IPv4 包头太短（{} 字节 < 20）", pkt.len());
+    }
+    let ihl = usize::from(pkt[0] & 0x0F) * 4;
+    if ihl < 20 {
+        bail!("IPv4 IHL 非法：{}（<20 字节）", pkt[0] & 0x0F);
+    }
+    if pkt.len() < ihl {
+        bail!("IPv4 包头截断：IHL 需 {ihl} 字节，实收 {} 字节", pkt.len());
+    }
+    let total = usize::from(u16::from_be_bytes([pkt[2], pkt[3]]));
+    if total < ihl + 20 {
+        bail!("IPv4 总长 {total} 不足 IP 头({ihl})+TCP 头(20)");
+    }
+    if total > pkt.len() {
+        bail!("IPv4 截断：总长 {total} 字节 > 实收 {} 字节", pkt.len());
+    }
+    // 分片面同 UDP：MF 置位或分片偏移非零 = 非首分片 → 拒绝（DF 不算分片）
+    let frag = u16::from_be_bytes([pkt[6], pkt[7]]);
+    if frag & 0x3FFF != 0 {
+        bail!("非首分片/带 MF 分片不支持（flags={frag:#06x}）");
+    }
+    if pkt[9] != 6 {
+        bail!("非 TCP 协议号 {}", pkt[9]);
+    }
+    let src = IpAddr::V4(Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]));
+    let dst = IpAddr::V4(Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]));
+    let tcp = &pkt[ihl..total];
+    let data_off = usize::from(tcp[12] >> 4) * 4;
+    if data_off < 20 {
+        bail!("TCP 数据偏移非法：{}（<20 字节）", tcp[12] >> 4);
+    }
+    if tcp.len() < data_off {
+        bail!("TCP 头截断：偏移需 {data_off} 字节，实收 {} 字节", tcp.len());
+    }
+    let flags = tcp[13];
+    Ok(TcpSegment {
+        src,
+        dst,
+        sport: u16::from_be_bytes([tcp[0], tcp[1]]),
+        dport: u16::from_be_bytes([tcp[2], tcp[3]]),
+        seq: u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]),
+        ack_seq: u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]),
+        syn: flags & 0x02 != 0,
+        ack: flags & 0x10 != 0,
+        rst: flags & 0x04 != 0,
+        fin: flags & 0x01 != 0,
+        psh: flags & 0x08 != 0,
+        payload: &tcp[data_off..],
+    })
+}
+
+/// 构造 IPv4 TCP 段（测试/回环面：§4.1 无特权全路径测试扮演本机应用）。
+/// 头校验和 + 伪首部校验和（RFC 9293 同 RFC 768 口径）真实现；TTL 64、DF、
+/// 固定窗口 65535、无选项（数据偏移 5）。IPv6 形 MVP 不支持（栈面同口径）。
+#[allow(clippy::too_many_arguments)]
+pub fn build_tcp_packet(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    sport: u16,
+    dport: u16,
+    seq: u32,
+    ack_seq: u32,
+    flags: TcpFlags,
+    payload: &[u8],
+) -> Result<Vec<u8>> {
+    let tlen = 20 + payload.len();
+    let total = 20 + tlen;
+    if total > usize::from(u16::MAX) {
+        bail!("IPv4 TCP 包超长：{total} 字节");
+    }
+    let mut pkt = Vec::with_capacity(total);
+    pkt.extend_from_slice(&[0x45, 0x00]); // ver/ihl、TOS
+    pkt.extend_from_slice(&(total as u16).to_be_bytes());
+    pkt.extend_from_slice(&[0x00, 0x00]); // ip id
+    pkt.extend_from_slice(&[0x40, 0x00]); // DF 置位、不分片
+    pkt.push(64); // TTL
+    pkt.push(6); // TCP
+    pkt.extend_from_slice(&[0x00, 0x00]); // 头校验和占位
+    pkt.extend_from_slice(&src.octets());
+    pkt.extend_from_slice(&dst.octets());
+    let hc = internet_checksum(&pkt);
+    pkt[10..12].copy_from_slice(&hc.to_be_bytes());
+
+    let mut tcp = Vec::with_capacity(tlen);
+    tcp.extend_from_slice(&sport.to_be_bytes());
+    tcp.extend_from_slice(&dport.to_be_bytes());
+    tcp.extend_from_slice(&seq.to_be_bytes());
+    tcp.extend_from_slice(&ack_seq.to_be_bytes());
+    tcp.push(0x50); // 数据偏移 5（20 字节，无选项）
+    tcp.push(flags.to_byte());
+    tcp.extend_from_slice(&65535u16.to_be_bytes()); // 窗口
+    tcp.extend_from_slice(&[0x00, 0x00]); // 校验和占位
+    tcp.extend_from_slice(&[0x00, 0x00]); // 紧急指针
+    tcp.extend_from_slice(payload);
+    let tc = tcp_checksum_v4(src, dst, &tcp);
+    tcp[16..18].copy_from_slice(&tc.to_be_bytes());
+    pkt.extend_from_slice(&tcp);
+    Ok(pkt)
+}
+
+/// IPv4 TCP 校验和（伪首部同 UDP 口径但协议号 6；TCP 校验和 0 是合法值——
+/// 无 0xFFFF 兜底）。
+fn tcp_checksum_v4(s: Ipv4Addr, d: Ipv4Addr, tcp: &[u8]) -> u16 {
+    let mut buf = Vec::with_capacity(12 + tcp.len());
+    buf.extend_from_slice(&s.octets());
+    buf.extend_from_slice(&d.octets());
+    buf.push(0x00);
+    buf.push(6);
+    buf.extend_from_slice(&(tcp.len() as u16).to_be_bytes());
+    buf.extend_from_slice(tcp);
+    internet_checksum(&buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +641,145 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("版本不一致"), "{err}");
+    }
+
+    /// TCP 段构造→解析往返：五元组/序号/控制位/载荷真值 + IPv4 头与
+    /// TCP 伪首部校验和自洽（§4.1 T4 面）
+    #[test]
+    fn tcp_segment_roundtrip_and_checksums() {
+        let pkt = build_tcp_packet(
+            "10.66.0.1".parse().unwrap(),
+            "203.0.113.10".parse().unwrap(),
+            40000,
+            8080,
+            0xDEAD_BEEF,
+            0x0102_0304,
+            TcpFlags::PSH_ACK,
+            b"hello",
+        )
+        .expect("build");
+        assert_eq!(internet_checksum(&pkt[..20]), 0x0000, "IPv4 头校验和自洽");
+
+        let mut pseudo = Vec::new();
+        pseudo.extend_from_slice(&pkt[12..20]); // v4 伪首部 = src || dst
+        pseudo.push(0x00);
+        pseudo.push(6);
+        pseudo.extend_from_slice(&(25u16).to_be_bytes()); // TCP 段长 20+5
+        pseudo.extend_from_slice(&pkt[20..]);
+        assert_eq!(internet_checksum(&pseudo), 0x0000, "TCP 校验和自洽");
+
+        let seg = parse_tcp_segment(&pkt).expect("parse");
+        assert_eq!(seg.src, "10.66.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(seg.dst, "203.0.113.10".parse::<IpAddr>().unwrap());
+        assert_eq!((seg.sport, seg.dport), (40000, 8080));
+        assert_eq!((seg.seq, seg.ack_seq), (0xDEAD_BEEF, 0x0102_0304));
+        assert!(seg.psh && seg.ack && !seg.syn && !seg.fin && !seg.rst);
+        assert_eq!(seg.payload, b"hello");
+
+        // 握手控制位形（SYN / SYN-ACK / 纯 ACK / FIN-ACK）
+        let syn = build_tcp_packet(
+            "10.66.0.1".parse().unwrap(),
+            "203.0.113.10".parse().unwrap(),
+            40001,
+            443,
+            1000,
+            0,
+            TcpFlags::SYN,
+            b"",
+        )
+        .unwrap();
+        let s = parse_tcp_segment(&syn).unwrap();
+        assert!(s.syn && !s.ack && s.payload.is_empty());
+        let flags = [
+            TcpFlags::SYN_ACK,
+            TcpFlags::ACK,
+            TcpFlags::FIN_ACK,
+            TcpFlags::default(),
+        ];
+        assert_eq!(flags[0].to_byte(), 0x12);
+        assert_eq!(flags[1].to_byte(), 0x10);
+        assert_eq!(flags[2].to_byte(), 0x11);
+        assert_eq!(flags[3].to_byte(), 0x00);
+    }
+
+    /// TCP 解析拒绝面（§4.1：E9 丢弃口径纯函数半边）
+    #[test]
+    fn tcp_parse_rejects_invalid() {
+        // 空包 / 非 IPv4（v6 段）
+        assert!(parse_tcp_segment(&[]).is_err());
+        let mut v6 = build_v6_udp(
+            "2001:db8::1".parse().unwrap(),
+            "2001:db8::2".parse().unwrap(),
+            1,
+            2,
+            b"x",
+        )
+        .unwrap();
+        v6[6] = 6; // 下一跳头改 TCP——版本 6 仍应先被版本门拒
+        let e = parse_tcp_segment(&v6).unwrap_err();
+        assert!(e.to_string().contains("非 IPv4"), "{e}");
+
+        // 非 TCP 协议号
+        let mut udpish = build_tcp_packet(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            1,
+            2,
+            0,
+            0,
+            TcpFlags::ACK,
+            b"",
+        )
+        .unwrap();
+        udpish[9] = 17;
+        let e = parse_tcp_segment(&udpish).unwrap_err();
+        assert!(e.to_string().contains("非 TCP"), "{e}");
+
+        // 截断（总长 > 实收）
+        let mut trunc = build_tcp_packet(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            1,
+            2,
+            0,
+            0,
+            TcpFlags::ACK,
+            b"abcdef",
+        )
+        .unwrap();
+        trunc.truncate(35);
+        assert!(parse_tcp_segment(&trunc).unwrap_err().to_string().contains("截断"));
+
+        // TCP 数据偏移非法（12 字节高半字节 = 4 → 16 < 20）
+        let mut bad_off = build_tcp_packet(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            1,
+            2,
+            0,
+            0,
+            TcpFlags::ACK,
+            b"",
+        )
+        .unwrap();
+        bad_off[32] = 0x40;
+        let e = parse_tcp_segment(&bad_off).unwrap_err();
+        assert!(e.to_string().contains("数据偏移"), "{e}");
+
+        // 非首分片拒绝（同 UDP 口径）
+        let mut frag = build_tcp_packet(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            1,
+            2,
+            0,
+            0,
+            TcpFlags::ACK,
+            b"",
+        )
+        .unwrap();
+        frag[6] = 0x20;
+        assert!(parse_tcp_segment(&frag).unwrap_err().to_string().contains("分片"));
     }
 
     /// 奇数长度载荷（校验和补 0 对齐）与空载荷往返；v4/v6 双栈
