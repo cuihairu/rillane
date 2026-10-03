@@ -1392,6 +1392,11 @@ impl Runtime {
         self.tun_ingress.clone()
     }
 
+    /// 获取网络虚拟化模式（network-route.md：用于 /network/route/status）
+    pub fn get_network_mode(&self) -> Option<NetworkMode> {
+        self.runtime_config.network_config.as_ref().map(|n| n.mode)
+    }
+
     /// P2-8 M1 观测接缝：DNS 服务单例（控制面 /dns/stats 取数；
     /// None = network.dns 块缺席/关闭）
     pub fn get_dns_service(&self) -> Option<Arc<crate::dns_config::DnsService>> {

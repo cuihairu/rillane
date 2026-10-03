@@ -3,7 +3,7 @@ use std::{
     convert::Infallible,
     net::SocketAddr,
     sync::Arc,
-    time::Instant,
+    time::{Instant, SystemTime},
 };
 
 use bytes::Bytes;
@@ -169,6 +169,11 @@ impl ControlPlane {
             // /chains/{chain_id}
             (Method::GET, p) if p.starts_with("/chains/") => self.handle_chain_get(p).await,
             (Method::DELETE, p) if p.starts_with("/chains/") => self.handle_chain_delete(p).await,
+
+            // network/route endpoints (network-route.md §3)
+            (Method::POST, "/network/route/apply") => self.handle_route_apply(req).await,
+            (Method::POST, "/network/route/clear") => self.handle_route_clear(req).await,
+            (Method::GET, "/network/route/status") => self.handle_route_status().await,
 
             _ => text(StatusCode::NOT_FOUND, "not found"),
         }
@@ -1684,6 +1689,179 @@ impl ControlPlane {
         }
 
         json(StatusCode::OK, &out)
+    }
+
+    /// network-route.md §3: POST /network/route/apply {dry_run?: bool}
+    async fn handle_route_apply(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        #[derive(Deserialize)]
+        struct ApplyReq {
+            #[serde(default)]
+            dry_run: bool,
+        }
+        let ApplyReq { dry_run } = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+
+        let tun_ingress = match self.runtime.get_tun_ingress() {
+            Some(t) => t,
+            None => {
+                return text(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "TUN 未启用（检查 network 配置与日志）",
+                );
+            }
+        };
+
+        let rm = tun_ingress.route_manager();
+        let rm_guard = rm.lock().await;
+
+        match rm_guard.apply_desired(dry_run).await {
+            Ok(outcome) => {
+                let mut planned = Vec::new();
+                for step in &outcome.planned {
+                    planned.push(serde_json::json!({
+                        "argv": step.argv(),
+                        "at": SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    }));
+                }
+                let mut executed = Vec::new();
+                for step in &outcome.executed {
+                    executed.push(serde_json::json!({
+                        "argv": step.argv(),
+                        "at": SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    }));
+                }
+                let mut rolled_back = Vec::new();
+                for step in &outcome.rolled_back {
+                    rolled_back.push(serde_json::json!({
+                        "argv": step.undo_argv(),
+                        "at": SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    }));
+                }
+                json(
+                    StatusCode::OK,
+                    &serde_json::json!({
+                        "planned": planned,
+                        "executed": executed,
+                        "rolled_back": rolled_back
+                    }),
+                )
+            }
+            Err(apply_failure) => {
+                let mut rolled_back = Vec::new();
+                for step in &apply_failure.rolled_back {
+                    rolled_back.push(serde_json::json!({
+                        "argv": step.undo_argv(),
+                        "at": SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    }));
+                }
+                json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({
+                        "error": apply_failure.error.to_string(),
+                        "rolled_back": rolled_back
+                    }),
+                )
+            }
+        }
+    }
+
+    /// network-route.md §3: POST /network/route/clear
+    async fn handle_route_clear(&self, _req: Request<impl RequestBody>) -> Response<RespBody> {
+        let tun_ingress = match self.runtime.get_tun_ingress() {
+            Some(t) => t,
+            None => {
+                return text(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "TUN 未启用（检查 network 配置与日志）",
+                );
+            }
+        };
+
+        let rm = tun_ingress.route_manager();
+        let rm_guard = rm.lock().await;
+
+        match rm_guard.clear().await {
+            Ok(undone) => {
+                let mut steps = Vec::new();
+                for step in undone {
+                    steps.push(serde_json::json!({
+                        "argv": step.undo_argv(),
+                        "at": SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    }));
+                }
+                json(StatusCode::OK, &serde_json::json!({ "undone": steps }))
+            }
+            Err(e) => text(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("clear failed: {e}"),
+            ),
+        }
+    }
+
+    /// network-route.md §3: GET /network/route/status
+    async fn handle_route_status(&self) -> Response<RespBody> {
+        let tun_ingress = match self.runtime.get_tun_ingress() {
+            Some(t) => t,
+            None => {
+                return text(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "TUN 未启用（检查 network 配置与日志）",
+                );
+            }
+        };
+
+        let rm = tun_ingress.route_manager();
+        let rm_guard = rm.lock().await;
+        let status = rm_guard.status();
+
+        let mut applied = Vec::new();
+        for record in &status.applied {
+            let at_secs = record
+                .at
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            applied.push(serde_json::json!({
+                "argv": record.step.argv(),
+                "at": at_secs
+            }));
+        }
+
+        let mode = match self.runtime.get_network_mode() {
+            Some(seep_runtime::NetworkMode::Tun) => "tun",
+            Some(seep_runtime::NetworkMode::Transparent) => "transparent",
+            Some(seep_runtime::NetworkMode::Tap) => "tap",
+            Some(seep_runtime::NetworkMode::Hybrid) => "hybrid",
+            None => "unknown",
+        };
+
+        json(
+            StatusCode::OK,
+            &serde_json::json!({
+                "mode": mode,
+                "device": status.device,
+                "mtu": status.mtu,
+                "up": status.up,
+                "applied": applied
+            }),
+        )
     }
 }
 

@@ -35,7 +35,7 @@ use seep_platform::network::ipcodec::{
 };
 use seep_platform::network::linux::{LinuxRouteManager, LinuxTunProvider};
 use seep_platform::network::route::{
-    default_bypass_rules, RouteDestination, RouteManager, RoutingConfig as PlatformRoutingConfig,
+    default_bypass_rules, RouteDestination, RoutingConfig as PlatformRoutingConfig,
 };
 use seep_platform::network::tun::{PacketInfo, TunConfig, TunProvider};
 
@@ -146,7 +146,7 @@ enum LoopEvent {
 pub struct TunIngress {
     config: TunIngressConfig,
     tun: TokioMutex<LinuxTunProvider>,
-    route_manager: TokioMutex<LinuxRouteManager>,
+    route_manager: Arc<TokioMutex<LinuxRouteManager>>,
     flow_table: Arc<DashMap<TunFlowKey, TunFlowEntry>>,
     udp_connector: Arc<dyn EgressUdpConnector>,
     /// TUN TCP 用户态栈（§2.4/§2.9 T4；纯用户态——设备 I/O 仍在 run 循环）
@@ -182,7 +182,7 @@ impl TunIngress {
         let tcp = Arc::new(TunTcpStack::new(local, config.tun.mtu));
         Self {
             tun: TokioMutex::new(LinuxTunProvider::new(config.tun.clone())),
-            route_manager: TokioMutex::new(route_manager),
+            route_manager: Arc::new(TokioMutex::new(route_manager)),
             flow_table: Arc::new(DashMap::new()),
             udp_connector,
             tcp,
@@ -204,6 +204,12 @@ impl TunIngress {
     /// 配置只读面（控制面/测试：has_process_rules、auto-bypass 集等）
     pub fn config(&self) -> &TunIngressConfig {
         &self.config
+    }
+
+    /// 获取路由管理器（network-route.md §2.3：控制面 apply/clear/status 消费；
+    /// 返回 Arc 保证与 run() 内部同一实例，操作级互斥由 manager 内部 Mutex 承担）
+    pub fn route_manager(&self) -> Arc<TokioMutex<LinuxRouteManager>> {
+        Arc::clone(&self.route_manager)
     }
 
     /// 注入路由器/出口（run() 由 IngressEndpoint 调用前；测试也可直注）
@@ -255,12 +261,17 @@ impl TunIngress {
             .await
             .context("启动 TUN 接口失败")?;
         tun_guard.configure_ip().await.context("配置 TUN IP 失败")?;
-        self.route_manager
-            .lock()
-            .await
-            .apply_routing()
-            .await
-            .context("应用路由失败")?;
+        // §5「启动 apply ≡ CLI apply」：run() 启动即 apply_desired(false)
+        // 幂等重放（与 seepctl route apply 同一方法——不存在两条路由写路径）；
+        // 设备 up 态回填（status 端点消费）
+        {
+            let rm = self.route_manager.lock().await;
+            rm.set_device_up(true);
+            rm.apply_desired(false)
+                .await
+                .map_err(|f| f.error)
+                .context("应用路由失败")?;
+        }
 
         info!(target: "seep::tun", name = %iface_name, "TunIngress 已启动");
 
@@ -274,10 +285,15 @@ impl TunIngress {
         // T4：TCP 栈全量收口（应用连接随 EOF 退场；设备即将销毁不再出段）
         self.tcp.shutdown_all();
         {
-            let rm = self.route_manager.lock().await;
-            if let Err(e) = rm.clear_routing().await {
+            // 路由还原 + 设备态清零（clear 后设备名义上仍 up——§5「clear 后
+            // 数据面空转」；此处 teardown 阶段设备将销毁，账面同步归零，
+            // 后续 CLI apply 得到 E10 而非裸 ip 报错）
+            let mut rm = self.route_manager.lock().await;
+            if let Err(e) = rm.clear().await {
                 warn!(target: "seep::tun", error = %e, "清理路由失败");
             }
+            rm.set_device_up(false);
+            rm.clear_interface_name();
         }
         if let Err(e) = tun_guard.down_interface().await {
             warn!(target: "seep::tun", error = %e, "关闭 TUN 接口失败");

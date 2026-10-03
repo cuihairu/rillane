@@ -90,6 +90,13 @@ enum Command {
         #[command(subcommand)]
         command: SubscriptionCommand,
     },
+    /// 系统路由管理（network-route.md §4：apply/clear/status）
+    Route {
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[command(subcommand)]
+        command: RouteCommand,
+    },
     /// 一键诊断信息收集（生成诊断目录）
     Diagnose {
         /// 控制面 base URL，如 http://127.0.0.1:9090
@@ -286,6 +293,20 @@ enum SubscriptionCommand {
         /// 不指定则刷新全部
         name: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum RouteCommand {
+    /// 应用路由规则（幂等重放配置中的 include 目标）
+    Apply {
+        /// 仅打印计划执行的 ip 命令，不实际执行
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 撤销所有已应用的路由规则（逆序清理）
+    Clear,
+    /// 查看路由应用状态（设备态 + 已应用步骤表）
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -626,6 +647,81 @@ fn main() -> Result<()> {
                     }
                     let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
                     println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+            }
+        }
+        Command::Route { endpoint, command } => {
+            let config = SeepConfig::load_from_path(&cli.config)?;
+            let base = endpoint.unwrap_or_else(|| format!("http://{}", config.control.api_bind));
+            let client = Client::new();
+
+            let token = config.control.admin_token.clone();
+            let with_auth = |req: reqwest::blocking::RequestBuilder| {
+                if let Some(t) = &token {
+                    req.header("x-admin-token", t)
+                } else {
+                    req
+                }
+            };
+
+            match command {
+                RouteCommand::Apply { dry_run } => {
+                    let url = format!("{base}/network/route/apply");
+                    let body = serde_json::json!({ "dry_run": dry_run });
+                    let resp = with_auth(client.post(&url).json(&body))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let err_text = resp.text().unwrap_or_default();
+                        anyhow::bail!("控制面返回错误: {} - {}", status, err_text);
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    let undo = step_argv_lines(v.get("rolled_back"));
+                    if dry_run {
+                        println!("plan:");
+                        for line in step_argv_lines(v.get("planned")) {
+                            println!("{line}");
+                        }
+                    } else {
+                        println!("ok:");
+                        for line in step_argv_lines(v.get("executed")) {
+                            println!("{line}");
+                        }
+                        if !undo.is_empty() {
+                            println!("undo:");
+                            for line in undo {
+                                println!("{line}");
+                            }
+                        }
+                    }
+                }
+                RouteCommand::Clear => {
+                    let url = format!("{base}/network/route/clear");
+                    let resp = with_auth(client.post(&url))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let err_text = resp.text().unwrap_or_default();
+                        anyhow::bail!("控制面返回错误: {} - {}", status, err_text);
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    println!("undo:");
+                    for line in step_argv_lines(v.get("undone")) {
+                        println!("{line}");
+                    }
+                }
+                RouteCommand::Status => {
+                    let url = format!("{base}/network/route/status");
+                    let resp = with_auth(client.get(&url))
+                        .send()
+                        .with_context(|| format!("无法访问 {url}"))?;
+                    if !resp.status().is_success() {
+                        anyhow::bail!("控制面返回错误: {}", resp.status());
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    print!("{}", render_route_status(&v));
                 }
             }
         }
@@ -1516,6 +1612,49 @@ fn url_base(url: &str) -> String {
     format!("{scheme}://{host}")
 }
 
+// ---------- network-route.md §4：route 输出渲染（纯函数，§7.1 断言消费） ----------
+
+/// step 数组 → 逐行 argv 表（两空格缩进、argv 空格连接；缺键/非数组 → 空表）
+fn step_argv_lines(steps: Option<&serde_json::Value>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(arr) = steps.and_then(|s| s.as_array()) {
+        for step in arr {
+            if let Some(argv) = step.get("argv").and_then(|a| a.as_array()) {
+                lines.push(format!(
+                    "  {}",
+                    argv.iter()
+                        .map(|v| v.as_str().unwrap_or(""))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
+            }
+        }
+    }
+    lines
+}
+
+/// route status 渲染（§4：mode/device/mtu/up 四行设备态 + applied 逐行 argv 表；
+/// 缺键容错——unknown/false 占位，与 §3 响应形状宽松对齐）
+fn render_route_status(v: &serde_json::Value) -> String {
+    let mut out = format!(
+        "mode: {}\ndevice: {}\nmtu: {}\nup: {}\n",
+        v.get("mode").and_then(|m| m.as_str()).unwrap_or("unknown"),
+        v.get("device")
+            .and_then(|d| d.as_str())
+            .unwrap_or("unknown"),
+        v.get("mtu")
+            .and_then(|m| m.as_u64())
+            .map_or("unknown".to_string(), |m| m.to_string()),
+        v.get("up").and_then(|u| u.as_bool()).unwrap_or(false)
+    );
+    out.push_str("applied:\n");
+    for line in step_argv_lines(v.get("applied")) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
 /// §9-2 UDP 段渲染（纯函数，测试直调）。零值行照打（与 §6-2「序列不因开关
 /// 消失」同口径，渲染侧无需分支）；dropped/expired 固定序只列非零 reason、
 /// 全零打 `(none)`；mesh 未启用打占位（与零流量对象两态可区分）。
@@ -1705,6 +1844,101 @@ mod tests {
         );
         assert_eq!(url_base("http://127.0.0.1:9090"), "http://127.0.0.1:9090");
         assert_eq!(url_base("127.0.0.1:9090/flows"), "http://127.0.0.1:9090");
+    }
+
+    /// network-route.md §7.1 CLI 组装断言（不真发）：route 三动作参数形状——
+    /// --endpoint/--config 透传、apply --dry-run 开关、缺省 dry_run=false
+    #[test]
+    fn route_command_parse_shapes() {
+        let cli = Cli::parse_from(["seepctl", "route", "status"]);
+        assert!(matches!(
+            &cli.command,
+            Command::Route {
+                endpoint: None,
+                command: RouteCommand::Status
+            }
+        ));
+
+        let cli = Cli::parse_from([
+            "seepctl",
+            "--config",
+            "x.yaml",
+            "route",
+            "--endpoint",
+            "http://127.0.0.1:9090",
+            "apply",
+            "--dry-run",
+        ]);
+        assert!(matches!(
+            &cli.command,
+            Command::Route {
+                endpoint: Some(e),
+                command: RouteCommand::Apply { dry_run: true },
+            } if e == "http://127.0.0.1:9090"
+        ));
+        assert_eq!(cli.config, "x.yaml");
+
+        let cli = Cli::parse_from(["seepctl", "route", "clear"]);
+        assert!(matches!(
+            &cli.command,
+            Command::Route {
+                endpoint: None,
+                command: RouteCommand::Clear
+            }
+        ));
+
+        // apply 缺省真执行（dry_run=false）
+        let cli = Cli::parse_from(["seepctl", "route", "apply"]);
+        assert!(matches!(
+            &cli.command,
+            Command::Route {
+                endpoint: None,
+                command: RouteCommand::Apply { dry_run: false }
+            }
+        ));
+    }
+
+    /// network-route.md §4/§3 输出格式：argv 逐行表 + status 四行设备态 +
+    /// 缺键容错（unknown/false 占位）
+    #[test]
+    fn route_render_steps_and_status() {
+        let v = serde_json::json!({
+            "planned": [{"argv": ["ip", "route", "replace", "203.0.113.0/24", "dev", "seep0", "metric", "0"], "at": 1760000000}],
+            "executed": [],
+            "rolled_back": [{"argv": ["ip", "addr", "del", "10.255.0.1/24", "dev", "seep0"]}]
+        });
+        assert_eq!(
+            step_argv_lines(v.get("planned")),
+            ["  ip route replace 203.0.113.0/24 dev seep0 metric 0"]
+        );
+        assert!(step_argv_lines(v.get("executed")).is_empty());
+        assert_eq!(
+            step_argv_lines(v.get("rolled_back")),
+            ["  ip addr del 10.255.0.1/24 dev seep0"]
+        );
+        assert!(step_argv_lines(None).is_empty());
+
+        let st = serde_json::json!({
+            "mode": "tun", "device": "seep0", "mtu": 1400, "up": true,
+            "applied": [{"argv": ["ip", "route", "replace", "203.0.113.0/24", "dev", "seep0", "metric", "0"], "at": 1760000000}]
+        });
+        let expected = [
+            "mode: tun",
+            "device: seep0",
+            "mtu: 1400",
+            "up: true",
+            "applied:",
+            "  ip route replace 203.0.113.0/24 dev seep0 metric 0",
+        ]
+        .join("\n");
+        assert_eq!(render_route_status(&st).trim_end(), expected);
+
+        let sparse: serde_json::Value = serde_json::json!({});
+        let out = render_route_status(&sparse);
+        assert!(out.contains("mode: unknown"));
+        assert!(out.contains("device: unknown"));
+        assert!(out.contains("mtu: unknown"));
+        assert!(out.contains("up: false"));
     }
 
     #[test]

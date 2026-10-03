@@ -13,11 +13,17 @@
 //! T2（系统路由）见同文件 `LinuxRouteManager`：MVP = main 表显式路由
 //! include 语义（§1.3），`AppliedStep` 记录已执行步骤供逆序撤销。
 
+#[cfg(test)]
+use std::sync::Arc;
 use std::{
     fmt, fs, io,
     net::{IpAddr, Ipv4Addr},
     os::fd::{AsRawFd, OwnedFd},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+    time::SystemTime,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -488,7 +494,7 @@ impl TunProvider for LinuxTunProvider {
 /// 已执行的配置步骤——apply 逆序撤销与 clear_routing 的事实源
 /// （tun-dataplane.md §1.3：ip addr/link/route replace 均幂等，
 /// 撤销对应 del/down）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppliedStep {
     /// `ip addr replace` 配置到接口的地址
     AddrReplaced { interface: String, cidr: String },
@@ -500,6 +506,40 @@ pub enum AppliedStep {
         interface: String,
         metric: u32,
     },
+}
+
+impl AppliedStep {
+    /// 正向执行 argv（apply 执行与 REST/CLI step 渲染共用——planner 只拼
+    /// 步骤，argv 从步骤还原保证「计划 = 执行」无第二构造路径）
+    pub fn argv(&self) -> Vec<String> {
+        match self {
+            AppliedStep::AddrReplaced { interface, cidr } => ip_argv_addr_replace(cidr, interface),
+            AppliedStep::LinkUp { interface } => vec![
+                "ip".into(),
+                "link".into(),
+                "set".into(),
+                "dev".into(),
+                interface.clone(),
+                "up".into(),
+            ],
+            AppliedStep::RouteReplaced {
+                cidr,
+                interface,
+                metric,
+            } => ip_argv_route_replace(cidr, interface, *metric),
+        }
+    }
+
+    /// 逆序撤销 argv（clear/apply 中途回滚共用——del/down）
+    pub fn undo_argv(&self) -> Vec<String> {
+        match self {
+            AppliedStep::AddrReplaced { interface, cidr } => ip_argv_addr_del(cidr, interface),
+            AppliedStep::LinkUp { interface } => ip_argv_link_down_name(interface),
+            AppliedStep::RouteReplaced {
+                cidr, interface, ..
+            } => ip_argv_route_del(cidr, interface),
+        }
+    }
 }
 
 impl fmt::Display for AppliedStep {
@@ -516,6 +556,41 @@ impl fmt::Display for AppliedStep {
             } => write!(f, "RouteReplaced({cidr} dev {interface} metric {metric})"),
         }
     }
+}
+
+/// E10 口径（network-route.md §6）：TunIngress 未运行/已退（接口未创建）
+pub const E10_TUN_DISABLED: &str = "TUN 未启用（检查 network 配置与日志）";
+
+/// apply 产物（network-route.md §2.3）：dry_run=true 时 executed/rolled_back 空
+#[derive(Debug, Clone)]
+pub struct ApplyOutcome {
+    pub planned: Vec<AppliedStep>,
+    pub executed: Vec<AppliedStep>,
+    pub rolled_back: Vec<AppliedStep>,
+}
+
+/// apply 的类型化失败（§6 E7）——控制面错误响应要同时携带 error 文本与
+/// 已逆序回滚的本批步骤（anyhow 装不下结构化负载，端点消费此形）
+#[derive(Debug)]
+pub struct ApplyFailure {
+    pub error: anyhow::Error,
+    pub rolled_back: Vec<AppliedStep>,
+}
+
+/// 已入账步骤（步骤 + 记录时刻——status 响应的 at 字段来源）
+#[derive(Debug, Clone)]
+pub struct AppliedRecord {
+    pub step: AppliedStep,
+    pub at: SystemTime,
+}
+
+/// 路由面状态快照（§2.3，同步读不持写锁）
+#[derive(Debug, Clone)]
+pub struct RouteStatus {
+    pub device: Option<String>,
+    pub mtu: Option<u16>,
+    pub up: bool,
+    pub applied: Vec<AppliedRecord>,
 }
 
 /// 计算 auto-bypass 集（§2.7）：
@@ -599,16 +674,26 @@ fn overlaps(a: &RouteDestination, b: &RouteDestination) -> bool {
 #[derive(Debug)]
 pub struct LinuxRouteManager {
     config: RoutingConfig,
-    /// T2 起由 apply/clear 读写（记录已执行步骤供逆序撤销）
-    applied: Mutex<Vec<AppliedStep>>,
+    /// T2 起由 apply/clear 读写（记录已执行步骤供逆序撤销——含记录时刻，
+    /// status 的 at 字段；§5 去重：同 argv 已在册不重复入账）
+    applied: Mutex<Vec<AppliedRecord>>,
     /// tun 配置（用于 auto-bypass 计算 tun 自身网段）
     tun_config: Option<TunConfig>,
     /// 实际接口名（create_interface 后由 TUNGETIFF 读回，供路由操作使用）
     interface_name: Option<String>,
+    /// 设备 up 态（TunIngress up_interface 成功后置位 / teardown 清零；
+    /// 设备生命周期属主仍是 TunIngress，此处仅承接 status 的 up 字段）
+    device_up: AtomicBool,
     /// §2.7 extra auto-bypass（构建期注入：egress 字面量地址 + api_bind +
     /// mesh listen；run() 起始处再并入域名解析结果）——与 tun 网段合并后
     /// 即完整 auto-bypass 集
     extra_auto_bypass: Vec<RouteDestination>,
+    /// §7.1 mock executor：在场时 exec/undo 不跑真 ip，只记录调用序列，
+    /// 可注入第 k 步非零退出（E7 语义单测；仅测试构建存在）
+    #[cfg(test)]
+    mock_exec: Option<Arc<Mutex<Vec<Vec<String>>>>>,
+    #[cfg(test)]
+    mock_fail_at: Option<usize>,
 }
 
 impl LinuxRouteManager {
@@ -619,7 +704,12 @@ impl LinuxRouteManager {
             applied: Mutex::new(Vec::new()),
             tun_config: None,
             interface_name: None,
+            device_up: AtomicBool::new(false),
             extra_auto_bypass: Vec::new(),
+            #[cfg(test)]
+            mock_exec: None,
+            #[cfg(test)]
+            mock_fail_at: None,
         }
     }
 
@@ -658,40 +748,211 @@ impl LinuxRouteManager {
         self.interface_name = Some(name);
     }
 
+    /// 清零接口名（TunIngress teardown 调用——设备已销毁，后续 apply 得到
+    /// E10 明确错误而非裸 ip 报错）
+    pub fn clear_interface_name(&mut self) {
+        self.interface_name = None;
+    }
+
+    /// 设备 up 态回填（status 的 up 字段；见结构体注释）
+    pub fn set_device_up(&self, up: bool) {
+        self.device_up.store(up, Ordering::Relaxed);
+    }
+
     fn get_interface_name(&self) -> Result<String> {
         self.interface_name
             .clone()
             .ok_or_else(|| anyhow!("接口名未设置——先调用 set_interface_name 或 create_interface"))
     }
 
-    /// 反向撤销所有已应用步骤（clear_routing 与 apply 中途失败共用）
-    async fn rollback_all(&self) -> Result<()> {
-        // 先取出所有步骤，释放锁再 await
-        let steps = {
+    /// planner（§2.3 dry-run 面）：构造期望步骤序列——addr 步骤（tun_config
+    /// 在场）+ include 规则步骤（enabled、auto-bypass 重叠剔除）。
+    /// 与执行同源（apply_desired 逐条跑 planned 的 argv）——不存在第二决策
+    /// 路径；接口未创建 → E10。
+    fn plan_steps(&self) -> Result<Vec<AppliedStep>> {
+        if !self.config.enabled {
+            return Ok(Vec::new());
+        }
+        let interface = self
+            .get_interface_name()
+            .map_err(|_| anyhow!(E10_TUN_DISABLED))?;
+        let auto_bypass = self.merged_auto_bypass();
+        let mut planned = Vec::new();
+
+        // 1. 地址步骤（configure_ip 已在 LinuxTunProvider 做；此处重复
+        //    replace 幂等无害，且使 clear 能一并还原地址）
+        if let Some(tun) = &self.tun_config {
+            if let Some(v4) = tun.ipv4_addr {
+                let prefix = tun
+                    .ipv4_netmask
+                    .map(|nm| u32::from(nm).leading_ones() as u8)
+                    .unwrap_or(32);
+                planned.push(AppliedStep::AddrReplaced {
+                    interface: interface.clone(),
+                    cidr: format!("{v4}/{prefix}"),
+                });
+            }
+            if let Some(v6) = tun.ipv6_addr {
+                let prefix = tun.ipv6_prefix_len.unwrap_or(128);
+                planned.push(AppliedStep::AddrReplaced {
+                    interface: interface.clone(),
+                    cidr: format!("{v6}/{prefix}"),
+                });
+            }
+        }
+
+        // 2. 路由步骤（按 priority 升序：数字越小优先级越高）
+        let mut rules = self.config.rules.clone();
+        rules.sort_by_key(|r| r.priority);
+        for rule in rules {
+            if !rule.enabled {
+                continue;
+            }
+            if auto_bypass.iter().any(|b| overlaps(&rule.destination, b)) {
+                debug!(target: "seep::route", name = %rule.name, dest = %rule.destination.as_string(), "跳过与 auto-bypass 重叠的 include 目标");
+                continue;
+            }
+            let interface = rule.interface.clone().unwrap_or_else(|| interface.clone());
+            if interface.is_empty() {
+                return Err(anyhow!("路由规则 {} 缺少接口（tun 未配置）", rule.name));
+            }
+            planned.push(AppliedStep::RouteReplaced {
+                cidr: rule.destination.as_string(),
+                interface,
+                metric: rule.metric.unwrap_or(0),
+            });
+        }
+        Ok(planned)
+    }
+
+    /// 执行单步 argv（§7.1 mock executor 挂点：测试在场时记录调用序列并
+    /// 可在第 fail_at 步注入非零退出——E7 语义无特权可测）
+    async fn exec_step(&self, _idx: usize, argv: &[String]) -> Result<()> {
+        #[cfg(test)]
+        {
+            if let Some(log) = &self.mock_exec {
+                log.lock().unwrap().push(argv.to_vec());
+                if self.mock_fail_at == Some(_idx) {
+                    return Err(anyhow!("mock ip 非零退出（注入 E7）"));
+                }
+                return Ok(());
+            }
+        }
+        run_ip(argv).await
+    }
+
+    /// 撤销单步 argv（mock 在场时只记录、恒成功——撤销阶段尽力而为的镜像）
+    async fn undo_step(&self, argv: &[String]) -> Result<()> {
+        #[cfg(test)]
+        {
+            if let Some(log) = &self.mock_exec {
+                log.lock().unwrap().push(argv.to_vec());
+                return Ok(());
+            }
+        }
+        run_ip(argv).await
+    }
+
+    /// 幂等重放期望路由集（network-route.md §2.3/§5）——CLI apply 与启动
+    /// apply 的同一入口。dry_run=true 只跑 planner 不执行不入账；执行失败
+    /// 逆序撤销本批已执行步骤（E7，在册步骤不动），Err 携 rolled_back；
+    /// 成功后去重入账（同 argv 已在册不重复入账，status 稳定）。
+    pub async fn apply_desired(
+        &self,
+        dry_run: bool,
+    ) -> std::result::Result<ApplyOutcome, ApplyFailure> {
+        let planned = match self.plan_steps() {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(ApplyFailure {
+                    error: e,
+                    rolled_back: Vec::new(),
+                })
+            }
+        };
+        if dry_run {
+            return Ok(ApplyOutcome {
+                planned,
+                executed: Vec::new(),
+                rolled_back: Vec::new(),
+            });
+        }
+        let mut executed: Vec<AppliedStep> = Vec::new();
+        for (idx, step) in planned.iter().enumerate() {
+            if let Err(e) = self.exec_step(idx, &step.argv()).await {
+                let mut rolled_back = Vec::new();
+                for s in executed.iter().rev() {
+                    let _ = self.undo_step(&s.undo_argv()).await; // 撤销尽力而为
+                    rolled_back.push(s.clone());
+                }
+                return Err(ApplyFailure {
+                    error: e.context(format!(
+                        "apply 第 {} 步失败（E7），已逆序回滚 {} 步",
+                        idx + 1,
+                        rolled_back.len()
+                    )),
+                    rolled_back,
+                });
+            }
+            executed.push(step.clone());
+        }
+        {
+            let mut applied = self.applied.lock().unwrap();
+            for s in &executed {
+                if !applied.iter().any(|r| r.step == *s) {
+                    applied.push(AppliedRecord {
+                        step: s.clone(),
+                        at: SystemTime::now(),
+                    });
+                }
+            }
+        }
+        Ok(ApplyOutcome {
+            planned,
+            executed,
+            rolled_back: Vec::new(),
+        })
+    }
+
+    /// 逆序撤销全部在册步骤并清空账本（§2.3；§5「完全还原」= 还原 seep
+    /// 所加步骤，非清空系统路由表）；无步骤时 Ok 空表（E8 幂等）
+    pub async fn clear(&self) -> Result<Vec<AppliedStep>> {
+        let records = {
             let mut applied = self.applied.lock().unwrap();
             applied.drain(..).rev().collect::<Vec<_>>()
         };
-        // 逆序撤销（锁已释放）
-        for step in steps {
-            let _ = match step {
-                AppliedStep::AddrReplaced { interface, cidr } => {
-                    run_ip(&ip_argv_addr_del(&cidr, &interface)).await
-                }
-                AppliedStep::LinkUp { interface } => {
-                    run_ip(&ip_argv_link_down_name(&interface)).await
-                }
-                AppliedStep::RouteReplaced {
-                    cidr,
-                    interface,
-                    metric: _,
-                } => run_ip(&ip_argv_route_del(&cidr, &interface)).await,
-            };
-            // 撤销阶段尽力而为，不因单步失败中断
+        let mut undone = Vec::new();
+        for r in records {
+            let _ = self.undo_step(&r.step.undo_argv()).await; // 尽力而为
+            undone.push(r.step);
         }
-        Ok(())
+        Ok(undone)
     }
 
-    /// 应用单条路由（addr 或 route），记录 AppliedStep
+    /// 状态快照（§2.3 同步读）：设备态 + 已应用步骤表
+    pub fn status(&self) -> RouteStatus {
+        RouteStatus {
+            device: self.interface_name.clone(),
+            mtu: self.tun_config.as_ref().map(|t| t.mtu),
+            up: self.device_up.load(Ordering::Relaxed),
+            applied: self.applied.lock().unwrap().clone(),
+        }
+    }
+
+    /// §7.1 mock executor 开启（返回调用记录句柄；fail_at = 注入非零退出
+    /// 的正向步骤下标，None = 恒成功）
+    #[cfg(test)]
+    pub(crate) fn enable_mock_exec(
+        &mut self,
+        fail_at: Option<usize>,
+    ) -> Arc<Mutex<Vec<Vec<String>>>> {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        self.mock_exec = Some(Arc::clone(&log));
+        self.mock_fail_at = fail_at;
+        log
+    }
+
+    /// 应用单条路由（add_route 动态面用；apply_desired 走批量路径不经此）
     async fn apply_step(&self, step: AppliedStep) -> Result<()> {
         match &step {
             AppliedStep::AddrReplaced { interface, cidr } => {
@@ -708,7 +969,10 @@ impl LinuxRouteManager {
                 run_ip(&ip_argv_route_replace(cidr, interface, *metric)).await?;
             }
         }
-        self.applied.lock().unwrap().push(step);
+        self.applied.lock().unwrap().push(AppliedRecord {
+            step,
+            at: SystemTime::now(),
+        });
         Ok(())
     }
 }
@@ -724,110 +988,24 @@ impl RouteManager for LinuxRouteManager {
         RouteStats {
             active_routes: applied
                 .iter()
-                .filter(|s| matches!(s, AppliedStep::RouteReplaced { .. }))
+                .filter(|r| matches!(r.step, AppliedStep::RouteReplaced { .. }))
                 .count(),
             total_routes: applied.len(),
             ..Default::default()
         }
     }
 
+    /// §5「启动 apply ≡ CLI apply」：trait 面向 enable_route 等既有消费者，
+    /// 内部即 apply_desired(false) 单一写路径（planner/执行/去重入账同源）
     async fn apply_routing(&self) -> Result<()> {
-        if !self.config.enabled {
-            return Ok(());
-        }
-
-        let auto_bypass = self.merged_auto_bypass();
-        let mut temp_applied = Vec::new();
-
-        // 1. 先应用地址（若有 tun_config，configure_ip 已在 LinuxTunProvider 做；
-        //    此处兼容 RouteManager 独立使用场景，重复 replace 幂等无害）
-        if let Some(tun) = &self.tun_config {
-            let interface = self.get_interface_name()?;
-            if let Some(v4) = tun.ipv4_addr {
-                let prefix = tun
-                    .ipv4_netmask
-                    .map(|nm| u32::from(nm).leading_ones() as u8)
-                    .unwrap_or(32);
-                let cidr = format!("{v4}/{prefix}");
-                let step = AppliedStep::AddrReplaced {
-                    interface: interface.clone(),
-                    cidr: cidr.clone(),
-                };
-                self.apply_step(step).await?;
-                temp_applied.push(AppliedStep::AddrReplaced {
-                    interface: interface.clone(),
-                    cidr,
-                });
-            }
-            if let Some(v6) = tun.ipv6_addr {
-                let prefix = tun.ipv6_prefix_len.unwrap_or(128);
-                let cidr = format!("{v6}/{prefix}");
-                let step = AppliedStep::AddrReplaced {
-                    interface: interface.clone(),
-                    cidr: cidr.clone(),
-                };
-                self.apply_step(step).await?;
-                temp_applied.push(AppliedStep::AddrReplaced { interface, cidr });
-            }
-        }
-
-        // 2. 应用路由规则（按 priority 升序：数字越小优先级越高）
-        let mut rules = self.config.rules.clone();
-        rules.sort_by_key(|r| r.priority);
-        for rule in rules {
-            if !rule.enabled {
-                continue;
-            }
-            if auto_bypass.iter().any(|b| overlaps(&rule.destination, b)) {
-                debug!(target: "seep::route", name = %rule.name, dest = %rule.destination.as_string(), "跳过与 auto-bypass 重叠的 include 目标");
-                continue;
-            }
-            let interface = rule
-                .interface
-                .clone()
-                .unwrap_or_else(|| self.get_interface_name().unwrap_or_default());
-            if interface.is_empty() {
-                return Err(anyhow!("路由规则 {} 缺少接口（tun 未配置）", rule.name));
-            }
-            let metric = rule.metric.unwrap_or(0);
-            let cidr = rule.destination.as_string();
-            let step = AppliedStep::RouteReplaced {
-                cidr: cidr.clone(),
-                interface: interface.clone(),
-                metric,
-            };
-            // 尝试应用，失败则回滚已应用的临时步骤
-            if let Err(e) = self.apply_step(step).await {
-                // 逆序撤销本次 apply 中已成功的步骤
-                for s in temp_applied.drain(..).rev() {
-                    let _ = match s {
-                        AppliedStep::AddrReplaced { interface, cidr } => {
-                            run_ip(&ip_argv_addr_del(&cidr, &interface)).await
-                        }
-                        AppliedStep::RouteReplaced {
-                            cidr,
-                            interface,
-                            metric: _,
-                        } => run_ip(&ip_argv_route_del(&cidr, &interface)).await,
-                        AppliedStep::LinkUp { .. } => Ok(()),
-                    };
-                }
-                return Err(e.context(format!("应用路由规则 {} 失败，已回滚", rule.name)));
-            }
-            temp_applied.push(AppliedStep::RouteReplaced {
-                cidr,
-                interface,
-                metric,
-            });
-        }
-
-        // 全部成功，合并到正式 applied
-        self.applied.lock().unwrap().extend(temp_applied);
-        Ok(())
+        self.apply_desired(false)
+            .await
+            .map(|_| ())
+            .map_err(|f| f.error)
     }
 
     async fn clear_routing(&self) -> Result<()> {
-        self.rollback_all().await
+        self.clear().await.map(|_| ())
     }
 
     async fn add_route(&self, rule: RouteRule) -> Result<()> {
@@ -859,10 +1037,11 @@ impl RouteManager for LinuxRouteManager {
         // 先找到并取出步骤，释放锁再 await
         let step = {
             let mut applied = self.applied.lock().unwrap();
-            if let Some(idx) = applied.iter().position(
-                |s| matches!(s, AppliedStep::RouteReplaced { .. } if s.to_string().contains(name)),
-            ) {
-                applied.remove(idx)
+            if let Some(idx) = applied.iter().position(|r| {
+                matches!(r.step, AppliedStep::RouteReplaced { .. })
+                    && r.step.to_string().contains(name)
+            }) {
+                applied.remove(idx).step
             } else {
                 return Err(anyhow!("未找到路由规则: {name}"));
             }
@@ -889,12 +1068,12 @@ impl RouteManager for LinuxRouteManager {
         let applied = self.applied.lock().unwrap();
         Ok(applied
             .iter()
-            .filter_map(|s| {
+            .filter_map(|r| {
                 if let AppliedStep::RouteReplaced {
                     cidr,
                     interface,
                     metric,
-                } = s
+                } = &r.step
                 {
                     let dest = parse_cidr(cidr).ok()?;
                     Some(
@@ -911,12 +1090,12 @@ impl RouteManager for LinuxRouteManager {
 
     async fn lookup_route(&self, destination: IpAddr) -> Result<Option<RouteRule>> {
         let applied = self.applied.lock().unwrap();
-        for s in applied.iter() {
+        for r in applied.iter() {
             if let AppliedStep::RouteReplaced {
                 cidr,
                 interface,
                 metric,
-            } = s
+            } = &r.step
             {
                 if let Ok(dest) = parse_cidr(cidr) {
                     if dest.matches(destination) {
@@ -1096,6 +1275,181 @@ mod tests {
             "198.51.100.1".parse().unwrap(),
         )]);
         assert!(mgr2.is_auto_bypass_ip("198.51.100.1".parse().unwrap()));
+    }
+
+    // ---------- RouteControl 契约（network-route.md §2.3/§5/§7.1） ----------
+
+    /// 契约测试基座：1 条 tun 地址 + 2 条 include（一条正常 TEST-NET-2、
+    /// 一条落 tun 网段内应被 §2.7 剔除）
+    fn route_control_routing() -> RoutingConfig {
+        let mut routing = RoutingConfig {
+            enabled: true,
+            ..RoutingConfig::default()
+        };
+        routing.rules.push(
+            RouteRule::new(
+                "include[0]".into(),
+                RouteDestination::ipv4(Ipv4Addr::new(198, 51, 100, 0), 24).unwrap(),
+            )
+            .with_metric(7),
+        );
+        routing.rules.push(RouteRule::new(
+            "include[1]".into(),
+            RouteDestination::ipv4(Ipv4Addr::new(10, 90, 0, 55), 32).unwrap(),
+        ));
+        routing
+    }
+
+    fn route_control_tun() -> TunConfig {
+        TunConfig {
+            ipv4_addr: Some(Ipv4Addr::new(10, 90, 0, 1)),
+            ipv4_netmask: Some(Ipv4Addr::new(255, 255, 255, 0)),
+            mtu: 1400,
+            ..TunConfig::default()
+        }
+    }
+
+    /// dry-run（§2.3/§7.1）：planner 产出 addr+include 步骤（auto-bypass
+    /// 重叠项剔除）、不执行不入账；status 快照字段齐备
+    #[tokio::test]
+    async fn apply_desired_dry_run_plans_without_exec_or_record() {
+        let mut mgr =
+            LinuxRouteManager::new(route_control_routing()).with_tun_config(route_control_tun());
+        mgr.set_interface_name("seepR2dry".into());
+
+        let out = mgr.apply_desired(true).await.expect("dry-run 应成功");
+        assert_eq!(
+            out.planned.len(),
+            2,
+            "addr + 1 条不重叠 include（tun 网段内目标剔除）：{:?}",
+            out.planned
+        );
+        assert_eq!(
+            out.planned[0].argv(),
+            ["ip", "addr", "replace", "10.90.0.1/24", "dev", "seepR2dry"]
+        );
+        assert_eq!(
+            out.planned[1].argv(),
+            [
+                "ip",
+                "route",
+                "replace",
+                "198.51.100.0/24",
+                "dev",
+                "seepR2dry",
+                "metric",
+                "7"
+            ]
+        );
+        assert!(out.executed.is_empty() && out.rolled_back.is_empty());
+
+        let st = mgr.status();
+        assert!(st.applied.is_empty(), "dry-run 不入账");
+        assert_eq!(st.device.as_deref(), Some("seepR2dry"));
+        assert_eq!(st.mtu, Some(1400));
+        assert!(!st.up, "设备 up 态未置位");
+    }
+
+    /// E10（§6）：接口未创建（TunIngress 未运行/已退）→ Err 携明确口径
+    #[tokio::test]
+    async fn apply_desired_without_interface_errors_e10() {
+        let mgr = LinuxRouteManager::new(RoutingConfig {
+            enabled: true,
+            ..RoutingConfig::default()
+        });
+        let f = mgr
+            .apply_desired(false)
+            .await
+            .expect_err("接口未创建应 E10");
+        assert!(
+            f.error.to_string().contains(E10_TUN_DISABLED),
+            "E10 口径：{}",
+            f.error
+        );
+        assert!(f.rolled_back.is_empty());
+    }
+
+    /// E7（§5/§7.1 mock executor）：注入第 2 步非零退出 → 前 1 步收到逆序
+    /// undo argv、账本清空（失败批不入账）
+    #[tokio::test]
+    async fn apply_desired_e7_rolls_back_batch_in_reverse() {
+        let mut mgr =
+            LinuxRouteManager::new(route_control_routing()).with_tun_config(route_control_tun());
+        mgr.set_interface_name("seepR2e7".into());
+        let log = mgr.enable_mock_exec(Some(1));
+
+        let f = mgr.apply_desired(false).await.expect_err("注入失败应 E7");
+        assert!(
+            format!("{:#}", f.error).contains("mock ip 非零退出"),
+            "错误链应含注入根因：{:#}",
+            f.error
+        );
+        assert_eq!(f.rolled_back.len(), 1, "前 1 步（addr）应回滚");
+        assert_eq!(
+            f.rolled_back[0].undo_argv(),
+            ["ip", "addr", "del", "10.90.0.1/24", "dev", "seepR2e7"]
+        );
+        // 调用序列：正向 addr、正向 route#0（失败）、逆序 undo addr
+        let calls = log.lock().unwrap().clone();
+        assert_eq!(calls.len(), 3, "mock 调用序列：{calls:?}");
+        assert_eq!(
+            calls[2],
+            ["ip", "addr", "del", "10.90.0.1/24", "dev", "seepR2e7"]
+        );
+        assert!(
+            mgr.status().applied.is_empty(),
+            "失败批不入账（E7 后账本干净）"
+        );
+    }
+
+    /// §5 幂等：重复 apply 去重入账（status 稳定）；clear 逆序全量撤销 +
+    /// E8 空表幂等
+    #[tokio::test]
+    async fn apply_desired_idempotent_record_and_clear_e8() {
+        let mut mgr =
+            LinuxRouteManager::new(route_control_routing()).with_tun_config(route_control_tun());
+        mgr.set_interface_name("seepR2idem".into());
+        let _log = mgr.enable_mock_exec(None);
+
+        mgr.apply_desired(false).await.expect("首次应成功");
+        mgr.apply_desired(false)
+            .await
+            .expect("重放应成功（replace 幂等）");
+        let st = mgr.status();
+        assert_eq!(
+            st.applied.len(),
+            2,
+            "重放后账本去重稳定（同 argv 不重复入账）：{:?}",
+            st.applied
+        );
+
+        let undone = mgr.clear().await.expect("clear 应成功");
+        assert_eq!(undone.len(), 2, "逆序全量撤销");
+        assert_eq!(
+            undone[0].undo_argv(),
+            ["ip", "route", "del", "198.51.100.0/24", "dev", "seepR2idem"]
+        );
+        assert!(mgr.status().applied.is_empty(), "clear 后账本清空");
+        assert!(
+            mgr.clear().await.unwrap().is_empty(),
+            "无步骤时 Ok 空表（E8 幂等）"
+        );
+    }
+
+    /// 真 exec 面 E7（无特权可跑）：接口名不存在 → 首 ip 命令非零退出，
+    /// 失败不入账（回滚面 mocked 路径已覆盖，此处在真 run_ip 上钉同一账目语义）
+    #[tokio::test]
+    async fn apply_desired_real_exec_failure_keeps_ledger_clean() {
+        let mut mgr =
+            LinuxRouteManager::new(route_control_routing()).with_tun_config(route_control_tun());
+        mgr.set_interface_name(format!("seep-no-dev-{}", std::process::id()));
+
+        let f = mgr
+            .apply_desired(false)
+            .await
+            .expect_err("不存在的设备必失败");
+        assert!(f.rolled_back.is_empty(), "首步即败无回滚步骤");
+        assert!(mgr.status().applied.is_empty(), "失败不入账");
     }
 
     #[test]
@@ -1289,5 +1643,115 @@ mod tests {
             auto.name()
         );
         auto.destroy_interface().await.expect("auto destroy");
+    }
+
+    /// §7.2 集成（skip 守卫同 §4.2）：apply/clear 全程对账——dry-run 零变化 →
+    /// apply ×2 幂等（前缀唯一 + 去重入账）→ status 对账 → clear 还原（仅
+    /// seep 所加行消失，设备仍 up）→ E8 空表幂等。include 用 pid 派生 /32
+    /// 宿主路由（多会话共享内核路由表，独占命名防互踩）
+    #[tokio::test]
+    async fn route_apply_clear_roundtrip() {
+        if !tun_device_available() {
+            return;
+        }
+
+        async fn route_show(query: &str) -> String {
+            let out = Command::new("ip")
+                .args(["route", "show", query])
+                .output()
+                .await
+                .expect("ip route show");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+
+        let pid = std::process::id();
+        let iface = format!("seepR2{pid}");
+        let octet = ((pid % 200) + 20) as u8; // 20..=219，避开 0/1/255
+        let prefix = format!("198.51.100.{octet}/32");
+
+        let tun_cfg = TunConfig::default().with_name(iface.clone()).with_ipv4(
+            Ipv4Addr::new(10, 197, 0, 1),
+            Ipv4Addr::new(255, 255, 255, 0),
+            Ipv4Addr::new(10, 197, 0, 1),
+        );
+        let mut tun = LinuxTunProvider::new(tun_cfg.clone());
+        if let Err(e) = tun.create_interface().await {
+            if is_permission_skip(&e) {
+                eprintln!("skip: 无 CAP_NET_ADMIN——{e}");
+                return;
+            }
+            panic!("create_interface 失败：{e:#}");
+        }
+        tun.up_interface().await.expect("up_interface");
+
+        let mut routing = RoutingConfig {
+            enabled: true,
+            ..RoutingConfig::default()
+        };
+        routing.rules.push(
+            RouteRule::new(
+                "include[0]".into(),
+                RouteDestination::ipv4(Ipv4Addr::new(198, 51, 100, octet), 32).unwrap(),
+            )
+            .with_metric(77),
+        );
+        let mut mgr = LinuxRouteManager::new(routing).with_tun_config(tun_cfg);
+        mgr.set_interface_name(iface.clone());
+        mgr.set_device_up(true);
+
+        // 基线（pid 复用留下的历史残留也兼容：全程按「相对基线」断言）
+        let baseline = route_show(&prefix).await;
+
+        // dry-run：planned 含 include 宿主路由，路由表零变化（§7.2）
+        let out = mgr.apply_desired(true).await.expect("dry-run 应成功");
+        assert!(out.executed.is_empty() && out.rolled_back.is_empty());
+        assert!(
+            out.planned.iter().any(|s| s.argv().contains(&prefix)),
+            "planned 应含 include 宿主路由：{:?}",
+            out.planned
+        );
+        assert_eq!(route_show(&prefix).await, baseline, "dry-run 零变化");
+
+        // apply ×2：幂等（replace + 去重入账）——前缀唯一且 dev/metric 落位
+        mgr.apply_desired(false).await.expect("首次 apply");
+        mgr.apply_desired(false).await.expect("重放 apply（幂等）");
+        let after = route_show(&prefix).await;
+        let lines: Vec<&str> = after.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1, "重放后前缀唯一：{after}");
+        assert!(
+            lines[0].contains(&format!("dev {iface}")) && lines[0].contains("metric 77"),
+            "dev/metric 落位：{}",
+            lines[0]
+        );
+
+        // status 对账：去重入账稳定（addr + route 共 2 条）、设备态齐备
+        let st = mgr.status();
+        assert_eq!(st.applied.len(), 2, "去重入账：{:?}", st.applied);
+        assert!(st.applied.iter().any(|r| matches!(
+            &r.step,
+            AppliedStep::RouteReplaced { cidr, interface, .. }
+                if *cidr == prefix && *interface == iface
+        )));
+        assert_eq!(st.device.as_deref(), Some(iface.as_str()));
+        assert_eq!(st.mtu, Some(tun.config().mtu));
+        assert!(st.up);
+
+        // clear 还原：仅 seep 所加行消失（回到基线）、账本清空、设备仍 up（§5）
+        let undone = mgr.clear().await.expect("clear 应成功");
+        assert_eq!(undone.len(), 2, "逆序全量撤销：{undone:?}");
+        assert_eq!(route_show(&prefix).await, baseline, "clear 后回到基线");
+        let st = mgr.status();
+        assert!(st.applied.is_empty());
+        assert!(st.up, "clear 后设备仍 up（数据面空转，§5）");
+        assert!(
+            mgr.clear().await.unwrap().is_empty(),
+            "无步骤时 Ok 空表（E8 幂等）"
+        );
+
+        // teardown：账面归零 + 设备回收
+        mgr.set_device_up(false);
+        mgr.clear_interface_name();
+        tun.down_interface().await.expect("down_interface");
+        tun.destroy_interface().await.expect("destroy_interface");
     }
 }

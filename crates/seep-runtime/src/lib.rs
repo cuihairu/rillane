@@ -41,6 +41,7 @@ pub use runtime_builder::{
     ConfigMergeStats, FlowStatItem, MeshConfig, MeshEventType, NetworkEventType, Runtime,
     RuntimeBuilder, RuntimeConfig, RuntimeEvent, RuntimeStats, SubscriptionEventType,
 };
+pub use seep_platform::network::NetworkMode;
 pub use tun_ingress::{Proto as TunProto, TunIngress, TunIngressConfig, TunIngressStats};
 pub use tun_process::{ProcessAttributor, ProcessInfo, SockProto};
 // P0-5 §2.4：client 出站侧 UDP 计数（模块私有，观测 getter 的返回类型经此公开）
