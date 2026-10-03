@@ -3537,4 +3537,168 @@ mod tests {
             t.abort();
         }
     }
+
+    // ---------- network-route.md §7.1：route 三端点 ----------
+
+    /// network-route.md §7.1 端点测试基座：Tun 模式 runtime（build 不 start——
+    /// 设备未创建、接口名由测试注入，设备 I/O 面零触达）
+    async fn build_tun_runtime() -> Arc<Runtime> {
+        let rc = RuntimeConfig {
+            enable_network_virtualization: true,
+            network_config: Some(seep_platform::network::NetworkConfig {
+                mode: seep_runtime::NetworkMode::Tun,
+                tun: Some(seep_platform::network::TunConfig {
+                    name: Some("seepR2ep".into()),
+                    ipv4_addr: Some("10.198.0.1".parse().unwrap()),
+                    ipv4_netmask: Some("255.255.255.0".parse().unwrap()),
+                    mtu: 1400,
+                    ..Default::default()
+                }),
+                routing: Some(seep_platform::network::RoutingConfig {
+                    enabled: true,
+                    rules: vec![seep_platform::network::RouteRule::new(
+                        "include[0]".into(),
+                        seep_platform::network::RouteDestination::ipv4(
+                            "203.0.113.0".parse().unwrap(),
+                            24,
+                        )
+                        .unwrap(),
+                    )],
+                    ..Default::default()
+                }),
+                filtering: None,
+                dns: None,
+            }),
+            ..RuntimeConfig::default()
+        };
+        Arc::new(
+            RuntimeBuilder::new(s4_udp_config())
+                .with_runtime_config(rc)
+                .build()
+                .unwrap(),
+        )
+    }
+
+    /// POST JSON → Response（route 端点测试用）
+    async fn post_json(cp: &ControlPlane, path: &str, body: &str) -> Response<RespBody> {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(CONTENT_TYPE, "application/json")
+            .body(RespBody::from(body.to_string()))
+            .unwrap();
+        cp.handle(req).await
+    }
+
+    /// 2xx 响应体 → JSON（调用方先断言状态码）
+    async fn resp_json(resp: Response<RespBody>) -> serde_json::Value {
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// step JSON → argv 字符串表
+    fn step_argv(step: &serde_json::Value) -> Vec<String> {
+        step["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// §6 E10：无 TUN 的 runtime 上 apply/clear/status 三端点均 503
+    ///（TunIngress 未装配——/nodes 的 SERVICE_UNAVAILABLE 先例口径）
+    #[tokio::test]
+    async fn route_endpoints_503_without_tun() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let resp = post_json(&cp, "/network/route/apply", r#"{"dry_run":false}"#).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let resp = post_json(&cp, "/network/route/clear", "").await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/network/route/status")
+            .body(RespBody::new(Bytes::new()))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let s = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            s.contains("TUN 未启用"),
+            "status 503 应携 E10 口径文本：{s}"
+        );
+    }
+
+    /// §3/§7.1 端点形状：dry-run planned（argv 精确 + at）与 executed/rolled_back
+    /// 两态 + E7 失败形（真 ip 对不存在设备非零退出——无特权可跑、零系统
+    /// 变更）+ clear E8 空表 + status 对账（mode/device/mtu/up/applied）
+    #[tokio::test]
+    async fn route_endpoints_shapes_on_unstarted_tun() {
+        let runtime = build_tun_runtime().await;
+        {
+            let tun = runtime
+                .get_tun_ingress()
+                .expect("Tun 模式应装配 TunIngress");
+            let rm = tun.route_manager();
+            rm.lock().await.set_interface_name("seepR2ep".into());
+        }
+        let cp = ControlPlane::new(runtime, None, true);
+
+        // dry-run：planned = addr + include 路由、executed/rolled_back 空
+        let resp = post_json(&cp, "/network/route/apply", r#"{"dry_run":true}"#).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = resp_json(resp).await;
+        let planned = v["planned"].as_array().expect("planned 数组");
+        assert_eq!(planned.len(), 2, "addr + 1 条 include：{v}");
+        assert_eq!(
+            step_argv(&planned[0]),
+            ["ip", "addr", "replace", "10.198.0.1/24", "dev", "seepR2ep"]
+        );
+        assert_eq!(
+            step_argv(&planned[1]),
+            [
+                "ip",
+                "route",
+                "replace",
+                "203.0.113.0/24",
+                "dev",
+                "seepR2ep",
+                "metric",
+                "0"
+            ]
+        );
+        assert!(planned[0]["at"].as_u64().is_some(), "step 携 at");
+        assert!(v["executed"].as_array().unwrap().is_empty());
+        assert!(v["rolled_back"].as_array().unwrap().is_empty());
+
+        // 真执行：设备不存在 → 首 ip 非零退出 → E7 形状 500 {error, rolled_back}
+        let resp = post_json(&cp, "/network/route/apply", r#"{"dry_run":false}"#).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let v = resp_json(resp).await;
+        assert!(
+            v["error"].as_str().unwrap_or_default().contains("E7"),
+            "error 应含 E7 口径：{v}"
+        );
+        assert!(v["rolled_back"].as_array().unwrap().is_empty());
+
+        // clear：账本空 → Ok 空表（E8 幂等）
+        let resp = post_json(&cp, "/network/route/clear", "").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = resp_json(resp).await;
+        assert!(v["undone"].as_array().unwrap().is_empty());
+
+        // status：mode/device/mtu/up + applied 空表（未 start → up=false）
+        let s = get_body(&cp, "/network/route/status").await;
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["mode"], serde_json::json!("tun"));
+        assert_eq!(v["device"], serde_json::json!("seepR2ep"));
+        assert_eq!(v["mtu"], serde_json::json!(1400));
+        assert_eq!(v["up"], serde_json::json!(false));
+        assert!(v["applied"].as_array().unwrap().is_empty());
+    }
 }

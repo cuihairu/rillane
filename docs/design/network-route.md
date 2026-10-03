@@ -185,6 +185,12 @@ seepctl route status  [--endpoint URL]
 | 8 | 范围 | seepd 的 `enable_mesh`/`enable_chain` 硬编码 true 不动（既有行为，另行条目） |
 | 9 | 修正 | todo 验收"apply 后 `ip rule`/路由表符合预期" → MVP 不触碰 ip rule（main 表显式路由口径，tun-dataplane §1.3） |
 | 10 | 假设 | include 仅收网络前缀 CIDR（/32 表达主机路由）；`RouteDestination::Default`/`Host` 变体不进 schema（V2 全局接管用 Default） |
+| 11 | 偏差 | §2.3 `apply_desired(&cfg, dry_run)` 签名落地为 `apply_desired(dry_run)`——manager 构造期已持 `RoutingConfig`（`with_tun_config` 同期注入），cfg 参数无第二来源；返回 `Result<ApplyOutcome, ApplyFailure>` 类型化失败（E7 的 `rolled_back` 结构化负载 anyhow 装不下，端点直接消费） |
+| 12 | 偏差 | §2.3「build() 构造 `Arc<LinuxRouteManager>` 双句柄」落地为 `TunIngress::route_manager()` 访问器——TunIngress 属主化设备+路由（tun-dataplane §2.6 延续），控制面经访问器取同一 `Arc<TokioMutex<LinuxRouteManager>>`，无双实例风险；操作级互斥由该 TokioMutex（端点间/与 run() 启动-teardown 串行）+ manager 内部 `Mutex<Vec<AppliedRecord>>`（入账原子）双层承担 |
+| 13 | 偏差 | §3 status 端点「失败 –」落地为 503 文本（TunIngress 未装配时，`/nodes` 先例口径）；TunIngress 在场但设备未建（未 start/已退）→ apply 500 `{"error": E10 口径}`、status 仍 200（device null/up false）——两种「TUN 不可用」以装配态分层 |
+| 14 | 偏差 | step.at 口径：status 的 applied 携**入账时刻**（`AppliedRecord.at`），apply/clear 响应的 step 携**响应生成时刻**（ executed/undone 无账目语义，求可读不谎称入账时间）；rolled_back/executed/undone 步骤渲染 `undo_argv`（撤销事实——E7 逆序回滚与 clear 还原展示的是将执行的撤销命令） |
+| 15 | 偏差 | §4 CLI status 输出在 argv 表外增加 mode/device/mtu/up 四行设备态（§3 响应字段对齐，缺键容错 unknown/false）；apply 成功响应非空 rolled_back 时追加 `undo:` 段 |
+| 16 | 偏差 | §8 R2–R4 三步合流为单提交 1befbe7（多会话并行推进同条目，分步节奏让位于合并收口）；§7.1 REST/CLI 测试随其后的测试补齐提交落地（端点形状含 E10 503/E7 500/dry-run planned、CLI 参数与渲染纯函数） |
 
 ## 10. 风险与未决
 
