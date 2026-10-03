@@ -16,6 +16,7 @@ serde_json.workspace = true
 uuid.workspace = true
 seep-config = { path = "../../crates/seep-config" }
 seep-core = { path = "../../crates/seep-core" }
+seep-platform = { path = "../../crates/seep-platform" }
 seep-runtime = { path = "../../crates/seep-runtime" }
 seep-telemetry = { path = "../../crates/seep-telemetry" }
 seep-mesh = { path = "../../crates/seep-mesh" }

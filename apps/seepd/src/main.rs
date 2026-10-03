@@ -17,6 +17,24 @@ fn version_flag_response(args: &[String]) -> Option<String> {
     }
 }
 
+/// R1 派生（tun-dataplane.md §2.6 / network-route.md §1.2）：network 块在场
+/// 即启用网络虚拟化——Tun 模式由 runtime_builder 裁决装配 TunIngress（属主化
+/// 设备+系统路由，NetworkManager 让位）；None = 无 network 块，行为与既有
+/// 版本零差异。mesh/chain 沿既有默认（控制面相关能力全开）。
+fn derive_runtime_config(config: &SeepConfig) -> Result<RuntimeConfig> {
+    Ok(RuntimeConfig {
+        enable_mesh: true,
+        enable_chain: true,
+        enable_network_virtualization: config.network.is_some(),
+        network_config: config
+            .network
+            .as_ref()
+            .map(seep_runtime::network_block_to_platform)
+            .transpose()?,
+        ..RuntimeConfig::default()
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // --version/-V 在配置加载前短路（daemon 不应因版本查询而读配置/起服务）
@@ -45,11 +63,7 @@ async fn main() -> Result<()> {
 
     // For seepd, enable control-plane-relevant capabilities by default.
     // These can be made configurable later via a dedicated runtime section in SeepConfig.
-    let runtime_config = RuntimeConfig {
-        enable_mesh: true,
-        enable_chain: true,
-        ..RuntimeConfig::default()
-    };
+    let runtime_config = derive_runtime_config(&config)?;
 
     let runtime = Arc::new(
         RuntimeBuilder::new(config.clone())
@@ -121,5 +135,36 @@ mod tests {
         assert!(version_flag_response(&args(&["seepd", "run"])).is_none());
         // 仅识别首位参数：`seepd start --version` 不短路（位置语义留给未来 CLI 扩展）
         assert!(version_flag_response(&args(&["seepd", "start", "--version"])).is_none());
+    }
+
+    /// R1 派生（tun-dataplane.md §2.6）：network 块在场 → 虚拟化开 + platform
+    /// 配置转换（Tun 模式直通）；缺块 → 双 None/false（既有行为零差异）。
+    /// 转换正确性本体归 network_config.rs 测试（seepd 侧只钉开关派生契约）。
+    #[test]
+    fn runtime_config_derives_network_block() {
+        use seep_config::{NetworkBlockConfig, NetworkBlockMode};
+        use seep_platform::network::NetworkMode;
+
+        // 基线 = 仓库示例配置（无 network 块）：与历史默认零差异
+        let cfg_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/seep.yaml");
+        let mut cfg = SeepConfig::load_from_path(&cfg_path).unwrap();
+        assert!(cfg.network.is_none(), "示例配置不应带 network 块");
+        let rc = derive_runtime_config(&cfg).unwrap();
+        assert!(!rc.enable_network_virtualization);
+        assert!(rc.network_config.is_none());
+        assert!(rc.enable_mesh && rc.enable_chain, "mesh/chain 默认不变");
+
+        // network 块（Tun 模式最小形——无 Default，显式全字段）→ 虚拟化开 + mode 直通
+        cfg.network = Some(NetworkBlockConfig {
+            mode: NetworkBlockMode::Tun,
+            tun: None,
+            routing: None,
+            dns: None,
+        });
+        let rc = derive_runtime_config(&cfg).unwrap();
+        assert!(rc.enable_network_virtualization);
+        let nc = rc.network_config.expect("network 块应完成平台转换");
+        assert!(matches!(nc.mode, NetworkMode::Tun));
     }
 }
