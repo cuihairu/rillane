@@ -18,9 +18,10 @@ pub mod network_config;
 pub mod obfs_config;
 pub mod pool_config;
 pub mod runtime_builder;
-// TUN 入口 + /proc 进程归因（tun-dataplane.md §2；Linux 数据面）
+// TUN 入口 + /proc 进程归因 + TCP 用户态栈（tun-dataplane.md §2；Linux 数据面）
 pub mod tun_ingress;
 pub mod tun_process;
+pub mod tun_tcp;
 mod udp_chain; // P0-4 §5 客户端出站（私有：消费点 = runtime_builder UDP 块，S5 接线）
 
 pub use chain::{

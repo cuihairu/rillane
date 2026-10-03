@@ -133,14 +133,19 @@ impl TxToken for PhyTxToken<'_> {
 }
 
 impl Device for TunPhy {
-    type RxToken<'a> = PhyRxToken
+    type RxToken<'a>
+        = PhyRxToken
     where
         Self: 'a;
-    type TxToken<'a> = PhyTxToken<'a>
+    type TxToken<'a>
+        = PhyTxToken<'a>
     where
         Self: 'a;
 
-    fn receive(&mut self, _timestamp: SmolInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(
+        &mut self,
+        _timestamp: SmolInstant,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let data = self.rx.pop_front()?;
         Some((PhyRxToken { data }, PhyTxToken { tx: &mut self.tx }))
     }
@@ -185,7 +190,8 @@ impl StackInner {
         );
         // 游戏低延迟面：小写立即出段；keep-alive 保持 smoltcp 默认关闭（§2.4）
         s.set_nagle_enabled(false);
-        s.listen(port).map_err(|e| anyhow!("TCP listen({port}) 失败：{e:?}"))?;
+        s.listen(port)
+            .map_err(|e| anyhow!("TCP listen({port}) 失败：{e:?}"))?;
         let h = self.sockets.add(s);
         self.listeners.insert(port, h);
         Ok(h)
@@ -330,7 +336,10 @@ impl TunTcpStack {
         iface.set_any_ip(true);
         iface.update_ip_addrs(|ips| {
             if let Some((addr, prefix)) = local {
-                let _ = ips.push(IpCidr::new(IpAddress::from(std::net::IpAddr::V4(addr)), prefix));
+                let _ = ips.push(IpCidr::new(
+                    IpAddress::from(std::net::IpAddr::V4(addr)),
+                    prefix,
+                ));
             }
             let _ = ips.push(IpCidr::new(IpAddress::v4(0, 0, 0, 0), 0));
         });
@@ -445,7 +454,10 @@ impl TunTcpStack {
     /// teardown：全量关闭（应用连接随 EOF 退场；设备即将销毁不再出段）
     pub fn shutdown_all(&self) {
         let mut inner = self.inner.lock().unwrap();
-        for (h, _) in inner.flows.drain() {
+        // 句柄先收集：MutexGuard 不支持字段分裂借用，drain 迭代不可与
+        // sockets 变更并发（借用面收窄为语句内）
+        let handles: Vec<SocketHandle> = inner.flows.drain().map(|(h, _)| h).collect();
+        for h in handles {
             let s = inner.sockets.get_mut::<tcp::Socket>(h);
             if s.is_open() {
                 s.close();
@@ -549,19 +561,13 @@ impl AsyncWrite for SmolTcpStream {
         }
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        _cx: &mut TaskContext<'_>,
-    ) -> TaskPoll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> TaskPoll<io::Result<()>> {
         // 数据已入 smoltcp 发送缓冲（poll_write 内已 kick 出段）——出段/ACK
         // 面不在此等（AsyncWrite flush 只要求应用缓冲排空）
         TaskPoll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        _cx: &mut TaskContext<'_>,
-    ) -> TaskPoll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> TaskPoll<io::Result<()>> {
         let this = self.get_mut();
         let mut inner = this.stack.inner.lock().unwrap();
         if this.flow_live(&inner) {
@@ -598,7 +604,16 @@ mod tests {
     use seep_platform::network::ipcodec::{build_tcp_packet, parse_tcp_segment, TcpFlags};
 
     #[allow(clippy::too_many_arguments)]
-    fn uplink(src: &str, dst: &str, sport: u16, dport: u16, seq: u32, ack: u32, flags: TcpFlags, payload: &[u8]) -> Bytes {
+    fn uplink(
+        src: &str,
+        dst: &str,
+        sport: u16,
+        dport: u16,
+        seq: u32,
+        ack: u32,
+        flags: TcpFlags,
+        payload: &[u8],
+    ) -> Bytes {
         let pkt = build_tcp_packet(
             src.parse().unwrap(),
             dst.parse().unwrap(),
@@ -626,7 +641,16 @@ mod tests {
         // ① 首 SYN：入册 + 下行 SYN-ACK
         let out = stack
             .ingest_syn(
-                uplink("10.66.0.1", "203.0.113.10", 40000, 8080, 1000, 0, TcpFlags::SYN, b""),
+                uplink(
+                    "10.66.0.1",
+                    "203.0.113.10",
+                    40000,
+                    8080,
+                    1000,
+                    0,
+                    TcpFlags::SYN,
+                    b"",
+                ),
                 key1,
                 RouteDecision::direct("n1".into()),
                 None,
@@ -647,7 +671,16 @@ mod tests {
         };
         let out2 = stack
             .ingest_syn(
-                uplink("10.66.0.1", "203.0.113.10", 40001, 8080, 2000, 0, TcpFlags::SYN, b""),
+                uplink(
+                    "10.66.0.1",
+                    "203.0.113.10",
+                    40001,
+                    8080,
+                    2000,
+                    0,
+                    TcpFlags::SYN,
+                    b"",
+                ),
                 key2,
                 RouteDecision::direct("n2".into()),
                 None,
@@ -671,18 +704,16 @@ mod tests {
         assert_eq!(out3.established.len(), 1, "应检出一条 Established");
         let est = &out3.established[0];
         assert_eq!(est.key, key1);
-        assert!(matches!(est.decision, Some(_)), "首 SYN 粘滞决策应随行");
+        assert!(est.decision.is_some(), "首 SYN 粘滞决策应随行");
         let out4 = stack.drive();
         assert_eq!(out4.established.len(), 0, "重复 drive 不重复检出");
 
         // ④ 已有条目判定（SYN 重传口径）
         assert!(stack.has_flow(&key1));
-        assert!(!stack.has_flow(
-            &TcpFlowKey {
-                app: "10.66.0.1:49999".parse().unwrap(),
-                server: "203.0.113.10:8080".parse().unwrap(),
-            }
-        ));
+        assert!(!stack.has_flow(&TcpFlowKey {
+            app: "10.66.0.1:49999".parse().unwrap(),
+            server: "203.0.113.10:8080".parse().unwrap(),
+        }));
 
         // ⑤ 清扫：ZERO 即全数超龄撤除（句柄退役收敛）
         assert_eq!(stack.sweep(Duration::ZERO), 2);

@@ -372,7 +372,10 @@ pub fn parse_tcp_segment(pkt: &[u8]) -> Result<TcpSegment<'_>> {
         bail!("TCP 数据偏移非法：{}（<20 字节）", tcp[12] >> 4);
     }
     if tcp.len() < data_off {
-        bail!("TCP 头截断：偏移需 {data_off} 字节，实收 {} 字节", tcp.len());
+        bail!(
+            "TCP 头截断：偏移需 {data_off} 字节，实收 {} 字节",
+            tcp.len()
+        );
     }
     let flags = tcp[13];
     Ok(TcpSegment {
@@ -748,7 +751,10 @@ mod tests {
         )
         .unwrap();
         trunc.truncate(35);
-        assert!(parse_tcp_segment(&trunc).unwrap_err().to_string().contains("截断"));
+        assert!(parse_tcp_segment(&trunc)
+            .unwrap_err()
+            .to_string()
+            .contains("截断"));
 
         // TCP 数据偏移非法（12 字节高半字节 = 4 → 16 < 20）
         let mut bad_off = build_tcp_packet(
@@ -779,7 +785,10 @@ mod tests {
         )
         .unwrap();
         frag[6] = 0x20;
-        assert!(parse_tcp_segment(&frag).unwrap_err().to_string().contains("分片"));
+        assert!(parse_tcp_segment(&frag)
+            .unwrap_err()
+            .to_string()
+            .contains("分片"));
     }
 
     /// 奇数长度载荷（校验和补 0 对齐）与空载荷往返；v4/v6 双栈

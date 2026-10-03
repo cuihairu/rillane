@@ -24,13 +24,15 @@ use dashmap::DashMap;
 use seep_core::udp::table::classify_failure;
 use seep_core::udp::{EgressUdpConnector, UdpRelay};
 use seep_core::{
-    FailureType, FlowContext, FlowId, FlowMetadata, FlowOutput, FlowRouter, FlowTarget,
+    FailureType, Flow, FlowContext, FlowId, FlowMetadata, FlowOutput, FlowRouter, FlowTarget,
     IngressEndpoint, RouteDecision, TargetProto,
 };
 use tokio::sync::{mpsc, Mutex as TokioMutex, Notify};
 use tracing::{debug, error, info, warn};
 
-use seep_platform::network::ipcodec::{build_udp_packet, parse_udp_datagram, UdpDatagram};
+use seep_platform::network::ipcodec::{
+    build_udp_packet, parse_tcp_segment, parse_udp_datagram, UdpDatagram,
+};
 use seep_platform::network::linux::{LinuxRouteManager, LinuxTunProvider};
 use seep_platform::network::route::{
     default_bypass_rules, RouteDestination, RouteManager, RoutingConfig as PlatformRoutingConfig,
@@ -38,6 +40,7 @@ use seep_platform::network::route::{
 use seep_platform::network::tun::{PacketInfo, TunConfig, TunProvider};
 
 use crate::tun_process::{ProcessAttributor, ProcessInfo, SockProto};
+use crate::tun_tcp::{EstablishedTcp, SmolTcpStream, TcpFlowKey, TcpOutcome, TunTcpStack};
 
 /// 下行通道容量（下行任务 → run 循环写 tun）
 const DOWNLINK_CHANNEL_CAP: usize = 1024;
@@ -135,6 +138,8 @@ enum LoopEvent {
     Read(Result<(Bytes, PacketInfo)>),
     Downlink(Option<Bytes>),
     Sweep,
+    /// §2.9 下行注入唤醒（SmolTcpStream 写入后 kick）：补一次 poll 出段
+    TcpKick,
 }
 
 /// TunIngress（tun-dataplane.md §2）
@@ -144,6 +149,8 @@ pub struct TunIngress {
     route_manager: TokioMutex<LinuxRouteManager>,
     flow_table: Arc<DashMap<TunFlowKey, TunFlowEntry>>,
     udp_connector: Arc<dyn EgressUdpConnector>,
+    /// TUN TCP 用户态栈（§2.4/§2.9 T4；纯用户态——设备 I/O 仍在 run 循环）
+    tcp: Arc<TunTcpStack>,
     /// run() 注入（runtime ingress 循环 @start() 的 router 通道），OnceLock
     /// 使构造期无需持有 runtime 全件
     flow_router: OnceLock<Arc<dyn FlowRouter>>,
@@ -162,11 +169,23 @@ impl TunIngress {
     pub fn new(config: TunIngressConfig, udp_connector: Arc<dyn EgressUdpConnector>) -> Self {
         let route_manager =
             LinuxRouteManager::new(config.routing.clone()).with_tun_config(config.tun.clone());
+        // TCP 栈面（§2.4）：tun 本端地址作回程路由基准（前缀 = 掩码置位数）；
+        // 栈内另恒压 0.0.0.0/0 兜底（任意源应用地址可达），MTU 定 socket 缓冲
+        let local = config.tun.ipv4_addr.map(|a| {
+            let prefix = config
+                .tun
+                .ipv4_netmask
+                .map(|m| u32::from(m).count_ones() as u8)
+                .unwrap_or(0);
+            (a, prefix)
+        });
+        let tcp = Arc::new(TunTcpStack::new(local, config.tun.mtu));
         Self {
             tun: TokioMutex::new(LinuxTunProvider::new(config.tun.clone())),
             route_manager: TokioMutex::new(route_manager),
             flow_table: Arc::new(DashMap::new()),
             udp_connector,
+            tcp,
             flow_router: OnceLock::new(),
             flow_output: OnceLock::new(),
             stats: Arc::new(Mutex::new(TunIngressStats::default())),
@@ -252,6 +271,8 @@ impl TunIngress {
             entry.cancel.notify_one();
         }
         self.flow_table.clear();
+        // T4：TCP 栈全量收口（应用连接随 EOF 退场；设备即将销毁不再出段）
+        self.tcp.shutdown_all();
         {
             let rm = self.route_manager.lock().await;
             if let Err(e) = rm.clear_routing().await {
@@ -287,6 +308,7 @@ impl TunIngress {
                 read = tun_guard.read_packet() => LoopEvent::Read(read),
                 pkt = downlink_rx.recv() => LoopEvent::Downlink(pkt),
                 _ = sweep.tick() => LoopEvent::Sweep,
+                _ = self.tcp.kick_notify().notified() => LoopEvent::TcpKick,
             };
             match event {
                 LoopEvent::Shutdown => {
@@ -312,7 +334,19 @@ impl TunIngress {
                     st.bytes_sent += n as u64;
                 }
                 LoopEvent::Downlink(None) => break, // 下行通道全员撤出（防御分支）
-                LoopEvent::Sweep => self.sweep_expired_flows_at(Instant::now()),
+                LoopEvent::Sweep => {
+                    self.sweep_expired_flows_at(Instant::now());
+                    // TCP 面：空闲回收 + 补 poll（§2.9 定时推进——重传/延迟 ACK/
+                    // 关闭态收敛复用既有 sweep 周期，不另起独立定时任务）
+                    let n = self
+                        .tcp
+                        .sweep(Duration::from_secs(self.config.tcp_idle_secs));
+                    if n > 0 {
+                        debug!(target: "seep::tun", evicted = n, "TCP 流空闲过期回收");
+                    }
+                    self.drive_tcp(&downlink_tx).await;
+                }
+                LoopEvent::TcpKick => self.drive_tcp(&downlink_tx).await,
             }
         }
         Ok(())
@@ -342,9 +376,11 @@ impl TunIngress {
                     self.increment_parse_errors();
                 }
             }
+        } else if info.is_tcp() {
+            self.handle_tcp_packet(pkt, downlink_tx).await;
         } else {
-            // TCP（T4 smoltcp 用户态栈，§2.4）与 ICMP 等：MVP 丢弃 + 计数（E9）
-            debug!(target: "seep::tun", proto = ?info.protocol, "非 UDP 包丢弃（TCP 接线归 T4）");
+            // ICMP 等：MVP 丢弃 + 计数（E9）
+            debug!(target: "seep::tun", proto = ?info.protocol, "非 UDP/TCP 包丢弃");
             self.increment_parse_errors();
         }
     }
@@ -506,6 +542,164 @@ impl TunIngress {
         }
     }
 
+    /// TCP 上行（§2.4/§2.9）：首 SYN 归因+粘滞路由 → 入栈；SYN 重传/其余
+    /// 包直接入栈；poll 产物（下行段 + Established 交接清单）统一收口
+    async fn handle_tcp_packet(&self, pkt: Bytes, downlink_tx: &mpsc::Sender<Bytes>) {
+        let seg = match parse_tcp_segment(&pkt) {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(target: "seep::tun", error = %e, "TCP 段解析失败，丢弃（E9）");
+                self.increment_parse_errors();
+                return;
+            }
+        };
+        let server = SocketAddr::new(seg.dst, seg.dport);
+        let key = TcpFlowKey {
+            app: SocketAddr::new(seg.src, seg.sport),
+            server,
+        };
+        let is_first_syn = seg.syn && !seg.ack;
+        let outcome = if is_first_syn && !self.tcp.has_flow(&key) {
+            if self.tcp.active_count() >= self.config.max_flows {
+                warn!(
+                    target: "seep::tun",
+                    server = %server,
+                    max = self.config.max_flows,
+                    "TCP 流表满，拒绝新连接"
+                );
+                return;
+            }
+            let Some((decision, process)) = self.tcp_route_decision(key.app, server, None).await
+            else {
+                return; // 路由失败：丢 SYN（应用侧重传或放弃，E9 同口径）
+            };
+            self.tcp.ingest_syn(pkt, key, decision, process)
+        } else {
+            // SYN 重传（决策已粘滞不重路由）/握手中途/中途接入——直接喂栈
+            self.tcp.ingest(pkt, server.port())
+        };
+        match outcome {
+            Ok(o) => self.tcp_finish(o, downlink_tx).await,
+            Err(e) => {
+                debug!(target: "seep::tun", error = %e, "TCP 入栈失败，丢弃（E9）");
+                self.increment_parse_errors();
+            }
+        }
+    }
+
+    /// TCP 决策（§2.4 首 SYN 粘滞；Established 兜底时 known 为 SYN 面随行归因）：
+    /// 归因（若需）→ process.* 注解 → 路由。失败 None（调用方丢包/拆流）
+    async fn tcp_route_decision(
+        &self,
+        app: SocketAddr,
+        server: SocketAddr,
+        known: Option<ProcessInfo>,
+    ) -> Option<(RouteDecision, Option<ProcessInfo>)> {
+        let mut process = known;
+        if process.is_none() && self.config.has_process_rules {
+            process = self.attributor.attribute(app, SockProto::Tcp).await;
+            if process.is_none() {
+                self.stats.lock().unwrap().process_attr_miss += 1;
+            }
+        }
+        let mut metadata = FlowMetadata::default();
+        if let Some(p) = &process {
+            metadata
+                .annotations
+                .insert("process.name".to_string(), p.comm.clone());
+            metadata
+                .annotations
+                .insert("process.pid".to_string(), p.pid.to_string());
+        }
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: tcp_target(server),
+            metadata,
+        };
+        match self.router().route(ctx).await {
+            Ok(d) => Some((d, process)),
+            Err(e) => {
+                error!(target: "seep::tun", error = %e, server = %server, "TUN TCP 流路由失败，丢包");
+                None
+            }
+        }
+    }
+
+    /// poll 产物收口：下行段入通道（run 循环写 tun；测试直驱同路径）+
+    /// Established 交接（spawn forward）
+    async fn tcp_finish(&self, outcome: TcpOutcome, downlink_tx: &mpsc::Sender<Bytes>) {
+        for pkt in outcome.tx_packets {
+            if downlink_tx.send(pkt).await.is_err() {
+                return; // run 循环已退出——后续产物无处可去
+            }
+        }
+        for est in outcome.established {
+            self.spawn_tcp_forward(est).await;
+        }
+    }
+
+    /// TCP 栈补 poll（run 循环 TcpKick/Sweep 臂；测试直驱同路径）
+    async fn drive_tcp(&self, downlink_tx: &mpsc::Sender<Bytes>) {
+        let outcome = self.tcp.drive();
+        self.tcp_finish(outcome, downlink_tx).await;
+    }
+
+    /// Established 交接（§2.4）：粘滞决策命中即用，缺档（中途接入）兜底路由 →
+    /// Flow{target, io: SmolTcpStream, metadata} → output.forward（spawn；
+    /// 终局 retire 句柄，桥接面随 Flow 消亡）
+    async fn spawn_tcp_forward(&self, est: EstablishedTcp) {
+        let EstablishedTcp {
+            handle,
+            key,
+            decision,
+            process,
+        } = est;
+        let (decision, process) = match decision {
+            Some(d) => (d, process),
+            None => match self.tcp_route_decision(key.app, key.server, process).await {
+                Some(pair) => pair,
+                None => {
+                    self.tcp.abort(handle);
+                    return;
+                }
+            },
+        };
+        let Some(output) = self.flow_output.get().cloned() else {
+            // 未注入（构造期）：拆流收口（应用侧收 FIN/RST）
+            self.tcp.abort(handle);
+            return;
+        };
+        let mut metadata = FlowMetadata::default();
+        if let Some(p) = &process {
+            metadata
+                .annotations
+                .insert("process.name".to_string(), p.comm.clone());
+            metadata
+                .annotations
+                .insert("process.pid".to_string(), p.pid.to_string());
+        }
+        debug!(
+            target: "seep::tun",
+            server = %key.server,
+            node = ?decision.path,
+            process = ?process.as_ref().map(|p| p.comm.as_str()),
+            "TUN TCP 流建立（交接）"
+        );
+        let flow = Flow {
+            id: FlowId::new(),
+            target: tcp_target(key.server),
+            io: Box::new(SmolTcpStream::new(Arc::clone(&self.tcp), handle)),
+            metadata,
+        };
+        let stack = Arc::clone(&self.tcp);
+        tokio::spawn(async move {
+            if let Err(e) = output.forward(decision, flow).await {
+                debug!(target: "seep::tun", error = %e, "TUN TCP forward 结束（错误）");
+            }
+            stack.retire(handle);
+        });
+    }
+
     /// 清扫过期流（`now` 可注入——单测无需真实时钟）
     fn sweep_expired_flows_at(&self, now: Instant) {
         let expired: Vec<TunFlowKey> = self
@@ -557,9 +751,9 @@ impl TunIngress {
         self.stats.lock().unwrap().clone()
     }
 
-    /// 活跃流数（T5 seep_tun_flows_active 源）
+    /// 活跃流数（T5 seep_tun_flows_active 源；UDP 流表 + TCP 栈面合计）
     pub fn active_flows(&self) -> usize {
-        self.flow_table.len()
+        self.flow_table.len() + self.tcp.active_count()
     }
 }
 
@@ -626,6 +820,15 @@ fn udp_target(dst: SocketAddr) -> FlowTarget {
     }
 }
 
+/// SocketAddr → TCP FlowTarget（同 udp_target 口径）
+fn tcp_target(dst: SocketAddr) -> FlowTarget {
+    FlowTarget {
+        host: dst.ip().to_string(),
+        port: dst.port(),
+        proto: TargetProto::Tcp,
+    }
+}
+
 #[async_trait]
 impl IngressEndpoint for TunIngress {
     fn name(&self) -> &'static str {
@@ -648,6 +851,7 @@ mod tests {
 
     use super::*;
     use seep_core::udp::relay::MockUdpRelay;
+    use seep_platform::network::ipcodec::{build_tcp_packet, TcpFlags, TcpSegment};
     use seep_platform::network::route::{BypassAction, BypassCondition, BypassRule};
     use seep_platform::network::tun::PacketType;
 
@@ -675,7 +879,29 @@ mod tests {
             _decision: RouteDecision,
             _flow: seep_core::Flow,
         ) -> Result<seep_core::FlowReport> {
-            unreachable!("TUN UDP 面不经 FlowOutput::forward（TCP 归 T4）")
+            unreachable!("TUN UDP 面不经 FlowOutput::forward")
+        }
+    }
+
+    /// echo 型出口（TCP §4.1 全路径）：读一段 → 原样回写 → 报信号；Flow 随帧
+    /// 消亡 → SmolTcpStream Drop 关 socket → FIN 收敛
+    struct EchoOutput {
+        done: mpsc::Sender<()>,
+    }
+
+    #[async_trait]
+    impl FlowOutput for EchoOutput {
+        async fn forward(
+            &self,
+            _decision: RouteDecision,
+            mut flow: seep_core::Flow,
+        ) -> Result<seep_core::FlowReport> {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 256];
+            let n = flow.io.read(&mut buf).await?;
+            flow.io.write_all(&buf[..n]).await?;
+            let _ = self.done.send(()).await;
+            Ok(seep_core::FlowReport::default())
         }
     }
 
@@ -705,6 +931,63 @@ mod tests {
         let mut info = PacketInfo::new(PacketType::from_ip_version(4), pkt.len());
         info.parse_ip_header(&pkt).unwrap();
         (Bytes::from(pkt), info)
+    }
+
+    /// TCP 上行包 + PacketInfo（§4.1 扮演本机应用——build_tcp_packet 真校验和）
+    fn tcp_uplink_packet(
+        app: &SocketAddr,
+        server: &SocketAddr,
+        seq: u32,
+        ack: u32,
+        flags: TcpFlags,
+        payload: &[u8],
+    ) -> (Bytes, PacketInfo) {
+        let (IpAddr::V4(src), IpAddr::V4(dst)) = (app.ip(), server.ip()) else {
+            panic!("TCP 全路径测试仅 v4 面");
+        };
+        let pkt = build_tcp_packet(
+            src,
+            dst,
+            app.port(),
+            server.port(),
+            seq,
+            ack,
+            flags,
+            payload,
+        )
+        .expect("build tcp");
+        let mut info = PacketInfo::new(PacketType::from_ip_version(4), pkt.len());
+        info.parse_ip_header(&pkt).unwrap();
+        (Bytes::from(pkt), info)
+    }
+
+    /// 驱动 TCP 栈直至下行段命中谓词（无 run 循环场景的轮询替身——
+    /// drive_tcp 与 run 循环 TcpKick/Sweep 臂同路径）
+    async fn drive_until(
+        t: &Arc<TunIngress>,
+        tx: &mpsc::Sender<Bytes>,
+        rx: &mut mpsc::Receiver<Bytes>,
+        mut pred: impl FnMut(&TcpSegment<'_>) -> bool,
+    ) -> Bytes {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            t.drive_tcp(tx).await;
+            match rx.try_recv() {
+                Ok(pkt) => {
+                    if let Ok(seg) = parse_tcp_segment(&pkt) {
+                        if pred(&seg) {
+                            return pkt;
+                        }
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {}
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    panic!("下行通道断开（run 循环持有发送端——不应发生）");
+                }
+            }
+            assert!(Instant::now() < deadline, "等待下行段（谓词未命中）超时");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     fn make_ingress(
@@ -767,6 +1050,95 @@ mod tests {
         assert_eq!(dgram.sport, 53);
         assert_eq!(dgram.dport, 40000);
         assert_eq!(dgram.payload, b"dns-response");
+    }
+
+    /// §4.1 TCP 全链路（无设备）：SYN→SYN-ACK 握手（粘滞路由于首 SYN 进料）→
+    /// ACK → Established 交接 forward → 上行数据进 forward → echo 回写经补 poll
+    /// 下行 → forward 收尾 Flow 消亡 → FIN 收口。全程单次路由（决策粘滞）。
+    #[tokio::test]
+    async fn tcp_full_path_echo_without_device() {
+        let router = Arc::new(RecordingRouter {
+            seen: StdMutex::new(Vec::new()),
+            node: "game-node",
+        });
+        let connector = Arc::new(MockConnector {
+            feeds: StdMutex::new(Vec::new()),
+        });
+        let (done_tx, mut done_rx) = mpsc::channel::<()>(1);
+        let output = Arc::new(EchoOutput { done: done_tx });
+        let t = Arc::new(TunIngress::new(TunIngressConfig::default(), connector));
+        t.set_endpoints(router.clone(), output);
+        let (downlink_tx, mut downlink_rx) = mpsc::channel::<Bytes>(DOWNLINK_CHANNEL_CAP);
+
+        let app: SocketAddr = "10.66.0.1:40000".parse().unwrap();
+        let server: SocketAddr = "203.0.113.10:8080".parse().unwrap();
+        let app_isn = 1000u32;
+
+        // ① 首 SYN：粘滞路由进料（目标五元组 + 无归因注解）+ 下行 SYN-ACK
+        let (pkt, info) = tcp_uplink_packet(&app, &server, app_isn, 0, TcpFlags::SYN, b"");
+        t.handle_uplink(pkt, info, &downlink_tx).await;
+        let seen: Vec<FlowContext> = router.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "首 SYN 应路由一次");
+        assert_eq!(seen[0].target.host, "203.0.113.10");
+        assert_eq!(seen[0].target.port, 8080);
+        assert!(
+            seen[0].metadata.annotations.is_empty(),
+            "无 Process 规则时不应归因"
+        );
+        assert_eq!(t.active_flows(), 1, "TCP 流在册");
+
+        let synack_pkt = tokio::time::timeout(Duration::from_secs(2), downlink_rx.recv())
+            .await
+            .expect("SYN-ACK 应在 2s 内回到通道")
+            .expect("run 循环持有发送端（测试场景通道存活）");
+        let synack = parse_tcp_segment(&synack_pkt).unwrap();
+        assert!(synack.syn && synack.ack, "SYN 阶段应答 SYN-ACK");
+        assert_eq!((synack.sport, synack.dport), (8080, 40000));
+        assert_eq!(synack.ack_seq, app_isn + 1, "SYN 占 1 序号");
+        let srv_isn = synack.seq;
+
+        // ② ACK → Established → 交接（spawn forward 等数据；不重复路由）
+        let (pkt, info) =
+            tcp_uplink_packet(&app, &server, app_isn + 1, srv_isn + 1, TcpFlags::ACK, b"");
+        t.handle_uplink(pkt, info, &downlink_tx).await;
+
+        // ③ 上行 "hello" → forward 读 → echo 回写 → 补 poll 下行
+        let (pkt, info) = tcp_uplink_packet(
+            &app,
+            &server,
+            app_isn + 1,
+            srv_isn + 1,
+            TcpFlags::PSH_ACK,
+            b"hello",
+        );
+        t.handle_uplink(pkt, info, &downlink_tx).await;
+        let echo_pkt = drive_until(&t, &downlink_tx, &mut downlink_rx, |seg| {
+            seg.payload == b"hello"
+        })
+        .await;
+        let echo = parse_tcp_segment(&echo_pkt).unwrap();
+        assert_eq!((echo.sport, echo.dport), (8080, 40000), "下行段方向反转");
+        assert_eq!(echo.ack_seq, app_isn + 1 + 5, "应确认 'hello' 5 字节");
+        assert_eq!(
+            router.seen.lock().unwrap().len(),
+            1,
+            "决策粘滞：全程只路由一次"
+        );
+
+        // ④ forward 收尾（Flow 消亡 → close → FIN）→ 应用侧收到 FIN
+        tokio::time::timeout(Duration::from_secs(2), done_rx.recv())
+            .await
+            .expect("forward 应完成 echo")
+            .expect("通道存活");
+        let fin_pkt = drive_until(&t, &downlink_tx, &mut downlink_rx, |seg| seg.fin).await;
+        let fin = parse_tcp_segment(&fin_pkt).unwrap();
+        assert!(fin.fin && fin.ack);
+        assert_eq!(fin.ack_seq, app_isn + 1 + 5);
+
+        // ⑤ 统计（tun 读入口径 + 无解析错误）
+        let st = t.get_stats();
+        assert_eq!(st.packets_received, 3);
+        assert_eq!(st.parse_errors, 0);
     }
 
     /// 流键含 src：同目标不同源 = 两条流（归因/拆除面不串流）
