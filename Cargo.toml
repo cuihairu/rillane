@@ -31,6 +31,9 @@ serde_yaml = "0.9"
 toml = { version = "0.8", features = ["preserve_order"] }
 thiserror = "1.0"
 bytes = "1.0"
+# TUN 用户态 TCP 栈（tun-dataplane.md §2.4 T4）：std=std::time 基时序、
+# medium-ip=纯 IP 媒质（TUN IFF_NO_PI 无以太头）、socket-tcp=TCP 终结面
+smoltcp = { version = "0.14", features = ["std", "medium-ip", "socket-tcp"] }
 tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "signal", "sync", "time", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
