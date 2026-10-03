@@ -93,14 +93,12 @@ fn find_pid_by_inode(root: &Path, inode: u64) -> Option<u32> {
             continue; // 权限/已退出 → 下一个 pid
         };
         for fd in fds.flatten() {
-            if fd
-                .path()
-                .symlink_metadata()
+            // /proc/<pid>/fd/* 恒为符号链接（内核 fd 表导出，无非链接形态）——
+            // 直读 read_link 免 symlink_metadata：strace 实测本机 593 进程
+            // 6.8k fd，statx 占归因扫描 syscall 面 ~36%（首包 345ms 里的大头）
+            if std::fs::read_link(fd.path())
                 .ok()
-                .is_some_and(|m| m.file_type().is_symlink())
-                && std::fs::read_link(fd.path())
-                    .ok()
-                    .is_some_and(|l| l.to_string_lossy() == expect)
+                .is_some_and(|l| l.to_string_lossy() == expect)
             {
                 return Some(pid);
             }
