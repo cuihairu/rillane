@@ -69,16 +69,19 @@
 
 ## P1 — TUN 系统接管 + 混淆 MVP（roadmap S2 + S3 前半）
 
-- [ ] **P1-1 Linux TUN 真实现**：`/dev/net/tun` + TUNSETIFF、包读写循环，替换 `platform.rs` 占位。
+- [x] **P1-1 Linux TUN 真实现**：`/dev/net/tun` + TUNSETIFF、包读写循环，替换 `platform.rs` 占位。
   实现级设计：[docs/design/tun-dataplane.md](docs/design/tun-dataplane.md) §1（设备生命周期/接口签名；最小 `LinuxRouteManager`＝main 表显式路由 + AppliedStep 回滚；模块接线与 `platform.rs`/`TunInterface` 占位处置——注意核对结论：该文件未编译且启用即编译失败，见 status-audit §1）；§5 清单 **T0–T2** 对应本条。
   实现落定稿：[docs/design/tun-linux-impl.md](docs/design/tun-linux-impl.md)（TUNSETIFF 接口/包读写循环/platform.rs 占位替换三线收口/测试计划与落地实况 + 偏差回填 9 条）。
   本轮注记（2026-10-01 文档轮，源码零改动）：**T0–T2 已落地**（c076fb8 trait 裁剪+四工厂分派、75c7747 设备生命周期+读写+捕获钉子、92f12ba RouteManager+AppliedStep 回滚）——验收钉子 provider 半边就位（skip 守卫集成测两周期：强制名/自动名+捕获+回收断言）；「捕获 IP 包进入 FlowRouter」的 FlowRouter 半边随 T3（P1-2）收口；auto-bypass 全集（egress/mesh/control 地址）随 T3/R1 合流；musl 交叉验收归 P3-3。
+  收口注记（2026-10-03）：FlowRouter 半边随 T3 收口（a9f11dc：捕获包 → FlowContext → 路由 → 出口全链路 + TUN 作为 ingress 类型接线 runtime），与 T0–T2 合并构成完整验收（设备创建/包捕获进 FlowRouter/路由回滚 root 全权 e2e 过）——本条勾选；musl 交叉验收仍归 P3-3。
   验收：Linux 集成测试中 tun 设备创建、捕获 IP 包进入 FlowRouter（设计 §4.2 钉子）；OpenWrt（musl）可复用同路径编译（§6 假设 #9；交叉产物验收归 P3-3）。
-- [ ] **P1-2 TunIngress 接线 runtime**：IP 流重组 → `FlowContext`（注入进程/端口），TUN 作为新 ingress 类型接入。
+- [x] **P1-2 TunIngress 接线 runtime**：IP 流重组 → `FlowContext`（注入进程/端口），TUN 作为新 ingress 类型接入。
   实现级设计：[docs/design/tun-dataplane.md](docs/design/tun-dataplane.md) §2（TunFlowTable 镜像 P0-1 语义 / UDP 头编解码含 v6 强制校验和 / smoltcp TCP 面 / 进程注解 `process.*` + `MatchCondition::Process` / TunIngress 属主化不经 NetworkManager / §2.7 bypass 防环）+ §3 错误路径 + §4 测试策略 + §5 清单 **T3–T5**（**2026-09 设计稿就绪，实施未开始**；2026-09-30 六要素审计补 §2.6 与既有 ingress 的选择边界——路由决定入哪个 ingress、seep 不选，TUN 流不入 `UdpSessionTable`，§2.8 计量边界、§2.9 smoltcp poll 驱动与下行注入（T4 主路径，Notify 事件驱动非定时轮询））。
+  进度（2026-10-03 落地，T3–T5 三增量 + 双场景走查收口）：**T3 a9f11dc** UDP 全链路（五元组 TunFlowTable / 首包 `/proc` 归因 `process.*` 注解进 `MatchCondition::Process` / auto-bypass 三源防环 / §2.9 事件枚举单循环 / 满表逐最早 expiry 驱逐）+ runtime 接线（`ingress_endpoints["tun"]`、NetworkManager 让路、`Runtime::get_tun_ingress`、stop→shutdown）；**T4 b5785c2** smoltcp 0.14 TCP 用户态栈（首 SYN 粘滞路由 → Established 交接 `FlowOutput::forward`、SmolTcpStream AsyncRead/Write 桥接、kick 事件驱动 + sweep 复用的单 poll 驱动点、tcp_idle 180s 回收）；**T5 7a3024d** `seep_tun_*` 指标族（§2.8 计量边界恒渲染）；**归因优化 6f4b0e9**（fd 扫描去冗余 statx，strace 实测占 syscall 面 ~36%，冷归因 345→86ms）。双场景并发走查实测（配置样例 `config/seep-demo-dual.yaml`，2026-10-03）：同目标 1.0.0.1 上 python3→web-node、curl→game-node 两路 TCP 按进程名分流 + NTP UDP:123→game-node 按端口分流，三腿同机并发逐流日志对账；前后延迟对比 UDP +2.6ms、TCP 热流 connect 1ms ≈ 直连，冷流首包付归因一次（TTL 30s 含负缓存）。遗留：direct 出口 include 自环（走查以 uid 逃逸绕行，seepd 出站 SO_MARK/fwmark 正解归后续增量）；mesh 链路承载形态未纳入本轮走查（规则面同源，节点以 direct 演示）。
   验收：按进程/端口规则将指定游戏流量路由至 mesh 链路（TCP 对象 T4 即验；UDP 对象软依赖 P0-4 S5）；bypass（局域网/DNS/管理口）默认安全（auto-bypass 集 + 进程内兜底）。
 - [ ] **P1-3 network 配置区块 + `seepctl route apply/clear`**（勘误重开）：`SeepConfig` 顶层 `network` 区块（mode: tun/transparent——命名裁决 B4；include 语义；进程过滤走 P1-2 `MatchCondition::Process`，不进本块）；CLI 幂等应用/撤销系统路由。
   实现级设计：[docs/design/network-route.md](docs/design/network-route.md)（§1 镜像类型 schema + 转换映射表——seep-config 不加 platform 依赖；§2 seepd 派生开关 + **NetworkManager 让路裁决**（修正 build() ④ 必失败路径，audit §1.2"接线存在但不可用"就此收口）；§3 控制面三端点；§5 幂等/回滚/还原状态机（"完全还原" = 撤销 seep 所加步骤）；§8 分步清单 **R0–R4**——R0 无依赖可先行，R1 起硬依赖 P1-1 T1/T2。**2026-09 设计稿就绪待实现**；2026-09-30 六要素审计补 §2.3 RouteControl in-process 契约（apply_desired/clear/status 签名钉死，不新起 trait）与 §5 启动 apply≡CLI apply 同入口、配置文件改动需重启）。
+  进度（2026-10-03）：R0/R1 已落地——`SeepConfig` 顶层 `network` 区块（mode: tun + tun/routing 镜像子块 + validate E 矩阵）与 seepd 派生开关（`enable_network_virtualization`/`network_config`，NetworkManager 让路裁决）随 1e1a7c0 合入并单测钉住（TUN-only 装配/平接零差异）；R2–R4（控制面 apply/clear/status 三端点 + `seepctl route` CLI 幂等/回滚）待续，本条保持未勾。
   验收：`apply` 后 main 表显式路由符合预期（**口径修正**：MVP 不触碰 `ip rule`，全局接管归 V2），`clear` 完全还原；重复执行幂等；失败时自动回滚。
 - [x] **P1-4 混淆中间件 MVP（padding）**（2026-10 完成，M0–M4 分五增量落地 484a4f7/c78f0f7/1c50565/8838f04/33cef4c）：以 `FlowMiddleware` 形态实现包长填充策略，按 profile 开关。
   实现级设计：[docs/design/obfuscation-middleware.md](docs/design/obfuscation-middleware.md)（**§8 清单 M0–M5 全部落地**；§1 静态挂载点收口 C1——`FlowOutputRouter::forward` 唯一双分派口建 `MiddlewareChain`，ingress 侧不设第二挂载点；§2 策略/执行分离——`handle(Flow)` 流签名不承载帧语义，middleware 只产 `seep.obfs.padding` 注解、帧载体执行（MVP = chain 的 `MeshEnvelope` 帧，UDP 帧随 P0-4 §2，单跳 TCP 无自有帧 no-op）；§3 `obfuscation:` 区块镜像类型 + profile 容器语义（P2-3 在其上组合））。
@@ -168,7 +171,7 @@
 | 优先级 | 条目 | 对应阶段 | 状态 |
 |--------|------|---------|------|
 | P0 | 5 | S1 UDP 全链路 | 5/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷、P0-4 mesh UDP 面、P0-5 观测与配置——S0–S6 全部落地） |
-| P1 | 5 | S2 TUN + S3 前半 | 1/5（**P1-5 完成**——M0–M5 全部落地 2026-10-02；P1-1 T2/P1-3 R0/P1-4 M0 部分步已落地（另会话在途推进）；设计稿就绪 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5 已落地）） |
+| P1 | 5 | S2 TUN + S3 前半 | 4/5（**P1-1/P1-2/P1-4/P1-5 完成**——P1-1/P1-2 于 2026-10-03 收口（tun-dataplane T0–T5：a9f11dc/b5785c2/7a3024d + 归因优化 6f4b0e9 + 双场景并发走查实测）、P1-4 M0–M4 2026-10 完成（484a4f7/c78f0f7/1c50565/8838f04/33cef4c）、P1-5 M0–M5 2026-10-02 完成；余 **P1-3 部分**（R0/R1 已落地 1e1a7c0，R2–R4 CLI/控制面待续）；设计稿就绪 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5 已落地）） |
 | P2 | 8 | S3 后半 + S4 | 7/8（**P2-1..P2-6 + P2-8 完成**——均 2026-10-02 全步落地；余 P2-7 归 twin 会话在途） |
 | P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
 
