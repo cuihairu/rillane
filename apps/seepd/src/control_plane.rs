@@ -821,6 +821,81 @@ impl ControlPlane {
                 .unwrap_or(0) as f64,
         );
 
+        // TUN 数据面序列（tun-dataplane.md §2.8，恒渲染：未装配 TUN 时全零
+        // ——与 UDP 族同口径，端点不因开关消失）。方向语义：up = tun 上行
+        // 读入，down = tun 下行写回；TUN 流量不进 seep_udp_* 族（§2.8 计量
+        // 边界——两族口径不同，勿把 TUN 有流量时 seep_udp_* 为零误读为故障）
+        let (tun_stats, tun_flows) = match self.runtime.get_tun_ingress() {
+            Some(t) => (t.get_stats(), t.active_flows()),
+            None => (seep_runtime::TunIngressStats::default(), 0),
+        };
+        push_gauge(
+            &mut out,
+            "seep_tun_flows_active",
+            "Active TUN flows (UDP NAT entries + TCP stack).",
+            tun_flows as f64,
+        );
+        push_metric_header(
+            &mut out,
+            "seep_tun_packets_total",
+            "TUN packets by direction (up = read from tun, down = written to tun).",
+            "counter",
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_tun_packets_total",
+            &[("direction", "up")],
+            tun_stats.packets_received as f64,
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_tun_packets_total",
+            &[("direction", "down")],
+            tun_stats.packets_sent as f64,
+        );
+        push_metric_header(
+            &mut out,
+            "seep_tun_bytes_total",
+            "TUN bytes by direction (up = read from tun, down = written to tun).",
+            "counter",
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_tun_bytes_total",
+            &[("direction", "up")],
+            tun_stats.bytes_received as f64,
+        );
+        push_metric_labeled(
+            &mut out,
+            "seep_tun_bytes_total",
+            &[("direction", "down")],
+            tun_stats.bytes_sent as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_tun_bypass_dropped_total",
+            "TUN uplink packets dropped by bypass rules.",
+            tun_stats.bypass_dropped as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_tun_parse_errors_total",
+            "TUN packets failing IP/UDP/TCP parse.",
+            tun_stats.parse_errors as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_tun_unknown_flow_total",
+            "TUN downlink packets with no live flow match.",
+            tun_stats.unknown_flow as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_tun_process_attr_miss_total",
+            "TUN first-packet process attribution misses.",
+            tun_stats.process_attr_miss as f64,
+        );
+
         // P1-4 §5 obfs 序列（恒渲染：关闭态全零 = 零开销旁路的可观测证据
         // §2.5/E11；invocations 的 {name} 标签 = 配置挂载集，空链无条目）
         let obfs = self.runtime.get_obfs_pad_snapshot();
@@ -2857,6 +2932,34 @@ mod tests {
             "seep_udp_mesh_malformed_total",
             "seep_udp_mesh_evicted_total",
             "seep_udp_mesh_client_dropped_total",
+        ];
+        for series in zero_series {
+            assert_eq!(
+                metric_value(&s, series),
+                Some(0.0),
+                "系列 {series} 应恒渲染且值为 0"
+            );
+        }
+    }
+
+    /// tun-dataplane.md §2.8：seep_tun_* 序列族恒渲染（未装配 TUN 时全零
+    /// ——get_tun_ingress()=None 走 default 快照），方向 up/down 双值齐全
+    #[tokio::test]
+    async fn metrics_contains_full_tun_family() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+        let s = get_body(&cp, "/metrics").await;
+
+        let zero_series = [
+            "seep_tun_flows_active",
+            "seep_tun_packets_total{direction=\"up\"}",
+            "seep_tun_packets_total{direction=\"down\"}",
+            "seep_tun_bytes_total{direction=\"up\"}",
+            "seep_tun_bytes_total{direction=\"down\"}",
+            "seep_tun_bypass_dropped_total",
+            "seep_tun_parse_errors_total",
+            "seep_tun_unknown_flow_total",
+            "seep_tun_process_attr_miss_total",
         ];
         for series in zero_series {
             assert_eq!(
