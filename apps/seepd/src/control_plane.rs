@@ -3,8 +3,12 @@ use std::{
     convert::Infallible,
     net::SocketAddr,
     sync::Arc,
-    time::{Instant, SystemTime},
+    time::Instant,
 };
+// SystemTime：route handler 的 at 时间戳（Linux 门控体，platform-packaging.md）
+// 与测试临时目录名用——非 Linux 非 test 编译单元缺席（免 unused）
+#[cfg(any(target_os = "linux", test))]
+use std::time::SystemTime;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -846,10 +850,15 @@ impl ControlPlane {
         // ——与 UDP 族同口径，端点不因开关消失）。方向语义：up = tun 上行
         // 读入，down = tun 下行写回；TUN 流量不进 seep_udp_* 族（§2.8 计量
         // 边界——两族口径不同，勿把 TUN 有流量时 seep_udp_* 为零误读为故障）
+        // TUN 指标取数（Linux 门控——platform-packaging.md；非 Linux 恒零值面，
+        // TunIngressStats 平台无关、恒渲染口径 tun-dataplane.md §2.8 不变）
+        #[cfg(target_os = "linux")]
         let (tun_stats, tun_flows) = match self.runtime.get_tun_ingress() {
             Some(t) => (t.get_stats(), t.active_flows()),
             None => (seep_runtime::TunIngressStats::default(), 0),
         };
+        #[cfg(not(target_os = "linux"))]
+        let (tun_stats, tun_flows) = (seep_runtime::TunIngressStats::default(), 0);
         push_gauge(
             &mut out,
             "seep_tun_flows_active",
@@ -1719,6 +1728,9 @@ impl ControlPlane {
     }
 
     /// network-route.md §3: POST /network/route/apply {dry_run?: bool}
+    // 路由面属 TUN 数据面：Linux 门控（platform-packaging.md）；非 Linux 恒
+    // 503——语义同 TUN 未装配分支，端点形状不因平台消失
+    #[cfg(target_os = "linux")]
     async fn handle_route_apply(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
         #[derive(Deserialize)]
         struct ApplyReq {
@@ -1806,7 +1818,16 @@ impl ControlPlane {
         }
     }
 
+    #[cfg(not(target_os = "linux"))]
+    async fn handle_route_apply(&self, _req: Request<impl RequestBody>) -> Response<RespBody> {
+        text(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TUN 未启用（仅 Linux 支持）",
+        )
+    }
+
     /// network-route.md §3: POST /network/route/clear
+    #[cfg(target_os = "linux")]
     async fn handle_route_clear(&self, _req: Request<impl RequestBody>) -> Response<RespBody> {
         let tun_ingress = match self.runtime.get_tun_ingress() {
             Some(t) => t,
@@ -1843,6 +1864,7 @@ impl ControlPlane {
     }
 
     /// network-route.md §3: GET /network/route/status
+    #[cfg(target_os = "linux")]
     async fn handle_route_status(&self) -> Response<RespBody> {
         let tun_ingress = match self.runtime.get_tun_ingress() {
             Some(t) => t,
@@ -1888,6 +1910,22 @@ impl ControlPlane {
                 "up": status.up,
                 "applied": applied
             }),
+        )
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn handle_route_clear(&self, _req: Request<impl RequestBody>) -> Response<RespBody> {
+        text(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TUN 未启用（仅 Linux 支持）",
+        )
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn handle_route_status(&self) -> Response<RespBody> {
+        text(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TUN 未启用（仅 Linux 支持）",
         )
     }
 }
@@ -3791,9 +3829,11 @@ mod tests {
     }
 
     // ---------- network-route.md §7.1：route 三端点 ----------
+    // （Linux 门控——路由面属 TUN 数据面，platform-packaging.md）
 
     /// network-route.md §7.1 端点测试基座：Tun 模式 runtime（build 不 start——
     /// 设备未创建、接口名由测试注入，设备 I/O 面零触达）
+    #[cfg(target_os = "linux")]
     async fn build_tun_runtime() -> Arc<Runtime> {
         let rc = RuntimeConfig {
             enable_network_virtualization: true,
@@ -3843,12 +3883,15 @@ mod tests {
     }
 
     /// 2xx 响应体 → JSON（调用方先断言状态码）
+    // 仅 route 端点测试消费（Linux 门控面，platform-packaging.md）
+    #[cfg(target_os = "linux")]
     async fn resp_json(resp: Response<RespBody>) -> serde_json::Value {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&body).unwrap()
     }
 
     /// step JSON → argv 字符串表
+    #[cfg(target_os = "linux")]
     fn step_argv(step: &serde_json::Value) -> Vec<String> {
         step["argv"]
             .as_array()
@@ -3889,6 +3932,7 @@ mod tests {
     /// §3/§7.1 端点形状：dry-run planned（argv 精确 + at）与 executed/rolled_back
     /// 两态 + E7 失败形（真 ip 对不存在设备非零退出——无特权可跑、零系统
     /// 变更）+ clear E8 空表 + status 对账（mode/device/mtu/up/applied）
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn route_endpoints_shapes_on_unstarted_tun() {
         let runtime = build_tun_runtime().await;

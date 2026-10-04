@@ -6,7 +6,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     sync::{Arc, OnceLock, RwLock},
     time::{Duration, Instant},
 };
@@ -23,8 +23,11 @@ use tokio::{
 
 use seep_config::{
     resolve_udp_enabled, EgressConfig, EgressDescriptor, GroupMember, IngressConfig,
-    IngressDescriptor, MatchCondition, PolicyGroup, RoutingConfig, SeepConfig, UdpConfig,
+    IngressDescriptor, PolicyGroup, RoutingConfig, SeepConfig, UdpConfig,
 };
+// TUN 装配块专用（Linux 门控面，platform-packaging.md）
+#[cfg(target_os = "linux")]
+use seep_config::MatchCondition;
 use seep_core::udp::table::chain_id_of;
 use seep_core::udp::{ChainFailureEvent, EgressUdpConnector};
 use seep_core::{
@@ -32,10 +35,14 @@ use seep_core::{
     MiddlewareChain, RouteDecision, RoutePath,
 };
 use seep_mesh::{MeshRegistry, MeshSession, NodeId, SessionId};
+#[cfg(target_os = "linux")]
 use seep_platform::network::route::RouteDestination;
 use seep_platform::network::{NetworkConfig, NetworkManager, NetworkMode};
 use seep_protocols::middleware::{ANN_ROUTE_EGRESS, ANN_ROUTE_KIND};
+#[cfg(target_os = "linux")]
+use std::net::IpAddr;
 
+#[cfg(target_os = "linux")]
 use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use seep_protocols::{
     DirectConnector, HttpConnector, HttpIngress, Hysteria2Connector, MixedIngress,
@@ -435,6 +442,9 @@ impl RuntimeBuilder {
         // 注入同一 FlowRouter（start() ingress 循环统一 spawn run()）。
         // 注：validate() 要求 ≥1 个常规入口——TUN-only 配置被拒（MVP 口径：
         // egress/UDP 装配面以常规入口为锚，TUN 与 socks5 并存即典型形态）。
+        // Linux 门控（platform-packaging.md：TUN 数据面 Linux-only）——非 Linux
+        // 编译单元配置了 TUN 显式 Err，未配置恒 None（口径同 network 四工厂）。
+        #[cfg(target_os = "linux")]
         let tun_ingress = match (tun_enabled, tun_udp_connector) {
             (true, Some(connector)) => {
                 let network_cfg = self
@@ -485,6 +495,14 @@ impl RuntimeBuilder {
             }
             _ => None,
         };
+        #[cfg(not(target_os = "linux"))]
+        let () = {
+            let _ = tun_udp_connector;
+            anyhow::ensure!(
+                !tun_enabled,
+                "TUN 面仅 Linux 支持（tun-dataplane.md；Windows/macOS 打包面见 platform-packaging.md §6）"
+            );
+        };
 
         let subscription_manager = if self.runtime_config.enable_hot_reload {
             Some(Arc::new(SubscriptionManager::new()))
@@ -519,6 +537,7 @@ impl RuntimeBuilder {
             transport_pool,
             tls_factory,
             network_manager,
+            #[cfg(target_os = "linux")]
             tun_ingress,
             dns_service,
             subscription_manager,
@@ -794,7 +813,8 @@ pub struct Runtime {
     network_manager: Option<Arc<Mutex<NetworkManager>>>,
     /// TUN 入口单例（tun-dataplane.md §2.6；None = 未启用/非 Tun 模式）。
     /// ingress_endpoints 内共享同一 Arc——本字段供 stop() 优雅关停与
-    /// 控制面指标取数（T5）定向寻址
+    /// 控制面指标取数（T5）定向寻址。Linux 门控（platform-packaging.md）
+    #[cfg(target_os = "linux")]
     tun_ingress: Option<Arc<TunIngress>>,
     /// P2-8 M1 观测接缝：DNS 分流服务单例（start/stop 消费 + 控制面
     /// /dns/stats 经 getter 取数；None = network.dns 块缺席/关闭）
@@ -1284,6 +1304,7 @@ impl Runtime {
         *self.running.write().expect("running lock poisoned") = false;
         // TUN 优雅关停：通知 run 循环 → teardown（路由回滚/设备销毁在
         // ingress 任务内完成，tun-dataplane.md §2.6）
+        #[cfg(target_os = "linux")]
         if let Some(t) = &self.tun_ingress {
             t.shutdown();
         }
@@ -1388,7 +1409,8 @@ impl Runtime {
     }
 
     /// 获取 TUN 入口（tun-dataplane.md T5 观测面：seep_tun_* 指标与流表
-    /// 状态取数；None = 未启用）
+    /// 状态取数；None = 未启用）。Linux 门控（platform-packaging.md）
+    #[cfg(target_os = "linux")]
     pub fn get_tun_ingress(&self) -> Option<Arc<TunIngress>> {
         self.tun_ingress.clone()
     }
@@ -2063,7 +2085,9 @@ fn build_ingress_endpoints(
 /// P0-5 §10-S2：`UdpConfig` → `UdpSessionConfig` 显式映射（S0 十字段全覆盖，
 /// 禁 `..Default::default()` 兜底——防「字段加了没接线」；lifetime 两态映射）。
 /// egress 出口的 server 主机面（Direct 无远端；Wireguard 为 endpoint 字段，
-/// 其余同名字段）——§2.7 auto-bypass 集的 egress 半边输入（字面量 IP 或域名）
+/// 其余同名字段）——§2.7 auto-bypass 集的 egress 半边输入（字面量 IP 或域名）。
+/// 仅 TUN 装配块消费（Linux 门控面）
+#[cfg(target_os = "linux")]
 fn egress_server_host(e: &EgressConfig) -> Option<&str> {
     match e {
         EgressConfig::Direct => None,
@@ -3535,6 +3559,7 @@ mod tests {
     /// （防双设备）、UDP 块必建（TUN NAT 面共享连接器）、Process 规则派生
     /// has_process_rules、api_bind 入 auto-bypass 字面量集；未启用 → 全缺省。
     #[test]
+    #[cfg(target_os = "linux")]
     fn t3_tun_mode_build_wiring() {
         let tun_platform_cfg = seep_platform::network::NetworkConfig {
             mode: NetworkMode::Tun,

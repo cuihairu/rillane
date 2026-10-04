@@ -117,19 +117,9 @@ struct TunFlowEntry {
     cancel: Arc<Notify>,
 }
 
-/// TunIngress 统计（方向语义：received = tun 上行读入；sent = tun 下行写回——
-/// 与「代理出站发送」无关，后者归 UDP 序列自身的指标）
-#[derive(Debug, Clone, Default)]
-pub struct TunIngressStats {
-    pub packets_received: u64,
-    pub packets_sent: u64,
-    pub bytes_received: u64,
-    pub bytes_sent: u64,
-    pub bypass_dropped: u64,
-    pub parse_errors: u64,
-    pub unknown_flow: u64,
-    pub process_attr_miss: u64,
-}
+/// TunIngress 统计（平台无关面，独立于 tun_stats——非 Linux 编译单元的
+/// 控制面恒渲染仍需引用；tun-dataplane.md §2.8）
+pub use crate::tun_stats::TunIngressStats;
 
 /// run 循环事件（事件枚举模式：select 产物先物化再 match，写 tun 的可变
 /// 借用发生在 match 臂——借用检查与「读挂起时写可就绪」两全）

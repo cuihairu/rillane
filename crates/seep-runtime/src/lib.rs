@@ -18,10 +18,18 @@ pub mod network_config;
 pub mod obfs_config;
 pub mod pool_config;
 pub mod runtime_builder;
-// TUN 入口 + /proc 进程归因 + TCP 用户态栈（tun-dataplane.md §2；Linux 数据面）
+// TUN 入口 + /proc 进程归因 + TCP 用户态栈（tun-dataplane.md §2；Linux 数据面）。
+// 非 Linux 编译单元整体门控（windows-gnu 打包面 platform-packaging.md；
+// 破损修复：tun_ingress 的 seep_platform::network::linux import 无门控，
+// E0432 于 x86_64-pc-windows-gnu）
+#[cfg(target_os = "linux")]
 pub mod tun_ingress;
+#[cfg(target_os = "linux")]
 pub mod tun_process;
+#[cfg(target_os = "linux")]
 pub mod tun_tcp;
+// 统计快照是平台无关面（控制面 seep_tun_* 恒渲染，§2.8）
+pub mod tun_stats;
 mod udp_chain; // P0-4 §5 客户端出站（私有：消费点 = runtime_builder UDP 块，S5 接线）
 
 pub use chain::{
@@ -42,8 +50,11 @@ pub use runtime_builder::{
     RuntimeBuilder, RuntimeConfig, RuntimeEvent, RuntimeStats, SubscriptionEventType,
 };
 pub use seep_platform::network::NetworkMode;
-pub use tun_ingress::{Proto as TunProto, TunIngress, TunIngressConfig, TunIngressStats};
+#[cfg(target_os = "linux")]
+pub use tun_ingress::{Proto as TunProto, TunIngress, TunIngressConfig};
+#[cfg(target_os = "linux")]
 pub use tun_process::{ProcessAttributor, ProcessInfo, SockProto};
+pub use tun_stats::TunIngressStats;
 // P0-5 §2.4：client 出站侧 UDP 计数（模块私有，观测 getter 的返回类型经此公开）
 pub use udp_chain::UdpClientMetrics;
 
