@@ -1,0 +1,32 @@
+# SEEP minimal runnable config (Windows template - place at C:\ProgramData\seep\seep.yaml)
+#
+# Same schema as config/seep.yaml; minimal face = socks ingress + direct egress.
+# Install via install-service.ps1 (copies this file when target config is absent).
+# Edit admin_token before starting the service.
+#
+# NOTE: the TUN face (network.tun) is Linux-only (P1-2); it is deliberately
+# absent here. Windows tunnel integration is a later platform increment.
+
+control:
+  api_bind: 127.0.0.1:9090
+  uds_path: null
+  admin_token: change-me
+
+telemetry:
+  log_level: info
+  enable_metrics: true
+  enable_tracing: false
+
+ingress:
+  - name: socks-in
+    type: socks5
+    bind: 0.0.0.0:7890
+
+egress:
+  - name: direct-main
+    type: direct
+
+routing:
+  default_node: direct-main
+  groups: []
+  rules: []
