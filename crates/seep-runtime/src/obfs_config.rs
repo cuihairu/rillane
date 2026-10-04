@@ -336,6 +336,15 @@ pub fn build_middleware_chain(
             ),
         }
     }
+    // P3-2（plugin-loader.md §2.1/§2.3）：插件在内置链之后按声明序追加——
+    // 链序 = 内置声明序 + plugins 声明序；JIT 编译在此同步发生（装配期，不占运行期）
+    for plugin in &cfg.plugins {
+        let opts = seep_plugins::PluginLoadOptions {
+            fuel: plugin.fuel.unwrap_or(seep_plugins::DEFAULT_PLUGIN_FUEL),
+        };
+        let mw = seep_plugins::load_plugin(&plugin.path, opts)?;
+        mws.push(mw);
+    }
     Ok(MiddlewareChain::new(mws))
 }
 
@@ -343,7 +352,7 @@ pub fn build_middleware_chain(
 mod tests {
     use std::collections::BTreeMap;
 
-    use seep_config::ObfsProfileConfig;
+    use seep_config::{ObfsPluginConfig, ObfsProfileConfig};
     use seep_core::{PaddingMode, PaddingSpec};
 
     use super::*;
@@ -374,6 +383,7 @@ mod tests {
                 },
             )]),
             padding: None,
+            plugins: Vec::new(),
         }
     }
 
@@ -749,5 +759,50 @@ mod tests {
             serde_json::to_string(&spec).unwrap(),
         );
         assert_eq!(padding_spec_from_annotations(&ann), Some(spec));
+    }
+    /// P3-2（plugin-loader.md §4.3）：build_middleware_chain 装配——plugins 在
+    /// 内置链之后按声明序追加（链名序断言）、坏路径构建期 Err。
+    #[test]
+    fn build_chain_appends_plugins_after_builtins() {
+        // 最小 wasm 插件（与 seep-plugins §4.1 同 ABI 面；wat 内联编译落盘）
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (global $heap (mut i32) (i32.const 1024))
+            (data (i32.const 0) "chain-test-plugin\00")
+            (func (export "alloc") (param $size i32) (result i32)
+                (local $p i32)
+                (local.set $p (global.get $heap))
+                (global.set $heap (i32.add (local.get $p) (i32.add (local.get $size) (i32.const 7))))
+                (local.get $p))
+            (func (export "plugin_name") (result i32) (i32.const 0))
+            (func (export "on_flow") (param i32 i32 i32 i32) (result i32) (i32.const 0))
+        )"#;
+        let dir = std::env::temp_dir().join(format!("seep-chain-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm_path = dir.join("chain-test.wasm");
+        std::fs::write(&wasm_path, wat::parse_str(wat).unwrap()).unwrap();
+
+        let mut cfg = profile_cfg();
+        cfg.plugins = vec![ObfsPluginConfig {
+            path: wasm_path.clone(),
+            fuel: None,
+        }];
+        let chain = build_middleware_chain(Some(&cfg), &[]).expect("装配应成功");
+        assert_eq!(chain.len(), 2, "内置 1 + 插件 1");
+        // 链名序断言（MiddlewareChain Debug 以名字呈现）：padding 在前、插件在后
+        let dbg = format!("{chain:?}");
+        let pad = dbg.find("padding").expect("内置名应可见");
+        let plug = dbg.find("chain-test-plugin").expect("插件名应可见");
+        assert!(pad < plug, "插件应追加在内置链之后：{dbg}");
+
+        // 坏路径构建期 Err（validate 拦存在性；此处钉直调防御面）
+        cfg.plugins = vec![ObfsPluginConfig {
+            path: dir.join("ghost.wasm"),
+            fuel: None,
+        }];
+        let err = build_middleware_chain(Some(&cfg), &[]).unwrap_err();
+        assert!(err.to_string().contains("ghost.wasm"), "{err:#}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

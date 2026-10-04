@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use seep_config::{ApplyTo, ObfsProfileConfig, ObfuscationConfig, PaddingBlockConfig, SeepConfig};
+use seep_config::{
+    ApplyTo, ObfsPluginConfig, ObfsProfileConfig, ObfuscationConfig, PaddingBlockConfig, SeepConfig,
+};
 
 const BASE_YAML: &str = r#"
 control:
@@ -119,6 +121,7 @@ fn obfuscation_block_serde_roundtrip() {
             ),
         ]),
         padding: None,
+        plugins: Vec::new(),
     };
     let rendered = serde_yaml::to_string(&cfg).expect("应可序列化");
     assert!(
@@ -464,4 +467,69 @@ profiles:
     )
     .unwrap();
     cfg.validate().expect("仅 timing 也视为有策略");
+}
+
+/// P3-2（plugin-loader.md §4.3）：plugins 块校验矩阵——仅 plugins 亦满足 E1、
+/// 路径不存在构建期拦截、关闭态容忍半成品（§3.3-1 同语义）、fuel ≥ 1、
+/// deny_unknown_fields 收口。
+#[test]
+fn obfuscation_plugins_validate_matrix() {
+    // validate 只查存在性，内容归载入器（seep-plugins）
+    let wasm =
+        std::env::temp_dir().join(format!("seep-plugins-validate-{}.wasm", std::process::id()));
+    std::fs::write(&wasm, b"\0asm stub").unwrap();
+    let plugin = |path: &std::path::Path, fuel: Option<u64>| ObfsPluginConfig {
+        path: path.to_path_buf(),
+        fuel,
+    };
+
+    // 仅 plugins（无内置策略）满足 E1（validate 扩 || !plugins.is_empty()）
+    ObfuscationConfig {
+        enabled: true,
+        middleware: vec![],
+        plugins: vec![plugin(&wasm, None)],
+        ..Default::default()
+    }
+    .validate()
+    .expect("plugins 应计入已配策略");
+
+    // enabled + 路径不存在 → E1 构建期拦截
+    let ghost = std::path::Path::new("/nonexistent/seep/ghost.wasm");
+    let err = ObfuscationConfig {
+        enabled: true,
+        middleware: vec![],
+        plugins: vec![plugin(ghost, None)],
+        ..Default::default()
+    }
+    .validate()
+    .expect_err("路径不存在应报 E1");
+    assert!(err.to_string().contains("E1"), "{err}");
+
+    // 关闭态容忍半成品（路径不存在的条目不报）
+    ObfuscationConfig {
+        enabled: false,
+        middleware: vec![],
+        plugins: vec![plugin(ghost, None)],
+        ..Default::default()
+    }
+    .validate()
+    .expect("关闭态应容忍半成品配置");
+
+    // fuel=0 拦截（指令预算下界）
+    let err = ObfuscationConfig {
+        enabled: true,
+        middleware: vec![],
+        plugins: vec![plugin(&wasm, Some(0))],
+        ..Default::default()
+    }
+    .validate()
+    .expect_err("fuel=0 应被拦截");
+    assert!(err.to_string().contains("fuel"), "{err}");
+
+    // deny_unknown_fields：未知字段拦截
+    let err = serde_yaml::from_str::<ObfsPluginConfig>("path: /tmp/x.wasm\nbogus: 1\n")
+        .expect_err("未知字段应被拒");
+    assert!(err.to_string().contains("unknown field"), "{err}");
+
+    std::fs::remove_file(&wasm).ok();
 }

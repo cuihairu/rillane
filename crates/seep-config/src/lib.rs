@@ -515,6 +515,9 @@ pub struct ObfuscationConfig {
     /// P2-4：内联 shaping 策略
     #[serde(default)]
     pub shaping: Option<ShapingBlockConfig>,
+    /// P3-2 WASM 插件块（plugin-loader.md §2.3）：在内置链之后按声明序追加
+    #[serde(default)]
+    pub plugins: Vec<ObfsPluginConfig>,
 }
 
 impl Default for ObfuscationConfig {
@@ -530,8 +533,20 @@ impl Default for ObfuscationConfig {
             timing: None,
             default_shaping: None,
             shaping: None,
+            plugins: Vec::new(),
         }
     }
+}
+
+/// P3-2 插件条目（plugin-loader.md §2.3）：wasm 产物路径 + 每调用 fuel 预算。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObfsPluginConfig {
+    /// wasm 二进制路径（相对路径按进程 CWD 解析）
+    pub path: PathBuf,
+    /// 每调用 fuel 指令预算（缺省 1e8，seep-plugins::DEFAULT_PLUGIN_FUEL）
+    #[serde(default)]
+    pub fuel: Option<u64>,
 }
 
 fn default_obfs_middleware() -> Vec<String> {
@@ -564,9 +579,26 @@ impl ObfuscationConfig {
                 || self.default_timing.is_some()
                 || self.timing.is_some()
                 || self.default_shaping.is_some()
-                || self.shaping.is_some(),
-            "obfuscation.enabled=true 但未配策略（default_*/内联 任一维任选其一，E1）"
+                || self.shaping.is_some()
+                || !self.plugins.is_empty(),
+            "obfuscation.enabled=true 但未配策略（default_*/内联/plugins 任一维任选其一，E1）"
         );
+        // P3-2（plugin-loader.md §2.3）：enabled 时 path 必须存在（E1 同款构建期拦截；
+        // 关闭态容忍半成品，§3.3-1 同语义）
+        for plugin in &self.plugins {
+            anyhow::ensure!(
+                plugin.path.exists(),
+                "obfuscation.plugins 路径不存在：{:?}（E1，相对路径按进程 CWD 解析）",
+                plugin.path
+            );
+            if let Some(fuel) = plugin.fuel {
+                anyhow::ensure!(
+                    fuel >= 1,
+                    "obfuscation.plugins fuel 必须 ≥ 1（{:?}）",
+                    plugin.path
+                );
+            }
+        }
         if let Some(name) = &self.default_padding {
             let profile = self.profiles.get(name).ok_or_else(|| {
                 anyhow::anyhow!("obfuscation.default_padding 指向未定义 profile：{name:?}（E3）")

@@ -12,6 +12,7 @@ members = [
     "crates/seep-mesh",
     "crates/seep-subscription",
     "crates/seep-ffi",
+    "crates/seep-plugins",
 ]
 resolver = "2"
 
