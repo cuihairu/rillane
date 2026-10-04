@@ -819,11 +819,26 @@ impl ControlPlane {
         );
         push_counter(
             &mut out,
+            "seep_udp_mesh_replay_dropped_total",
+            "Mesh UDP envelopes dropped by the anti-replay window (E4).",
+            udp_mesh.replay_dropped as f64,
+        );
+        push_counter(
+            &mut out,
             "seep_udp_mesh_client_dropped_total",
             "Client-side mesh UDP downlink drops.",
             self.runtime
                 .get_udp_client_metrics()
                 .map(|m| m.dropped())
+                .unwrap_or(0) as f64,
+        );
+        push_counter(
+            &mut out,
+            "seep_udp_mesh_client_replay_dropped_total",
+            "Client-side mesh UDP downlink envelopes dropped by the anti-replay window.",
+            self.runtime
+                .get_udp_client_metrics()
+                .map(|m| m.replay_dropped())
                 .unwrap_or(0) as f64,
         );
 
@@ -1159,6 +1174,7 @@ impl ControlPlane {
                 .get_udp_client_metrics()
                 .map(|m| UdpClientDroppedDto {
                     dropped: m.dropped(),
+                    replay_dropped: m.replay_dropped(),
                 }),
         };
         json(StatusCode::OK, &dto)
@@ -1891,6 +1907,8 @@ struct UdpStatsDto {
 #[derive(Debug, Clone, Serialize)]
 struct UdpClientDroppedDto {
     dropped: u64,
+    /// P2-7 M1 §3.6：下行防重放窗口拒帧（E4，与 dropped 分立）
+    replay_dropped: u64,
 }
 
 /// P2-8 M1 dns-partition.md §6 `/dns/stats` 响应体（引擎 `DnsStatsSnapshot`
@@ -2573,6 +2591,11 @@ mod tests {
     }
 
     async fn build_runtime(mesh: bool, chain: bool) -> Arc<Runtime> {
+        // mesh+chain 构建全部与 mtls env 快照测窗口串行（MESH_MTLS_ENV_TEST_LOCK
+        // 注记）：build() 的 enable_mesh 分支在 SEEP_MESH_MTLS=1 时无条件注入
+        // from_env_strict()（runtime_builder.rs），任何并发 build 都可能吸入他测
+        // env——锁住整个构建序列使窗口与调用者完全不相交（零差异路径不再赌时序）
+        let _env_serial = MESH_MTLS_ENV_TEST_LOCK.lock().await;
         let cfg_path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/seep.yaml");
         let cfg = SeepConfig::load_from_path(cfg_path).unwrap();
@@ -2582,6 +2605,10 @@ mod tests {
             mesh_config: if mesh {
                 Some(MeshConfig {
                     allow_plaintext_data_plane: true,
+                    // default() 的 data_plane_tls=from_env() 在并发测试窗口内
+                    // 会吸入他测的 SEEP_MESH_MTLS_*（mtls 快照测的临时文件），
+                    // start() 读文件迟到 ENOENT——显式钉死 None 去随机性
+                    data_plane_tls: None,
                     ..MeshConfig::default()
                 })
             } else {
@@ -2622,10 +2649,18 @@ mod tests {
         assert!(body.contains("mesh mTLS not enabled"));
     }
 
+    /// P2-7 R3 测试收编：SEEP_MESH_MTLS_* 是**进程级全局**——本测的 env 窗口
+    /// 会泄漏进同进程并发跑 `start()` 的 udp_stats_endpoint_shape（build() 的
+    /// data_plane_tls 注入读 env：窗口内路径存在但 cert 文件未写完 → start()
+    /// load_cert_chain ENOENT 晚炸）。两测持同一把锁串行化，确定性消歧。
+    static MESH_MTLS_ENV_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     /// P2-7 M0 §4.3：env 装配 mTLS（SEEP_MESH_MTLS=1 + 撤销 env/文件）→ 200 形状——
     /// static_count/文件态（path/loaded/mtime_secs/count/entries/error:null）。
     #[tokio::test]
     async fn mtls_revoked_shape_with_mesh_tls() {
+        let _env_serial = MESH_MTLS_ENV_TEST_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!(
             "seepd_mtls_revoked_{}",
             SystemTime::now()
@@ -3314,7 +3349,9 @@ mod tests {
             "seep_udp_mesh_unknown_flow_total",
             "seep_udp_mesh_malformed_total",
             "seep_udp_mesh_evicted_total",
+            "seep_udp_mesh_replay_dropped_total",
             "seep_udp_mesh_client_dropped_total",
+            "seep_udp_mesh_client_replay_dropped_total",
         ];
         for series in zero_series {
             assert_eq!(
@@ -3694,6 +3731,8 @@ mod tests {
 
         // —— 态二：relay 角色 + chain+udp + start() → mesh 对象（零流量全零）、
         //    mesh_client 出现（chain+udp 桥 build 期装配）——
+        // 与 mtls env 快照测串行（MESH_MTLS_ENV_TEST_LOCK 注记：进程级 env 泄漏）
+        let _env_serial = MESH_MTLS_ENV_TEST_LOCK.lock().await;
         let runtime2 = Arc::new(
             RuntimeBuilder::new(s4_udp_config())
                 .with_runtime_config(RuntimeConfig {
@@ -3706,6 +3745,8 @@ mod tests {
                         listen_address: "127.0.0.1:0".parse().unwrap(),
                         allow_plaintext_data_plane: true,
                         udp_allow_plaintext_data_plane: true,
+                        // 同 build_runtime 注记：钉死 None 防并发 env 吸入（ENOENT 晚炸）
+                        data_plane_tls: None,
                         ..MeshConfig::default()
                     }),
                     ..RuntimeConfig::default()
@@ -3726,6 +3767,7 @@ mod tests {
             "forwarded_up",
             "forwarded_down",
             "malformed",
+            "replay_dropped",
             "unknown_flow",
             "evicted",
             "flows_active",
@@ -3737,6 +3779,11 @@ mod tests {
             .and_then(|m| m.as_object())
             .expect("chain+udp 桥装配应出现 mesh_client");
         assert_eq!(mc.get("dropped"), Some(&serde_json::json!(0)));
+        assert_eq!(
+            mc.get("replay_dropped"),
+            Some(&serde_json::json!(0)),
+            "mesh_client.replay_dropped 零流量应为 0"
+        );
 
         for t in tasks {
             t.abort();

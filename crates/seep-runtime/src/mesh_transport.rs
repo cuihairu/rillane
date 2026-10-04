@@ -3,7 +3,7 @@
 //! This implements a simple "hop-by-hop" forwarding protocol between Seep nodes.
 //! It is intentionally minimal, but supports optional mTLS for encryption/authentication.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::{
     fs::File,
     io::BufReader,
@@ -992,6 +992,9 @@ struct UdpFaceMetrics {
     forwarded_down: AtomicU64,
     /// 解码拒绝（§2 校验失败）+ §13-3 超界 + §14-1 hop 溢出
     malformed: AtomicU64,
+    /// P2-7 M1 §3.6：防重放窗口拒帧（E4 静默丢弃——不混 malformed/unknown_flow，
+    /// 新语义新计数；拒绝即计数，与快照/渲染不变式一致）
+    replay_dropped: AtomicU64,
     /// 缓存条目数 gauge（插/逐/清扫后同步——净额即 len；§13-2 允许 sweep 时点偏差）
     flows_active: AtomicI64,
 }
@@ -1002,6 +1005,7 @@ impl UdpFaceMetrics {
             forwarded_up: AtomicU64::new(0),
             forwarded_down: AtomicU64::new(0),
             malformed: AtomicU64::new(0),
+            replay_dropped: AtomicU64::new(0),
             flows_active: AtomicI64::new(0),
         }
     }
@@ -1016,6 +1020,8 @@ pub struct UdpFaceSnapshot {
     pub forwarded_up: u64,
     pub forwarded_down: u64,
     pub malformed: u64,
+    /// P2-7 M1 §3.6：防重放窗口拒帧（E4），counter
+    pub replay_dropped: u64,
     pub flows_active: i64,
     pub unknown_flow: u64,
     pub evicted: u64,
@@ -1173,6 +1179,7 @@ impl UdpFace {
             forwarded_up: self.metrics.forwarded_up.load(Ordering::Relaxed),
             forwarded_down: self.metrics.forwarded_down.load(Ordering::Relaxed),
             malformed: self.metrics.malformed.load(Ordering::Relaxed),
+            replay_dropped: self.metrics.replay_dropped.load(Ordering::Relaxed),
             flows_active: self.metrics.flows_active.load(Ordering::Relaxed),
             unknown_flow: self.cache.unknown_flow_count(),
             evicted: self.cache.evicted_count(),
@@ -1181,14 +1188,17 @@ impl UdpFace {
 }
 
 /// exit 下行 task（§4 / §13-1，与 P0-1 forwarder 同构）：target 回包 → 封
-/// `UdpEnvelope{dir:Down, Cached, hop_index:0}` → 面 socket 发往 `cache.prev`
-/// （每次现读 prev——FULL 重关联刷新后下行随之改向）。
+/// `UdpEnvelope{dir:Down, Cached, hop_index:0, version:2, seq: 递增}` → 面 socket
+/// 发往 `cache.prev`（每次现读 prev——FULL 重关联刷新后下行随之改向）。
+/// P2-7 M1 §3.3：`down_seq` 序号源随建流新建（§13-1 生命周期随 ExitFlow——重关联
+/// retire 重建后序号归零，与接收侧窗口移除同步）。
 async fn exit_downlink_loop(
     face: Arc<UdpFace>,
     flow: Arc<UdpSocket>,
     face_sock: Arc<UdpSocket>,
     flow_id: [u8; 16],
     target: (String, u16),
+    down_seq: Arc<AtomicU32>,
 ) {
     let mut buf = vec![0u8; 65535];
     loop {
@@ -1206,15 +1216,16 @@ async fn exit_downlink_loop(
             return;
         };
         let env = UdpEnvelope {
-            version: UDP_ENVELOPE_VERSION,
+            version: UDP_ENVELOPE_VERSION_V2,
             dir: UdpDir::Down,
             flow_id,
             target_host: target.0.clone(),
             target_port: target.1,
             path_mode: UdpPathMode::Cached,
             hop_index: 0, // §14-1：下行发送端（exit）置 0
-            seq: 0,
-            seq_present: false, // P2-7 M1 R3：exit 下行序号源接入
+            // P2-7 M1 §3.3：exit 下行单调序号（建流时新建，fetch_add 即单调）
+            seq: down_seq.fetch_add(1, Ordering::Relaxed),
+            seq_present: true,
             path: Vec::new(),
             payload: buf[..n].to_vec(),
         };
@@ -1582,9 +1593,10 @@ impl MeshDataPlane {
             }
         };
         // P2-7 M1 §3.4/§3.7 E4：防重放窗口（decode 后、分派前；v1 帧
-        // seq_present=false fail-open；重放/超窗静默丢弃——replay_dropped
-        // 计数在 R3 并入计数面，此处先丢不计数）
+        // seq_present=false fail-open）；重放/超窗静默丢弃即计数——§3.6
+        // 拒绝即计数不变式（不混 malformed/unknown_flow）
         if !face.replay_check(env.flow_id, env.dir, env.seq, env.seq_present) {
+            face.metrics.replay_dropped.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         match env.dir {
@@ -1832,12 +1844,16 @@ impl MeshDataPlane {
             if is_full {
                 face.associate(env.flow_id, None, from);
             }
+            // P2-7 M1 §3.3：下行序号源随建流新建（旧 task 已 retire abort，
+            // 序号归零与接收侧窗口移除同刻——重关联无序号断层混淆）
+            let down_seq = Arc::new(AtomicU32::new(0));
             let task = tokio::spawn(exit_downlink_loop(
                 Arc::clone(face),
                 Arc::clone(&flow_sock),
                 Arc::clone(face_sock),
                 env.flow_id,
                 target.clone(),
+                down_seq,
             ));
             face.flows.insert(
                 env.flow_id,
@@ -2221,6 +2237,7 @@ fn load_root_store(path: &PathBuf) -> Result<RootCertStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seep_core::udp::relay::UdpRelay;
     use seep_mesh::{MeshRegistry, NodeRecord, NodeRole};
 
     #[test]
@@ -3944,17 +3961,306 @@ mod tests {
             .unwrap();
 
         // 两包后 relay/exit 对称：上行各转发 2、下行各回送 2、跳缓存各 1、
-        // unknown_flow/evicted/malformed 恒 0
+        // unknown_flow/evicted/malformed/replay_dropped 恒 0
         let expect = UdpFaceSnapshot {
             forwarded_up: 2,
             forwarded_down: 2,
             malformed: 0,
+            replay_dropped: 0,
             flows_active: 1,
             unknown_flow: 0,
             evicted: 0,
         };
         assert_eq!(relay_plane.udp_snapshot(), Some(expect), "relay 面快照");
         assert_eq!(exit_plane.udp_snapshot(), Some(expect), "exit 面快照");
+
+        relay_serve.abort();
+        exit_serve.abort();
+    }
+
+    // ── P2-7 M1 §4.2 集成：exit 面防重放端到端（真 socket 双 plane + echo）──
+
+    /// 轮询等待异步平面计数到位（serve 任务内同步递增，注入后短窗内可见）。
+    async fn wait_for(mut f: impl FnMut() -> bool, what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !f() {
+            assert!(Instant::now() < deadline, "等待 {what} 超时");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// 读下行回包（带 5s 超时——T2 同款窗；helper 规避「闭包返回借用入参的
+    /// future」生命期问题）
+    async fn recv_downlink(relay: &Arc<dyn UdpRelay>, rbuf: &mut [u8]) -> usize {
+        let rt = tokio::time::timeout(Duration::from_secs(5), relay.recv_from(rbuf))
+            .await
+            .expect("应收到下行回包")
+            .unwrap();
+        rt.1
+    }
+
+    /// §4.2 前两条：注入同 seq 重放帧 → exit 面 replay_dropped=1 且 echo 目标
+    /// 收不到重复载荷（echo 观测通道无第四段）；乱序帧（seq+1 先于 seq+0）
+    /// 两包都到、窗口就位（client 桥/relay 面计数不受牵连）。
+    #[tokio::test]
+    async fn udp_exit_plane_replay_drop_and_out_of_order() {
+        use crate::udp_chain::MeshUdpBridge;
+        use seep_core::{FlowContext, FlowId, FlowMetadata, FlowTarget, RouteHop, TargetProto};
+
+        // —— echo server，载荷逐段送观测通道（「未收到重复」的可断言证据）——
+        let echo = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let echo_addr = echo.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                if let Ok((n, peer)) = echo.recv_from(&mut buf).await {
+                    let _ = tx.send(buf[..n].to_vec()).await;
+                    let _ = echo.send_to(&buf[..n], peer).await;
+                }
+            }
+        });
+
+        // 探空闲端口（spawn_udp 内部 bind；T2 同法）
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_udp_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let exit_udp_addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        // —— exit plane + relay plane（拓扑同 T2/S3）——
+        let exit_registry = Arc::new(MeshRegistry::new());
+        exit_registry
+            .register_node(NodeRecord::new(
+                "exit1".into(),
+                NodeRole::Exit,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        let exit_plane = Arc::new(
+            MeshDataPlane::new("exit1".into(), exit_registry)
+                .with_udp(MeshUdpGate::new(true))
+                .unwrap(),
+        );
+        let exit_serve = exit_plane.spawn_udp(exit_udp_addr);
+
+        let relay_registry = Arc::new(MeshRegistry::new());
+        relay_registry
+            .register_node(NodeRecord::new(
+                "relay1".into(),
+                NodeRole::Relay,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        relay_registry
+            .register_node(NodeRecord::new(
+                "exit1".into(),
+                NodeRole::Exit,
+                exit_udp_addr,
+            ))
+            .unwrap();
+        let relay_plane = Arc::new(
+            MeshDataPlane::new("relay1".into(), relay_registry)
+                .with_udp(MeshUdpGate::new(true))
+                .unwrap(),
+        );
+        let relay_serve = relay_plane.spawn_udp(relay_udp_addr);
+
+        // —— client 桥（flow_id 持有，注入帧复用同 id）——
+        let client_registry = Arc::new(MeshRegistry::new());
+        client_registry
+            .register_node(NodeRecord::new(
+                "client1".into(),
+                NodeRole::Client,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        client_registry
+            .register_node(NodeRecord::new(
+                "relay1".into(),
+                NodeRole::Relay,
+                relay_udp_addr,
+            ))
+            .unwrap();
+        let bridge = MeshUdpBridge::new(
+            "client1".into(),
+            client_registry,
+            None,
+            &MeshUdpGate::new(true),
+        )
+        .unwrap();
+        let target = FlowTarget {
+            host: "127.0.0.1".into(),
+            port: echo_addr.port(),
+            proto: TargetProto::Udp,
+        };
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: target.clone(),
+            metadata: FlowMetadata::default(),
+        };
+        let flow_id = *ctx.id.as_uuid().as_bytes();
+        let hops = vec![
+            RouteHop {
+                node: "client1".into(),
+                hop_type: seep_core::HopType::Ingress,
+            },
+            RouteHop {
+                node: "relay1".into(),
+                hop_type: seep_core::HopType::Relay,
+            },
+            RouteHop {
+                node: "exit1".into(),
+                hop_type: seep_core::HopType::Egress,
+            },
+        ];
+        let relay = bridge.associate(ctx, &hops).await.unwrap();
+        let mut rbuf = [0u8; 2048];
+
+        // echo 观测通道逐段断言（「未收到重复」的顺序一致性证据）
+        let expect_echo_payloads = |got: Vec<u8>, w: &'static [u8]| {
+            assert_eq!(got, w, "echo 收到的载荷应逐段匹配");
+        };
+
+        // —— 1) 首包上行（FULL seq=0）→ echo 收 1 段、下行回包 ——
+        relay.send_to(&target, b"ping").await.unwrap();
+        let n = recv_downlink(&relay, &mut rbuf).await;
+        assert_eq!(&rbuf[..n], b"ping");
+        expect_echo_payloads(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("echo 观测通道应收到 ping")
+                .unwrap(),
+            b"ping",
+        );
+
+        // —— 2) 注入 FULL 帧直达 exit（绕过 relay——exit 面窗口独立）——
+        let inject = |seq: u32, payload: &[u8]| {
+            let env = UdpEnvelope {
+                version: UDP_ENVELOPE_VERSION_V2,
+                dir: UdpDir::Up,
+                flow_id,
+                target_host: "127.0.0.1".into(),
+                target_port: echo_addr.port(),
+                path_mode: UdpPathMode::Full,
+                hop_index: 0,
+                seq,
+                seq_present: true,
+                path: vec!["exit1".into()],
+                payload: payload.to_vec(),
+            };
+            encode_udp_envelope(&env).unwrap()
+        };
+        let injector = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        // 乱序帧：seq=2（later）先于 seq=1（middle）→ 两包都到。
+        // 注：注入的 FULL 使 exit 侧 prev 更新为 injector（§3 上行来源即下行
+        // 回包目标）——later/middle 的回包直回 injector，不经 relay/client；
+        // 这也正是「每接收跳独立窗口」的旁证：注入帧直入 exit 面窗口校验。
+        injector
+            .send_to(&inject(2, b"later"), exit_udp_addr)
+            .await
+            .unwrap();
+        let mut ibuf = [0u8; 2048];
+        let (n, _peer) =
+            tokio::time::timeout(Duration::from_secs(5), injector.recv_from(&mut ibuf))
+                .await
+                .expect("应收到 later 回包")
+                .unwrap();
+        let env = decode_udp_envelope(&ibuf[..n]).expect("回包应为合法 envelope");
+        assert_eq!(env.payload, b"later", "跳跃前进 seq=2 应接受");
+        injector
+            .send_to(&inject(1, b"middle"), exit_udp_addr)
+            .await
+            .unwrap();
+        let (n, _peer) =
+            tokio::time::timeout(Duration::from_secs(5), injector.recv_from(&mut ibuf))
+                .await
+                .expect("应收到 middle 回包")
+                .unwrap();
+        let env = decode_udp_envelope(&ibuf[..n]).expect("回包应为合法 envelope");
+        assert_eq!(env.payload, b"middle", "窗口内回退 seq=1（未收位）应接受");
+        expect_echo_payloads(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("echo 观测通道应收到 later")
+                .unwrap(),
+            b"later",
+        );
+        expect_echo_payloads(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("echo 观测通道应收到 middle")
+                .unwrap(),
+            b"middle",
+        );
+
+        // —— 3) 重放注入：同 seq=2（last 恒拒）→ injector 无回包、echo 无
+        //    第四段、exit 计数 1 ——
+        injector
+            .send_to(&inject(2, b"later"), exit_udp_addr)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), injector.recv_from(&mut ibuf))
+                .await
+                .is_err(),
+            "重放帧到达 exit 被拒——下行不应再有任何回包"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), rx.recv())
+                .await
+                .is_err(),
+            "echo 观测通道不应收到重放副本"
+        );
+        wait_for(
+            || exit_plane.udp_snapshot().unwrap().replay_dropped == 1,
+            "exit replay_dropped=1",
+        )
+        .await;
+
+        // —— 4) 窗口内重放：同 seq=1（历史位已置）→ 计数 2 ——
+        injector
+            .send_to(&inject(1, b"middle"), exit_udp_addr)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), injector.recv_from(&mut ibuf))
+                .await
+                .is_err(),
+            "窗口内重放同样被拒"
+        );
+        wait_for(
+            || exit_plane.udp_snapshot().unwrap().replay_dropped == 2,
+            "exit replay_dropped=2",
+        )
+        .await;
+
+        // —— 5) 终态快照：exit 收 3 段（ping/later/middle）、重放计 2 且不
+        //    混入 malformed/unknown；relay 面与 client 桥计数不受牵连 ——
+        let exit_snap = exit_plane.udp_snapshot().unwrap();
+        assert_eq!(exit_snap.forwarded_up, 3, "exit 上行三包");
+        assert_eq!(exit_snap.forwarded_down, 3, "exit 下行三包");
+        assert_eq!(exit_snap.replay_dropped, 2);
+        assert_eq!(exit_snap.malformed, 0, "重放不混 malformed（E4 静默语义）");
+        assert_eq!(exit_snap.unknown_flow, 0);
+        let relay_snap = relay_plane.udp_snapshot().unwrap();
+        assert_eq!(
+            relay_snap.forwarded_up, 1,
+            "relay 仅转发 ping（注入直达 exit）"
+        );
+        assert_eq!(
+            relay_snap.forwarded_down, 1,
+            "relay 仅下行转发 ping（later/middle 回包直回 injector，prev 已更新）"
+        );
+        assert_eq!(relay_snap.replay_dropped, 0, "relay 面窗口未见重放");
+        assert_eq!(relay_snap.malformed, 0);
+        let client = bridge.client_metrics();
+        assert_eq!(client.replay_dropped(), 0, "client 桥下行无重放");
+        assert_eq!(client.dropped(), 0);
+        // echo 观测通道已整体消费（ping/later/middle 三段），无第四段残留
+        assert!(rx.try_recv().is_err(), "echo 通道应已耗尽");
 
         relay_serve.abort();
         exit_serve.abort();

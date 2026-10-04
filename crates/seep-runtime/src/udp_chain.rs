@@ -19,8 +19,8 @@ use seep_core::{FlowContext, FlowTarget, RouteDecision, RouteHop, RoutePath, Tar
 use seep_mesh::{MeshRegistry, NodeId};
 
 use crate::mesh_transport::{
-    decode_udp_envelope, encode_udp_envelope, MeshTlsConfig, MeshUdpGate, UdpDir, UdpEnvelope,
-    UdpPathMode, UDP_ENVELOPE_VERSION_V2,
+    decode_udp_envelope, encode_udp_envelope, MeshTlsConfig, MeshUdpGate, ReplayWindow, UdpDir,
+    UdpEnvelope, UdpPathMode, UDP_ENVELOPE_VERSION_V2,
 };
 
 /// FULL 重发间隔（§5）：每 64 个上行包重发一次 FULL。
@@ -36,11 +36,18 @@ const FULL_RESEND_INTERVAL: Duration = Duration::from_secs(30);
 pub struct UdpClientMetrics {
     /// 下行丢弃（dir=Up / FULL / flow_id 不符 / 解码失败——recv_from 过滤点）
     dropped: AtomicU64,
+    /// P2-7 M1 §3.6：下行防重放窗口拒帧（E4 静默丢弃——与 dropped 分立，
+    /// 重放单独可观测）
+    replay_dropped: AtomicU64,
 }
 
 impl UdpClientMetrics {
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    pub fn replay_dropped(&self) -> u64 {
+        self.replay_dropped.load(Ordering::Relaxed)
     }
 }
 
@@ -154,6 +161,8 @@ impl MeshUdpBridge {
             packets: AtomicU64::new(0),
             last_full: Mutex::new(Instant::now()),
             next_seq: AtomicU32::new(0),
+            // P2-7 M1 §3.4：下行窗口起始即空（首包任意 seq 接受——惰性语义）
+            down_replay: Mutex::new(ReplayWindow::new()),
             // P0-5 §2.4：per-relay AtomicU64 → bridge 单例共享 Arc（fetch_add 点不变）
             metrics: Arc::clone(&self.client_metrics),
         }))
@@ -178,6 +187,9 @@ pub struct MeshUdpRelay {
     /// P2-7 M1 §3.3：上行序号源（per-relay 单调；fetch_add 在 send_to 前序，
     /// 每个 envelope 恰好一个 seq）
     next_seq: AtomicU32,
+    /// P2-7 M1 §3.4：下行防重放窗口（本 relay 单键——极缓变状态，Mutex 足够；
+    /// 生命周期随 relay 消亡，无 inflight 混淆）
+    down_replay: Mutex<ReplayWindow>,
     /// P0-5 §2.4：下行丢弃进程级计数（dir=Up / FULL / flow_id 不符 / 解码失败）——
     /// bridge 构造单例、同 bridge 各 relay 共享（收编裁决）
     metrics: Arc<UdpClientMetrics>,
@@ -254,6 +266,15 @@ impl UdpRelay for MeshUdpRelay {
             {
                 self.metrics.dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
+            }
+            // P2-7 M1 §3.4/§3.7 E4：下行防重放窗口（v1 帧 seq_present=false
+            // fail-open）；重放/超窗静默丢弃并计 replay_dropped（§3.6）
+            if env.seq_present {
+                let mut w = self.down_replay.lock().expect("down_replay poisoned");
+                if !w.check_and_advance(env.seq) {
+                    self.metrics.replay_dropped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
             }
             let target = FlowTarget {
                 host: env.target_host,
@@ -533,6 +554,128 @@ mod tests {
         }
         assert_eq!(saw_full, 1, "63 包中恰 1 个 FULL（第 65 包，n=64）");
         assert_eq!(saw_cached, 62);
+    }
+
+    /// P2-7 M1 §4.2：client 桥下行防重放——v2 下行帧 seq=5 接受；同 seq 重放被
+    /// recv_from 静默丢弃（replay_dropped 递增、dropped 不动、循环继续）；窗口
+    /// 重放后仍前进（seq=6 收、已置历史位再重放仍拒）。
+    #[tokio::test]
+    async fn udp_client_downlink_replay_drops_and_counts() {
+        let stub_face = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let stub_addr = stub_face.local_addr().unwrap();
+
+        let registry = Arc::new(MeshRegistry::new());
+        registry
+            .register_node(NodeRecord::new(
+                "client1".into(),
+                NodeRole::Client,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        registry
+            .register_node(NodeRecord::new("relay1".into(), NodeRole::Relay, stub_addr))
+            .unwrap();
+        let bridge =
+            MeshUdpBridge::new("client1".into(), registry, None, &MeshUdpGate::new(true)).unwrap();
+        let metrics = bridge.client_metrics();
+        assert_eq!(metrics.replay_dropped(), 0, "初始零");
+
+        let hops = vec![
+            RouteHop {
+                node: "client1".into(),
+                hop_type: seep_core::HopType::Ingress,
+            },
+            RouteHop {
+                node: "relay1".into(),
+                hop_type: seep_core::HopType::Relay,
+            },
+        ];
+        let target = FlowTarget {
+            host: "10.1.2.3".into(),
+            port: 5353,
+            proto: TargetProto::Udp,
+        };
+        let relay = bridge
+            .associate(ctx_for("127.0.0.1", 53), &hops)
+            .await
+            .unwrap();
+
+        // 首包上行 FULL（stub 由此拿到 client socket 源地址；seq 只影响上行窗口）
+        relay.send_to(&target, b"ping").await.unwrap();
+        let mut buf = [0u8; 4096];
+        let (n, client_from) =
+            tokio::time::timeout(Duration::from_secs(2), stub_face.recv_from(&mut buf))
+                .await
+                .expect("首包 FULL 应到达桩对端")
+                .unwrap();
+        let full = decode_udp_envelope(&buf[..n]).unwrap();
+
+        let down = |seq: u32, payload: &[u8]| {
+            encode_udp_envelope(&UdpEnvelope {
+                version: UDP_ENVELOPE_VERSION_V2,
+                dir: UdpDir::Down,
+                flow_id: full.flow_id,
+                target_host: "10.1.2.3".into(),
+                target_port: 5353,
+                path_mode: UdpPathMode::Cached,
+                hop_index: 1,
+                seq,
+                seq_present: true,
+                path: vec![],
+                payload: payload.to_vec(),
+            })
+            .unwrap()
+        };
+        let inject = |seq: u32, payload: &[u8]| {
+            let wire = down(seq, payload);
+            let stub = Arc::clone(&stub_face);
+            async move {
+                stub.send_to(&wire, client_from).await.unwrap();
+            }
+        };
+
+        let mut rbuf = [0u8; 128];
+        // 1) 首下行 seq=5 → 接受
+        inject(5, b"d1").await;
+        let (_, rn) = tokio::time::timeout(Duration::from_secs(2), relay.recv_from(&mut rbuf))
+            .await
+            .expect("seq=5 下行应命中")
+            .unwrap();
+        assert_eq!(&rbuf[..rn], b"d1");
+        assert_eq!(metrics.replay_dropped(), 0);
+
+        // 2) 同 seq=5 重放 → 拒（计数 1，dropped 不动），循环继续收 seq=6
+        inject(5, b"d1-replay").await;
+        inject(6, b"d2").await;
+        let (_, rn) = tokio::time::timeout(Duration::from_secs(2), relay.recv_from(&mut rbuf))
+            .await
+            .expect("窗口前进后 d2 应达（重放帧被拒不卡循环）")
+            .unwrap();
+        assert_eq!(&rbuf[..rn], b"d2");
+        assert_eq!(metrics.replay_dropped(), 1);
+        assert_eq!(metrics.dropped(), 0, "重放不混入 dropped（§3.6 分立语义）");
+
+        // 3) 已置历史位（seq=5）再重放 → 仍拒（计数 2），seq=7 正常收
+        inject(5, b"d1-replay").await;
+        inject(7, b"d3").await;
+        let (_, rn) = tokio::time::timeout(Duration::from_secs(2), relay.recv_from(&mut rbuf))
+            .await
+            .expect("seq=7 应达")
+            .unwrap();
+        assert_eq!(&rbuf[..rn], b"d3");
+        assert_eq!(metrics.replay_dropped(), 2);
+        assert_eq!(metrics.dropped(), 0);
+
+        // 4) 回退超窗（back=70 > 63 窗口外太旧）→ 拒（计数 3），窗口不受污染
+        let too_old = 7u32.wrapping_sub(70); // last=7 时 back=70 > 63
+        inject(too_old, b"too-old").await;
+        inject(8, b"d4").await;
+        let (_, rn) = tokio::time::timeout(Duration::from_secs(2), relay.recv_from(&mut rbuf))
+            .await
+            .expect("seq=8 应达")
+            .unwrap();
+        assert_eq!(&rbuf[..rn], b"d4");
+        assert_eq!(metrics.replay_dropped(), 3);
     }
 
     /// gate 构造点拦截（§6 client 侧）：tls=None 且 !allow_plaintext → new 即 Err。

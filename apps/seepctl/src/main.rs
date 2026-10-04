@@ -1582,6 +1582,8 @@ struct UdpStatsDto {
     table: UdpTableDto,
     ingress: UdpIngressDto,
     mesh: Option<UdpMeshDto>,
+    /// 旧 seepd 无该键 → None（§3.6 对拷容错）
+    mesh_client: Option<UdpMeshClientDto>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1610,6 +1612,17 @@ struct UdpMeshDto {
     forwarded_down: u64,
     flows_active: i64,
     unknown_flow: u64,
+    /// P2-7 M1 §3.6：防重放窗口拒帧；旧 seepd 无该键 → 缺省 0
+    #[serde(default)]
+    replay_dropped: u64,
+}
+
+/// P2-7 M1 §3.6：client 桥计数（旧 seepd 无该键 → Option None；字段 default 容错）
+#[derive(Debug, Deserialize)]
+struct UdpMeshClientDto {
+    dropped: u64,
+    #[serde(default)]
+    replay_dropped: u64,
 }
 
 /// GET {base}/udp/stats；不可达 / 非 2xx / 解析失败均返回 None（§3.2：
@@ -1754,11 +1767,22 @@ fn render_udp_section(s: &UdpStatsDto) -> String {
             &mut out,
             "mesh",
             format!(
-                "{} up / {} down (flows {}, unknown_flow {})",
-                m.forwarded_up, m.forwarded_down, m.flows_active, m.unknown_flow
+                "{} up / {} down (flows {}, unknown_flow {}, replay_dropped {})",
+                m.forwarded_up, m.forwarded_down, m.flows_active, m.unknown_flow, m.replay_dropped
             ),
         ),
         None => push_udp_line(&mut out, "mesh", "(面未启用)".to_string()),
+    }
+    // P2-7 M1 §3.6：client 桥计数在装配时渲染（旧 seepd 无该键 → 不渲染）
+    if let Some(mc) = &s.mesh_client {
+        push_udp_line(
+            &mut out,
+            "mesh_client",
+            format!(
+                "{} dropped ({} replay_dropped)",
+                mc.dropped, mc.replay_dropped
+            ),
+        );
     }
     out
 }
@@ -1848,9 +1872,9 @@ mod tests {
       },
       "mesh": {
         "forwarded_up": 512, "forwarded_down": 480, "malformed": 0,
-        "unknown_flow": 3, "evicted": 0, "flows_active": 4
+        "unknown_flow": 3, "evicted": 0, "flows_active": 4, "replay_dropped": 2
       },
-      "mesh_client": {"dropped": 0}
+      "mesh_client": {"dropped": 5, "replay_dropped": 1}
     }"#;
 
     /// §10-S5 测试 4：§9-1 JSON → §9-2 文本逐行断言（纯函数，零网络）
@@ -1865,12 +1889,14 @@ mod tests {
             "  associates  3 active / 45 total (2 rejected)",
             "  dropped     send_failed=1",
             "  expired     idle=120 revoked=1",
-            "  mesh        512 up / 480 down (flows 4, unknown_flow 3)",
+            "  mesh        512 up / 480 down (flows 4, unknown_flow 3, replay_dropped 2)",
+            "  mesh_client 5 dropped (1 replay_dropped)",
         ]
         .join("\n");
         assert_eq!(renderled(rendered), expected);
-        // mesh_client 键不在渲染面（§9-2 无该行），反序列化仅要求可容忍多余键
+        // P2-7 M1 §3.6：装配态 mesh_client 渲染；旧 seepd 缺键 → 整段不渲染
         assert!(stats.mesh.is_some());
+        assert!(stats.mesh_client.is_some());
 
         // 全零 + mesh null：零值行照打（§9-2 注记），reason 全零 (none)、面占位
         let zero: UdpStatsDto = serde_json::from_str(
@@ -1890,6 +1916,20 @@ mod tests {
         assert!(r2.contains("  dropped     (none)"));
         assert!(r2.contains("  expired     (none)"));
         assert!(r2.contains("  mesh        (面未启用)"));
+
+        // 旧 seepd 对拷容错（§3.6）：mesh/mesh_client 缺 replay_dropped 键 → 缺省 0
+        let legacy: UdpStatsDto = serde_json::from_str(
+            r#"{"table":{"sessions_active":0,"sessions_total":0,"mappings_active":0,
+                "bytes_up":0,"bytes_down":0,"dropped":{},"expired":{}},
+              "ingress":{"associates_active":0,"associates_total":0,"associate_rejected":0,
+                "uplink_packets":0,"downlink_packets":0},
+              "mesh":{"forwarded_up":1,"forwarded_down":1,"flows_active":1,
+                      "unknown_flow":0},
+              "mesh_client":{"dropped":0}}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.mesh.as_ref().unwrap().replay_dropped, 0);
+        assert_eq!(legacy.mesh_client.as_ref().unwrap().replay_dropped, 0);
     }
 
     fn renderled(s: String) -> String {
