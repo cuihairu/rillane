@@ -1122,6 +1122,15 @@ impl MeshDataPlane {
         self.udp.as_ref().map(|f| f.snapshot())
     }
 
+    /// P2-7 M0 §2.1：撤销生效面快照（None = 未以 mTLS 装配——纯明文 TCP 面）。
+    /// `GET /mtls/revoked` 数据源，经 runtime 观测接缝暴露（runtime_builder.rs）。
+    pub async fn revoked_snapshot(&self) -> Option<RevokedSnapshot> {
+        match &self.tls {
+            Some(tls) => Some(tls.revoked_snapshot().await),
+            None => None,
+        }
+    }
+
     /// TCP 面 serve（S5 起 `self: Arc<Self>`——与 `spawn_udp` 并列共享同一 plane 实例，
     /// 同端口双栈；§9.2）。
     pub fn spawn(self: Arc<Self>, bind: SocketAddr) -> JoinHandle<Result<()>> {
@@ -1807,8 +1816,44 @@ struct MeshTlsFingerprint {
     revoked_mtime: Option<SystemTime>,
 }
 
+/// P2-7 M0 §2.1：撤销生效面运行期快照（`GET /mtls/revoked` 数据源）。
+/// 调用前先 maybe_reload（与 is_revoked 同口径——快照即当前生效面）；
+/// reload 失败沿用 fail-closed（连接面报错），快照呈现最近成功载入态并
+/// 把失败详情放 `RevokedFileState::error` 供诊断。
+#[derive(Debug, Clone)]
+pub struct RevokedSnapshot {
+    /// 静态 env 条目（SEEP_MESH_MTLS_REVOKED_NODES，CSV 解析后原样）
+    pub static_entries: Vec<NodeId>,
+    /// 文件载体（None = 未配置 SEEP_MESH_MTLS_REVOKED_NODES_FILE）
+    pub file: Option<RevokedFileState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RevokedFileState {
+    pub path: String,
+    /// 最近一次载入尝试是否成功（false = error 有值；entries 为最近成功态）
+    pub loaded: bool,
+    pub error: Option<String>,
+    /// 最后成功载入版本的文件 mtime（epoch 秒；载入时刻指纹，非当前文件）
+    pub mtime_secs: u64,
+    pub entries: Vec<NodeId>,
+}
+
+fn mtime_epoch_secs(t: Option<SystemTime>) -> u64 {
+    t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 impl MeshTls {
     fn from_config(cfg: &MeshTlsConfig) -> Result<Self> {
+        // rustls 在依赖图里同持 ring/aws-lc-rs 双特征（seep-protocols tls.rs
+        // 同注）：`ClientConfig::builder()` 在多提供方歧义下直接 panic——
+        // mesh 面构造处安装进程默认提供方（已装者生效，冲突忽略）。
+        static INSTALL: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INSTALL.get_or_init(|| {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        });
         let inner = MeshTlsInner::load(cfg)?;
         Ok(Self {
             cfg: cfg.clone(),
@@ -1867,6 +1912,26 @@ impl MeshTls {
         }
         let guard = self.inner.read().await;
         Ok(guard.revoked_node_ids.iter().any(|n| n == node_id))
+    }
+
+    /// P2-7 M0 §2.1：撤销生效面快照（见 RevokedSnapshot 注释）。
+    async fn revoked_snapshot(&self) -> RevokedSnapshot {
+        let reload_err = self.maybe_reload().await.err().map(|e| format!("{:#}", e));
+        let guard = self.inner.read().await;
+        RevokedSnapshot {
+            static_entries: self.cfg.revoked_node_ids.clone(),
+            file: self
+                .cfg
+                .revoked_nodes_path
+                .as_ref()
+                .map(|p| RevokedFileState {
+                    path: p.display().to_string(),
+                    loaded: reload_err.is_none(),
+                    error: reload_err.clone(),
+                    mtime_secs: mtime_epoch_secs(guard.fingerprint.revoked_mtime),
+                    entries: guard.revoked_node_ids.clone(),
+                }),
+        }
     }
 }
 

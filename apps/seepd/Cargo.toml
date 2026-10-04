@@ -21,3 +21,6 @@ seep-runtime = { path = "../../crates/seep-runtime" }
 seep-telemetry = { path = "../../crates/seep-telemetry" }
 seep-mesh = { path = "../../crates/seep-mesh" }
 seep-subscription = { path = "../../crates/seep-subscription" }
+
+[dev-dependencies]
+rcgen.workspace = true

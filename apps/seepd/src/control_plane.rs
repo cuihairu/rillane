@@ -149,6 +149,7 @@ impl ControlPlane {
             (Method::POST, "/mesh/nodes/register") => self.handle_register_node(req).await,
             (Method::POST, "/mesh/link-states") => self.handle_update_link_state(req).await,
             (Method::GET, "/mesh/switches") => self.handle_mesh_switches().await,
+            (Method::GET, "/mtls/revoked") => self.handle_mtls_revoked().await,
 
             (Method::POST, "/chains/dry-run") => self.handle_chain_dry_run(req).await,
             (Method::POST, "/chains") => self.handle_chain_create(req).await,
@@ -1238,6 +1239,16 @@ impl ControlPlane {
         json(StatusCode::OK, &dto)
     }
 
+    /// P2-7 M0 §2.2：撤销生效面快照（静态 env 条目 + 文件载体态）。
+    /// 503 语义 = 未装配 mesh / 纯明文 TCP 面（/nodes 先例分层口径）。
+    async fn handle_mtls_revoked(&self) -> Response<RespBody> {
+        let snap = match self.runtime.get_mesh_revoked_snapshot().await {
+            Some(s) => s,
+            None => return text(StatusCode::SERVICE_UNAVAILABLE, "mesh mTLS not enabled"),
+        };
+        json(StatusCode::OK, &MtlsRevokedDto::from(snap))
+    }
+
     async fn handle_nodes(&self) -> Response<RespBody> {
         let registry = match self.mesh() {
             Ok(v) => v,
@@ -1962,6 +1973,39 @@ struct MeshSwitchesDto {
     events: Vec<seep_runtime::SwitchEvent>,
 }
 
+/// P2-7 M0 §2.2：`GET /mtls/revoked` 响应体（RevokedSnapshot 序列化形状）
+#[derive(Debug, Clone, Serialize)]
+struct MtlsRevokedDto {
+    static_count: usize,
+    file: Option<MtlsRevokedFileDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MtlsRevokedFileDto {
+    path: String,
+    loaded: bool,
+    error: Option<String>,
+    mtime_secs: u64,
+    count: usize,
+    entries: Vec<String>,
+}
+
+impl From<seep_runtime::mesh_transport::RevokedSnapshot> for MtlsRevokedDto {
+    fn from(s: seep_runtime::mesh_transport::RevokedSnapshot) -> Self {
+        Self {
+            static_count: s.static_entries.len(),
+            file: s.file.map(|f| MtlsRevokedFileDto {
+                path: f.path,
+                loaded: f.loaded,
+                error: f.error,
+                mtime_secs: f.mtime_secs,
+                count: f.entries.len(),
+                entries: f.entries,
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct MeshNodeDto {
     id: String,
@@ -2477,6 +2521,57 @@ mod tests {
     use tokio::net::UdpSocket;
     use tokio::time::{timeout, Duration};
 
+    /// env 设置守卫：测试结束恢复原值（并行测试不互相污染）。
+    /// P2-7 M0 §4.3 用例专用（mTLS 装配仅能从 env 读取）。
+    struct EnvGuard(Vec<(&'static str, Option<String>)>);
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let old = std::env::var(key).ok();
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            Self(vec![(key, old)])
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, old) in &self.0 {
+                match old {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// 测试用自签证书（P2-7 M0 §4.3：平面构造只 load PEM 不握手，自签即可）。
+    /// is_ca → BasicConstraints CA（rustls WebPkiClientVerifier root 解析要求）。
+    fn gen_test_cert(cn: &str, is_ca: bool) -> (String, String) {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
+            KeyUsagePurpose,
+        };
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec!["seep".to_string()]).unwrap();
+        params.is_ca = if is_ca {
+            IsCa::Ca(BasicConstraints::Unconstrained)
+        } else {
+            IsCa::NoCa
+        };
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, cn);
+        params.distinguished_name = dn;
+        let cert = params.self_signed(&key).unwrap();
+        (cert.pem(), key.serialize_pem())
+    }
+
     async fn build_runtime(mesh: bool, chain: bool) -> Arc<Runtime> {
         let cfg_path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/seep.yaml");
@@ -2500,6 +2595,116 @@ mod tests {
                 .build()
                 .unwrap(),
         )
+    }
+
+    /// P2-7 M0 §4.3：未装配 mesh → /mtls/revoked 503（/nodes 先例分层口径）。
+    #[tokio::test]
+    async fn mtls_revoked_503_without_mesh() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/mtls/revoked")
+            .body(RespBody::new(Bytes::new()))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("mesh mTLS not enabled"));
+    }
+
+    /// P2-7 M0 §4.3：env 装配 mTLS（SEEP_MESH_MTLS=1 + 撤销 env/文件）→ 200 形状——
+    /// static_count/文件态（path/loaded/mtime_secs/count/entries/error:null）。
+    #[tokio::test]
+    async fn mtls_revoked_shape_with_mesh_tls() {
+        let dir = std::env::temp_dir().join(format!(
+            "seepd_mtls_revoked_{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca_path = dir.join("ca.cert.pem");
+        let cert_path = dir.join("node.cert.pem");
+        let key_path = dir.join("node.key.pem");
+        let revoked_path = dir.join("revoked.list");
+        let (ca_pem, _ca_key) = gen_test_cert("seep-ca", true);
+        let (cert_pem, key_pem) = gen_test_cert("seep-node", false);
+        std::fs::write(&ca_path, &ca_pem).unwrap();
+        std::fs::write(&cert_path, &cert_pem).unwrap();
+        std::fs::write(&key_path, &key_pem).unwrap();
+        std::fs::write(&revoked_path, "node-c\nnode-b\n").unwrap();
+
+        let _g1 = EnvGuard::set("SEEP_MESH_MTLS", Some("1"));
+        let _g2 = EnvGuard::set("SEEP_MESH_MTLS_CA", Some(ca_path.to_str().unwrap()));
+        let _g3 = EnvGuard::set("SEEP_MESH_MTLS_CERT", Some(cert_path.to_str().unwrap()));
+        let _g4 = EnvGuard::set("SEEP_MESH_MTLS_KEY", Some(key_path.to_str().unwrap()));
+        let _g5 = EnvGuard::set("SEEP_MESH_MTLS_REVOKED_NODES", Some("node-a,node-b"));
+        let _g6 = EnvGuard::set(
+            "SEEP_MESH_MTLS_REVOKED_NODES_FILE",
+            Some(revoked_path.to_str().unwrap()),
+        );
+
+        // mTLS 装配 = start() 建 mesh plane（relay 角色 + UDP 面）后才回填；
+        // 参照 seep-runtime §10-S3 装配（role=relay + listen 127.0.0.1:0 + 显式明文）
+        let mut cfg = SeepConfig::load_from_path(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/seep.yaml"),
+        )
+        .unwrap();
+        cfg.udp.enabled = true;
+        let rt_cfg = RuntimeConfig {
+            enable_mesh: true,
+            enable_chain: true,
+            mesh_config: Some(MeshConfig {
+                node_id: "seepd-mtls-test".into(),
+                role: "relay".into(),
+                listen_address: "127.0.0.1:0".parse().unwrap(),
+                allow_plaintext_data_plane: true,
+                udp_allow_plaintext_data_plane: true,
+                ..MeshConfig::default()
+            }),
+            ..RuntimeConfig::default()
+        };
+        let runtime = Arc::new(
+            RuntimeBuilder::new(cfg)
+                .with_runtime_config(rt_cfg)
+                .build()
+                .unwrap(),
+        );
+        let tasks = runtime.start().await.expect("start 应成功");
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let body = get_body(&cp, "/mtls/revoked").await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["static_count"], 2, "静态 env 条目两条 node-a/node-b");
+        let f = v["file"].as_object().expect("文件载体已配置");
+        assert_eq!(f["loaded"], true);
+        assert!(f["error"].is_null(), "成功载入 error 应为 null");
+        assert!(f["mtime_secs"].as_u64().unwrap() > 0, "mtime 非零");
+        assert_eq!(f["count"], 2, "文件条目 node-b/node-c");
+        assert!(f["path"].as_str().unwrap().ends_with("revoked.list"));
+        let entries: Vec<&str> = f["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().unwrap())
+            .collect();
+        assert_eq!(entries, vec!["node-b", "node-c"], "排序 + 去重");
+
+        for t in tasks {
+            t.abort();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

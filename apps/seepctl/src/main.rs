@@ -235,6 +235,12 @@ enum RevokeCommand {
         #[arg(long)]
         node_id: String,
     },
+    /// 查询运行节点的撤销生效面（GET 控制面 /mtls/revoked；分发—生效—校验闭环的「生效」观测）
+    Status {
+        /// 控制面 base URL，如 http://127.0.0.1:9090（缺省读 config.control.api_bind）
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1092,6 +1098,24 @@ fn main() -> Result<()> {
                     write_revoked_list_atomic(&path, &items)?;
                     println!("已更新撤销列表: {}", path.display());
                 }
+                RevokeCommand::Status { endpoint } => {
+                    let config = SeepConfig::load_from_path(&cli.config)?;
+                    let base =
+                        endpoint.unwrap_or_else(|| format!("http://{}", config.control.api_bind));
+                    let url = format!("{base}/mtls/revoked");
+                    let mut req = Client::new().get(&url);
+                    if let Some(t) = &config.control.admin_token {
+                        req = req.header("x-admin-token", t);
+                    }
+                    let resp = req.send().with_context(|| format!("无法访问 {url}"))?;
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let err_text = resp.text().unwrap_or_default();
+                        anyhow::bail!("控制面返回错误: {} - {}", status, err_text);
+                    }
+                    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+                    print!("{}", render_mtls_revoked(&v));
+                }
             },
         },
     }
@@ -1655,6 +1679,42 @@ fn render_route_status(v: &serde_json::Value) -> String {
     out
 }
 
+/// P2-7 M0 §2.3：`mtls revoke status` 渲染（纯函数，测试直调）。
+/// 形状：static 计数行 + file 状态行（null → 未配置占位）+ 逐条 revoked。
+fn render_mtls_revoked(v: &serde_json::Value) -> String {
+    let mut out = format!(
+        "static: {}\n",
+        v.get("static_count").and_then(|n| n.as_u64()).unwrap_or(0)
+    );
+    match v.get("file") {
+        Some(f) if !f.is_null() => {
+            let loaded = f.get("loaded").and_then(|b| b.as_bool()).unwrap_or(false);
+            let error = f
+                .get("error")
+                .and_then(|e| e.as_str())
+                .filter(|e| !e.is_empty())
+                .unwrap_or("(无)");
+            out.push_str(&format!(
+                "file: {} (loaded={} mtime={} entries={} error={})\n",
+                f.get("path").and_then(|p| p.as_str()).unwrap_or("unknown"),
+                loaded,
+                f.get("mtime_secs").and_then(|m| m.as_u64()).unwrap_or(0),
+                f.get("count").and_then(|c| c.as_u64()).unwrap_or(0),
+                error,
+            ));
+            if let Some(entries) = f.get("entries").and_then(|e| e.as_array()) {
+                for e in entries {
+                    if let Some(id) = e.as_str() {
+                        out.push_str(&format!("  revoked: {id}\n"));
+                    }
+                }
+            }
+        }
+        _ => out.push_str("file: (未配置 SEEP_MESH_MTLS_REVOKED_NODES_FILE)\n"),
+    }
+    out
+}
+
 /// §9-2 UDP 段渲染（纯函数，测试直调）。零值行照打（与 §6-2「序列不因开关
 /// 消失」同口径，渲染侧无需分支）；dropped/expired 固定序只列非零 reason、
 /// 全零打 `(none)`；mesh 未启用打占位（与零流量对象两态可区分）。
@@ -1896,6 +1956,78 @@ mod tests {
                 command: RouteCommand::Apply { dry_run: false }
             }
         ));
+    }
+
+    /// mesh-advanced-security.md §2.3/§4.3：mtls revoke status 参数形状——
+    /// --endpoint 在子命令体内透传（顶层 mtls 无 endpoint）
+    #[test]
+    fn mtls_revoke_status_parse_shapes() {
+        let cli = Cli::parse_from(["seepctl", "mtls", "revoke", "status"]);
+        assert!(matches!(
+            &cli.command,
+            Command::Mtls {
+                command: MtlsCommand::Revoke {
+                    command: RevokeCommand::Status { endpoint: None }
+                }
+            }
+        ));
+
+        let cli = Cli::parse_from([
+            "seepctl",
+            "--config",
+            "y.yaml",
+            "mtls",
+            "revoke",
+            "status",
+            "--endpoint",
+            "http://127.0.0.1:9091",
+        ]);
+        assert!(matches!(
+            &cli.command,
+            Command::Mtls {
+                command: MtlsCommand::Revoke {
+                    command: RevokeCommand::Status {
+                        endpoint: Some(e)
+                    }
+                }
+            } if e == "http://127.0.0.1:9091"
+        ));
+        assert_eq!(cli.config, "y.yaml");
+    }
+
+    /// mesh-advanced-security.md §2.3/§4.3：`mtls revoke status` 输出格式——
+    /// static 计数行 + file 状态行（loaded/mtime/entries/error）+ 逐条 revoked；
+    /// file null → 未配置占位（缺键容错）
+    #[test]
+    fn mtls_revoke_status_render() {
+        let v = serde_json::json!({
+            "static_count": 2,
+            "file": {
+                "path": "/etc/seep/revoked.list",
+                "loaded": true,
+                "error": null,
+                "mtime_secs": 1760000000,
+                "count": 2,
+                "entries": ["node-b", "node-c"]
+            }
+        });
+        assert_eq!(
+            renderled(render_mtls_revoked(&v)),
+            [
+                "static: 2",
+                "file: /etc/seep/revoked.list (loaded=true mtime=1760000000 entries=2 error=(无))",
+                "  revoked: node-b",
+                "  revoked: node-c",
+            ]
+            .join("\n")
+        );
+
+        let v2 = serde_json::json!({ "static_count": 0, "file": null });
+        let out = render_mtls_revoked(&v2);
+        assert_eq!(
+            out,
+            "static: 0\nfile: (未配置 SEEP_MESH_MTLS_REVOKED_NODES_FILE)\n"
+        );
     }
 
     /// network-route.md §4/§3 输出格式：argv 逐行表 + status 四行设备态 +

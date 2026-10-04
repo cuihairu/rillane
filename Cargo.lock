@@ -2973,6 +2973,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rcgen",
  "seep-config",
  "seep-core",
  "seep-mesh",

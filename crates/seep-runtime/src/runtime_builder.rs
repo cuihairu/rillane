@@ -49,7 +49,8 @@ use seep_subscription::SubscriptionManager;
 
 use crate::chain::{ChainBuilder, ChainConfig, ChainConstraints, ChainManager, SwitchReason};
 use crate::mesh_transport::{
-    MeshDataPlane, MeshEnvelope, MeshTlsConfig, MeshUdpGate, UdpFaceSnapshot, UDP_FACE_DEFAULT_MAX,
+    MeshDataPlane, MeshEnvelope, MeshTlsConfig, MeshUdpGate, RevokedSnapshot, UdpFaceSnapshot,
+    UDP_FACE_DEFAULT_MAX,
 };
 use crate::udp_chain::{MeshUdpBridge, UdpChainRouter, UdpClientMetrics};
 
@@ -1407,6 +1408,15 @@ impl Runtime {
     /// None = 未 start / client-only / UDP 面未挂）
     pub fn get_mesh_udp_snapshot(&self) -> Option<UdpFaceSnapshot> {
         self.mesh_plane.get().and_then(|p| p.udp_snapshot())
+    }
+
+    /// P2-7 M0 §2.2 观测接缝：mesh mTLS 撤销生效面快照（`GET /mtls/revoked`
+    /// 数据源；None = 未装配 mesh / 纯明文 TCP 面无 mTLS）。
+    pub async fn get_mesh_revoked_snapshot(&self) -> Option<RevokedSnapshot> {
+        match self.mesh_plane.get() {
+            Some(plane) => plane.revoked_snapshot().await,
+            None => None,
+        }
     }
 
     /// P1-4 §5：obfs 填充执行计数快照（进程级 statics，`/metrics` 渲染数据源）。
