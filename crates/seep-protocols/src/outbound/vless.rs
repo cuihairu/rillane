@@ -244,7 +244,13 @@ impl VlessConnector {
                     .await
                     .with_context(|| format!("连接 VLESS 服务器失败: {server_addr}"))?;
 
-                let (up, down) = tokio::io::copy_bidirectional(&mut flow.io, &mut stream).await?;
+                let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                    &mut flow.io,
+                    &mut stream,
+                    seep_core::performance::relay_buffer(),
+                    seep_core::performance::relay_buffer(),
+                )
+                .await?;
                 Ok(FlowReport {
                     upstream: up,
                     downstream: down,
@@ -335,8 +341,13 @@ impl VlessConnector {
                     stream.flush().await?;
                     Self::read_vless_response_header(&mut stream).await?;
 
-                    let (up, down) =
-                        tokio::io::copy_bidirectional(&mut flow.io, &mut stream).await?;
+                    let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                        &mut flow.io,
+                        &mut stream,
+                        seep_core::performance::relay_buffer(),
+                        seep_core::performance::relay_buffer(),
+                    )
+                    .await?;
                     Ok(FlowReport {
                         upstream: up,
                         downstream: down,
@@ -347,7 +358,13 @@ impl VlessConnector {
                     tcp.flush().await?;
                     Self::read_vless_response_header(&mut tcp).await?;
 
-                    let (up, down) = tokio::io::copy_bidirectional(&mut flow.io, &mut tcp).await?;
+                    let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                        &mut flow.io,
+                        &mut tcp,
+                        seep_core::performance::relay_buffer(),
+                        seep_core::performance::relay_buffer(),
+                    )
+                    .await?;
                     Ok(FlowReport {
                         upstream: up,
                         downstream: down,

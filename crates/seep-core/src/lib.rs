@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
+pub mod performance;
 pub mod udp;
 
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.

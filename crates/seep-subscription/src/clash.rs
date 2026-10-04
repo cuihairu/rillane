@@ -693,6 +693,7 @@ impl ClashConverter {
             // 订阅转换不产混淆块（P1-4 归用户主配置）
             obfuscation: None,
             profile: None,
+            performance: None,
             egress_pool: None,
         };
 

@@ -146,9 +146,14 @@ impl TrojanConnector {
             .await
             .with_context(|| format!("连接 Trojan 服务器失败: {server_addr}"))?;
 
-        let (up, down) = tokio::io::copy_bidirectional(&mut flow.io, &mut outbound)
-            .await
-            .context("双向转发失败")?;
+        let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+            &mut flow.io,
+            &mut outbound,
+            seep_core::performance::relay_buffer(),
+            seep_core::performance::relay_buffer(),
+        )
+        .await
+        .context("双向转发失败")?;
 
         Ok(FlowReport {
             upstream: up,
@@ -191,9 +196,14 @@ impl TrojanConnector {
         tls_stream.write_all(&request).await?;
 
         // 双向转发
-        let (up, down) = tokio::io::copy_bidirectional(&mut flow.io, &mut tls_stream)
-            .await
-            .context("双向转发失败")?;
+        let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+            &mut flow.io,
+            &mut tls_stream,
+            seep_core::performance::relay_buffer(),
+            seep_core::performance::relay_buffer(),
+        )
+        .await
+        .context("双向转发失败")?;
 
         Ok(FlowReport {
             upstream: up,

@@ -46,6 +46,33 @@ pub struct SeepConfig {
     /// 仅 from_str 入口展开——订阅/程序化构造不触发，§5-1）
     #[serde(default)]
     pub profile: Option<ProfileKind>,
+    /// relay IO 性能参数（P3-5 performance-io.md §3；缺省 None = 不设定、
+    /// 缓冲维持 8192×2 缺省，行为零差异 §2-D5）
+    #[serde(default)]
+    pub performance: Option<PerformanceBlock>,
+}
+
+/// P3-5 performance-io.md §3：进程级 relay 缓冲参数。
+/// deny_unknown_fields = 新块无存量兼容负担，拼错子字段立刻报错。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerformanceBlock {
+    /// TCP relay 双向缓冲（字节）；None = 缺省 8192（tokio copy 同值）。
+    /// 进程级单值：RuntimeBuilder::build 期读取设定，变更需重启（§2-D1）。
+    pub relay_buffer: Option<u32>,
+}
+
+impl PerformanceBlock {
+    /// E1：非法值构建期报错（域约束对齐 seep-core `set_relay_buffer`）。
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(n) = self.relay_buffer {
+            anyhow::ensure!(
+                (1..=1024 * 1024).contains(&n),
+                "performance.relay_buffer 必须 1..=1048576 字节，当前 {n}"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// UDP 数据面配置（udp-dataplane.md §5.2 / udp-relay-path.md §2）。

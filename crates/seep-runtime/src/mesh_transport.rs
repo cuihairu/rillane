@@ -18,7 +18,7 @@ use dashmap::DashMap;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt},
+    io::{copy_bidirectional_with_sizes, AsyncReadExt, AsyncWriteExt},
     net::{lookup_host, TcpListener, TcpStream, UdpSocket},
     task::JoinHandle,
 };
@@ -1416,7 +1416,14 @@ impl MeshDataPlane {
                     return Err(e);
                 }
             };
-            let (up, down) = match copy_bidirectional(&mut inbound, &mut out).await {
+            let (up, down) = match copy_bidirectional_with_sizes(
+                &mut inbound,
+                &mut out,
+                seep_core::performance::relay_buffer(),
+                seep_core::performance::relay_buffer(),
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => {
                     if let Some(peer) = &peer_node_id {
@@ -1478,7 +1485,14 @@ impl MeshDataPlane {
         );
         write_envelope(&mut outbound, &fwd).await?;
 
-        let (up, down) = match copy_bidirectional(&mut inbound, &mut outbound).await {
+        let (up, down) = match copy_bidirectional_with_sizes(
+            &mut inbound,
+            &mut outbound,
+            seep_core::performance::relay_buffer(),
+            seep_core::performance::relay_buffer(),
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 self.registry.record_link_error(&self.local_node_id, &next);
@@ -1545,7 +1559,14 @@ impl MeshDataPlane {
             Some(padded) => write_frame(&mut stream, &padded).await?,
             None => write_envelope(&mut stream, envelope).await?,
         }
-        let (up, down) = match copy_bidirectional(io, &mut stream).await {
+        let (up, down) = match copy_bidirectional_with_sizes(
+            io,
+            &mut stream,
+            seep_core::performance::relay_buffer(),
+            seep_core::performance::relay_buffer(),
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 self.registry

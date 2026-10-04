@@ -1652,6 +1652,7 @@ proxies:
                 network: None,
                 obfuscation: None,
                 profile: None,
+                performance: None,
                 egress_pool: None,
             },
             stats: ConversionStats {

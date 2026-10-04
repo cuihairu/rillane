@@ -41,6 +41,7 @@ async fn mesh_target_routes_to_chain_decision() {
         network: None,
         obfuscation: None,
         profile: None,
+        performance: None,
         egress_pool: None,
     };
 

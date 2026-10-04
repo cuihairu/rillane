@@ -129,6 +129,15 @@ impl RuntimeBuilder {
         // 装配前防御性调用，存量路由配置无 slo 时零开销直通）
         config_snapshot.routing.validate()?;
 
+        // P3-5 performance-io.md §3：进程级 relay 缓冲设定（块缺省 None =
+        // 不设定，缓冲维持 8192×2，行为零差异 §2-D5；变更需重启）
+        if let Some(perf) = &config_snapshot.performance {
+            perf.validate().context("performance 校验失败（E1）")?;
+            if let Some(n) = perf.relay_buffer {
+                seep_core::performance::set_relay_buffer(n as usize)?;
+            }
+        }
+
         // 创建路由引擎
         let router = Arc::new(RoutingEngine::new(config_snapshot.routing.clone()));
 
@@ -3297,6 +3306,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            performance: None,
             egress_pool: None,
         };
 
@@ -3340,6 +3350,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            performance: None,
             egress_pool: None,
         };
 
@@ -3387,6 +3398,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            performance: None,
             egress_pool: None,
         };
 
@@ -3456,6 +3468,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            performance: None,
             egress_pool: None,
         };
 
@@ -3533,6 +3546,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            performance: None,
             egress_pool: None,
         }
     }
@@ -4091,6 +4105,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            performance: None,
             egress_pool: None,
         }
     }
@@ -4287,6 +4302,7 @@ mod tests {
             obfuscation: None,
             egress_pool,
             profile: None,
+            performance: None,
         }
     }
 

@@ -140,9 +140,14 @@ impl HttpConnector {
             .await
             .with_context(|| format!("连接 HTTP 代理失败: {proxy_addr}"))?;
 
-        let (up, down) = tokio::io::copy_bidirectional(&mut flow.io, &mut outbound)
-            .await
-            .context("双向转发失败")?;
+        let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+            &mut flow.io,
+            &mut outbound,
+            seep_core::performance::relay_buffer(),
+            seep_core::performance::relay_buffer(),
+        )
+        .await
+        .context("双向转发失败")?;
 
         Ok(FlowReport {
             upstream: up,
@@ -187,9 +192,14 @@ impl HttpConnector {
             // 发送 CONNECT 请求
             perform_connect(&mut tls_stream, &self.build_connect_request(&target)).await?;
 
-            let (up, down) = tokio::io::copy_bidirectional(&mut flow.io, &mut tls_stream)
-                .await
-                .context("双向转发失败")?;
+            let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                &mut flow.io,
+                &mut tls_stream,
+                seep_core::performance::relay_buffer(),
+                seep_core::performance::relay_buffer(),
+            )
+            .await
+            .context("双向转发失败")?;
 
             Ok(FlowReport {
                 upstream: up,
@@ -200,9 +210,14 @@ impl HttpConnector {
             // 发送 CONNECT 请求
             perform_connect(&mut outbound, &self.build_connect_request(&target)).await?;
 
-            let (up, down) = tokio::io::copy_bidirectional(&mut flow.io, &mut outbound)
-                .await
-                .context("双向转发失败")?;
+            let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                &mut flow.io,
+                &mut outbound,
+                seep_core::performance::relay_buffer(),
+                seep_core::performance::relay_buffer(),
+            )
+            .await
+            .context("双向转发失败")?;
 
             Ok(FlowReport {
                 upstream: up,

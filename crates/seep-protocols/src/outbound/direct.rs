@@ -62,9 +62,14 @@ impl EgressConnector for DirectConnector {
             ),
         };
 
-        let (up, down) = tokio::io::copy_bidirectional(&mut flow.io, &mut outbound)
-            .await
-            .context("双向转发失败")?;
+        let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+            &mut flow.io,
+            &mut outbound,
+            seep_core::performance::relay_buffer(),
+            seep_core::performance::relay_buffer(),
+        )
+        .await
+        .context("双向转发失败")?;
 
         Ok(FlowReport {
             upstream: up,
