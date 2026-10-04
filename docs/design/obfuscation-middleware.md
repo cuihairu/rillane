@@ -88,6 +88,7 @@ forward(decision, flow):
 
 - 链内**声明顺序即执行顺序**，由 `obfuscation.middleware` 配置数组（§3.1）决定；MVP 仅 `padding` 一个实现，顺序无实义，但契约先钉（P2-4 多策略时会踩）；
 - P3-2 动态加载 = 在该静态链之上加 loader：`MiddlewareChain` 的 `Vec<Arc<dyn FlowMiddleware>>` 由 loader 填充（原生动态库/WASM 适配器实现同一 trait）；**本条目不引入任何动态加载依赖**（workspace 现无 `libloading`/`wasmtime`/`wasmer`，已核对）。
+- **落地注记（2026-10-04，P3-2 已落地）**：trait 承诺兑现——`WasmPluginMiddleware` 实现同一 `FlowMiddleware` trait（`name()` 以 `Box::leak` 固化为 `&'static str`，本节 trait 签名不动承诺兑现）；载具按 WASM-only 裁决（`crates/seep-plugins`，wasmtime），链序 = 内置 `middleware` 声明序 + `plugins` 声明序，见 [plugin-loader.md](plugin-loader.md) §1.5/§2.3。
 
 ## 2. padding 策略（策略 / 执行分离）
 

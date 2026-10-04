@@ -12,3 +12,6 @@ platforms/android/.gradle/
 platforms/android/app/build/
 platforms/android/build/
 platforms/android/local.properties
+# 示例插件 wasm 产物（plugins/build.sh 产 output/，不入库；crate target/ 由顶层 target/ 覆盖不到 plugins/*/target，显式补）
+plugins/output/
+plugins/*/target/
