@@ -4,9 +4,11 @@
 > [PROTOCOLS.md](../PROTOCOLS.md) 性能节。
 > 本文是落地定稿：**范围裁决（splice/recvmmsg 出界）、进程级 relay 缓冲参数、
 > 帧写 vectored 化、基准方案、分步清单**。落地后偏差回填 §7。
-> **状态：R0/R1 已落地**（R1：seep-core `performance` 模块 + seep-config
+> **状态：R0–R3 已落地**（R1：seep-core `performance` 模块 + seep-config
 > `performance:` 块 + RuntimeBuilder 接线 + 16 处 relay 点
-> `copy_bidirectional_with_sizes`，420 测试全绿）。R2–R4 见 §6。
+> `copy_bidirectional_with_sizes`；R2：`write_frame` vectored 化 + 短写
+> 推进 + ShortWriter 专项测试；R3：criterion benches 实跑，数字见 §5
+> 结果表）。R4 文档回填见 §6。
 
 ## 0. 范围与验收口径
 
@@ -125,6 +127,34 @@ pub struct PerformanceConfig {
 - 产出：criterion 输出截图式数字回填 §6 表格；基准不入 CI 门禁
   （本地跑，噪声大环境不稳定不判 CI）。
 
+**结果（2026-10-05 实跑，多轮取中位）**。实跑落点：
+`seep-core/benches/{relay_throughput,write_frame}.rs`；relay 组单迭代
+= 32 MiB 单向灌包经 `copy_bidirectional_with_sizes` 中继收毕；帧写组
+单迭代 = 2048 帧连续写、读端读满总量收敛。环境为多会话共用开发机
+（bench 期间 load avg 19–45），run-to-run 波动显著，故每配置跑
+3–4 轮取中位数；数字仅代表同轮相对对照，非绝对吞吐承诺（§7.4）。
+
+relay 吞吐（32 MiB 单向，多轮中位）：
+
+| 缓冲 | 8192 | 32768 | 65536 | 262144 |
+|------|------|-------|-------|--------|
+| 迭代耗时 | 149 ms | 122 ms | 112 ms | 96 ms |
+| 吞吐 | 214 MiB/s | 263 MiB/s | 286 MiB/s | 357 MiB/s |
+
+8K→256K 中位吞吐 +67%，缓冲上调摊薄 syscall 的方向与幅度稳定复现。
+
+帧写对照（2048 帧/迭代，多轮中位）：
+
+| 写法 | 4 KiB payload | 64 KiB payload |
+|------|---------------|----------------|
+| 两段 `write_all` | 33.8 ms / 243 MiB/s | 206.9 ms / 620 MiB/s |
+| vectored 合一 | 25.3 ms / 318 MiB/s | 217.4 ms / 589 MiB/s |
+
+4 KiB 帧 vectored 中位快约 26%（安静轮次最高 2.2×，4 轮中 3 轮占优）；
+64 KiB 帧两者同量级（差约 5%，置信区间重叠，判无回归）——大帧下
+syscall 次数占比趋零，与 §2-D2「明文段收益、TLS 段等价回落」的
+预期一致；TLS 段等价性由既有帧测试与 ShortWriter 短写专项测试保证。
+
 ## 6. 分步实施清单
 
 | 步 | 内容与落点 | 验收 |
@@ -132,7 +162,7 @@ pub struct PerformanceConfig {
 | R0 | 本设计稿 | — |
 | R1 | seep-core `performance` 模块 + seep-config `performance:` 块（validate E1）+ runtime_builder/seepd 接线 + 15 处 relay 点换 `copy_bidirectional_with_sizes` + 单测（set/get、非法值、缺省零差异） | 门禁全绿；无配置时行为与现状逐字节一致 |
 | R2 | `write_frame` vectored 化 + 既有帧测试零回归 | mesh 帧测试全绿 |
-| R3 | criterion benches（§5 两组）+ 实跑 + 数字回填 §6 表 | 基准产出真实数字 |
+| R3 | criterion benches（§5 两组）+ 实跑 + 数字回填本文 §5 结果表 | 基准产出真实数字（已落地，见 §5 结果表） |
 | R4 | PROTOCOLS.md 性能节回填（「已实现（范围）」+ 范围外项登记）+ todo.md P3-5 勾选 + 本文状态行 | 文档与实现对齐 |
 
 ## 7. 偏差与假设

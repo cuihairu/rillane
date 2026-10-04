@@ -13,3 +13,15 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+# P3-5 performance-io.md §5：基准仅本地实跑回填文档，不入 CI 门禁
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "relay_throughput"
+harness = false
+
+[[bench]]
+name = "write_frame"
+harness = false
