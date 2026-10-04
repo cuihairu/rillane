@@ -14,7 +14,13 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # nightly 工具链每日漂移，第三方依赖（defguard_boringtun 等）撞 rustc ICE
+    # 不可控——nightly 失败标黄不置红、不连坐 stable/beta；stable/beta 红照红
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
     strategy:
+      # 同理：单成员失败不取消其余（此前默认 fail-fast 把 stable/beta 遮成
+      # cancelled，真实信号被 nightly 连坐掩盖）
+      fail-fast: false
       matrix:
         rust:
           - stable
@@ -65,7 +71,9 @@ jobs:
         components: llvm-tools-preview
 
     - name: Install cargo-llvm-cov
-      run: cargo install cargo-llvm-cov
+      # --locked 钉安装面依赖：无 pin 的 cargo install 每次按当下 registry
+      # 重新解析，上游新发版即可漂移破坏可复现性（0.9.1 起锁定）
+      run: cargo install cargo-llvm-cov --locked
 
     - name: Cache dependencies
       uses: actions/cache@v4
@@ -99,7 +107,8 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
 
     - name: Install cargo-audit
-      run: cargo install cargo-audit
+      # --locked 钉安装面依赖（同 coverage install 步口径）
+      run: cargo install cargo-audit --locked
 
     - name: Run security audit
       # RUSTSEC-2026-0258（h2 <0.4.16 空 DATA 帧放大）已随 hyper 0.14 → 1.x
@@ -114,7 +123,7 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@1.88.0  # MSRV 随锁上调：shadowsocks 1.24.0=1.88 / time 0.3.47=1.88 / serde_with 3.21=1.88（1.75 基线在旧锁已红）
+      uses: dtolnay/rust-toolchain@1.96.0  # MSRV 随锁上调：wasmtime 49.0.2 / cranelift-* 0.136=1.96、smoltcp 0.14=1.91（1.88 基线在 wasmtime 49 入锁后已红；前值 1.88=shadowsocks 1.24.0 / time 0.3.47 / serde_with 3.21）
 
     - name: Cache dependencies
       uses: actions/cache@v4
