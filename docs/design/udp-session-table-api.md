@@ -1,7 +1,7 @@
 # P0-1 接口草案：UDP 会话表 API 与回收算法
 
-> 状态：实现级接口草案（2026-09）· 设计依据：[udp-session-table.md](udp-session-table.md)（本文不重复论证，只给可转录的 API/算法）· 总设计：[udp-dataplane.md](udp-dataplane.md) · 中继路径契约：[udp-relay-path.md](udp-relay-path.md) §4 · 对应 [todo.md](../../todo.md) P0-1
-> 假设（如与实施冲突需回改本稿）：A1 时基用进程单调时钟秒值（免 NTP 跳变）；A2 下行通道容量 64 沿用 udp-relay-path.md §4.3；A3 `FlowSession` 结构不改（O7 走 wrapper，见 §4.4）；A4 指标命名沿 udp-dataplane.md §5.3 与 udp-session-table.md §7。
+> 状态：**已实施（todo P0-1 完成，2026-09）**· 实施面 = `crates/seep-core/src/udp/`（下文 §2.2 草案签名与实施的差异以 §9 裁决表为准）· 设计依据：[udp-session-table.md](udp-session-table.md)（本文不重复论证，只给可转录的 API/算法）· 总设计：[udp-dataplane.md](udp-dataplane.md) · 中继路径契约：[udp-relay-path.md](udp-relay-path.md) §4 · 对应 [todo.md](../../todo.md) P0-1
+> 假设（如与实施冲突需回改本稿）：A1 时基用进程单调时钟秒值（免 NTP 跳变）；A2 下行通道容量 64 沿用 udp-relay-path.md §4.3；A3 `FlowSession` 结构不改（O7 走 wrapper，见 §4.4）；A4 指标命名沿 [udp-observability.md](udp-observability.md) §2.4（落地定稿）。
 
 ## 执行摘要
 
@@ -58,7 +58,7 @@ impl UdpSessionTable {
     pub fn new(config: UdpSessionConfig, metrics: Arc<TableMetrics>, clock: Arc<dyn Clock>) -> Self;
 
     /// 每包入口（快路径优先）：命中→Sent；未命中→Miss（调用方改走 resolve，或放弃）
-    pub fn forward_up(&self, key: &UdpSessionKey, target: &FlowTarget, data: Bytes) -> UpResult;
+    pub async fn forward_up(&self, key: &UdpSessionKey, target: &FlowTarget, data: Bytes) -> UpResult;
 
     /// 慢路径：未命中时路由决策并建会话+首映射；满员→Err(CapacityLimited)
     pub async fn resolve(
@@ -68,11 +68,11 @@ impl UdpSessionTable {
         router: Arc<dyn FlowRouter>,
     ) -> Result<SessionRef, ResolveError>;
 
-    /// ASSOCIATE 控制连接关闭等强制回收（udp-relay-path.md §2.5）
-    pub fn force_revoke(&self, key: &UdpSessionKey);
+    /// ASSOCIATE 控制连接关闭等强制回收（udp-relay-path.md §2.5）；返回是否确实存在并移除了该会话
+    pub fn force_revoke(&self, key: &UdpSessionKey) -> bool;
 
     /// 链路故障事件源（ChainManager），驱动决策缓存失效（udp-session-table.md §3.4）
-    pub fn attach_chain_events(&self, rx: mpsc::Receiver<ChainFailureEvent>);
+    pub fn attach_chain_events(self: &Arc<Self>, rx: mpsc::Receiver<ChainFailureEvent>);
 
     /// 启动周期回收任务（sweep_interval；单一任务，重复调用 no-op）
     pub fn spawn_reclaimer(self: &Arc<Self>) -> JoinHandle<()>;
@@ -290,5 +290,7 @@ forwarder task 持 `Arc<Inner>` + 自己的 `UdpBinding` 一半；teardown 先 `
 | 10 | `sweep` 边界未定 | 严格大于（`idle > limit`，边界值存活） | MockClock 边界单测钉死（sweep_session_idle_expiry_boundary） |
 | 11 | `TargetProto` derive | 补 `Copy + PartialEq + Eq + Hash`（lib.rs 既有类型） | `FlowTargetKey` 需作 HashMap 键；纯 derive 扩展，无语义变更 |
 | 12 | DashMap entry 内做容量判定 | 容量判定移到 `entry()` 之前 | entry 持分片写锁期间调 `len()` 有同 map 死锁风险（实施中发现）；并发窗口允许极小超卖（软门语义） |
+| 13 | `force_revoke` 无返回值 | `pub fn force_revoke(&self, key) -> bool` | ASSOCIATE 关闭路径需区分「确实回收」与「会话已不存在」，返回存在性布尔 |
+| 14 | `attach_chain_events(&self, …)` | `pub fn attach_chain_events(self: &Arc<Self>, …)` | 事件消费 task 需持表弱/强引用跨 await，`&self` 裸引用无法 `Arc::clone` 进 task |
 
-测试锚点：`crates/seep-core/tests/udp_session_table.rs`（22 项：生命周期 2、快路径与映射复用 3、超时回收 4、容量与 LRU 2、决策失效与重路由 2、吊销/关停 2、失败与下行满载 2、并发契约 2、ledger 直测 2、chain_id 口径 1）。
+测试锚点：`crates/seep-core/tests/udp_session_table.rs`（**26 项**：生命周期 2、快路径与映射复用 3、超时回收 4、容量与 LRU 2、决策失效与重路由 1、吊销/关停 2、上行失败与下行满载 5、并发契约 2、ledger 直测 3、chain_id 口径 1、表级聚合 1）。

@@ -1,8 +1,8 @@
 # P0-1 实现级设计：seep-core NAT 式 UDP 会话表
 
-> 状态：实现级设计稿（2026-09）· 本文是 [udp-dataplane.md](udp-dataplane.md) §1 的展开，是该条目的实现口径 · 对应 [todo.md](../../todo.md) P0-1 · 上游：[roadmap.md](roadmap.md) S1 · 缺口来源 [positioning.md](positioning.md) G1
-> 接口草案（可转录签名/算法伪码）：[udp-session-table-api.md](udp-session-table-api.md)。
-> 本轮为设计稿：不改任何源码；文中"新增"均为 P0-1 实施工作量。
+> 状态：**已落地（todo P0-1 完成，2026-09）**· 本文是 [udp-dataplane.md](udp-dataplane.md) §1 的展开，是该条目的实现口径 · 对应 [todo.md](../../todo.md) P0-1 · 上游：[roadmap.md](roadmap.md) S1 · 缺口来源 [positioning.md](positioning.md) G1
+> 实施面 = `crates/seep-core/src/udp/`（`table.rs`/`inner.rs`/`reclaim.rs` 等）· 接口草案（可转录签名/算法伪码）：[udp-session-table-api.md](udp-session-table-api.md)（已实施，差异以 §9 为准）。
+> 设计原文保留；实施差异与指标实况见 api 稿 §9 与 [udp-observability.md](udp-observability.md) §2.4。
 
 ## 执行摘要
 
@@ -160,11 +160,11 @@ ASSOCIATE 控制连接（TCP）与 UDP 数据报同源：MVP 按 udp-dataplane.m
 
 ### 4.4 满员准入：拒新不逐旧
 
-`max_sessions` 达到后：新客户端首包**丢弃**并计 `seep_udp_packets_dropped_total{reason="session_limit"}`，**绝不驱逐活跃会话**（游戏被挤下线比丢新会话严重得多）。容量规划建议随指标观察调整，非自动扩缩（非目标）。
+`max_sessions` 达到后：新客户端首包**丢弃**并计 `seep_udp_dropped_total{reason="session_limit"}`，**绝不驱逐活跃会话**（游戏被挤下线比丢新会话严重得多）。容量规划建议随指标观察调整，非自动扩缩（非目标）。
 
 ### 4.5 回收动作清单
 
-会话/映射到期时按序执行：① drop `UdpBinding`（relay 句柄/socket 关闭，§2.3 的 forwarder task 随之退出）；② 会话移出 Level-1；③ `downlink` 通道关闭，入站侧感知后清理 ASSOCIATE 关联状态；④ 指标：`seep_udp_sessions_expired_total{reason=idle|lifetime}` 自增、`seep_udp_sessions_active` 递减。回收不发送任何对端通知（UDP 无此语义）。
+会话/映射到期时按序执行：① drop `UdpBinding`（relay 句柄/socket 关闭，§2.3 的 forwarder task 随之退出）；② 会话移出 Level-1；③ `downlink` 通道关闭，入站侧感知后清理 ASSOCIATE 关联状态；④ 指标：`seep_udp_expired_total{reason=idle|lifetime|revoked}` 自增、`seep_udp_sessions_active` 递减。回收不发送任何对端通知（UDP 无此语义）。
 
 ## 5. FlowSession 集成（逐字段映射）
 
@@ -200,14 +200,14 @@ ASSOCIATE 控制连接（TCP）与 UDP 数据报同源：MVP 按 udp-dataplane.m
 
 ## 7. 指标与测试清单（对齐 todo P0-1 验收）
 
-指标（命名沿用 udp-dataplane.md §5.3，本条目新增细化项）：
+指标（权威口径 = [udp-observability.md](udp-observability.md) §2.4 落地定稿；下表已按实况名同步）：
 
 ```
 seep_udp_sessions_active / seep_udp_sessions_total
-seep_udp_sessions_expired_total{reason=idle|lifetime}
-seep_udp_packets_dropped_total{reason=timeout|frag|session_limit|no_mapping}
+seep_udp_expired_total{reason=idle|lifetime|revoked}
+seep_udp_dropped_total{reason=…}    # frag/source/malformed 另立独立序列
 seep_udp_mappings_active                       # 新增：Level-2 总映射数
-seep_udp_decision_reroutes_total{trigger=chain_failure}    # 新增：决策失效重路由计数
+seep_udp_reroutes_total                        # 新增：决策失效重路由计数（无标签）
 ```
 
 单元测试（验收原文 → 测试项）：

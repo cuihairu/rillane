@@ -77,15 +77,15 @@ impl TlsFingerprint {
     pub fn parse(s: &str) -> Result<Self>;   // M1 转换层用（E1 带原值报错）
 }
 
-struct FingerprintSpec {
-    protocol_versions: &'static [&'static SupportedProtocolVersion],
-    cipher_suites: &'static [SupportedCipherSuite],   // ring 集内子集排序
-    kx_groups: &'static [&'static dyn SupportedKxGroup],
-    sig_schemes: &'static [SignatureScheme],
+struct ShapeSpec {                                   // 实形（fingerprint.rs:138）
+    versions: Versions,                              // enum Versions { V13Only, V13AndV12 }
+    cipher_suites: &'static [rustls::CipherSuite],   // ring 集内子集排序
+    kx_groups: &'static [rustls::NamedGroup],
+    sig_schemes: &'static [rustls::SignatureScheme],
 }
 
 impl TlsFingerprint {
-    fn spec(&self) -> Option<FingerprintSpec>; // None = rustls 缺省（零差异）
+    fn spec(&self) -> Option<ShapeSpec>; // None = rustls 缺省（零差异）
     pub fn shape_material(&self) -> String;    // 形态串（D-6）
 }
 ```
@@ -145,7 +145,7 @@ seep-config 面（M1）：四个 TLS 承载 egress 变体（http/vmess/vless/tro
    精确随机/会话 ID 形态）——本步在 rustls 约束内交付**指纹可变且
    预设间可区分**（验收「可区分」的可复现形 = §0-3），「对检测工具
    呈现为真 Chrome」不承诺、明示不达成；uTLS 级拟真归 V2（需换栈
-   BoringSSL 或自研 ClientHello 组包器，positioning §2.4 同注）。
+   BoringSSL 或自行开发 ClientHello 组包器，positioning §2.4 同注）。
    预设名 chrome/ios/safari 表达「形态取向」非「等值伪装」；
 2. **可区分的判定面 = JA3 输入五元组**（本地解析），非三方检测服务
    在线比对——离线可复现优先；

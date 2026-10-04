@@ -19,7 +19,7 @@
 2. **Windows**：cross windows-gnu 产物（CI 已证 aws-lc-sys 在该目标可编）→ PE 头静态核验 → zip 布局断言；**真机服务安装/启动不在本机能力面**（§3.3 如实登记）。
 3. **macOS**：脚本与 plist 结构验证（`bash -n` + python3 plistlib）；**Mach-O 产物本机不产**（与 CI darwin 排除同一限制），登记为「脚本级交付，产物待原生环境」。
 
-「可安装」在 Linux 侧取最强口径（真 deb 且可抽取可运行），Windows/macOS 取交付包结构完备口径，真机安装面归后续。
+「可安装」在 Linux 侧取最严口径（真 deb 且可抽取可运行），Windows/macOS 取交付包结构完备口径，真机安装面归后续。
 
 ## 1. 现状与约束（核对结论，非重述）
 
@@ -95,7 +95,7 @@ WantedBy=multi-user.target
 /usr/bin/seepctl                0755
 /etc/seep/seep.yaml.example     0644   （示例；真配置由部署者落位，避免覆盖）
 /lib/systemd/system/seep.service 0644
-DEBIAN/control                          Package: seep; Version: 0.1.0; Architecture: amd64|arm64
+DEBIAN/control                          Package: seep; Version: 0.1.0-1; Architecture: amd64|arm64
 DEBIAN/conffiles                        /etc/seep/seep.yaml.example（示例文件登记 conffile）
 DEBIAN/postinst                         建系统用户 seep → chown /etc/seep → daemon-reload → enable（不 start）
 DEBIAN/prerm                            stop + disable（保留配置）
@@ -119,7 +119,7 @@ DEBIAN/prerm                            stop + disable（保留配置）
 `cross build --release --target x86_64-pc-windows-gnu`（CI 同款目标）→ 产物 `seepd.exe`/`seepctl.exe` → zip 交付包：
 
 ```
-seep-0.1.0-x86_64-windows.zip
+seep_0.1.0_x86_64_windows.zip
 ├── seepd.exe                PE32+ x86-64（file 核验）
 ├── seepctl.exe
 ├── seep.yaml.example
@@ -150,7 +150,7 @@ seepd 是普通控制台程序，**不与 SCM 交互**（不调 `StartServiceCtr
 `platforms/launchd/build.sh` **设计为 macOS 原生运行**：`cargo build --release` × (aarch64-apple-darwin, x86_64-apple-darwin) → `lipo -create` universal2 → tar.gz：
 
 ```
-seep-0.1.0-macos-universal2.tar.gz
+seep_0.1.0_macos_universal2.tar.gz
 ├── seepd                    Mach-O universal2（lipo -info 核验）
 ├── seepctl
 ├── com.seep.seepd.plist

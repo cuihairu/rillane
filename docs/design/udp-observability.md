@@ -1,6 +1,7 @@
 # P0-5 UDP 观测与配置 — 实现级设计
 
 > 上游设计：[udp-dataplane.md](udp-dataplane.md) §5（P0-5 概念稿：配置示意/指标草案/R11 基数风险/O4 未决）。
+> **状态：已落地（todo P0-5 完成，2026-09）**——实施面 = `seep-core/src/udp/metrics.rs` + `seep-config` `udp:` 块 + `apps/seepd/src/control_plane.rs` 渲染与 `/udp/stats`；§10 S0–S6 分步清单已全部实施。
 > 本文是落地定稿：**配置项清单、`/metrics` 命名与语义、seepctl 渲染、与 P0-4 数据面的衔接点**。
 > 复用基线：P0-1 会话表指标（`TableMetrics`/`TableSnapshot`）· P0-2 ASSOCIATE 指标（`UdpIngressMetrics`）· P0-3 能力表 · P0-4 mesh UDP 面（`udp-mesh-dataplane.md`，**已落地**）。
 >

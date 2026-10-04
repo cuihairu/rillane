@@ -1,8 +1,8 @@
 # 协议支持
 
-Seep 是一个高性能的网络路由代理系统，支持多种主流的网络协议。
+Seep 是一个网络路由代理系统，支持多种主流的网络协议。
 
-> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态；2026-10-02 回填 P1-4/P1-5/P2-1..P2-6 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
+> **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态；2026-10-02 回填 P1-4/P1-5/P2-1..P2-6 落地状态；2026-10-04 回填 P2-7 落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
 >
 > | 能力 | 状态 | 落地去向 |
 > |------|------|---------|
@@ -11,14 +11,15 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 > | 出站 direct/socks5/http/shadowsocks/trojan/hysteria2/vless/wireguard（TCP） | 已实现 | — |
 > | 出站 UDP 承载（direct/ss/wg） | **已实现（2026-09，P0-3）**；联调工具 = `seepctl udp-probe`（P0-5，退出码 0-4） | — |
 > | mesh TCP/UDP envelope 二进制化（TCP 面 JSON→二进制 v2，接收侧嗅探兼容旧 JSON） | **已实现（2026-10，P2-6）**：UDP 面 P0-4 即二进制；TCP 面 `MeshEnvelope` 本步切换 | [mesh-envelope-binary.md](design/mesh-envelope-binary.md) |
-| mesh UDP 多跳转发（UdpEnvelope over UDP 数据报） | **已实现（2026-09，P0-4）**：FULL/CACHED 跳缓存、exit per-flow socket、同端口双栈、明文门（chain+udp 未配加密构建期拒绝） | — |
+> | mesh UDP 多跳转发（UdpEnvelope over UDP 数据报） | **已实现（2026-09，P0-4）**：FULL/CACHED 跳缓存、exit per-flow socket、同端口双栈、明文门（chain+udp 未配加密构建期拒绝） | — |
 > | UDP 观测与联调（`seep_udp_*` 指标族 / `/udp/stats` / `seepctl stats` UDP 段 / `udp-probe`） | **已实现（2026-09，P0-5）**：`/metrics` 恒渲染（开关关闭全零、端点不消失）+ 入口级 `udp_enabled` 覆盖 + `udp:` 配置全字段 | — |
 > | 出站 UDP 承载（hy2） | 未实现（`hysteria2` 0.1.6 公开 API 无 UDP 出口；P0-4 已完成且**维持改判**） | V2（quinn 载具，未决） |
 > | 出站 vmess 连接器 | **已实现（2026-10）**：VMess AEAD 认证头（authID 时间窗+防重放）+ AES-128-GCM/ChaCha20-Poly1305 分块流数据面，tcp（可叠 TLS）/ws（可叠 TLS）；`alter_id=0` 限定，h2/gRPC 与 UDP 承载未实现 | todo「VMess 出站」条目 |
-> | hysteria v1 | 未实现 | 无计划（仅 hy2） |
+> | hysteria v1 | **出站连接器未实现**（配置 schema 与订阅转换已支持，运行期构建期报错） | 无计划（仅 hy2） |
 > | 出站连接池 / TLS 会话恢复 | **已实现（2026-10，P1-5）**：`egress_pool:` 配置块 + 预建立/借出即消费池（trojan/http/vless + direct 选通）+ TLS 会话恢复（进程级共享 ClientConfig）+ `seep_pool_*`/`seep_tls_*` 指标 + `GET /egress/pool/stats` | — |
 > | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `seep_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
 > | mesh 链路可观测（per-link RTT 分位 / 观测形丢包 / 切换原因账本） | **已实现（2026-10，P2-1）**：`seep_mesh_link_rtt_ms{from,to,quantile}` + `seep_mesh_link_loss_ratio{from,to}` + `seep_mesh_switch_total{reason}`（chain 启用时恒渲染）+ `GET /mesh/switches` 最近 100 事件；mesh 未启用三族与端点均缺席 | [mesh-link-observability.md](design/mesh-link-observability.md) |
+> | mesh UDP 防重放 + 撤销可见性 | **已实现（2026-10-04，P2-7）**：UDP 面 v2 帧流序号 + per-(flow,dir) 64 位滑窗（`replay_dropped` 计数进 `/udp/stats` 与 `/metrics`）+ 撤销文件载体 mtime 热加载 + 运行期观测（`GET /mtls/revoked`、`seepctl mtls revoke status`）；OCSP/CA 直连撤销查询与端到端 MAC 归 V2 | [mesh-advanced-security.md](design/mesh-advanced-security.md) |
 > | timing/shaping 扰动（启动抖动 + 写网格归一） | **已实现（2026-10，P2-4）**：`TimingMiddleware` handle 内 sleep（fixed/uniform，max_delay_ms 闸门）、`ShapingMiddleware` 包装 `flow.io` 为 `PacedIo`（interval 网格 + jitter，读侧不包装）；注解可观测 `seep.obfs.timing`/`seep.obfs.shaping`；game 预设接线演示 | [obfuscation-timing-shaping.md](design/obfuscation-timing-shaping.md) |
 > | SLO 打分选路（组策略 `slo:` 门 + penalty 评分 + chain 侧 `slo_watch` 劣化切换） | **已实现（2026-10，P2-2）**：`latency` 策略真数据在场时 = 门内最低分（score = p95 + loss × penalty）；chain watcher 越门即切换，账本 `reason="slo_degraded"`；无真数据部署行为不变；`slo_watch` YAML 面归 P2-3 | [slo-scoring.md](design/slo-scoring.md) |
 > | 场景 profile 预设（`profile: proxy\|game\|web` 配置期展开） | **已实现（2026-10，P2-3）**：缺省填充语义（显式恒优先，运行期零分支）；game = SLO 目标 + 域名模板 + bucket 混淆；web = 连接池；`examples/profile-*.yaml` 三选一即运行 | [scenario-profiles.md](design/scenario-profiles.md) |
@@ -133,7 +134,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 
 - **特点**: 轻量级协议，无状态加密
 - **加密**: 自动选择最优加密算法
-- **Flow 控制:
+- **Flow 控制**:
   - VLESS-Vision-Stream (实时流)
   - VLESS-Vision-UDP (UDP 支持)
 - **传输层**: 同 VMess
@@ -158,11 +159,11 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - DPI 抗审查能力强
 
 ### Hysteria
-> 状态：**v1 未实现**（配置 schema、订阅转换与出站连接器均不支持），本节保留为背景资料。
+> 状态：**v1 出站连接器未实现**（配置 schema 与订阅转换已支持，运行期构建期报错「暂不支持的出口类型」），本节保留为背景资料。
 
 - **协议**: 基于 QUIC 的高性能代理
 - **版本**: Hysteria v1/v2
-- **拥塞控制:
+- **拥塞控制**:
   - BBR (Bottleneck Bandwidth and RTT)
   - Cubic
   - 自定义算法
@@ -182,7 +183,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
   - 更简单的协议设计
   - 更好的移动网络支持
   - 降低 CPU 使用率
-- **加密:
+- **加密**:
   - AES-128-GCM
   - ChaCha20-Poly1305
 - **认证**:
@@ -207,7 +208,7 @@ Seep 是一个高性能的网络路由代理系统，支持多种主流的网络
 
 ## 协议扩展
 
-Seep 的模块化设计使得添加新协议变得简单：
+Seep 的模块化设计使新协议以 `EgressConnector` 实现挂入：
 
 1. **实现协议 trait**: 创建新的协议处理器
 2. **注册协议**: 在配置文件中声明新协议
@@ -300,7 +301,7 @@ egress:
 ## 兼容性
 
 ### 客户端兼容性
-Seep 与主流代理客户端完全兼容：
+Seep 入口与主流代理客户端互通（SOCKS5/HTTP CONNECT 口径；入口不支持的方法返回 405）：
 
 - **Windows**: Shadowsocks-windows, Clash, v2rayN, Qv2ray
 - **macOS**: ShadowsocksX-NG, ClashX, V2RayU
@@ -309,10 +310,10 @@ Seep 与主流代理客户端完全兼容：
 - **iOS**: Shadowrocket, Quantumult X, Surge, Stash
 
 ### 服务端互操作
-- **V2Ray**: 完全兼容 VMess/VLESS 协议
-- **Xray**: 支持所有 Xray 扩展功能
-- **Shadowsocks**: 兼容所有标准 SS 实现
-- **Trojan**: 标准 Trojan 协议实现
+- **V2Ray**: 核心 VMess/VLESS 面互通（tcp/ws；VLESS flow 与 h2/gRPC 传输不支持，见各节状态行）
+- **Xray**: VMess AEAD（tcp/ws）+ VLESS（tcp/ws，无 flow）互通；扩展传输（h2/gRPC）与 flow 不支持
+- **Shadowsocks**: AEAD 方法互通（方法集以 `shadowsocks` crate 1.21 为准，非法 `method` 运行时报错）
+- **Trojan**: 标准 Trojan 协议实现（TCP 原生 + TLS；WS/gRPC 传输未实现）
 
 ## 路线图
 
@@ -320,14 +321,14 @@ Seep 与主流代理客户端完全兼容：
 - [ ] QUIC v2 支持
 - [ ] HTTP/3 代理
 - [ ] WireGuard v2
-- [ ] 自定义协议插件系统
+- [x] 自定义协议插件系统（WASM 加载器已落地，2026-10-04 P3-2——[plugin-loader.md](design/plugin-loader.md)）
 - [ ] 协议性能基准测试工具
 
 ### 未来计划
 - [ ] QUIC 协议原生代理
 - [ ] gRPC 协议支持
 - [ ] eBPF 加速 (XDP)
-- [ ] WebAssembly 协议插件
+- [x] WebAssembly 协议插件（wasmtime 动态加载 + 示例插件，同 P3-2——[plugin-loader.md](design/plugin-loader.md)）
 - [ ] 自适应协议选择
 
 更多信息请参考 [架构总览](architecture.md)、[订阅指南](subscription.md)、[系统路由](networking.md)、[Mesh 指南](mesh.md) 与 [设计文档](design/positioning.md)。

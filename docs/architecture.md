@@ -1,9 +1,9 @@
 # Seep 架构草图
 
 ## 设计目标
-- 以 Rust 实现跨平台代理内核，兼顾性能、安全与可维护性。
-- 使用 monorepo 管理全部 crate / app / 平台 glue 代码，减少版本漂移。
-- 支持 Windows、Linux、macOS、Android、iOS、OpenWrt，并提供一致的配置与控制面。
+- 以 Rust 实现跨平台代理内核：数据面走 tokio 异步运行时，mesh 数据面默认强制 mTLS，代码组织为 monorepo 分 crate。
+- 全部 crate / app / 平台 glue 代码在一个 monorepo 内，依赖版本随 workspace 锁定，减少漂移。
+- 目标平台为 Windows、Linux、macOS、Android、iOS、OpenWrt，共用同一套配置 schema 与控制面。
 
 ## 顶层目录
 ```
@@ -11,7 +11,7 @@ seep/
 ├── apps/            # 二进制入口 (守护进程、CLI)
 ├── crates/          # 复用库 (core、config、routing、protocols 等)
 ├── docs/            # 设计文档与 ADR
-├── platforms/       # 特定平台 glue (后续补充 android/ ios/ openwrt)
+├── platforms/       # 特定平台 glue (android/ ios/ launchd/ openwrt/ systemd/ windows)
 ├── Cargo.toml       # Workspace 定义
 └── README.md
 ```
@@ -25,6 +25,9 @@ seep/
 - `seep-platform`：封装各平台的安装、服务管理、权限处理，编译期通过 feature 划分实现。
 - `seep-runtime`：编排引擎，串联配置、路由、协议组件，启动监听及热更新逻辑。
 - `seep-mesh`：协作节点模型与注册表，维护节点角色（client/relay/exit）、能力与心跳，为后续组网/加速提供统一数据面。
+- `seep-subscription`：订阅拉取/转换（Clash、分享链接、Seep DSL）/缓存/定时刷新全链路，内容哈希无变化时跳过重载。
+- `seep-plugins`：WASM 插件加载器（wasmtime 动态加载，插件适配为 `FlowMiddleware` 挂入中间件链，见 [design/plugin-loader.md](design/plugin-loader.md)）。
+- `seep-ffi`：移动平台 FFI 面（`cdylib` 导出，供 Android/iOS UI 侧调用）。
 
 ## 应用层
 - `apps/seepd`：常驻守护进程 (service/daemon)，负责加载配置、初始化 Telemetry、启动 runtime。
@@ -42,8 +45,8 @@ seep/
 - **OpenWrt**：默认构建 `musl` 静态包，并提供 UCI/ubus 适配器；LuCI 插件单独维护在 `platforms/openwrt`。
 
 ## 控制面与生态
-- 控制面统一走 `control.api_bind` (gRPC/WebSocket/REST) + `seepctl`。
-- 支持热更新：`seepctl reload` -> 守护进程 watch 配置 -> `RuntimeBuilder` reload。
+- 控制面统一走 `control.api_bind` 的 HTTP/REST + `seepctl`（手写 HTTP 路由，无 gRPC/WebSocket 面）。
+- 支持热更新：守护进程 watch 配置文件变更 -> `RuntimeBuilder` reload（无 `seepctl reload` 子命令）。
 - 文档及 ADR 集中在 `docs/`，重要决策使用 ADR 记录。
 
 ## Mesh / 协作加速 / 节点组（现状）
@@ -54,15 +57,16 @@ seep/
 - 数据面：mesh data-plane 已实现 **TCP** hop-by-hop 转发（envelope 携带路径，逐跳剥离）与 **UDP** 多跳转发（2026-09 P0-4：`UdpEnvelope` 二进制头 over UDP 数据报、FULL/CACHED 跳缓存、同端口双栈——规格见 [design/udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)，概念稿 [design/udp-dataplane.md](design/udp-dataplane.md) §4）。
 - 边界（当前不做）：UDP 面加密（**V2** quinn 载具未决；MVP 明文门已落地——chain+udp 未配加密时构建期拒绝启动）、端到端多跳 MAC/认证（无端到端密钥分发机制，归 V2）、OCSP/CA 直连撤销查询——见下「协作节点安全」与 todo P2-7。UDP 面**防重放已落地**（2026-10-04：v2 帧流序号 + per-(flow,dir) 64 位滑窗，`replay_dropped` 计数进入 /udp/stats 与 /metrics，见 [mesh.md](mesh.md) 与 [design/mesh-advanced-security.md](design/mesh-advanced-security.md)）；撤销分发=文件载体 + 运行期观测（`GET /mtls/revoked` + `seepctl mtls revoke status`）已落地。
 
-## 系统路由与虚拟网卡（现状：模型已建，实现未落地）
+## 系统路由与虚拟网卡（现状：Linux 已落地，跨平台 provider 占位）
 
-- `seep-platform::network` 已建立完整 trait 与数据模型：`TunProvider`/`TunConfig`/`TunInterface`、`RouteManager`/`RouteRule`、`PacketFilter`/`FilteringConfig`（进程/端口/IP/域名规则）、`DnsHandler`，共五个子模块（tun/route/filter/dns/platform）。
-- **未落地**（如实标注，详见 [networking.md](networking.md)）：各平台 Provider 均为占位实现（构造即告警、收发返回"未实现"）；`seep-runtime` 尚无 `TunIngress` 接线；`SeepConfig` 尚无顶层 `network` 区块；`seepctl` 尚无 `route apply/clear` 子命令。对应 todo P1-1..P1-3。
-- 当前唯一可用的相关能力：`seepctl diagnose` 采集本机路由/DNS/接口快照（只读）。
+- `seep-platform::network` 已建立完整 trait 与数据模型：`TunProvider`/`TunConfig`/`TunInterface`、`RouteManager`/`RouteRule`、`PacketFilter`/`FilteringConfig`（进程/端口/IP/域名规则）、`DnsHandler`；模块树现含 tun/route/filter/dns/dns_engine/ipcodec/linux 七个子模块（linux 为 Linux 实现，`#[cfg(target_os = "linux")]`）。
+- **Linux 面已落地**（todo P1-1..P1-3，2026-10-03，详见 [networking.md](networking.md)）：`seep-runtime` 的 `TunIngress` 接线（`tun_ingress.rs`，TCP/UDP 数据面 + 自动绕过）、`SeepConfig` 顶层 `network` 区块（含 `deny_unknown_fields` 拼错即报错）、`seepctl route apply/clear/status` 三子命令与控制面 `/network/route/{apply,clear,status}` 三端点。
+- **跨平台边界（如实标注）**：非 Linux 平台 Provider 仍为占位实现（构造即告警、收发返回"未实现"）；`RouteManagerFactory`/`DnsHandlerFactory` 的非 Linux 分支仍返回 Err——TUN 主路径不经工厂，直构 `LinuxTunProvider`/`LinuxRouteManager`。
+- 只读能力：`seepctl diagnose` 采集本机路由/DNS/接口快照。
 
 ## 订阅与配置编译（现状：全链路已实现）
 
-- Clash 订阅（proxies/proxy-groups/rules）与分享链接（vmess/vless/trojan/hysteria2/ss，含 base64 整体编码）均可转换为 `SeepConfig`；类型自动识别（`detect_type`）。转换中产出暂未实现的出站类型（如 vmess）会在运行时构建期报错提示。
+- Clash 订阅（proxies/proxy-groups/rules）与分享链接（vmess/vless/trojan/hysteria2/ss，含 base64 整体编码）均可转换为 `SeepConfig`；类型自动识别（`detect_type`）。转换中产出暂未实现的出站类型（如 hysteria v1——schema/订阅转换已支持，出站连接器缺）会在运行时构建期报错提示。
 - 自有 Seep DSL（version/meta/nodes/groups/rulesets，含认证/传输层/TLS/地理位置字段）支持导入导出与校验。
 - 拉取器支持超时/UA/自定义头/代理与 ETag/Last-Modified 条件请求；缓存为 TTL+LRU；按订阅与全局两级刷新间隔定时刷新，内容哈希无变化时跳过重载；控制面提供订阅 CRUD 与手动/全量刷新端点，配置文件变更经文件监视热更新。
 - 完整说明见 [subscription.md](subscription.md)。
@@ -76,5 +80,5 @@ seep/
 
 ## 当前状态与路线
 
-- **已完成底座**（roadmap S0）：socks5/http/mixed 入站 + direct/ss/trojan/hysteria2/vless/wireguard/socks/http TCP 出站；组策略路由；mesh 控制面 + TCP 数据面 + mTLS；订阅全链路；控制面与 seepctl；基础 Prometheus 指标。协议实现边界见 [PROTOCOLS.md](PROTOCOLS.md) 状态标注。
-- **进行中/规划**（见 [design/roadmap.md](design/roadmap.md)）：S1 UDP 全链路（会话表/入站/出站/mesh 数据面已落地，余 P0-5 观测与配置——[设计稿](design/udp-dataplane.md)、[观测设计稿](design/udp-observability.md)）→ S2 TUN 系统接管 → S3 混淆横切层与连接复用 → S4 调度闭环与发布。可执行条目见根目录 [todo.md](../todo.md)。
+- **已完成底座**（roadmap S0）：socks5/http/mixed 入站 + direct/ss/trojan/hysteria2/vmess/vless/wireguard/socks/http TCP 出站；组策略路由；mesh 控制面 + TCP 数据面 + mTLS；订阅全链路；控制面与 seepctl；基础 Prometheus 指标。协议实现边界见 [PROTOCOLS.md](PROTOCOLS.md) 状态标注。
+- **进行中/规划**（见 [design/roadmap.md](design/roadmap.md)）：S1 UDP 全链路（P0-1..P0-5 会话表/入站/出站/mesh 数据面/观测与配置**全部已落地**——[设计稿](design/udp-dataplane.md)、[观测设计稿](design/udp-observability.md)）→ S2 TUN 系统接管 → S3 混淆横切层与连接复用 → S4 调度闭环与发布。可执行条目见根目录 [todo.md](../todo.md)。

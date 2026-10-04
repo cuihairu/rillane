@@ -8,7 +8,7 @@ cross windows-gnu 交叉编译 + zip 交付包 + sc.exe 服务脚本（模板级
 | 文件 | 落位（zip 内） | 说明 |
 |---|---|---|
 | `build.sh` | —（产线） | cross `x86_64-pc-windows-gnu`（CI 同款目标）→ `dist/windows/seep_<版本>_x86_64_windows.zip`；PE32+ 静态核验 + zip 布局断言入 `.build-log.txt` |
-| `seepd.exe` / `seepctl.exe` | 根目录 | 交叉产物（file PE32+ x86-64 核验） |
+| `seepd.exe` / `seepctl.exe` | 根目录 | 交叉产物（file PE32+ x86-64 核验仅 seepd.exe；seepctl 仅 zip 布局存在性断言） |
 | `seep.yaml.example` | 根目录 | Windows 装机模板（**无 `network.tun` 块**——TUN 面 Linux-only，P1-2；Windows 隧道归平台增量） |
 | `install-service.ps1` | 根目录 | `sc.exe create`（auto 启动）+ `sc.exe failure` 三段退避重启 + 注册表 `Environment` 键注入 `SEEP_CONFIG`（seepd 无 `--config` 旗标，sc.exe 也无环境参数面） |
 | `uninstall-service.ps1` | 根目录 | `sc.exe stop/delete` 幂等卸载（1060/1062 容忍）；`-RemoveConfig` 连配置清理 |

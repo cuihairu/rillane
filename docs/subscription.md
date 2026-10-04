@@ -26,7 +26,7 @@ Seep 订阅链路覆盖：拉取（条件请求/代理/自定义头）→ 类型
 | `proxy-groups` | `routing.groups`（`PolicyGroup`，保留策略；成员支持嵌套组与权重） |
 | `rules` | `routing.rules` |
 
-- 转换产出**当前未实现的出站类型**（如 vmess）时不会静默丢弃：运行时构建（`RuntimeBuilder`）阶段报错提示。协议实现边界见 [PROTOCOLS.md](PROTOCOLS.md) 状态标注。
+- 转换产出**当前未实现的出站类型**（如 hysteria v1——schema/订阅转换已支持，出站连接器缺）时不会静默丢弃：运行时构建（`RuntimeBuilder`）阶段报错提示。协议实现边界见 [PROTOCOLS.md](PROTOCOLS.md) 状态标注。
 - 亦支持导出为 Seep 自有 DSL 并回导入（`seep_dsl.rs`）：`version/meta/nodes（auth/transport/tls/location）/groups（strategy、嵌套成员）/rulesets`，附带校验器。
 
 ## 4. 缓存与刷新（`cache.rs` + `lib.rs`）

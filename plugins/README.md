@@ -28,7 +28,10 @@ obfuscation:
 
 - 链序：内置 `middleware` 声明序在前，`plugins` 声明序在后；
 - 相对路径按进程 CWD 解析（validate E1：enabled 时路径必须存在）；
-- 配置热更新重建链 = 插件实例状态（令牌桶）清零（plugin-loader.md §7 R-state）。
+- 链重建只发生在**进程重启**：当前 seepd 无配置热更新（启动一次性读配置，
+  无 SIGHUP/watch），混淆链为进程内静态——插件实例状态（令牌桶）随进程退出
+  清零，同进程内改配置不会重建链（plugin-loader.md §7 R-state 的触发前提
+  现不成立）。
 
 ## 宿主侧验收实况
 

@@ -78,9 +78,9 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 | obfs 插件 | simple-obfs（http/tls 填充）、Shadowsocks plugind 机制 | Clash `plugin: obfs/v2ray-plugin` |
 | 混淆传输 | salamander（Hysteria2）、QUIC 流量整形 | hy2 原生 `obfs: salamander` |
 | 指纹模拟 | uTLS/客户端 TLS 指纹（chrome/ios/safari） | sing-box `utls` |
-| 特征打散 | 包长填充、时序扰动、心跳归一化——对抗基于统计的 QoS 识别 | 自研重点（见下） |
+| 特征打散 | 包长填充、时序扰动、心跳归一化——对抗基于统计的 QoS 识别 | 自行开发重点（见下） |
 
-**自研重点——流量特征打散**：QoS/DPI 对游戏流量的识别多基于包长分布、包间隔、流形状（而非协议内容）。横切层应提供：
+**自行开发重点——流量特征打散**：QoS/DPI 对游戏流量的识别多基于包长分布、包间隔、流形状（而非协议内容）。横切层应提供：
 
 - `padding`：可控包长填充策略（对齐到目标分布）；
 - `timing`：微抖动注入（可配置窗口，牺牲微延迟换抗识别）;

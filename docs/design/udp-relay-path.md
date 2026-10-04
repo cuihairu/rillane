@@ -1,7 +1,7 @@
 # P0-2 / P0-3 实现级设计：单跳 UDP 中继路径
 
-> 状态：实现级设计稿（2026-09）· 本文是 [udp-dataplane.md](udp-dataplane.md) §2/§3 的展开，为两条目的实现口径 · 依赖会话表契约：[udp-session-table.md](udp-session-table.md) · 对应 [todo.md](../../todo.md) P0-2/P0-3 · 上游：[roadmap.md](roadmap.md) S1
-> 本轮为设计稿：不改任何源码。
+> 状态：**已落地（todo P0-2/P0-3 完成，2026-09）**· 本文是 [udp-dataplane.md](udp-dataplane.md) §2/§3 的展开，为两条目的实现口径 · 依赖会话表契约：[udp-session-table.md](udp-session-table.md) · 对应 [todo.md](../../todo.md) P0-2/P0-3 · 上游：[roadmap.md](roadmap.md) S1
+> 实施面 = `seep-core/src/udp/associate.rs`（入站）+ `seep-protocols` 出站承载连接器；设计原文保留，偏差以各节落地注记为准。
 
 ## 执行摘要
 
@@ -81,12 +81,12 @@ RFC 1928：TCP 控制连接终止，服务器应结束该关联。落地：
 
 | EgressConfig 变体 | UDP 能力 | 承载方式 |
 |-------------------|---------|---------|
-| `Direct` | ✅ | 本地 UDP socket（§3.2） |
-| `Shadowsocks` | ✅ | crate UDP relay（§3.3） |
-| `Hysteria2` | ✅（以 V1 核查为前提） | QUIC 数据报（§3.4） |
-| `WireGuard` | ✅ | IP 包封装（§3.5） |
-| `Socks5` / `Http` / `Trojan` / `Vless` | ❌（S1 范围外，udp-dataplane.md §3.5） | 构建期报错 |
-| `Vmess` | ❌（连接器本身未实现，P3 遗留条目） | 同上 |
+| `Direct` | 是 | 本地 UDP socket（§3.2） |
+| `Shadowsocks` | 是 | crate UDP relay（§3.3） |
+| `Hysteria2` | 是（以 V1 核查为前提） | QUIC 数据报（§3.4） |
+| `WireGuard` | 是 | IP 包封装（§3.5） |
+| `Socks5` / `Http` / `Trojan` / `Vless` | 否（S1 范围外，udp-dataplane.md §3.5） | 构建期报错 |
+| `Vmess` | 否（连接器本身未实现，P3 遗留条目） | 同上 |
 
 - `RuntimeBuilder` 构建期：对 `routing.rules`/`default_node`/组 `members` 可达的全部出站求 UDP 能力闭包；UDP 流量可达但能力为 ❌ 的节点 → **启动失败**，错误信息逐个列出节点名与规则来源（todo P0-3 验收"构建期明确报错"）；
 - mesh 目标（`mesh.*`）不在本表，P0-4 另行处理（udp-dataplane.md §4）。

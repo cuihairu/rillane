@@ -21,17 +21,31 @@ Auth:
 - If `control.admin_token` is set, mutating requests must include either:
   - `X-Admin-Token: <token>` or
   - `Authorization: Bearer <token>`
+- Sensitive reads (`GET /runtime/config`, `GET /events`, `GET /logs`) require the
+  token too; other GET endpoints are token-free.
 
-Endpoints:
+Endpoints (mesh scope):
 - `GET /health`
 - `GET /nodes` (mesh node snapshots)
 - `POST /mesh/nodes/register` (register/update a node)
 - `POST /mesh/link-states` (update directed link-state)
+- `GET /mesh/switches` (最近 100 次 chain 切换事件，P2-1)
+- `GET /mtls/revoked` (撤销列表加载状态：mtime / 条目 / 加载错误，P2-7)
 - `POST /chains/dry-run` (chain build pre-check)
 - `POST /chains` (create/reuse chain; uses a session_id UUID)
 - `GET /chains/{chain_id}`
 - `DELETE /chains/{chain_id}`
 - `GET /chains/stats`
+
+Other control-plane endpoints (outside mesh scope, dispatcher in
+`apps/seepd/src/control_plane.rs`):
+- Observability: `GET /flows` / `GET /metrics` / `GET /udp/stats` /
+  `GET /egress/pool/stats` / `GET /dns/stats` / `GET /runtime/stats`
+- Subscriptions: `GET|POST /subscriptions`, `POST /subscriptions/refresh`,
+  `POST /subscriptions/{name}/refresh`, `DELETE /subscriptions/{name}`
+- System routing (P1-3): `POST /network/route/apply` / `POST /network/route/clear`
+  / `GET /network/route/status`
+- Sensitive reads (token required): `GET /runtime/config` / `GET /events` / `GET /logs`
 
 ## Routing To A Mesh Target
 
@@ -59,7 +73,8 @@ When `mesh` + `chain` are enabled, each node also listens on `MeshConfig.listen_
 > exit per-flow socket 与下行 task、同端口双栈（`spawn_udp` 与 TCP `spawn` 并列）、明文门（env
 > `SEEP_MESH_UDP_ALLOW_PLAINTEXT` ∪ `MeshConfig.udp_allow_plaintext_data_plane`，chain+udp 未配加密时**构建期拒绝启动**）——
 > 规格与实施见 [design/udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)（与 TCP 面的选择边界见其 §1，多跳 TTL/去重裁决见其 §14）；
-> UDP 侧观测与配置见 [design/udp-observability.md](design/udp-observability.md)（todo P0-5，未落地）。
+> UDP 侧观测与配置见 [design/udp-observability.md](design/udp-observability.md)
+> （todo P0-5，**已落地**：`/udp/stats` 快照 + `seep_udp_*` 指标族 + 入口级 `udp_enabled` 覆盖）。
 > 按本注记原设条件，标题的 "(TCP, MVP)" 限定已随之移除。
 
 ### mTLS (Recommended / Secure-by-default for chain)
@@ -100,36 +115,44 @@ When `GET /metrics` is enabled, seepd exposes per-link counters (labels: `from`,
 - `seep_mesh_link_connections_total`
 - `seep_mesh_link_errors_total`
 
-### Wire Format
+Chain-enabled deployments additionally render (P2-1, 恒渲染，mesh 未启用则缺席):
+- `seep_mesh_link_rtt_ms{from,to,quantile}` / `seep_mesh_link_loss_ratio{from,to}`
+  / `seep_mesh_switch_total{reason}` — see
+  [design/mesh-link-observability.md](design/mesh-link-observability.md)
 
-Each connection begins with a `MeshEnvelope` header:
+UDP-side families (P0-5, 与 `/udp/stats` 同源): `seep_udp_*` — see
+[design/udp-observability.md](design/udp-observability.md); mesh UDP replay
+counter `seep_udp_mesh[_client]_replay_dropped_total` (P2-7).
+
+### Wire Format (TCP 面，P2-6 起二进制 v2)
+
+Each connection begins with one `[len: u32 BE][payload]` frame carrying the
+`MeshEnvelope`. Since P2-6 the sender always emits the **binary** payload; the
+receiver sniffs the first byte and stays compatible with the legacy JSON
+framing (`{` → legacy JSON, `'S'` → binary):
 
 ```
-+------------------+--------------------+
-| length (4 bytes) | JSON payload       |
-+------------------+--------------------+
++--------------------+----------------------------------+
+| length (4 bytes BE)| binary v2 payload (or legacy JSON)|
++--------------------+----------------------------------+
 ```
 
-- `length`: u32 big-endian, the size of the JSON payload (max 64KB)
-- JSON payload: `MeshEnvelope` structure
+Binary payload layout (big-endian, `MESH_ENVELOPE_BIN_VERSION = 2`,
+`seep-runtime/src/mesh_transport.rs`):
 
-### MeshEnvelope Structure
-
-```json
-{
-  "version": 1,
-  "flow_id": "uuid-string",
-  "target_host": "example.com",
-  "target_port": 443,
-  "path": ["client1", "relay1", "exit1"]
-}
+```
+magic(2)='SU' | struct_ver(1)=2 | flags(1)=0 (保留) | env.version(4)
+| flow_id_len(1) + flow_id | host_len(1) + target_host
+| target_port(2) | hop_count(1) + [ node_len(1) + node_id ]*
+| pad_len(4) + pad(0x00 × pad_len)
 ```
 
-- `version`: Protocol version (currently 1)
-- `flow_id`: Unique identifier for this flow
-- `target_host`: Final destination hostname/IP
-- `target_port`: Final destination port
-- `path`: Ordered list of node IDs; `path[0]` is the current node
+- 截断 / magic 不符 / 结构版本非 2 / 保留位非 0 / pad 不一致一律 Err（帧丢弃）。
+- `pad_len > 0` 要求 `env.version ≥ PAD_ENVELOPE_VERSION`（P1-4 包长填充帧）。
+- Legacy JSON payload（接收侧兼容）：`{"version":1,"flow_id":…,"target_host":…,`
+  `"target_port":443,"path":[…]}`，尾部 `0x00` 填充按 `pad_len` 校验（E7）。
+- 字段语义不变：`version` 协议版本、`flow_id` 流唯一标识、
+  `target_host`/`target_port` 最终目的地、`path` 有序节点表（`path[0]` 为当前节点）。
 
 ### Hop Behavior
 
@@ -175,7 +198,10 @@ let env = MeshEnvelope::new(
     443,
     vec!["relay1".into(), "exit1".into()],
 );
-plane.dial_and_tunnel(&"relay1".into(), &env, &mut io_stream).await?;
+let flow_id = seep_core::FlowId::new();
+plane
+    .dial_and_tunnel(&"relay1".into(), &env, &mut io_stream, None, &flow_id)
+    .await?;
 ```
 
 ## Minimal Example (curl)

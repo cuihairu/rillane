@@ -1,8 +1,8 @@
 # S1 UDP 全链路设计稿（UDP Data-Plane）
 
-> 状态：设计稿（2026-09）· 对应 [roadmap.md](roadmap.md) S1 · 覆盖 [todo.md](../../todo.md) P0-1..P0-5
+> 状态：**已落地（todo P0-1..P0-5 完成，2026-09）**· 对应 [roadmap.md](roadmap.md) S1 · 覆盖 [todo.md](../../todo.md) P0-1..P0-5
 > 上游文档：[positioning.md](positioning.md)（定位与缺口 G1）· [architecture.md](../architecture.md)（crate 划分与关键接口）· [mesh.md](../mesh.md)（TCP 数据面/envelope/mTLS）· [PROTOCOLS.md](../PROTOCOLS.md)（能力声明，部分超前，见 §0.2 状态标注）
-> 本轮为设计稿：不改任何源码；文中"新增"均为实施轮工作量。
+> 实施状态以各节「状态注记」与子稿状态行为准；设计期表述与实况的偏差已随落地回填。
 
 ## 执行摘要
 
@@ -41,16 +41,16 @@
 
 ### 0.2 交叉引用与 PROTOCOLS.md 状态标注
 
-> **2026-09-30 回填（第二轮，随 P0-4 完成）**：P0-1（会话表）/ P0-2（ASSOCIATE）/ P0-3（direct/ss/wg 出站载荷）/ **P0-4（mesh UDP 面，S0–S6 全部落地，27 项新增测试全绿）**已落地，「落地现状」列如实标注；P0-5 未落地（实现级设计稿 [udp-observability.md](udp-observability.md) 已细化到可开工），相关声明维持超前/未实现口径。
+> **2026-09-30 回填（第二轮，随 P0-4 完成）**：P0-1（会话表）/ P0-2（ASSOCIATE）/ P0-3（direct/ss/wg 出站载荷）/ **P0-4（mesh UDP 面，S0–S6 全部落地，27 项新增测试全绿）**已落地，「落地现状」列如实标注；P0-5 亦已落地（[udp-observability.md](udp-observability.md)，2026-09），相关声明按实况回填。
 
 | 声明出处 | 状态（设计时点） | 落地现状（2026-09 回填） | 本稿处置 |
 |---------|------|------|---------|
-| PROTOCOLS.md「SOCKS5 … UDP ASSOCIATE (UDP 代理)」 | **超前描述**（代码仅 CONNECT） | ✅ 已实现（P0-2，2026-09） | §2 落地完成；PROTOCOLS.md 总表与 SOCKS5 节已改"已实现" |
-| PROTOCOLS.md「Shadowsocks … TCP, UDP」 | 部分超前（仅 TCP） | ✅ UDP 已实现（P0-3 `ShadowsocksUdpConnector`；完整解密往返联调归 P0-5） | §3.2 落地完成 |
-| PROTOCOLS.md「Hysteria … UDP 首包优化」/ hy2 小节 | 超前（仅 TCP） | ❌ 未实现——V1 核查：`hysteria2` 0.1.6 公开 API 无 UDP 出口；移 P0-4 后 **P0-4 完成时维持改判**（todo P0-4 §0.1-③），hy2 UDP 终态 = **V2（quinn 载具，未决）** | §3.3 分支 (c) 改道 |
-| PROTOCOLS.md「WireGuard … Layer 3 (IP) 隧道」 | 与实现一致（TCP over WG 已通） | ✅ UDP 已实现（P0-3：`allowed_ips` 预检 + MTU 上限 `mtu-80`，仍走系统 WG 接口） | §3.4 扩展落地 |
-| PROTOCOLS.md「SOCKS5 出口 … UDP 中继」 | 超前 | ❌ 维持不在 S1 范围（§3.5） | 不变 |
-| mesh.md「Mesh Data-Plane Protocol」 | 设计时点标注 (TCP, MVP) | ✅ UDP 面已实现（P0-4，2026-09）——mesh.md 现状注记按其原设条件已移除 "(TCP, MVP)" 限定并改写 | §4 落地（[udp-mesh-dataplane.md](udp-mesh-dataplane.md)） |
+| PROTOCOLS.md「SOCKS5 … UDP ASSOCIATE (UDP 代理)」 | **超前描述**（代码仅 CONNECT） | 已实现（P0-2，2026-09） | §2 落地完成；PROTOCOLS.md 总表与 SOCKS5 节已改"已实现" |
+| PROTOCOLS.md「Shadowsocks … TCP, UDP」 | 部分超前（仅 TCP） | UDP 已实现（P0-3 `ShadowsocksUdpConnector`；完整解密往返联调归 P0-5） | §3.2 落地完成 |
+| PROTOCOLS.md「Hysteria … UDP 首包优化」/ hy2 小节 | 超前（仅 TCP） | 未实现——V1 核查：`hysteria2` 0.1.6 公开 API 无 UDP 出口；移 P0-4 后 **P0-4 完成时维持改判**（todo P0-4 §0.1-③），hy2 UDP 终态 = **V2（quinn 载具，未决）** | §3.3 分支 (c) 改道 |
+| PROTOCOLS.md「WireGuard … Layer 3 (IP) 隧道」 | 与实现一致（TCP over WG 已通） | UDP 已实现（P0-3：`allowed_ips` 预检 + MTU 上限 `mtu-80`，仍走系统 WG 接口） | §3.4 扩展落地 |
+| PROTOCOLS.md「SOCKS5 出口 … UDP 中继」 | 超前 | 维持不在 S1 范围（§3.5） | 不变 |
+| mesh.md「Mesh Data-Plane Protocol」 | 设计时点标注 (TCP, MVP) | UDP 面已实现（P0-4，2026-09）——mesh.md 现状注记按其原设条件已移除 "(TCP, MVP)" 限定并改写 | §4 落地（[udp-mesh-dataplane.md](udp-mesh-dataplane.md)） |
 | architecture.md「下一阶段 … UDP 等」 | 计划中 | P0-1..P0-4 已落地；P0-5 设计与派工拆解就绪（architecture.md 数据面/路线两处 UDP 口径已同步更正） | 本稿 + 实现级设计四稿 |
 
 ## 1. UDP 会话表与粘滞键（P0-1）
@@ -117,7 +117,7 @@ pub trait UdpRelay: Send {
 
 - 会话创建/查询/超时回收有单元测试：空闲超 `session_timeout` 后表项消失；活跃会话不回收；
 - 同一粘滞键连续发包复用同一 `RouteDecision` 与映射，不重建（断言表内映射计数不变）；
-- 超限拒收有计数指标（`seep_udp_packets_dropped_total{reason="session_limit"}`）。
+- 超限拒收有计数指标（`seep_udp_dropped_total{reason="session_limit"}`）。
 
 ### 1.5 风险与未决项
 
@@ -312,10 +312,12 @@ egress 无开关：UDP 能力由类型静态决定（direct/ss/hy2/wg 有，其�
 ```
 seep_udp_sessions_active            # 会话表当前大小
 seep_udp_sessions_total             # 累计创建
-seep_udp_bytes_total{direction=up|down}
-seep_udp_packets_dropped_total{reason=timeout|frag|session_limit|no_mapping}
+seep_udp_relay_bytes_total{direction=up|down}
+seep_udp_dropped_total{reason=…}    # frag/source/malformed 另立独立序列
 seep_udp_relay_handshake_errors_total   # mesh UDP 面（预留）
 ```
+
+> 落地指标名以 [udp-observability.md](udp-observability.md) §2.4（落地定稿）与 `apps/seepd/src/control_plane.rs` 渲染为准。
 
 `/flows` 控制面接口同步区分 TCP/UDP 方向计数（现有累计流量结构加 proto 维度）。
 

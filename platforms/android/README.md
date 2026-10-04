@@ -10,12 +10,12 @@ Rust 核心（`crates/seep-ffi` cdylib）+ Kotlin VpnService。`build.sh` 一条
 |---|---|---|
 | `arm64-v8a` | `aarch64-linux-android` | 现代手机/平板 |
 | `x86_64` | `x86_64-linux-android` | 模拟器（AVD x86_64 镜像） |
-| `armeabi-v7a` | `armv7-linux-androideabi` | 老 32 位 arm（可选项，需先 `rustup target add`） |
+| `armeabi-v7a` | `armv7-linux-androideabi` | 老 32 位 arm（可选项；除 `rustup target add` 外还需在 `Cross.toml` 补 `[target.armv7-linux-androideabi]` 段——该段现缺，cross 会走官方旧镜像并撞 libunwind 缺失） |
 
 依赖：docker + cross（seep-ffi 交叉编译；镜像自带 NDK 工具链——host 直配
 NDK 需逐依赖喂 CC/AR/cmake 面，ring/aws-lc-sys 均探不到裸 clang 前缀，故
 与 platforms/openwrt 同走 cross 约定）、Android SDK（compileSdk 35 +
-build-tools 35 + licenses）、java 17+、首次运行需网络（gradle 发行版 +
+licenses；buildToolsVersion 未显式声明，走 AGP 缺省）、java 17+、首次运行需网络（gradle 发行版 +
 AGP/Kotlin 插件下载，gradle 8.10.2 由脚本按需落 `~/.seep-tools/`，不依赖
 系统 gradle 版本）。
 

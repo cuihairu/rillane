@@ -2,6 +2,9 @@
 
 Rust 核心（`crates/seep-ffi` cdylib）+ `NEPacketTunnelProvider` extension。
 本目录提供：Provider Swift 源码、macOS 侧 xcframework 构建脚本、集成步骤。
+（xcframework 现由 `libseep_ffi.dylib` 三面组装——dylib 面 extension 链接/分发
+形态**未在本仓实证**，无 macOS 工具链；静态 `.a` 路径见 `build.sh::build_one`
+备用函数，当前未接通。）
 **本仓开发环境为 Linux，iOS 面只能出源码与脚本，无法在本机完成 Xcode
 构建与真机/模拟器运行验证**（边界见下）。
 
@@ -22,14 +25,18 @@ Rust 核心（`crates/seep-ffi` cdylib）+ `NEPacketTunnelProvider` extension。
 1. `rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios`
    后跑 `platforms/ios/build.sh`，产物 `platforms/ios/build/seep_ffi.xcframework`；
 2. 新建 iOS App 工程 + Packet Tunnel Provider extension target，把
-   xcframework 拖入 extension 的 Link Binary With Libraries；
+   xcframework 拖入 extension 的 Link Binary With Libraries（dylib 面链接形态
+   未实证，见头注）；
 3. extension 的 bridging header 引入 `seep_ffi.h`（或 Swift Package
    module map）；把 `SeepPacketTunnelProvider.swift` 放入 extension target；
 4. extension `Info.plist` 声明 `NSExtensionPointIdentifier =
    com.apple.networkextension.packet-tunnel`；App Group
    （`group.dev.seep.shared`）勾选 App 与 extension 两 target；
-5. 宿主 App 用 `NETunnelProviderManager` 建 VPN Profile 并下发配置
-   （`saveProviderConfiguration` 写 `seepConfigYaml`）；
+5. 宿主 App 用 `NETunnelProviderManager` 建 VPN Profile 并下发配置，同时
+   **把配置 YAML 写进 App Group `UserDefaults(suiteName: "group.dev.seep.shared")`
+   的 `seepConfigYaml` 键**——Provider 的 `loadConfigYaml()` 从该处读取
+   （`saveProviderConfiguration` 的 providerConfiguration 字典不被读取，
+   只写它会恒走 Provider 内置 default 配置）；
 6. 起 VPN 后在设备上 `ping 10.111.0.1` 验一轮流量。
 
 ## 验证边界（如实说明）

@@ -27,7 +27,7 @@
 ### 1.2 接口签名
 
 ```rust
-// crates/seep-platform/src/network/linux.rs（新增单文件，约 400 行）
+// crates/seep-platform/src/network/linux.rs（新增单文件，设计估约 400 行；落地现 1757 行含测试）
 pub struct LinuxTunProvider {
     config: TunConfig,
     fd: Option<AsyncFd<OwnedFd>>,
@@ -119,6 +119,7 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 - 落点：`runtime_builder::build()` 在 UDP 块旁增 TUN 块——条件 `runtime_config.enable_network_virtualization && network_config.mode == Tun`，构造 `TunIngress` 插入 `ingress_endpoints["tun"]`；依赖仅 router + egress 描述符（UDP 连接器表与 `scan_udp_capability` **与 P0-3 UDP 块共享同一次构建结果**），无 build() 时序问题（不像 P0-4 §9.1——`run()` 时才取 `flow_router()`，start() 已统一注入 RuntimeFlowRouter）；
 - `TunIngress: IngressEndpoint`：`run(self: Arc<Self>, router, output)` = 设备就绪门 → 包循环 + per-flow 任务族；与 socks5 入口同构，`start()` 的统一循环零改动。
 - **与既有 ingress 的共存与选择边界**（P0-4 §1 同款缺口补全）：TUN ingress 与 socks5/mixed ingress 在 `ingress_endpoints` 中并列共存，两者**注入同一 `FlowRouter`**（chain 启用时即 `RuntimeFlowRouter`），共享 egress 连接器表与 `scan_udp_capability` 结果；**选择边界由内核/应用配置决定、不由 seep 选择**——socks5 流量是应用显式走代理监听口，TUN 流量是系统路由把应用包导入 tun 设备，两路互不重叠（一个包不会同时进两个 ingress）；UDP 侧 TUN 流的 `Arc<dyn UdpRelay>` 归 `TunFlowEntry` 持有，**不注册进 P0-1 `UdpSessionTable`**（该表与 socks5 控制连接绑定），故 TUN 会话不计入 `seep_udp_sessions_active`，见 §2.8。
+- **TUN-only 配置拒启（MVP 口径，落地约束）**：`runtime_builder::validate()` 要求 `ingress` 非空——只配 `network:` 块而无任一常规 ingress（socks5/mixed/http）时配置被拒（"至少需要配置一个入口"）。设计上 TUN 不参与该校验计数；TUN-only 独立启动归后续。
 
 ### 2.7 bypass 与防环
 
@@ -156,7 +157,7 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 | E9 | 包解析 | 截断/未知版本/非首分片 | 丢弃 + `parse_errors` 计数；**ICMP 不支持**（MVP 丢弃+计数，PMTU 影响见 §7 O-icmp） |
 | E10 | 流表满 | max | 逐最早 expiry 驱逐 + 计数（不拒新） |
 | E11 | UDP associate/send_to 失败 | P0-3 各载体错误 | `classify_failure` 同关键词分类：Timeout 族保映射（MTU 类同 P0-3 裁决）；Route 族拆映射 → 下包重新决策 |
-| E12 | UDP 链路决策 | `RoutePath::Chain` 且 P0-4 未接 | 首包 bail，错误信息注明依赖 P0-4 |
+| ~~E12~~ | ~~UDP 链路决策~~ | ~~`RoutePath::Chain` 且 P0-4 未接~~ | **已失效（P0-4 S5）**——Chain 决策由 `UdpChainRouter` 承接（`build()` 以 `Some(bridge)` 包装并注入 TunIngress），"未接线前首包 bail"过渡态已随 S5 消失（§0 软依赖同步解除） |
 | E13 | 下行未命中 | 表过期/驱逐 | 丢弃 + `unknown_flow` 计数 |
 | E14 | TCP 握手 | 超时/RST | smoltcp socket 关闭 + 流表清理 |
 | E15 | 进程归因 | proc 消失/权限 | `process.*` 注解缺省（Process 规则不匹配）+ `process_attr_miss` 计数，不报错 |
@@ -177,8 +178,8 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 - 设备生命周期：创建（强制名/自动名读回）/up/addr/mtu 断言（`ip link show` 输出或 TUNGETIFF）；
 - 路由：apply 幂等（重复执行）+ clear 完全还原 + 失败回滚（注入 cidr 冲突）；
 - **P1-1 验收钉子「捕获 IP 包进入 FlowRouter」**：测试前缀路由入 tun → 本机 `UdpSocket` 发包 → mock `FlowRouter`（记录 FlowContext）断言五元组/target/`process.*` 注解；
-- **UDP 全链路**：真设备 + mock `EgressUdpConnector`/`MockUdpRelay`（echo）→ 应用 socket 发 → **收 echo**（下行重组包校验和错误会被内核/应用丢弃，测试自验证）；
-- **TCP 全链路**：真设备 + smoltcp + mock `FlowOutput` echo（`FixedReportOutput` 同形）→ `TcpStream::connect(测试前缀地址)` 收发 echo——无需真实远端，mock 出口回环即验证全路径。
+- **UDP 全链路**：真设备 + mock `EgressUdpConnector`/`MockUdpRelay`（echo）→ 应用 socket 发 → **收 echo**（下行重组包校验和错误会被内核/应用丢弃，测试自验证）；【已落地 `tun_udp_e2e_capture_route_attribution_echo`，含捕获/路由/归因/echo】
+- **TCP 全链路**：真设备 + smoltcp + mock `FlowOutput` echo（`FixedReportOutput` 同形）→ `TcpStream::connect(测试前缀地址)` 收发 echo——无需真实远端，mock 出口回环即验证全路径。【落地偏差：真设备集成测仅 UDP 一条；TCP 走无设备注入式单测（`tcp_full_path_echo_without_device`）+ `tun_tcp.rs` 单测，真设备 TCP e2e 未补】
 
 ### 4.3 门禁
 
@@ -189,14 +190,14 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 
 依赖：`T0 → T1 → T2 → T3(UDP 面) / T4(TCP 面，仅依赖 T1) → T5`；T3/T4 可并行。提交节奏循 P0-4 §9.1.1：每步 build+test 全绿 → 单条 commit 引用本文 §节 → `git fetch origin main` + rebase → push → 下一步；禁 tag/release/force push。
 
-| 步 | 内容与落点 | 依赖 | 验收 |
-|----|-----------|------|------|
-| T0 | trait 裁剪（删 `packet_stream`/`TunPacketStream`/`TunInterface`）+ `network/linux.rs` 骨架 + 四工厂 cfg 分派 + nix 启用 | — | 编译绿；全仓基线持平；既有 seep-platform 消费点零感知 |
-| T1 | `LinuxTunProvider`：open/TUNSETIFF/AsyncFd 读写循环 + `PacketInfo` 联动 | T0 | 4.2 设备生命周期 + 「捕获 IP 包进入 FlowRouter」钉子（P1-1 验收核心） |
-| T2 | `LinuxRouteManager`：ip helper（构造/执行分离）+ addr/route 幂等 + AppliedStep 回滚 + auto-bypass 集 | T0（独立于 T1） | 4.2 路由幂等/还原/回滚 |
-| T3 | UDP 面：头编解码纯函数 + `TunFlowTable` + `TunIngress` UDP 循环 + connector 接线 + build() TUN 块 | T1（+T2 供路由） | 4.1 编解码/流表 + 4.2 UDP 全链路 echo |
-| T4 | TCP 面：smoltcp 依赖 + Interface/phy 适配 + `SmolTcpStream` + Flow 交接 | T1 | 4.2 TCP 全链路 echo（mesh 链路 TCP 此步即可达） |
-| T5 | 进程归因 + `MatchCondition::Process` + §2.8 指标 + 文档回填（networking.md §2 现状节改写、todo 勾选、status-audit §4 修正清单执行） | T3+T4 | 进程/端口规则路由测试 + 指标序列可见 + P1-1/P1-2 验收全表核对 |
+| 步 | 内容与落点 | 依赖 | 验收 | 落地 |
+|----|-----------|------|------|------|
+| T0 | trait 裁剪（删 `packet_stream`/`TunPacketStream`/`TunInterface`）+ `network/linux.rs` 骨架 + 四工厂 cfg 分派 + nix 启用 | — | 编译绿；全仓基线持平；既有 seep-platform 消费点零感知 | `c076fb8` |
+| T1 | `LinuxTunProvider`：open/TUNSETIFF/AsyncFd 读写循环 + `PacketInfo` 联动 | T0 | 4.2 设备生命周期 + 「捕获 IP 包进入 FlowRouter」钉子（P1-1 验收核心） | `75c7747` |
+| T2 | `LinuxRouteManager`：ip helper（构造/执行分离）+ addr/route 幂等 + AppliedStep 回滚 + auto-bypass 集 | T0（独立于 T1） | 4.2 路由幂等/还原/回滚 | `92f12ba` |
+| T3 | UDP 面：头编解码纯函数 + `TunFlowTable` + `TunIngress` UDP 循环 + connector 接线 + build() TUN 块 | T1（+T2 供路由） | 4.1 编解码/流表 + 4.2 UDP 全链路 echo | `a9f11dc` |
+| T4 | TCP 面：smoltcp 依赖 + Interface/phy 适配 + `SmolTcpStream` + Flow 交接 | T1 | 4.2 TCP 全链路 echo（mesh 链路 TCP 此步即可达；真设备 TCP e2e 见 §4.2 落地偏差注） | `b5785c2` |
+| T5 | 进程归因 + `MatchCondition::Process` + §2.8 指标 + 文档回填（networking.md §2 现状节改写、todo 勾选、status-audit §4 修正清单执行） | T3+T4 | 进程/端口规则路由测试 + 指标序列可见 + P1-1/P1-2 验收全表核对 | `7a3024d`+`55e4f14`（回填 2/3；status-audit §4 已于 2026-10-04 文档对账轮补） |
 
 验收对齐：P1-1 = T1+T2（+musl 交叉编译冒烟归 P3-3 打包）；P1-2 = T3/T4/T5——"按进程/端口规则将指定游戏流量路由至 mesh 链路"：TCP 对象 T4 即验；UDP 对象随 P0-4 S5；"bypass 默认安全" = T2 auto-bypass + 4.2 路由测试。
 
@@ -215,10 +216,14 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 | 9 | 假设 | OpenWrt musl 同路径编译（std/tokio/nix 均 musl 兼容）；交叉编译产物验收归 P3-3 |
 | 10 | 假设 | UDP-over-mesh 软依赖 P0-4；TCP-over-mesh 即刻可用 |
 | 11 | 假设 | ICMP 不实现（丢弃+计数）；QUIC 即普通 UDP 透传（`TargetProto::Quic` 枚举保留不特判） |
+| 12 | 偏差（落地登记） | TCP 监听句柄以 smoltcp「接生」代替字面「每五元组预建」——smoltcp 无按五元组预绑定 API（`tun_tcp.rs` §6 口径自注） |
+| 13 | 偏差（落地登记） | smoltcp TCP socket 关闭 Nagle（`nagle_enabled=false`）——时延优先 |
+| 14 | 偏差（落地登记） | `max_flows` 上限同口径限**新连接**：超限丢 SYN（不对既有流驱逐，与 UDP 面 E10 驱逐语义不同源） |
+| 15 | 假设（落地登记） | TCP 栈面 IPv4-only：smoltcp 仅启用 `proto-ipv4` feature，IPv6 TCP 形不支持（`ipcodec.rs` 同口径自注）；UDP 面 v4/v6 均支持 |
 
 ## 7. 风险与未决
 
-- **R-tun1（最大项）**：smoltcp 集成（phy 适配/waker/窗口调优）是 T4 主工作量；回退路径 = TCP 面延后，P1-2 验收先以 UDP 对象落地（游戏流量 UDP 为主的定位判断，显式接受）；
+- **R-tun1（最大项，已消除）**：smoltcp 集成（phy 适配/waker/窗口调优）是 T4 主工作量——**T4 已落地 @b5785c2**（`tun_tcp.rs` SmolTcpStream 接管，回退路径未启用）；
 - **R-tun2**：`/proc` fd 扫描成本——仅新流 + 仅存在 Process 规则时触发；采样与开关留实施期调；
 - **R-tun3**：tun 全局接管场景下 seep 自身控制面/metrics 回流——include 模式天然豁免，全局模式随 P1-3 fwmark 设计一并解；
 - **O-icmp**：ICMP（PMTUD/ping）不支持的补偿 = MTU 建议 1400；游戏场景是否需要 ICMP 透传待实测；
