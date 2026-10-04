@@ -11,9 +11,13 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # 全部 job 跑自托管 runner（seep-docker100-1/2，标签集 self-hosted+seep，
+  # 同机 /opt/runners/seepN 一实例一并发）：私有仓走 GitHub-hosted 分钟数被
+  # 账号计费拦死（job 秒失败 "recent account payments have failed"），自托管
+  # 不耗计费分钟。扩容=runner 主机再加同标签实例。
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, seep]
     # nightly 工具链每日漂移，第三方依赖（defguard_boringtun 等）撞 rustc ICE
     # 不可控——nightly 失败标黄不置红、不连坐 stable/beta；stable/beta 红照红
     continue-on-error: ${{ matrix.rust == 'nightly' }}
@@ -60,7 +64,7 @@ jobs:
 
   coverage:
     name: Code coverage
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, seep]
     steps:
     - name: Checkout source code
       uses: actions/checkout@v4
@@ -98,7 +102,7 @@ jobs:
 
   audit:
     name: Security audit
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, seep]
     steps:
     - name: Checkout source code
       uses: actions/checkout@v4
@@ -117,7 +121,7 @@ jobs:
 
   msrv:
     name: Check MSRV
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, seep]
     steps:
     - name: Checkout source code
       uses: actions/checkout@v4
@@ -139,7 +143,7 @@ jobs:
 
   cross-compile:
     name: Cross compile
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, seep]
     strategy:
       # 单目标失败不连环取消其余目标（此前 fail-fast 默认把另外 4 个
       # 目标遮在 cancelled 态，掩盖真实信号）
@@ -194,7 +198,7 @@ jobs:
 
   docker:
     name: Docker build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, seep]
     steps:
     - name: Checkout source code
       uses: actions/checkout@v4
