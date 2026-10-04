@@ -52,7 +52,7 @@ seep/
 - 组与链路：`RoutingConfig.groups`（`PolicyGroup`）成员可为 `Node` / `Group`（嵌套） / `WeightedNode` / `WeightedGroup`，组策略含 latency/bandwidth/weighted/random/consistent_hash/round_robin/fixed；路由目标 `mesh.<node>` 会被 `ChainManager` 升级为 `RouteDecision::Chain`（源 → relay → exit）。
 - 链路能力：构建（`ChainBuilder`，含约束与链路权重打分）、Dry Run 预检、健康检查任务、故障回退（`ChainContext` 备选路径切换）。控制面端点与数据面 wire format 见 [mesh.md](mesh.md)。
 - 数据面：mesh data-plane 已实现 **TCP** hop-by-hop 转发（envelope 携带路径，逐跳剥离）与 **UDP** 多跳转发（2026-09 P0-4：`UdpEnvelope` 二进制头 over UDP 数据报、FULL/CACHED 跳缓存、同端口双栈——规格见 [design/udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)，概念稿 [design/udp-dataplane.md](design/udp-dataplane.md) §4）。
-- 边界（当前不做）：UDP 面加密（**V2** quinn 载具未决；MVP 明文门已落地——chain+udp 未配加密时构建期拒绝启动）、端到端多跳 MAC/防重放、自动 CA 撤销分发（CRL/OCSP）——见下「协作节点安全」与 todo P2-7。
+- 边界（当前不做）：UDP 面加密（**V2** quinn 载具未决；MVP 明文门已落地——chain+udp 未配加密时构建期拒绝启动）、端到端多跳 MAC/认证（无端到端密钥分发机制，归 V2）、OCSP/CA 直连撤销查询——见下「协作节点安全」与 todo P2-7。UDP 面**防重放已落地**（2026-10-04：v2 帧流序号 + per-(flow,dir) 64 位滑窗，`replay_dropped` 计数进入 /udp/stats 与 /metrics，见 [mesh.md](mesh.md) 与 [design/mesh-advanced-security.md](design/mesh-advanced-security.md)）；撤销分发=文件载体 + 运行期观测（`GET /mtls/revoked` + `seepctl mtls revoke status`）已落地。
 
 ## 系统路由与虚拟网卡（现状：模型已建，实现未落地）
 
@@ -71,7 +71,7 @@ seep/
 
 - Mesh data-plane mTLS：chain 启用时**默认强制**（dev 可 `SEEP_MESH_ALLOW_PLAINTEXT=1` 豁免）；证书由 `seepctl mtls` 生成（CA/节点证书/轮换/CA bundle 双信任窗口），经 `SEEP_MESH_MTLS_*` 环境变量注入；撤销采用最小实现（按节点 CN 的撤销列表，文件 mtime 热加载）。详见 [mesh.md](mesh.md)。
 - ACL 与配额：`NodeACL`（允许的 client CIDR、角色限制）与 `NodeQuota`（日/月带宽、并发连接数）在 registry 层强制，超限返回 `QuotaExceeded`。
-- 边界：CRL/OCSP 自动撤销分发、多跳端到端 MAC/防重放未实现（todo P2-7）。
+- 边界：OCSP/CA 直连撤销查询未实现（V2——节点间除 mTLS 数据面外无 CA 通道）；多跳端到端 MAC/认证未实现（无端到端密钥分发机制，记 mesh-advanced-security.md §6 偏差 1）。撤销分发与 UDP 面防重放已落地（todo P2-7）：撤销文件 mtime 热加载 + 运行期生效面可查（`/mtls/revoked`）；UDP 面 v2 流序号 + 滑窗拒重放并计数。
 - 观测：`telemetry.enable_metrics=true` 时 `GET /metrics` 暴露 Prometheus 文本（mesh per-link 计数、chain、subscription 事件等）；`GET /flows` 提供入口→出口流量统计；`GET /nodes` 提供节点快照。per-link 时延分布/切换原因等细粒度指标见 todo P2-1。
 
 ## 当前状态与路线

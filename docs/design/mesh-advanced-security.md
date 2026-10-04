@@ -184,3 +184,12 @@ struct ReplayWindow { last: u32, bits: u64 }  // bit i = last - 1 - i 是否已�
 - **O-mix**：混布窗口 UDP 面新→旧方向中断（版本门）。缓解：文档明示 + 网格同版升级；与 P0-4 明文门/env 同批部署节奏；
 - **R-replay2**：seq 校验在 decode 后、path 校验前——攻击者可对未命中窗口的帧（不存在的流）先建窗口条目？**裁决：窗口条目惰性创建**（校验通过的帧才 insert）——重放帧必先被真实首包拉出窗口，伪造流无窗口可污染；真实流首包 seq 混沌（非 0 起跳）拒后不建条目（窗口键仅在接受时入表）；
 - **R-replay3**：多 client 同 next_hop 时 client 桥各自窗口——(flow_id, dir) 键天然隔离，无共享窗口需求。
+
+## 9. 落地注记（R1–R4 偏差回填）
+
+- **R1（fffc103）**：M0 按 §2 全量落地——`MeshTls::revoked_snapshot()`（快照前 `maybe_reload`，与 `is_revoked` 同口径）+ `GET /mtls/revoked`（无 mesh 503）+ seepctl `mtls revoke status --endpoint`（逐条渲染：static/file/revoked 列表）。帮助文本随 CLI 定义同轮落位。
+- **R2（26e923d）**：M1 编解码+窗口按 §3.2/§3.4/§3.5 落地（v2 恒带 seq、`ReplayWindow` 纯函数、`UdpFace.replay` 惰性创建随 retire/forget/sweep 回收）。**措辞回填**：前进超窗（`diff ≥ 65`）与重放同判拒（RFC 4303 同——已入 §3.4 正文）；两向超窗均拒。
+- **R3（7a8a209）**：M1 接线+计数按 §3.3/§3.6/§3.7 落地（发送侧三源序号、接收侧两校验点、`replay_dropped` 全观测链）。偏差：
+  - **§4.2 集成测试形态**：注入帧直达 exit 属 FULL 上行，exit 侧缓存 `prev` 随之更新为注入端（§3 上行来源即下行回包目标——协议既定语义），故 later/middle 回包直回注入 socket 而不经 relay/client。测试改为从注入端读回包断言（payload 经 envelope 解码），「下行经 relay 抵 client」仅对经 relay 上行的帧断言（首包 ping 往返）；「每接收跳独立窗口」由 exit 计 2 / relay 计 0 / client 桥计 0 旁证；
+  - **跨测试 env 全局竞态**：`RuntimeBuilder::build()` 的 enable_mesh 分支在 `SEEP_MESH_MTLS=1` 时**无条件**注入 `from_env_strict()`（runtime_builder.rs）——进程级 env 是测试间共享面，seepd 侧以 `MESH_MTLS_ENV_TEST_LOCK` 串行锁收编（`build_runtime` 全量持锁 + 两处 inline build+start 测试持锁），MeshConfig literal 显式 `data_plane_tls: None` 钉死；属测试基建收编，非产品代码变更。
+- **验收兑现**：todo P2-7 两目——①「撤销节点无需重启即可被拒」：文件 mtime 热加载（既有）+ M0 生效面可证（R1）；②「重放报文被丢弃并有计数」：M1 滑窗拒 + `replay_dropped` 进 /udp/stats 与 /metrics（R2/R3）。端到端 MAC/认证不在验收两目内，归 V2（§6 偏差 1）。

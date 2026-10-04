@@ -221,7 +221,7 @@ seepctl -c config/seep.yaml chain create  --source client1 --target exit1
 seepctl -c config/seep.yaml chain stats
 ```
 
-## Security Notes (current status, 2026-09)
+## Security Notes (current status, 2026-10)
 
 - mTLS on the mesh data-plane is **required by default** when `chain` is enabled
   (`SEEP_MESH_ALLOW_PLAINTEXT=1` only for dev). CA bundle dual-trust rotation and a
@@ -229,5 +229,17 @@ seepctl -c config/seep.yaml chain stats
   and [architecture.md](architecture.md).
 - `NodeACL` (client CIDR / role restrictions) and `NodeQuota` (bandwidth / connection
   limits) are enforced at the registry layer.
-- Still NOT implemented (todo P2-7): end-to-end multi-hop MAC / replay protection,
-  CRL/OCSP auto-distribution.
+- **UDP data-plane replay protection** (todo P2-7, 2026-10-04): per-(flow, dir)
+  RFC4303-style 64-bit sliding window over v2 envelopes with flow sequence numbers
+  (`UDP_FLAG_HAS_SEQ`). Rejected replays / out-of-window frames are dropped silently
+  and counted (`replay_dropped`) in `/udp/stats` (mesh + mesh_client) and `/metrics`
+  (`seep_udp_mesh[_client]_replay_dropped_total`); v1 frames bypass the window
+  (fail-open during mixed-deployment window). Design: [design/mesh-advanced-security.md](design/mesh-advanced-security.md) §3.
+- **Revocation distribution visibility** (todo P2-7, 2026-10-04): the revoked-list
+  file hot-reload is now verifiable at runtime — `GET /mtls/revoked` (control plane)
+  + `seepctl mtls revoke status` show the loaded file state (mtime / entries /
+  load errors), closing the distribute—take-effect—verify loop. OCSP stays out of
+  scope (needs direct CA connectivity, V2).
+- Still NOT implemented (todo P2-7): end-to-end multi-hop MAC / authentication —
+  there is no node public-key distribution or per-session key negotiation to anchor
+  an HMAC on (see §6 deviation 1 of the design doc above).
