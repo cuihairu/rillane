@@ -180,7 +180,7 @@ impl RuntimeBuilder {
         // P1-4 §1.2/§3.2：混淆 middleware 链（块缺席/关闭 = 空链零开销，§2.5）。
         // known_egress = 配置 egress 名 ∪ build 期已注册输出名（E5 判定输入；
         // 并集覆盖 with_output 显式注册的自定义出口）。
-        let middleware_chain = {
+        let (middleware_chain, plugin_middlewares) = {
             let mut names: Vec<String> = config_snapshot
                 .egress
                 .iter()
@@ -192,7 +192,12 @@ impl RuntimeBuilder {
                 }
             }
             let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-            crate::obfs_config::build_middleware_chain(config_snapshot.obfuscation.as_ref(), &refs)?
+            // 观测轮（plugin-loader.md §0 计数面）：插件具体类型句柄经元组旁路
+            // 留存（控制面 /plugins/stats 取数）——与链内同一实例
+            crate::obfs_config::build_middleware_chain_with_plugins(
+                config_snapshot.obfuscation.as_ref(),
+                &refs,
+            )?
         };
 
         // TUN 模式属主裁决（tun-dataplane.md §2.6）：TunIngress 组合设备+路由
@@ -549,6 +554,7 @@ impl RuntimeBuilder {
             #[cfg(target_os = "linux")]
             tun_ingress,
             dns_service,
+            plugin_middlewares,
             subscription_manager,
             event_tx,
             stats: Arc::new(RwLock::new(RuntimeStats::new())),
@@ -828,6 +834,9 @@ pub struct Runtime {
     /// P2-8 M1 观测接缝：DNS 分流服务单例（start/stop 消费 + 控制面
     /// /dns/stats 经 getter 取数；None = network.dns 块缺席/关闭）
     dns_service: Option<Arc<crate::dns_config::DnsService>>,
+    /// 观测轮（plugin-loader.md §0 计数面）：插件具体类型句柄旁路（控制面
+    /// /plugins/stats 经 getter 取数；空 = obfs 未启用/无 plugins 声明）
+    plugin_middlewares: Vec<Arc<seep_plugins::WasmPluginMiddleware>>,
     subscription_manager: Option<Arc<SubscriptionManager>>,
     event_tx: broadcast::Sender<RuntimeEvent>,
     stats: Arc<RwLock<RuntimeStats>>,
@@ -1433,6 +1442,16 @@ impl Runtime {
     /// None = network.dns 块缺席/关闭）
     pub fn get_dns_service(&self) -> Option<Arc<crate::dns_config::DnsService>> {
         self.dns_service.clone()
+    }
+
+    /// 观测轮（plugin-loader.md §0 计数面）：per-plugin 计数快照（控制面
+    /// /plugins/stats 取数；空 = obfs 未启用/无 plugins 声明）。即时快照、
+    /// 不暴露内部句柄。
+    pub fn get_plugin_stats(&self) -> Vec<(String, seep_plugins::PluginStatsSnapshot)> {
+        self.plugin_middlewares
+            .iter()
+            .map(|mw| (mw.name().to_string(), mw.stats()))
+            .collect()
     }
 
     /// 获取 mesh UDP 面快照（P0-5 §4 观测接缝②：start() 在 spawn_udp 后回填；

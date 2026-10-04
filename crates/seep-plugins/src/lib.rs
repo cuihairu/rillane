@@ -11,7 +11,7 @@ mod plugin;
 mod replay;
 
 pub use abi::{FlowContextJson, PluginDecision, DECISION_OUT_CAP, FIRST_CHUNK_CAP};
-pub use loader::{load_plugin, load_plugin_from_bytes};
+pub use loader::{load_plugin, load_plugin_from_bytes, load_plugin_with_stats};
 pub use plugin::{PluginStats, PluginStatsSnapshot, WasmPluginMiddleware};
 pub use replay::ReplayIo;
 
@@ -239,6 +239,7 @@ mod tests {
         .unwrap();
         let (flow, mut test_side) = make_flow(b"PEEKDATA-rest").await;
         let flow = mw.handle(flow).await.unwrap();
+        assert_eq!(mw.name(), "peek-allow", "name() 应回 plugin_name 固化名");
         assert_eq!(
             flow.metadata.annotations.get("plugin.noop.seen").unwrap(),
             "1",

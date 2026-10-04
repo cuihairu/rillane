@@ -24,3 +24,6 @@ seep-subscription = { path = "../../crates/seep-subscription" }
 
 [dev-dependencies]
 rcgen.workspace = true
+# 观测轮（plugin-loader.md §0）：/plugins/stats 启用形测试以最小 wat 内联
+# 模块产出 .wasm 落盘；版本随 wasmtime 所引（Cargo.lock wat 1.261.0）
+wat = "1.261"

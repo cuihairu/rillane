@@ -33,10 +33,20 @@ fn engine() -> &'static wasmtime::Engine {
 /// 从文件载入插件 → `FlowMiddleware` 适配器（同步调用；JIT 编译发生在本调用，
 /// 位于 build_middleware_chain 装配期，不占运行期）。
 pub fn load_plugin(path: &Path, opts: PluginLoadOptions) -> Result<Arc<dyn FlowMiddleware>> {
+    Ok(load_plugin_with_stats(path, opts)?.0)
+}
+
+/// 从文件载入并同时返回擦除前后两个句柄（观测轮：trait 对象入链、
+/// 具体类型旁路给 Runtime 计数面取数——同一实例，不二次 JIT）。
+pub fn load_plugin_with_stats(
+    path: &Path,
+    opts: PluginLoadOptions,
+) -> Result<(Arc<dyn FlowMiddleware>, Arc<WasmPluginMiddleware>)> {
     let bytes = std::fs::read(path).with_context(|| format!("读取插件文件 {path:?} 失败"))?;
-    let mw: Arc<dyn FlowMiddleware> =
+    let mw =
         load_plugin_from_bytes(&bytes, opts).with_context(|| format!("载入插件 {path:?} 失败"))?;
-    Ok(mw)
+    let erased: Arc<dyn FlowMiddleware> = mw.clone();
+    Ok((erased, mw))
 }
 
 /// 从内存载入（§4.1：单测内联 WAT 与生产二进制同一 ABI 面）。

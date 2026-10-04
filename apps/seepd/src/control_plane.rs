@@ -146,6 +146,7 @@ impl ControlPlane {
             (Method::GET, "/udp/stats") => self.handle_udp_stats().await,
             (Method::GET, "/egress/pool/stats") => self.handle_egress_pool_stats().await,
             (Method::GET, "/dns/stats") => self.handle_dns_stats().await,
+            (Method::GET, "/plugins/stats") => self.handle_plugins_stats().await,
             (Method::GET, "/runtime/stats") => self.handle_runtime_stats().await,
             (Method::GET, "/runtime/config") => self.handle_runtime_config().await,
             (Method::GET, "/events") => self.handle_events().await,
@@ -1264,6 +1265,26 @@ impl ControlPlane {
         json(StatusCode::OK, &dto)
     }
 
+    /// 观测轮（plugin-loader.md §0 计数面）`GET /plugins/stats`：per-plugin
+    /// 计数快照（calls/denied/traps/fuel_exhausted）。空表 = obfs 未启用或
+    /// 无 plugins 声明（形态稳定恒 200，/dns/stats 先例同款——插件面缺席
+    /// 不是错误态）。
+    async fn handle_plugins_stats(&self) -> Response<RespBody> {
+        let plugins: Vec<PluginStatsDto> = self
+            .runtime
+            .get_plugin_stats()
+            .into_iter()
+            .map(|(name, s)| PluginStatsDto {
+                name,
+                calls: s.calls,
+                denied: s.denied,
+                traps: s.traps,
+                fuel_exhausted: s.fuel_exhausted,
+            })
+            .collect();
+        json(StatusCode::OK, &PluginsStatsDto { plugins })
+    }
+
     /// P2-7 M0 §2.2：撤销生效面快照（静态 env 条目 + 文件载体态）。
     /// 503 语义 = 未装配 mesh / 纯明文 TCP 面（/nodes 先例分层口径）。
     async fn handle_mtls_revoked(&self) -> Response<RespBody> {
@@ -1963,6 +1984,22 @@ struct DnsStatsDto {
     pollution_suspected: u64,
     domestic_queries: u64,
     trusted_queries: u64,
+}
+
+/// 观测轮（plugin-loader.md §0 计数面）`/plugins/stats` 响应体。
+/// plugins 空 = obfs 未启用/无 plugins 声明（客户端以数组空判形态）。
+#[derive(Debug, Clone, Serialize)]
+struct PluginsStatsDto {
+    plugins: Vec<PluginStatsDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PluginStatsDto {
+    name: String,
+    calls: u64,
+    denied: u64,
+    traps: u64,
+    fuel_exhausted: u64,
 }
 
 /// P1-5 §6.2 响应体（keys = 每键 idle 快照；leased 全局 gauge 不分键记账）
@@ -3562,6 +3599,86 @@ mod tests {
             "\"pollution_suspected\":0",
             "\"domestic_queries\":0",
             "\"trusted_queries\":0",
+        ] {
+            assert!(s.contains(key), "应含 {key}：{s}");
+        }
+    }
+
+    /// 观测轮（plugin-loader.md §0 计数面）：无 obfs → `/plugins/stats` 报
+    /// 空表形（恒 200，数组空判形态稳定）。
+    #[tokio::test]
+    async fn plugins_stats_absent_renders_empty_shape() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let s = get_body(&cp, "/plugins/stats").await;
+        assert!(s.contains("\"plugins\":[]"), "缺席态应报空插件表：{s}");
+    }
+
+    /// 观测轮：plugins 声明 → 名字与四计数键齐备（装配期零流量 → 全零；
+    /// 计数语义由 seep-plugins 单测钉，此处钉控制面暴露面与 runtime 旁路
+    /// 同实例性——getter 名字与 wasm plugin_name 固化名一致）。
+    #[tokio::test]
+    async fn plugins_stats_present_renders_counts_shape() {
+        // 最小 wasm 插件（内联 WAT 落盘，同 obfs_config §4.3 测试法）
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (global $heap (mut i32) (i32.const 1024))
+            (data (i32.const 0) "observed-plugin\00")
+            (func (export "alloc") (param $size i32) (result i32)
+                (local $p i32)
+                (local.set $p (global.get $heap))
+                (global.set $heap (i32.add (local.get $p) (i32.add (local.get $size) (i32.const 7))))
+                (local.get $p))
+            (func (export "plugin_name") (result i32) (i32.const 0))
+            (func (export "on_flow") (param i32 i32 i32 i32) (result i32) (i32.const 0))
+        )"#;
+        let dir = std::env::temp_dir().join(format!("seepd-plugins-stats-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm_path = dir.join("observed.wasm");
+        std::fs::write(&wasm_path, wat::parse_str(wat).unwrap()).unwrap();
+
+        let mut cfg = {
+            let path =
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/seep.yaml");
+            SeepConfig::load_from_path(path).unwrap()
+        };
+        cfg.obfuscation = Some(seep_config::ObfuscationConfig {
+            enabled: true,
+            middleware: vec![],
+            plugins: vec![seep_config::ObfsPluginConfig {
+                path: wasm_path,
+                fuel: None,
+            }],
+            ..Default::default()
+        });
+        let rt_cfg = RuntimeConfig {
+            enable_mesh: false,
+            enable_chain: false,
+            mesh_config: None,
+            ..RuntimeConfig::default()
+        };
+        let runtime = Arc::new(
+            RuntimeBuilder::new(cfg)
+                .with_runtime_config(rt_cfg)
+                .build()
+                .unwrap(),
+        );
+        let cp = ControlPlane::new(runtime.clone(), None, true);
+
+        // getter 旁路与端点同源：名字一致、初始计数零
+        let stats = runtime.get_plugin_stats();
+        assert_eq!(stats.len(), 1, "应恰一插件");
+        assert_eq!(stats[0].0, "observed-plugin");
+        assert_eq!(stats[0].1.calls, 0);
+
+        let s = get_body(&cp, "/plugins/stats").await;
+        assert!(s.contains("\"observed-plugin\""), "应含插件名：{s}");
+        for key in [
+            "\"calls\":0",
+            "\"denied\":0",
+            "\"traps\":0",
+            "\"fuel_exhausted\":0",
         ] {
             assert!(s.contains(key), "应含 {key}：{s}");
         }

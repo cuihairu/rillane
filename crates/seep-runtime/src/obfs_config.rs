@@ -294,11 +294,23 @@ pub fn build_middleware_chain(
     cfg: Option<&ObfuscationConfig>,
     known_egress: &[&str],
 ) -> Result<MiddlewareChain> {
+    build_middleware_chain_with_plugins(cfg, known_egress).map(|(chain, _)| chain)
+}
+
+/// 装配并同时旁路插件具体类型句柄（观测轮：控制面 /plugins/stats 取数——
+/// 与链内同一实例，不二次 JIT；无 obfs/未启用 → (空链, 空表)）。
+pub fn build_middleware_chain_with_plugins(
+    cfg: Option<&ObfuscationConfig>,
+    known_egress: &[&str],
+) -> Result<(
+    MiddlewareChain,
+    Vec<Arc<seep_plugins::WasmPluginMiddleware>>,
+)> {
     let Some(cfg) = cfg else {
-        return Ok(MiddlewareChain::default());
+        return Ok((MiddlewareChain::default(), Vec::new()));
     };
     if !cfg.enabled {
-        return Ok(MiddlewareChain::default());
+        return Ok((MiddlewareChain::default(), Vec::new()));
     }
     let padding_policy = to_padding_policy(cfg, known_egress)?;
     let timing_policy = to_timing_policy(cfg, known_egress)?;
@@ -338,14 +350,16 @@ pub fn build_middleware_chain(
     }
     // P3-2（plugin-loader.md §2.1/§2.3）：插件在内置链之后按声明序追加——
     // 链序 = 内置声明序 + plugins 声明序；JIT 编译在此同步发生（装配期，不占运行期）
+    let mut plugins: Vec<Arc<seep_plugins::WasmPluginMiddleware>> = Vec::new();
     for plugin in &cfg.plugins {
         let opts = seep_plugins::PluginLoadOptions {
             fuel: plugin.fuel.unwrap_or(seep_plugins::DEFAULT_PLUGIN_FUEL),
         };
-        let mw = seep_plugins::load_plugin(&plugin.path, opts)?;
+        let (mw, concrete) = seep_plugins::load_plugin_with_stats(&plugin.path, opts)?;
         mws.push(mw);
+        plugins.push(concrete);
     }
-    Ok(MiddlewareChain::new(mws))
+    Ok((MiddlewareChain::new(mws), plugins))
 }
 
 #[cfg(test)]

@@ -118,6 +118,11 @@ impl WasmPluginMiddleware {
         self.stats.snapshot()
     }
 
+    /// `plugin_name()` 固化名（观测面取数：控制面 /plugins/stats 以名标识插件）
+    pub fn name(&self) -> &str {
+        self.name
+    }
+
     pub fn wants_payload(&self) -> bool {
         self.wants_payload
     }

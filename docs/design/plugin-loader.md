@@ -12,7 +12,7 @@
 | **两个示例插件**：限速（令牌桶，实例内存态）+ 内容过滤（首块关键词扫描）；`plugins/` 目录独立构建（非 workspace 成员，wasm32-unknown-unknown 交叉编译） | 插件 I/O 面（网络/文件/时钟）：MVP 插件纯计算、零 WASI（宿主注入 `now_ms`——wasm32-unknown-unknown 无时钟）；异步 host function 归 V2 |
 | **配置面**：`obfuscation.plugins` 块（路径 + fuel 预算），build_middleware_chain 追加挂载；seepd 现为启动时一次性读配置（配置热更新未接线），插件链进程内静态、随进程重启换代 | 插件热插拔/运行期装卸（无独立装卸 API）|
 | **首块探测内容过滤**：`wants_payload` 导出声明 + `Flow.io` 首块探测/回放包装 | 载荷**改写**（MVP 只 allow/deny 二值裁决，不改写流字节——HTTP 级改写语义面归 V2）|
-| **计数面**：per-plugin 原子计数（calls/denied/traps/fuel_exhausted）+ tracing 日志 | 控制面端点接线（观测面进 /metrics 或 /plugins/stats 归后续观测轮）|
+| **计数面**：per-plugin 原子计数（calls/denied/traps/fuel_exhausted）+ tracing 日志；**控制面 `GET /plugins/stats` 已接线**（2026-10-05 观测轮：runtime 旁路具体类型句柄 + getter 快照）| /metrics 指标族形态（端点 JSON 已可用；prometheus 序列归后续按需）|
 
 **验收口径**（todo P3-2 原文，逐一兑现）：①「外部编译的示例插件可加载并生效」= `plugins/` 两示例以独立 cargo 构建 wasm32 产物，宿主载入后链上生效（限速：令牌耗尽后拒流；内容过滤：首块命中即拒）；②「崩溃/超时有隔离」= trap 插件（unreachable）与死循环插件（fuel 耗尽）均以 Err 收敛于该次 `handle` 调用（E8 拒流），进程与后续流不受影响（§4 单测钉死）。
 
@@ -138,7 +138,7 @@ obfuscation:
 | 2 | 假设 | 插件纯计算零 WASI：时钟由宿主注入（now_ms）、无文件/网络面；异步 host function 归 V2 |
 | 3 | 偏差 | wall-clock 不做中止依据（同步调用不可抢占）；fuel 是唯一硬上界，配置面暴露 fuel 预算调优 |
 | 4 | 偏差 | 同插件调用经 Store Mutex 串行化——限速状态正确性优先于并发度；插件并发度归 V2（多实例分片） |
-| 5 | 范围 | 载荷只 allow/deny 不改写（HTTP 级改写语义面归 V2）；观测面控制面接线归后续观测轮 |
+| 5 | 范围 | 载荷只 allow/deny 不改写（HTTP 级改写语义面归 V2）；观测面控制面接线已兑现（2026-10-05，`GET /plugins/stats`，§0 计数面行）|
 | 6 | 假设 | 链内首块探测是 flow.io 首读者（forward 在链后才交出站连接器——runtime_builder §2.1 时序）；若未来有链前读者，探测语义需重裁 |
 
 ## 7. 风险与未决
@@ -162,6 +162,6 @@ obfuscation:
 | 3 | 载入期探测调用缺燃料 | `consume_fuel(true)` 引擎下 Store 初始 fuel=0——载入期 `wants_payload`/`plugin_name` 探测前先 `set_fuel(u64::MAX)` 放开（每调用预算重置语义仍归 invoke，§2.1 不变） |
 | 4 | 示例插件线性内存扩容 | `alloc` 内 `memory_size`/`memory_grow` 按需扩页（`#[cfg(target_arch = "wasm32")]` 门控——宿主 `cargo test` 只走纯逻辑面不触 alloc）；cdylib 产物名随包名（`seep_plugin_<name>.wasm`），build.sh 复制为对外名 |
 | 5 | 死循环 WAT 形 | `(loop br)` 后必须补 `unreachable` 方过 wasm 类型校验（函数结果 i32 的静态可达性要求） |
-| 6 | 计数面观测载体 | §0 计数面「控制端点接线归后续观测轮」兑现为：`WasmPluginMiddleware::stats()`（`Debug` 呈现 + `plugins_smoke` 实证）；/metrics 接线仍归观测轮 |
+| 6 | 计数面观测载体 | §0 计数面「控制端点接线归后续观测轮」已兑现两步：`WasmPluginMiddleware::stats()`（`Debug` 呈现 + `plugins_smoke` 实证）；2026-10-05 观测轮补控制面 `GET /plugins/stats`（runtime `get_plugin_stats()` 快照旁路，`load_plugin_with_stats` 同实例双句柄——链内 trait 对象、观测具体类型，不二次 JIT）；/metrics 指标族形态归后续按需 |
 
 §6 偏差表无新增（偏差 1–6 全部按原裁决兑现）。
