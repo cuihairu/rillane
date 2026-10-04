@@ -18,7 +18,7 @@
 | 配置新增 network 区块（mode: tun/redir；bypass/include）+ CLI `route apply/route clear` | `SeepConfig` 无顶层 network 区块；`seepctl` 无 route 子命令 | → P1 |
 | FlowMiddleware 支持 WASM/动态库加载，示例（限速、统计、内容过滤） | 仅有 `LatencyProbe` 一个实现，无动态加载机制 | → P3（降级） |
 
-另：`docs/PROTOCOLS.md` 部分描述超前于实现——**SOCKS5 UDP ASSOCIATE 已随 P0-2 落地并于 2026-09-30 回填状态；出站连接池/TLS 会话恢复已随 P1-5 落地并于 2026-10-02 回填状态**（总表与 SOCKS5 节均为"已实现"）；VMess 出站（归「VMess 出站」条目）、零拷贝/批量收发（2026-09-30 降级登记 **P3-5**）维持超前/未实现口径，各自落地后回填。
+另：`docs/PROTOCOLS.md` 部分描述超前于实现——**SOCKS5 UDP ASSOCIATE 已随 P0-2 落地并于 2026-09-30 回填状态；出站连接池/TLS 会话恢复已随 P1-5 落地并于 2026-10-02 回填状态**（总表与 SOCKS5 节均为"已实现"）；零拷贝/批量收发已随 **P3-5** 落地并于 2026-10-05 回填状态（性能节改"已实现（范围）"口径，splice/UDP 批量收发范围外如实登记）；VMess 出站（归「VMess 出站」条目）维持超前/未实现口径，落地后回填。
 
 ---
 
@@ -148,8 +148,9 @@
 - [x] **P3-4 移动端 FFI 骨架**：Android（VpnService）/ iOS（NEPacketTunnel）cdylib + C ABI 最小通路。
   验收：Android demo 通过 VpnService 建立 tun 并经内核代理一轮流量。
   本轮注记（2026-10-02，**已落地，模拟器验收通过**）：①`crates/seep-ffi` 新 crate（cdylib+rlib）——C ABI 八函数（version/last_error/start/stop/is_running/stats_json/tun_start/tun_stop + free_string），TLS take-once last_error + catch_unwind 包裹，每句柄私有 tokio runtime（worker 2），config 走 YAML 字节容忍尾 NUL，stop 经 Box 消费 + shutdown_timeout(2s)；TUN 最小数据通路 = 独立 std 线程 poll(200ms) 轮转、仅 ICMP echo（v4 重算 ICMP+IP 校验和 / v6 伪首部，RFC1071 as_chunks），TCP/UDP 真实代理路径随 P1-2 TunIngress 另落（fd 持有点即 tun_start）；10 项宿主单测含 socketpair 模拟 TUN 回环。Android JNI 桥（jni 0.21，&mut JNIEnv 面）仅 android 目标编译，8 符号 `Java_com_seep_seep_SeepFfi_*`；seep-protocols 对 android 剥离 wireguard（defguard_boringtun 0.6 无平台支撑实测编译失败 → 恒 Err 桩 `wireguard_stub.rs`，宿主面零差异）。②`platforms/android`——build.sh 产线（cross 交叉双 ABI → jniLibs 预置 → gradle 只打包、无 externalNativeBuild，gradle 8.10.2 按需落 ~/.seep-tools 不依赖系统版本）；cross 0.2.5 官方 android 镜像 NDK 过老缺 libunwind（rustc 1.99 链接失败，实测）且镜像 ENV `CARGO_TARGET_*_LINKER` 压过 cargo config 文件——自定义镜像 `cross/Dockerfile.android` 装 NDK r27c + PATH 前段落 `*-gcc/g++` 转发脚本（NDK wrapper 按 dirname $0 定位本体、软链会断；入参 --target 过滤统一钉 API 24）+ 根 Cross.toml build-args 逐 target 注入三元组；Kotlin demo 零 androidx 程序化 UI，VpnService establish `10.111.0.2/24` 仅接管测试网段（0.0.0.0/0 全局接管归 P1-2 后，免流量黑洞）+ detachFd→JNI tunStart 交接；targetSdk 33 免 FGS 样板。③`platforms/ios`——NEPacketTunnelProvider.swift 源码级交付（UserDefaults suite 读配置 + packetFlow fd 交 tun_start）+ macOS 侧 xcframework 脚本（本仓 Linux 无 Xcode，边界如实登记）。实况验收：宿主 346 测试全绿；模拟器 API33 x86_64 全链路——交叉 .so（ELF for Android 24）→ APK 双 ABI → 安装 → appops 免弹窗 → autostart → establish 得 `tun0 10.111.0.2/24` → fd=85 交接 → `ping -c 3 10.111.0.1` 三发三收 0 丢失（内核→tun fd→Rust echo→内核）→ logcat 零 AndroidRuntime 崩溃；arm64 真机未验（platforms/android/README.md 边界登记）。
-- [ ] **P3-5 零拷贝/批量收发**（2026-09-30 降级登记）：PROTOCOLS.md「性能优化」节的零拷贝与批量处理描述超前于实现且无近期落地计划，自"设计口径"降级为本登记项，避免超前描述无主。
+- [x] **P3-5 零拷贝/批量收发**（2026-09-30 降级登记；2026-10-05 落地收口）：PROTOCOLS.md「性能优化」节的零拷贝与批量处理描述超前于实现且无近期落地计划，自"设计口径"降级为本登记项，避免超前描述无主。
   验收：落地时以基准测试佐证吞吐/延迟收益，并回填 PROTOCOLS.md 性能节状态（异步 I/O 已实现一行保留）。
+  收口注记（2026-10-05，**R0–R4 全落地**；设计定稿 `docs/design/performance-io.md`——范围裁决 §2：splice 出界（middleware 链包装破坏 fd 语义、TLS 段占多数）、UDP recvmmsg/sendmmsg 出界（无高包率证据），「零拷贝」降档为「减少拷贝/减少 syscall」）：①**R1 relay 缓冲参数化**——seep-core `performance` 模块（`DEFAULT_RELAY_BUFFER=8192`、`set_relay_buffer` 1..=1MiB 校验 + `relay_buffer()` AtomicUsize 读侧，进程级单值同 P1-5 池/工厂 D-10 先例——connector trait 无 config 通道）+ seep-config 顶层 `performance:` 块（`deny_unknown_fields`，`relay_buffer: Option<u32>` validate E1 带原值报错）+ RuntimeBuilder 构建期接线 + 16 处 relay 点（seep-protocols 出站 13 + mesh_transport 3）`copy_bidirectional` → `copy_bidirectional_with_sizes(n, n)`；缺省 8192=现行为，存量零差异；②**R2 帧写 vectored 化**——`mesh_transport::write_frame` 两段 `[len_be][payload]` IoSlice 一次 `write_vectored` 提交 + 手写短写推进循环（tokio 无 `write_all_vectored`，E0599 实证后改）+ 0 字节写按连接关闭报错 + `MAX_HEADER_BYTES` 64KiB 先行检查不变；rustls `TlsStream` 无 vectored（`is_write_vectored()=false`）tokio 默认回落单段写=等价现状两段 `write_all`；ShortWriter mock（cap 短写 + calls 计数）专项测试钉死推进逻辑（cap=3/1/usize::MAX 三组，充足时单次调用）；③**R3 基准实证**——criterion 0.8 入 seep-core dev-deps，`benches/relay_throughput.rs`（32MiB 单向灌包经 `copy_bidirectional_with_sizes`，8K/32K/64K/256K 对照）+ `benches/write_frame.rs`（两段 vs vectored，4KiB/64KiB×2048 帧）；多会话共用开发机 load 19–45 噪声显著，每配置 3–4 轮取中位：relay 8K→256K 中位吞吐 214→357 MiB/s（**+67%**），帧写 4KiB vectored 中位快约 26%（3/4 轮占优）、64KiB 同量级无回归；基准不入 CI 门禁（本地跑，环境噪声不判 CI）；④**R4 文档回填**——PROTOCOLS.md 性能节改「已实现（范围）」口径（异步 I/O 已实现一行保留；splice/UDP 批量收发范围外如实登记）；设计稿 §5 结果表 + 状态行终态。
 
 ---
 
@@ -187,6 +188,6 @@
 | P0 | 5 | S1 UDP 全链路 | 5/5（P0-1 会话表、P0-2 ASSOCIATE、P0-3 出站载荷、P0-4 mesh UDP 面、P0-5 观测与配置——S0–S6 全部落地） |
 | P1 | 5 | S2 TUN + S3 前半 | 5/5（**P1 全部完成**——P1-1/P1-2 于 2026-10-03 收口（tun-dataplane T0–T5：a9f11dc/b5785c2/7a3024d + 归因优化 6f4b0e9 + 双场景并发走查实测）、P1-3 于 2026-10-03 收口（R0/R1 1e1a7c0 + R2–R4 1befbe7：RouteControl 契约 + 控制面三端点 + `seepctl route` CLI）、P1-4 M0–M4 2026-10 完成（484a4f7/c78f0f7/1c50565/8838f04/33cef4c）、P1-5 M0–M5 2026-10-02 完成；设计稿 5/5：P1-1/P1-2（tun-dataplane.md T0–T5）、P1-3（network-route.md R0–R4 已落地）、P1-4（obfuscation-middleware.md M0–M5）、P1-5（egress-connection-pool.md M0–M5 已落地）） |
 | P2 | 8 | S3 后半 + S4 | 8/8（**P2-1..P2-6 + P2-7 + P2-8 完成**——P2-7 于 2026-10-04 落地，余项均 2026-10-02 全步落地） |
-| P3 | 5+1 | S4 收尾 | 1/6（P3-1 文档对齐完成；P3-5 为 2026-09-30 超前描述降级登记） |
+| P3 | 5+1 | S4 收尾 | 2/6（P3-1 文档对齐、P3-5 零拷贝/批量收发（范围）完成；P3-5 原 2026-09-30 降级登记于 2026-10-05 R0–R4 落地收口） |
 
 已完成底座（S0）9 大项见上文归档清单；原 19 条清单中 10 项核实为真实完成、3 项勘误重开、其余并入 P0–P3 对应条目。

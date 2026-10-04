@@ -4,11 +4,12 @@
 > [PROTOCOLS.md](../PROTOCOLS.md) 性能节。
 > 本文是落地定稿：**范围裁决（splice/recvmmsg 出界）、进程级 relay 缓冲参数、
 > 帧写 vectored 化、基准方案、分步清单**。落地后偏差回填 §7。
-> **状态：R0–R3 已落地**（R1：seep-core `performance` 模块 + seep-config
-> `performance:` 块 + RuntimeBuilder 接线 + 16 处 relay 点
-> `copy_bidirectional_with_sizes`；R2：`write_frame` vectored 化 + 短写
-> 推进 + ShortWriter 专项测试；R3：criterion benches 实跑，数字见 §5
-> 结果表）。R4 文档回填见 §6。
+> **状态：R0–R4 已全部落地**（2026-10-05。R1：seep-core `performance`
+> 模块 + seep-config `performance:` 块 + RuntimeBuilder 接线 + 16 处
+> relay 点 `copy_bidirectional_with_sizes`；R2：`write_frame` vectored
+> 化 + 短写推进 + ShortWriter 专项测试；R3：criterion benches 实跑，
+> 数字见 §5 结果表；R4：PROTOCOLS.md 性能节「已实现（范围）」回填 +
+> todo.md P3-5 勾选）。
 
 ## 0. 范围与验收口径
 
@@ -163,7 +164,7 @@ syscall 次数占比趋零，与 §2-D2「明文段收益、TLS 段等价回落�
 | R1 | seep-core `performance` 模块 + seep-config `performance:` 块（validate E1）+ runtime_builder/seepd 接线 + 15 处 relay 点换 `copy_bidirectional_with_sizes` + 单测（set/get、非法值、缺省零差异） | 门禁全绿；无配置时行为与现状逐字节一致 |
 | R2 | `write_frame` vectored 化 + 既有帧测试零回归 | mesh 帧测试全绿 |
 | R3 | criterion benches（§5 两组）+ 实跑 + 数字回填本文 §5 结果表 | 基准产出真实数字（已落地，见 §5 结果表） |
-| R4 | PROTOCOLS.md 性能节回填（「已实现（范围）」+ 范围外项登记）+ todo.md P3-5 勾选 + 本文状态行 | 文档与实现对齐 |
+| R4 | PROTOCOLS.md 性能节回填（「已实现（范围）」+ 范围外项登记）+ todo.md P3-5 勾选 + 本文状态行 | 文档与实现对齐（已落地） |
 
 ## 7. 偏差与假设
 

@@ -237,13 +237,13 @@ impl EgressConnector for MyProtocol {
 
 ## 性能优化
 
-> 状态：异步 I/O（tokio）已实现；**零拷贝与批量处理未实现**（描述为设计口径，无近期落地计划，降级登记 todo **P3-5**）；**连接池已实现**（2026-10，P1-5：预建立/借出即消费池 + TLS 会话恢复，`egress_pool:` 块，`seep_pool_reuse_ratio` 等指标可见——总拨号 ≈ 流数不降系每流消耗一条连接的结构约束，降总连接数归 V2 多路复用）；「智能选择/故障转移」部分成立——组策略选路（7 种策略）与 mesh chain 故障回退已实现；「会话保持」在 UDP 侧已成立（2026-09，P0-1 会话表：进程/五元组粘滞键 + 空闲/生命周期回收，`seep-core/src/udp/`），TCP 侧连接复用以池形态成立（2026-10，P1-5）。
+> 状态：异步 I/O（tokio）已实现；**零拷贝/批量收发已按范围落地**（2026-10，P3-5：relay 缓冲参数化 `performance.relay_buffer`（缺省 8192 零差异）+ 16 处 relay 点 `copy_bidirectional_with_sizes` + mesh 帧写 vectored 合一；基准与范围裁决见 [performance-io.md](design/performance-io.md)——内核态 splice 与 UDP recvmmsg/sendmmsg 为范围外，如实登记）；**连接池已实现**（2026-10，P1-5：预建立/借出即消费池 + TLS 会话恢复，`egress_pool:` 块，`seep_pool_reuse_ratio` 等指标可见——总拨号 ≈ 流数不降系每流消耗一条连接的结构约束，降总连接数归 V2 多路复用）；「智能选择/故障转移」部分成立——组策略选路（7 种策略）与 mesh chain 故障回退已实现；「会话保持」在 UDP 侧已成立（2026-09，P0-1 会话表：进程/五元组粘滞键 + 空闲/生命周期回收，`seep-core/src/udp/`），TCP 侧连接复用以池形态成立（2026-10，P1-5）。
 
 ### 协议层优化
-- **零拷贝**: 使用 Rust 的所有权系统避免不必要的内存拷贝
+- **零拷贝**: 使用 Rust 的所有权系统避免不必要的内存拷贝（**已实现（范围）**，2026-10 P3-5——用户态中继无法全免拷贝（TLS 终结、middleware 链语义），落地形态为减少拷贝与 syscall：`performance.relay_buffer` 双向缓冲可配（8K→256K 基准中位吞吐 +67%）、16 处 relay 点 `copy_bidirectional_with_sizes`、mesh 帧写两段合一 vectored 提交（4 KiB 帧基准快约 26%，TLS 段 rustls 无 vectored 自动回落等价现状）；内核态 splice 判出界（middleware 链包装破坏 fd 语义），见 [performance-io.md](design/performance-io.md)）
 - **连接池**: 复用 TCP 连接减少握手开销（**已实现**，2026-10 P1-5——池形态 = 预建立 + 借出即消费：命中借出的请求零拨号零握手，预热/补充拨号的握手被 TLS 会话恢复取代；总拨号 ≈ 流数不降为结构约束，降总连接数归 V2 多路复用）
-- **异步 I/O**: 基于 Tokio 的非阻塞 I/O
-- **批量处理**: 支持批量发送和接收
+- **异步 I/O**: 基于 Tokio 的非阻塞 I/O（已实现）
+- **批量处理**: 支持批量发送和接收（**未实现**——UDP recvmmsg/sendmmsg 批量收发判出界：现网无高包率场景证据，libc 直调 + tokio 托管 fd 兼容复杂度不值；待真机高包率场景以基准驱动重评，见 [performance-io.md](design/performance-io.md) §2-D4）
 
 ### 路由优化
 - **智能选择**: 根据延迟、带宽、负载自动选择最优路径
