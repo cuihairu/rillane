@@ -6,7 +6,7 @@
 //! `RoutePath::Chain{hops≥2}` 走 mesh 桥，其余决策原样落 inner（按 final_node
 //! 分发，能力表扫描口径不变）。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ use seep_mesh::{MeshRegistry, NodeId};
 
 use crate::mesh_transport::{
     decode_udp_envelope, encode_udp_envelope, MeshTlsConfig, MeshUdpGate, UdpDir, UdpEnvelope,
-    UdpPathMode, UDP_ENVELOPE_VERSION,
+    UdpPathMode, UDP_ENVELOPE_VERSION_V2,
 };
 
 /// FULL 重发间隔（§5）：每 64 个上行包重发一次 FULL。
@@ -153,6 +153,7 @@ impl MeshUdpBridge {
             sent_full: AtomicBool::new(false),
             packets: AtomicU64::new(0),
             last_full: Mutex::new(Instant::now()),
+            next_seq: AtomicU32::new(0),
             // P0-5 §2.4：per-relay AtomicU64 → bridge 单例共享 Arc（fetch_add 点不变）
             metrics: Arc::clone(&self.client_metrics),
         }))
@@ -174,6 +175,9 @@ pub struct MeshUdpRelay {
     packets: AtomicU64,
     /// 上次 FULL 发送时刻（重发判据 2；Instant 非整数故 Mutex 而非 Atomic）
     last_full: Mutex<Instant>,
+    /// P2-7 M1 §3.3：上行序号源（per-relay 单调；fetch_add 在 send_to 前序，
+    /// 每个 envelope 恰好一个 seq）
+    next_seq: AtomicU32,
     /// P0-5 §2.4：下行丢弃进程级计数（dir=Up / FULL / flow_id 不符 / 解码失败）——
     /// bridge 构造单例、同 bridge 各 relay 共享（收编裁决）
     metrics: Arc<UdpClientMetrics>,
@@ -194,27 +198,33 @@ impl UdpRelay for MeshUdpRelay {
             }
             due
         };
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let env = if use_full {
             UdpEnvelope {
-                version: UDP_ENVELOPE_VERSION,
+                version: UDP_ENVELOPE_VERSION_V2,
                 dir: UdpDir::Up,
                 flow_id: self.flow_id,
                 target_host: target.host.clone(),
                 target_port: target.port,
                 path_mode: UdpPathMode::Full,
                 hop_index: 0, // §14-1：发送端置 0
+                // P2-7 M1 §3.3：client 桥本流单调序号（fetch_add 即单调）
+                seq,
+                seq_present: true,
                 path: self.path.clone(),
                 payload: buf.to_vec(),
             }
         } else {
             UdpEnvelope {
-                version: UDP_ENVELOPE_VERSION,
+                version: UDP_ENVELOPE_VERSION_V2,
                 dir: UdpDir::Up,
                 flow_id: self.flow_id,
                 target_host: target.host.clone(),
                 target_port: target.port,
                 path_mode: UdpPathMode::Cached,
                 hop_index: 0,
+                seq,
+                seq_present: true,
                 path: Vec::new(),
                 payload: buf.to_vec(),
             }
@@ -260,6 +270,7 @@ impl UdpRelay for MeshUdpRelay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesh_transport::UDP_ENVELOPE_VERSION;
     use seep_core::{FlowId, FlowMetadata};
     use seep_mesh::{NodeRecord, NodeRole};
 
@@ -484,6 +495,8 @@ mod tests {
             target_port: 4242,
             path_mode: UdpPathMode::Cached,
             hop_index: 1,
+            seq: 0,
+            seq_present: false,
             path: vec![],
             payload: b"echo!".to_vec(),
         };
@@ -649,6 +662,8 @@ mod tests {
             target_port: 5353,
             path_mode: UdpPathMode::Cached,
             hop_index: 0,
+            seq: 0,
+            seq_present: false,
             path: vec![],
             payload: b"junk".to_vec(),
         };

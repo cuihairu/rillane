@@ -498,6 +498,10 @@ pub fn decode_mesh_envelope_binary(buf: &[u8]) -> Result<MeshEnvelope> {
 // 路径拒绝"由编码侧强制，解码侧结构上不可能出现）。
 
 pub const UDP_ENVELOPE_VERSION: u8 = 1;
+/// P2-7 M1 §3.2：带流序号版本（恒置 HAS_SEQ）；seq_present=false 时按 v1 编码。
+pub const UDP_ENVELOPE_VERSION_V2: u8 = 2;
+/// P2-7 M1 §3.2：flags bit1 = HAS_SEQ（帧携带 4 字节 BE 序号）
+pub const UDP_FLAG_HAS_SEQ: u8 = 0x02;
 /// IPv4 UDP 载荷理论上界（§13-3）：encode 总长超此值拒绝，调用方丢弃 + `malformed` 计数。
 pub const UDP_ENVELOPE_MAX: usize = 65507;
 
@@ -519,7 +523,7 @@ pub enum UdpPathMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdpEnvelope {
-    /// 恒 1，其他值解码拒绝
+    /// 恒 1（或 P2-7 M1 起恒 2），其他值解码拒绝
     pub version: u8,
     pub dir: UdpDir,
     /// UUID 原始字节（非字符串化——缓存键与线上格式同源，§11-3）
@@ -530,6 +534,11 @@ pub struct UdpEnvelope {
     pub path_mode: UdpPathMode,
     /// 已穿越跳数（§14-1：发送端置 0，每经一个 relay +1，上下行对称）
     pub hop_index: u8,
+    /// P2-7 M1 §3.2：流序号（seq_present=true 时入帧；发送侧单调递增，
+    /// relay 转发原样保留——端到端语义）。v1 帧恒 0。
+    pub seq: u32,
+    /// P2-7 M1 §3.2：本帧是否携带 seq（序列 = version=2 + HAS_SEQ；解码 v1 → false）
+    pub seq_present: bool,
     /// Full 时非空；Cached 恒空（编解码双向强制）
     pub path: Vec<NodeId>,
     pub payload: Vec<u8>,
@@ -548,8 +557,19 @@ fn udp_take<'a>(buf: &'a [u8], pos: &mut usize, n: usize, what: &str) -> Result<
 }
 
 pub fn encode_udp_envelope(env: &UdpEnvelope) -> Result<Vec<u8>> {
-    if env.version != UDP_ENVELOPE_VERSION {
-        anyhow::bail!("udp envelope: 不支持的版本 {}（仅支持 1）", env.version);
+    // P2-7 M1 §3.2：版本由 seq_present 推导（v1 无 seq / v2 恒带 seq），
+    // env.version 只做一致性校验（§3.7 E1：构造器缺陷可观测）。
+    let wire_version = if env.seq_present {
+        UDP_ENVELOPE_VERSION_V2
+    } else {
+        UDP_ENVELOPE_VERSION
+    };
+    if env.version != wire_version {
+        anyhow::bail!(
+            "udp envelope: version({}) 与 seq_present({}) 不一致（期望 {wire_version}）",
+            env.version,
+            env.seq_present
+        );
     }
     match env.path_mode {
         UdpPathMode::Full if env.path.is_empty() => {
@@ -582,11 +602,15 @@ pub fn encode_udp_envelope(env: &UdpEnvelope) -> Result<Vec<u8>> {
 
     let mut out = Vec::with_capacity(24 + addr.len() + env.path.len() * 8 + env.payload.len());
     out.extend_from_slice(b"SU");
-    out.push(env.version);
-    out.push(match env.dir {
+    out.push(wire_version);
+    let mut flags = match env.dir {
         UdpDir::Up => 0u8,
         UdpDir::Down => 1,
-    });
+    };
+    if env.seq_present {
+        flags |= UDP_FLAG_HAS_SEQ;
+    }
+    out.push(flags);
     out.extend_from_slice(&env.flow_id);
     out.push(atyp);
     if atyp == 3 {
@@ -599,6 +623,9 @@ pub fn encode_udp_envelope(env: &UdpEnvelope) -> Result<Vec<u8>> {
         UdpPathMode::Cached => 1,
     });
     out.push(env.hop_index);
+    if env.seq_present {
+        out.extend_from_slice(&env.seq.to_be_bytes());
+    }
     if matches!(env.path_mode, UdpPathMode::Full) {
         out.push(env.path.len() as u8);
         for id in &env.path {
@@ -625,13 +652,27 @@ pub fn decode_udp_envelope(buf: &[u8]) -> Result<UdpEnvelope> {
         anyhow::bail!("udp envelope: magic 不符");
     }
     let version = buf[2];
-    if version != UDP_ENVELOPE_VERSION {
-        anyhow::bail!("udp envelope: 不支持的版本 {version}");
-    }
     let flags = buf[3];
-    if flags & 0xFE != 0 {
-        anyhow::bail!("udp envelope: 保留位非 0（flags=0x{flags:02x}）");
-    }
+    // P2-7 M1 §3.2 §3.7 E2/E5：v1 维持旧保留位矩阵；v2 仅新增 HAS_SEQ 位
+    //（恒置——v2 无 seq 帧不存在）。
+    let seq_present = match version {
+        UDP_ENVELOPE_VERSION => {
+            if flags & 0xFE != 0 {
+                anyhow::bail!("udp envelope: 保留位非 0（flags=0x{flags:02x}）");
+            }
+            false
+        }
+        UDP_ENVELOPE_VERSION_V2 => {
+            if flags & !0x03 != 0 {
+                anyhow::bail!("udp envelope: v2 保留位非 0（flags=0x{flags:02x}）");
+            }
+            if flags & UDP_FLAG_HAS_SEQ == 0 {
+                anyhow::bail!("udp envelope: v2 必须带 HAS_SEQ（flags=0x{flags:02x}）");
+            }
+            true
+        }
+        other => anyhow::bail!("udp envelope: 不支持的版本 {other}"),
+    };
     let dir = if flags & 1 == 0 {
         UdpDir::Up
     } else {
@@ -667,6 +708,19 @@ pub fn decode_udp_envelope(buf: &[u8]) -> Result<UdpEnvelope> {
         _ => anyhow::bail!("udp envelope: 非法 path_mode {pm}"),
     };
     let hop_index = udp_take(buf, &mut pos, 1, "hop_index")?[0];
+    // P2-7 M1 §3.2：seq 段在 hop_index 之后（v2 恒 4 字节 BE；§3.7 E3 截断走 udp_take）
+    let (seq, seq_present) = if seq_present {
+        (
+            u32::from_be_bytes(
+                udp_take(buf, &mut pos, 4, "seq")?
+                    .try_into()
+                    .expect("长度由 udp_take 保证"),
+            ),
+            true,
+        )
+    } else {
+        (0, false)
+    };
     let path = if matches!(path_mode, UdpPathMode::Full) {
         let hop_count = udp_take(buf, &mut pos, 1, "hop_count")?[0] as usize;
         let mut path = Vec::with_capacity(hop_count);
@@ -691,10 +745,78 @@ pub fn decode_udp_envelope(buf: &[u8]) -> Result<UdpEnvelope> {
         target_port: port,
         path_mode,
         hop_index,
+        seq,
+        seq_present,
         path,
         payload,
     })
 }
+
+// ── P2-7 M1 §3.4：RFC 4303 风格 64 位滑窗（防重放判定纯函数）──
+//
+// 键 = (flow_id, dir)——流 + 方向各自窗口。wrapping 差语义：diff = seq - last
+// (wrapping) 为“前进量”；diff==0 重放、1..=64 前进接受（越 64 位窗历史全丢）、
+// 其余视作“回退”（回退 ≤63 位内查历史位，超窗拒）。2^32 空间半空间单调
+// 假设见 §6 偏差 4。初始态（首包）无条件接受——窗口条目惰性创建（§7
+// R-replay2：仅校验通过的流才入表）。
+
+/// P2-7 M1 §3.4：单 (flow_id, dir) 窗口。bits bit i = 已收 seq == last-1-i；last
+/// 本身不入 bits（相等即重放）；前进 d 时旧 last 落位 `bits |= 1 << (d-1)`——
+/// 被超越的 last 成为历史（跳过的中间 seq 不置位）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ReplayWindow {
+    last: Option<u32>,
+    bits: u64,
+}
+
+impl ReplayWindow {
+    pub const fn new() -> Self {
+        Self {
+            last: None,
+            bits: 0,
+        }
+    }
+
+    /// 判定并前进：接受返回 true；重放/超窗返回 false 且状态不变。
+    pub fn check_and_advance(&mut self, seq: u32) -> bool {
+        let Some(last) = self.last else {
+            self.last = Some(seq);
+            return true;
+        };
+        let diff = seq.wrapping_sub(last) as u64;
+        match diff {
+            0 => false,
+            // 前进：last+1 ..= last+64（含 64 = 越窗：历史全丢）；旧 last 入历史
+            d @ 1..=64 => {
+                if d < 64 {
+                    self.bits = (self.bits << d) | (1u64 << (d - 1));
+                } else {
+                    self.bits = 1u64 << (d - 1);
+                }
+                self.last = Some(seq);
+                true
+            }
+            // 回退（diff ≥ 65 即 wrapping 差大于半空间者的镜像面）：
+            // last-63 ..= last-1 内查历史位；更旧/跳变拒
+            _ => {
+                let back = last.wrapping_sub(seq) as u64;
+                if (1..=63).contains(&back) {
+                    let bit = 1u64 << (back - 1);
+                    if self.bits & bit != 0 {
+                        return false;
+                    }
+                    self.bits |= bit;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
+/// P2-7 M1 §3.5：防重放窗口键（flow_id + dir：上行 0 / 下行 1，与 flags 位一致）
+pub(crate) type ReplayKey = ([u8; 16], u8);
 
 // ── P0-4 §3：跳缓存 UdpFlowCache（relay/exit 的 flow_id → {next, prev, expiry} 本地状态）──
 //
@@ -914,6 +1036,9 @@ struct ExitFlow {
 struct UdpFace {
     cache: UdpFlowCache,
     flows: DashMap<[u8; 16], ExitFlow>,
+    /// P2-7 M1 §3.5：防重放窗口表（(flow_id, dir) 键；条目惰性创建、随
+    /// 缓存/flow 表消亡点回收——见 sweep/retire_flow/forget_flow 接缝）
+    replay: DashMap<ReplayKey, ReplayWindow>,
     metrics: UdpFaceMetrics,
 }
 
@@ -926,7 +1051,31 @@ impl UdpFace {
         Self {
             cache: UdpFlowCache::new(ttl, max),
             flows: DashMap::new(),
+            replay: DashMap::new(),
             metrics: UdpFaceMetrics::new(),
+        }
+    }
+
+    /// P2-7 M1 §3.4/§3.5：窗口判定（seq_present=false 的 v1 帧 fail-open 跳过）。
+    /// 命中即返回——调用方丢弃报文（E4 静默，不计 malformed）。
+    fn replay_check(&self, flow_id: [u8; 16], dir: UdpDir, seq: u32, seq_present: bool) -> bool {
+        if !seq_present {
+            return true;
+        }
+        let dir_bit = match dir {
+            UdpDir::Up => 0u8,
+            UdpDir::Down => 1,
+        };
+        match self.replay.get_mut(&(flow_id, dir_bit)) {
+            Some(mut w) => w.check_and_advance(seq),
+            // 惰性创建：首包无条件接受并建条目（§7 R-replay2——重放帧必先
+            // 被真实首包拉出窗口；不存在流的伪造帧不建表污染）
+            None => {
+                let mut w = ReplayWindow::new();
+                let ok = w.check_and_advance(seq);
+                self.replay.insert((flow_id, dir_bit), w);
+                ok
+            }
         }
     }
 
@@ -967,6 +1116,9 @@ impl UdpFace {
         }
         self.flows.remove(flow_id);
         self.cache.remove(flow_id);
+        // P2-7 M1 §3.5：窗口条目随 flow 消亡回收（上行/下行键同流同删）
+        self.replay.remove(&(*flow_id, 0));
+        self.replay.remove(&(*flow_id, 1));
         self.sync_gauge();
     }
 
@@ -975,6 +1127,8 @@ impl UdpFace {
     fn forget_flow(&self, flow_id: &[u8; 16]) {
         self.flows.remove(flow_id);
         self.cache.remove(flow_id);
+        self.replay.remove(&(*flow_id, 0));
+        self.replay.remove(&(*flow_id, 1));
         self.sync_gauge();
     }
 
@@ -990,6 +1144,19 @@ impl UdpFace {
             .collect();
         for id in orphans {
             self.retire_flow(&id);
+        }
+        // P2-7 M1 §3.5：窗口条目随缓存生命周期——纯 relay/exit 转发流（无
+        // ExitFlow）由 sweep 扫除：flow_id 已不在缓存/flow 两表的窗口键全删。
+        let stale: Vec<ReplayKey> = self
+            .replay
+            .iter()
+            .filter(|r| {
+                !self.cache.map.contains_key(&r.key().0) && !self.flows.contains_key(&r.key().0)
+            })
+            .map(|r| *r.key())
+            .collect();
+        for k in stale {
+            self.replay.remove(&k);
         }
         self.sync_gauge();
     }
@@ -1046,6 +1213,8 @@ async fn exit_downlink_loop(
             target_port: target.1,
             path_mode: UdpPathMode::Cached,
             hop_index: 0, // §14-1：下行发送端（exit）置 0
+            seq: 0,
+            seq_present: false, // P2-7 M1 R3：exit 下行序号源接入
             path: Vec::new(),
             payload: buf[..n].to_vec(),
         };
@@ -1412,6 +1581,12 @@ impl MeshDataPlane {
                 return Err(e);
             }
         };
+        // P2-7 M1 §3.4/§3.7 E4：防重放窗口（decode 后、分派前；v1 帧
+        // seq_present=false fail-open；重放/超窗静默丢弃——replay_dropped
+        // 计数在 R3 并入计数面，此处先丢不计数）
+        if !face.replay_check(env.flow_id, env.dir, env.seq, env.seq_present) {
+            return Ok(());
+        }
         match env.dir {
             UdpDir::Up => self.udp_uplink(face, sock, from, env).await,
             UdpDir::Down => self.udp_downlink(face, sock, env).await,
@@ -1484,6 +1659,9 @@ impl MeshDataPlane {
                         target_port: env.target_port,
                         path_mode: UdpPathMode::Full,
                         hop_index: env.hop_index.saturating_add(1), // §14-1 每经一跳 +1
+                        // P2-7 M1 §3.3：转发保留入帧 seq（端到端语义，非逐跳重编号）
+                        seq: env.seq,
+                        seq_present: env.seq_present,
                         path: env.path[1..].to_vec(),
                         payload: env.payload,
                     };
@@ -1533,6 +1711,8 @@ impl MeshDataPlane {
                             target_port: env.target_port,
                             path_mode: UdpPathMode::Cached,
                             hop_index: env.hop_index + 1, // 已过上界检查
+                            seq: env.seq,
+                            seq_present: env.seq_present, // §3.3 转发保留 seq
                             path: env.path,               // CACHED 恒空
                             payload: env.payload,
                         };
@@ -1586,6 +1766,8 @@ impl MeshDataPlane {
             target_port: env.target_port,
             path_mode: env.path_mode,
             hop_index: env.hop_index.saturating_add(1), // §14-1：每经一 relay +1（上下行对称）
+            seq: env.seq,
+            seq_present: env.seq_present, // §3.3 转发保留 seq
             path: env.path,
             payload: env.payload,
         };
@@ -2743,6 +2925,8 @@ mod tests {
             target_port: 4433,
             path_mode: mode,
             hop_index: 3,
+            seq: 0,
+            seq_present: false,
             path: match mode {
                 UdpPathMode::Full => vec!["relay-1".into(), "exit-1".into()],
                 UdpPathMode::Cached => vec![],
@@ -2765,6 +2949,130 @@ mod tests {
                     assert_eq!(back, env, "roundtrip 失败: {host} {mode:?} {dir:?}");
                 }
             }
+        }
+    }
+
+    // ── P2-7 M1 §3.2/§4.1：v2 序号帧编解码 + 滑窗判定 ──
+
+    /// v2 往返 + 字节级 golden（Cached/v4/Up 布局：pm=27, hop=28, seq=29..33）；
+    /// v1 字节不变回归（seq_present=false → 老路径逐字节一致）。
+    #[test]
+    fn udp_envelope_v2_seq_golden_and_v1_regression() {
+        let mut env = udp_env_sample("10.0.0.1", UdpPathMode::Cached, UdpDir::Up);
+        env.version = UDP_ENVELOPE_VERSION_V2;
+        env.seq = 0xDEAD_BEEF;
+        env.seq_present = true;
+
+        let wire = encode_udp_envelope(&env).unwrap();
+        assert_eq!(&wire[0..2], b"SU", "magic 不变");
+        assert_eq!(wire[2], UDP_ENVELOPE_VERSION_V2, "version=2");
+        assert_eq!(
+            wire[3] & UDP_FLAG_HAS_SEQ,
+            UDP_FLAG_HAS_SEQ,
+            "HAS_SEQ 位置位"
+        );
+        assert_eq!(wire[3] & 1, 0, "dir=Up 的 bit0 保持 0");
+        assert_eq!(wire[28], 3, "hop_index 原样");
+        assert_eq!(
+            &wire[29..33],
+            &0xDEAD_BEEFu32.to_be_bytes(),
+            "seq 大端黄金位"
+        );
+        assert_eq!(wire[33..], env.payload[..], "payload 原样");
+        let back = decode_udp_envelope(&wire).unwrap();
+        assert_eq!(back.seq, 0xDEAD_BEEF);
+        assert!(back.seq_present);
+        assert_eq!(back.version, UDP_ENVELOPE_VERSION_V2);
+
+        // v1 回归：不带 HAS_SEQ、长度短 4、解码 seq_present=false/seq=0
+        let v1 = udp_env_sample("10.0.0.1", UdpPathMode::Cached, UdpDir::Up);
+        let wire_v1 = encode_udp_envelope(&v1).unwrap();
+        assert_eq!(wire_v1[2], UDP_ENVELOPE_VERSION);
+        assert_eq!(wire_v1[3] & UDP_FLAG_HAS_SEQ, 0, "v1 不带 HAS_SEQ");
+        assert_eq!(wire_v1.len(), wire.len() - 4, "v2 比 v1 多 4 字节 seq");
+        let back1 = decode_udp_envelope(&wire_v1).unwrap();
+        assert!(!back1.seq_present);
+        assert_eq!(back1.seq, 0);
+    }
+
+    /// §3.7 E2/E3/E5 矩阵：v2 保留位非 0 → 拒；v2 缺 HAS_SEQ → 拒；seq 截断 → 拒；
+    /// v1 旧保留位矩阵回归（既有拒绝保持）。
+    #[test]
+    fn udp_envelope_v2_flags_matrix() {
+        let mut env = udp_env_sample("10.0.0.1", UdpPathMode::Cached, UdpDir::Up);
+        env.version = UDP_ENVELOPE_VERSION_V2;
+        env.seq_present = true;
+        env.seq = 1;
+        env.payload = vec![];
+        let wire = encode_udp_envelope(&env).unwrap();
+
+        // E2：v2 保留位（bit2+）非 0
+        let mut bad = wire.clone();
+        bad[3] |= 0x04;
+        assert!(decode_udp_envelope(&bad).is_err(), "v2 保留位应拒绝");
+
+        // v1 保留位旧矩阵回归
+        let v1 = encode_udp_envelope(&udp_env_sample("10.0.0.1", UdpPathMode::Cached, UdpDir::Up))
+            .unwrap();
+        let mut badv1 = v1;
+        badv1[3] |= 0x04;
+        assert!(decode_udp_envelope(&badv1).is_err(), "v1 保留位应拒绝");
+
+        // E5-变体：v2 缺 HAS_SEQ（dir=Up 且无 bit1）
+        let mut no_seq = wire.clone();
+        no_seq[3] &= !UDP_FLAG_HAS_SEQ;
+        assert!(
+            decode_udp_envelope(&no_seq).is_err(),
+            "v2 必须带 HAS_SEQ（恒带 seq 语义）"
+        );
+
+        // E3：seq 截断（payload 空 → 尾部即 seq 区，切 2 字节）
+        let cut = &wire[..wire.len() - 2];
+        assert!(decode_udp_envelope(cut).is_err(), "seq 截断应拒绝");
+    }
+
+    /// §3.4 §4.1 表驱动：首包任意起点 / 升序 / 乱序 / 重放 / 回退窗口位 / 超窗
+    /// （前向与过旧两向）/ 移位语义 / u32 wrap（wrapping 差判先后）。
+    #[test]
+    fn replay_window_matrix() {
+        let cases: &[(&[u32], &[bool], &str)] = &[
+            (&[100], &[true], "首包任意起点接受"),
+            (&[5, 6, 7], &[true, true, true], "升序"),
+            (&[10, 12, 11], &[true, true, true], "乱序窗口内"),
+            (&[10, 12, 11, 12], &[true, true, true, false], "重放拒"),
+            (&[50, 50], &[true, false], "last 恒拒"),
+            (&[5, 6, 5], &[true, true, false], "回退 1 已收拒"),
+            (&[5, 6, 4], &[true, true, true], "回退 2 未收接受"),
+            (&[50, 60, 59], &[true, true, true], "回退 1 未收接受"),
+            (&[50, 100, 35], &[true, true, false], "回退 65 超窗拒"),
+            (&[50, 100, 110], &[true, true, true], "前进 10 接受滑窗"),
+            (&[10, 100], &[true, false], "前进超窗（diff=90）拒"),
+            (
+                &[10, 12, 12, 11],
+                &[true, true, false, true],
+                "拒帧不前进窗口，后续窗口内可续",
+            ),
+            (
+                &[10, 9, 70, 9],
+                &[true, true, true, false],
+                "跳窗移位：9 的历史随 bits 右移后仍命中",
+            ),
+            (
+                &[10, 9, 70, 8],
+                &[true, true, true, true],
+                "跳窗后更旧未收可接受",
+            ),
+            (&[u32::MAX, 0], &[true, true], "u32 wrap：wrapping diff=1"),
+            (
+                &[u32::MAX, 4294967295 - 1],
+                &[true, true],
+                "wrap 前回退窗口内未收接受",
+            ),
+        ];
+        for (seqs, expected, name) in cases {
+            let mut w = ReplayWindow::new();
+            let got: Vec<bool> = seqs.iter().map(|s| w.check_and_advance(*s)).collect();
+            assert_eq!(&got[..], *expected, "{name}");
         }
     }
 
@@ -3033,6 +3341,8 @@ mod tests {
             target_port: 4433,
             path_mode: UdpPathMode::Full,
             hop_index: 0, // §14-1：发送端置 0
+            seq: 0,
+            seq_present: false,
             path: vec!["relay1".into(), "exit1".into()],
             payload: vec![1, 2, 3],
         };
@@ -3060,6 +3370,8 @@ mod tests {
             target_port: 4433,
             path_mode: UdpPathMode::Cached,
             hop_index: 0,
+            seq: 0,
+            seq_present: false,
             path: vec![],
             payload: vec![4, 5],
         };
@@ -3107,6 +3419,8 @@ mod tests {
             target_port: 4433,
             path_mode: UdpPathMode::Full,
             hop_index: 0,
+            seq: 0,
+            seq_present: false,
             path: vec!["relay1".into(), "exit1".into()],
             payload: vec![1],
         };
@@ -3132,6 +3446,8 @@ mod tests {
             target_port: 4433,
             path_mode: UdpPathMode::Cached,
             hop_index: 0,
+            seq: 0,
+            seq_present: false,
             path: vec![],
             payload: vec![2],
         };
@@ -3226,6 +3542,8 @@ mod tests {
             target_port: echo_addr.port(),
             path_mode: UdpPathMode::Full,
             hop_index: 0,
+            seq: 0,
+            seq_present: false,
             path: vec!["exit1".into()],
             payload: vec![7, 7, 7],
         };
@@ -3257,6 +3575,8 @@ mod tests {
             target_port: echo_addr.port(),
             path_mode: UdpPathMode::Cached,
             hop_index: 0,
+            seq: 0,
+            seq_present: false,
             path: vec![],
             payload: vec![8, 8],
         };

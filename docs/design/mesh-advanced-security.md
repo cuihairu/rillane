@@ -105,11 +105,12 @@ magic "SU" | version=2 | flags: bit0=dir, bit1=HAS_SEQ(=1) | flow_id(16)
 struct ReplayWindow { last: u32, bits: u64 }  // bit i = last - 1 - i 是否已收
 ```
 
-判定（`seq_present` 时才走）：
-- `seq > last` → 接受；`last = seq`；`bits <<= diff`（diff = seq−last，>63 时清零如常规）；bit0 置位表达「自身已收」可省（last 即代表）——采用 RFC 语义：接受后 bits 记录历史、last 前进；
-- `seq == last` → 重放拒；
-- `last − seq ≤ 63`（wrapping 差窗口内）→ 查 bits 位：已置 → 重放拒；未置 → 接受置位；
-- `last − seq > 63` → 超窗拒（过旧）。
+判定（`seq_present` 时才走；wrapping 差 `diff = seq − last`，2^31 半空间内判先后）：
+- `diff == 0` → 重放拒（last 恒拒）；
+- `1 ≤ diff ≤ 64` → 前进接受；`last = seq`；`diff < 64` 时 `bits <<= diff`（历史右移），`diff == 64` 时历史清空（越 64 位窗）；
+- `diff ≥ 65` 且 `< 半空间` → **前进超窗拒**（RFC 4303 同：跳窗帧与重放同判丢弃；攻击者 seq 跳变即丢，流级隔离见 §6 偏差 4）；
+- `diff ≥ 半空间`（等价回退）→ `back = last − seq ≤ 63` 内查 bits 位：已置 → 重放拒；未置 → 接受置位；`back > 63` → 超窗拒（过旧）。
+- 首包（窗口空）任意 seq 接受——窗口条目惰性创建（§7 R-replay2）。
 
 键：**`(flow_id, dir)`**（流 + 方向；上下行各自窗口——exit 下行与 client 上行互不干扰）。无源节点 id 字段（帧不带），flow_id 是 128 位随机 UUID，跨流碰撞概率可忽略——与 P0-4 缓存同键前提。
 
