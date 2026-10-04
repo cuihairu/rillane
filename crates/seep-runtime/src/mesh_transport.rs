@@ -1979,6 +1979,10 @@ where
 }
 
 /// P1-4 §2.4：`[len: u32][payload]` 帧写入（envelope 与填充帧共用）。
+/// P3-5 performance-io.md §2-D2：两段 `write_vectored` 提交 + 短写推进——
+/// 明文 TcpStream 段一次 syscall；rustls `TlsStream` 无 vectored 实现
+/// （`is_write_vectored()=false`），tokio 默认实现回落单段写，行为等价
+/// 现状两段 `write_all`。0 字节短写按连接关闭报错。
 async fn write_frame<W>(stream: &mut W, payload: &[u8]) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -1986,8 +1990,30 @@ where
     if payload.len() > MAX_HEADER_BYTES {
         return Err(anyhow!("mesh header too large: {} bytes", payload.len()));
     }
-    stream.write_u32(payload.len() as u32).await?;
-    stream.write_all(payload).await?;
+    let len_be = (payload.len() as u32).to_be_bytes();
+    let parts: [&[u8]; 2] = [&len_be, payload];
+    let (mut si, mut so) = (0usize, 0usize);
+    while si < parts.len() {
+        let cur = &parts[si][so..];
+        let next = parts.get(si + 1).copied().unwrap_or(&[]);
+        let bufs = [std::io::IoSlice::new(cur), std::io::IoSlice::new(next)];
+        let n = stream.write_vectored(&bufs).await?;
+        if n == 0 {
+            return Err(anyhow!("mesh 帧写：写入 0 字节（连接已关闭）"));
+        }
+        let mut rem = n;
+        while rem > 0 && si < parts.len() {
+            let avail = parts[si].len() - so;
+            if rem < avail {
+                so += rem;
+                rem = 0;
+            } else {
+                rem -= avail;
+                si += 1;
+                so = 0;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2260,6 +2286,8 @@ mod tests {
     use super::*;
     use seep_core::udp::relay::UdpRelay;
     use seep_mesh::{MeshRegistry, NodeRecord, NodeRole};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
     #[test]
     fn from_env_strict_requires_paths_when_enabled() {
@@ -4285,5 +4313,87 @@ mod tests {
 
         relay_serve.abort();
         exit_serve.abort();
+    }
+
+    /// P3-5 R2：write_frame 短写推进钉死——mock 每次最多写 `cap` 字节，
+    /// 断言 vectored 循环推进至收齐完整 `[len][payload]`。
+    struct ShortWriter {
+        cap: usize,
+        written: Vec<u8>,
+        calls: usize,
+    }
+
+    impl ShortWriter {
+        fn new(cap: usize) -> Self {
+            Self {
+                cap,
+                written: Vec::new(),
+                calls: 0,
+            }
+        }
+    }
+
+    impl tokio::io::AsyncWrite for ShortWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.calls += 1;
+            let n = buf.len().min(self.cap);
+            self.written.extend_from_slice(&buf[..n]);
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_write_vectored(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[std::io::IoSlice<'_>],
+        ) -> Poll<std::io::Result<usize>> {
+            self.calls += 1;
+            let total: usize = bufs.iter().map(|b| b.len()).sum();
+            let n = total.min(self.cap);
+            let mut rem = n;
+            for b in bufs {
+                if rem == 0 {
+                    break;
+                }
+                let take = b.len().min(rem);
+                self.written.extend_from_slice(&b[..take]);
+                rem -= take;
+            }
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn write_frame_short_write_drives_to_completion() {
+        let payload = b"hello-mesh-frame-p3-5".repeat(7);
+        let mut expect = (payload.len() as u32).to_be_bytes().to_vec();
+        expect.extend_from_slice(&payload);
+
+        // cap=3：len 4B 需两次 + payload 多次——短写推进全路径
+        let mut w = ShortWriter::new(3);
+        write_frame(&mut w, &payload).await.unwrap();
+        assert_eq!(w.written, expect);
+
+        // cap=1：最碎短写
+        let mut w = ShortWriter::new(1);
+        write_frame(&mut w, &payload).await.unwrap();
+        assert_eq!(w.written, expect);
+
+        // cap 充足：单次调用写齐（TcpStream 形态，无多余 syscall）
+        let mut w = ShortWriter::new(usize::MAX);
+        write_frame(&mut w, &payload).await.unwrap();
+        assert_eq!(w.written, expect);
+        assert_eq!(w.calls, 1, "vectored 充足容量应一轮写齐");
     }
 }
