@@ -454,9 +454,9 @@ impl RuntimeBuilder {
         // TUN 入口（tun-dataplane.md §2.6/§2.7）：TunIngress 属主化设备+系统
         // 路由（Tun 模式下 NetworkManager 已让位，见上）；与 socks5 等入口并列
         // 注入同一 FlowRouter（start() ingress 循环统一 spawn run()）。
-        // 注：validate() 要求 ≥1 个常规入口——TUN-only 配置被拒（MVP 口径：
-        // egress/UDP 装配面以常规入口为锚，TUN 与 socks5 并存即典型形态）。
-        // Linux 门控（platform-packaging.md：TUN 数据面 Linux-only）——非 Linux
+        // 注：validate() 允许 TUN-only（network.mode=tun 豁免空 ingress，
+        // tun-dataplane.md「TUN-only 独立启动」；TUN 与 socks5 并存仍为典型
+        // 形态）。Linux 门控（platform-packaging.md：TUN 数据面 Linux-only）——非 Linux
         // 编译单元配置了 TUN 显式 Err，未配置恒 None（口径同 network 四工厂）。
         #[cfg(target_os = "linux")]
         let tun_ingress = match (tun_enabled, tun_udp_connector) {
@@ -564,7 +564,21 @@ impl RuntimeBuilder {
 
     fn validate(&self) -> Result<()> {
         if self.config.ingress.is_empty() {
-            return Err(anyhow!("至少需要配置一个入口"));
+            // TUN-only 启动放行（tun-dataplane.md「TUN-only 独立启动」后续项，
+            // 2026-10-05 兑现）：network.mode=tun 且启用网络虚拟化时 TUN 即入口
+            // （build() 后段注入 ingress_endpoints["tun"]，start() 同一循环
+            // spawn——无常规入口特判）；其余空 ingress 维持拒绝
+            let tun_only = self.runtime_config.enable_network_virtualization
+                && self
+                    .runtime_config
+                    .network_config
+                    .as_ref()
+                    .is_some_and(|n| n.mode == NetworkMode::Tun);
+            if !tun_only {
+                return Err(anyhow!(
+                    "至少需要配置一个入口（仅 network.mode=tun 可豁免：TUN 即入口）"
+                ));
+            }
         }
         if self.config.egress.is_empty() {
             return Err(anyhow!("至少需要配置一个出口"));
@@ -3655,6 +3669,55 @@ mod tests {
         assert!(plain.get_tun_ingress().is_none());
         assert!(plain.network_manager.is_none());
         assert!(plain.udp_service.is_none());
+    }
+
+    /// TUN-only 启动（tun-dataplane.md「TUN-only 独立启动」后续项）：
+    /// 空 ingress + network.mode=tun → validate 放行，TUN 为唯一入口；
+    /// 非 Tun 时空 ingress 维持拒绝。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn tun_only_config_builds_with_tun_as_sole_ingress() {
+        let tun_platform_cfg = seep_platform::network::NetworkConfig {
+            mode: NetworkMode::Tun,
+            tun: Some(seep_platform::network::TunConfig {
+                name: Some("seepT3".into()),
+                ipv4_addr: Some("10.77.0.1".parse().unwrap()),
+                ipv4_netmask: Some("255.255.255.0".parse().unwrap()),
+                ..Default::default()
+            }),
+            routing: Some(seep_platform::network::RoutingConfig {
+                enabled: true,
+                ..Default::default()
+            }),
+            filtering: None,
+            dns: None,
+        };
+        let mut cfg = s5_udp_config(false);
+        cfg.ingress.clear();
+        let rc = RuntimeConfig {
+            enable_network_virtualization: true,
+            network_config: Some(tun_platform_cfg),
+            ..RuntimeConfig::default()
+        };
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(rc)
+            .build()
+            .expect("TUN-only build 应成功（设备 I/O 归 start()）");
+        assert!(runtime.get_tun_ingress().is_some());
+        assert!(
+            runtime.ingress_endpoints.keys().all(|k| k == "tun"),
+            "TUN 应为唯一入口：{:?}",
+            runtime.ingress_endpoints.keys().collect::<Vec<_>>()
+        );
+
+        // 无 network 块的空 ingress 维持拒绝（豁免面仅 Tun 模式）
+        let mut plain = s5_udp_config(false);
+        plain.ingress.clear();
+        let err = RuntimeBuilder::new(plain)
+            .build()
+            .err()
+            .expect("空 ingress 且非 Tun 模式应拒");
+        assert!(err.to_string().contains("至少需要配置一个入口"), "{err:#}");
     }
 
     /// 口径 1：chain+udp 同启 + 显式允许明文 → build 成功；mesh-chain 装配落位

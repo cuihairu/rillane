@@ -119,7 +119,7 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 - 落点：`runtime_builder::build()` 在 UDP 块旁增 TUN 块——条件 `runtime_config.enable_network_virtualization && network_config.mode == Tun`，构造 `TunIngress` 插入 `ingress_endpoints["tun"]`；依赖仅 router + egress 描述符（UDP 连接器表与 `scan_udp_capability` **与 P0-3 UDP 块共享同一次构建结果**），无 build() 时序问题（不像 P0-4 §9.1——`run()` 时才取 `flow_router()`，start() 已统一注入 RuntimeFlowRouter）；
 - `TunIngress: IngressEndpoint`：`run(self: Arc<Self>, router, output)` = 设备就绪门 → 包循环 + per-flow 任务族；与 socks5 入口同构，`start()` 的统一循环零改动。
 - **与既有 ingress 的共存与选择边界**（P0-4 §1 同款缺口补全）：TUN ingress 与 socks5/mixed ingress 在 `ingress_endpoints` 中并列共存，两者**注入同一 `FlowRouter`**（chain 启用时即 `RuntimeFlowRouter`），共享 egress 连接器表与 `scan_udp_capability` 结果；**选择边界由内核/应用配置决定、不由 seep 选择**——socks5 流量是应用显式走代理监听口，TUN 流量是系统路由把应用包导入 tun 设备，两路互不重叠（一个包不会同时进两个 ingress）；UDP 侧 TUN 流的 `Arc<dyn UdpRelay>` 归 `TunFlowEntry` 持有，**不注册进 P0-1 `UdpSessionTable`**（该表与 socks5 控制连接绑定），故 TUN 会话不计入 `seep_udp_sessions_active`，见 §2.8。
-- **TUN-only 配置拒启（MVP 口径，落地约束）**：`runtime_builder::validate()` 要求 `ingress` 非空——只配 `network:` 块而无任一常规 ingress（socks5/mixed/http）时配置被拒（"至少需要配置一个入口"）。设计上 TUN 不参与该校验计数；TUN-only 独立启动归后续。
+- **TUN-only 启动已放行（2026-10-05 兑现，原 MVP 拒启约束撤销）**：`runtime_builder::validate()` 在 `ingress` 为空时仅当 `network.mode=tun` 且启用网络虚拟化放行——TUN 即入口（`build()` 注入 `ingress_endpoints["tun"]`，`start()` 同一循环 spawn，无常规入口特判）；其余空 ingress 仍拒（错误文案注记豁免面）。build 级钉子 `tun_only_config_builds_with_tun_as_sole_ingress`；TUN-only start 真机面未单独走查（与常规形态差异仅少 socks5 监听，start 循环同构）。
 
 ### 2.7 bypass 与防环
 
