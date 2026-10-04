@@ -27,7 +27,7 @@ launchctl print system/com.seep.seepd    # 状态
 
 | 层 | 内容 | 状态 |
 |---|---|---|
-| L1 脚本结构 | build.sh / install.sh / uninstall.sh 语法（bash -n）；plist 结构（python3 plistlib 解析 + 键面断言） | 本机 Linux 验证 ✅ |
+| L1 脚本结构 | build.sh / install.sh / uninstall.sh 语法（bash -n）；plist 结构（python3 plistlib 解析 + 键面断言） | 本机 Linux 已验 |
 | L2 产物核验 | Mach-O universal2（`lipo -info` 断言在脚本内） | **本机不产 Mach-O**（Apple SDK 再分发限制，与 CI darwin 排除同口径），断言随脚本交付、实跑待 macOS |
 | L3/L4 | tar 实产、launchctl bootstrap/kickstart 实装 | **需 macOS 未验** |
 

@@ -1,6 +1,6 @@
 # P2-7 mesh 高级安全：CRL 分发 + UDP 面防重放 — 实现级设计
 
-> 上游：[roadmap.md](roadmap.md) S4-4（「高级安全收尾：CRL/OCSP、mesh 端到端 MAC/防重放」）· [mesh.md](mesh.md)「Security Notes」遗留 · [architecture.md](architecture.md) 协作节点安全边界。
+> 上游：[roadmap.md](roadmap.md) S4-4（「高级安全收尾：CRL/OCSP、mesh 端到端 MAC/防重放」）· [mesh.md](../mesh.md)「Security Notes」遗留 · [architecture.md](../architecture.md) 协作节点安全边界。
 > 本文是落地定稿：**范围裁决、CRL 分发形态、UDP 帧防重放协议（v2 + 流序号 + 滑窗）、计数面、错误路径、测试策略、分步清单**。落地后偏差回填 §9。
 > 复用基线：`MeshTls` 撤销文件 mtime 指纹热加载（`SEEP_MESH_MTLS_REVOKED_NODES[ _FILE]`，mesh_transport.rs）· `seepctl mtls revoke` 撤销列表文件管理（seepctl main.rs）· P0-4 UDP 面 `UdpEnvelope` 二进制帧（P2-6 已字节化：magic `SU` + version + flags + flow_id…）· `UdpFaceMetrics`/`UdpFaceSnapshot` 计数面（P0-5 §2.4）· control_plane (`Method, path)` 分派与 `/udp/stats` mesh 段（先例）。
 

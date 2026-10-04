@@ -1,7 +1,7 @@
 # Seep 分阶段路线图
 
 > 状态：设计文档（2026-09）· 定位依据：[positioning.md](positioning.md) · 可执行条目：[todo.md](../../todo.md)
-> 进度速览（2026-10-02）：S0 ✅ ｜ S1 进行中 4/5（P0-4 已完成；P0-5 实现级设计与派工拆解 S0–S6 就绪）｜ S2/S3 进行中（P1-5 出站连接池**已完成** M0–M5；P1-1 T2/P1-3 R0/P1-4 M0 部分步落地、推进中；P1-2 设计就绪）｜ S4 进行中（P2-1 per-link 指标**已完成** M1–M2；P2-2 SLO 打分选路**已完成** M1–M2；P2-3 场景 profile 预设**已完成** M0–M1；P2-4 timing/shaping 扰动**已完成** M0–M2；P2-5 TLS 指纹形态**已完成** M0–M1；P2-6 envelope 二进制化**已完成**；P2-8 DNS 分流**已完成** M0–M1）
+> 进度速览（2026-10-04）：S0 完成 ｜ S1 完成 5/5（P0-1..P0-5 全部落地）｜ S2 完成（P1-1/P1-2 于 2026-10-03 收口 T0–T5；P1-3 R0–R4 落地）｜ S3 完成（P1-4 M0–M4、P1-5 M0–M5）｜ S4 完成（P2-1..P2-8 全部落地，P2-7 于 2026-10-04 收口；P3-2 插件动态加载、P3-3 平台打包、P3-1 文档对齐随阶段同步收尾）｜ 条目级统计见 [todo.md](../../todo.md) 统计节（P0 5/5、P1 5/5、P2 8/8）。
 
 ## 执行摘要
 
@@ -38,7 +38,7 @@
 
 **目标**：让游戏流量（UDP 为主）走通「入站 → 路由 → 出站 → mesh 多跳」全程。
 
-> **进度（2026-09-30）**：4/5 完成——P0-1 会话表 / P0-2 UDP ASSOCIATE / P0-3 出站载荷（direct/ss/wg）/ **P0-4 mesh UDP 面**（[udp-mesh-dataplane.md](udp-mesh-dataplane.md) S0–S6 全部落地，27 项测试全绿）已落地（细节见 todo.md 各条）；仅余 **P0-5**——[udp-observability.md](udp-observability.md)（§7 文件清单 + §9 细节补全 + **§10 分步实施清单 S0–S6**）已细化到可开工。退出标准勘误：hy2 出站 UDP 承载经 P0-3 核查改判——hysteria2 0.1.6 公开 API 无 UDP 出口，移 P0-4；**P0-4 完成时维持改判**（终态 V2，载具 quinn 未决）。
+> **进度（2026-10-02 收口）**：5/5 完成——P0-1 会话表 / P0-2 UDP ASSOCIATE / P0-3 出站载荷（direct/ss/wg）/ P0-4 mesh UDP 面（[udp-mesh-dataplane.md](udp-mesh-dataplane.md) S0–S6 全部落地，27 项测试全绿）/ P0-5 观测与配置（[udp-observability.md](udp-observability.md) S0–S6 落地）均已完成，细节见 todo.md 各条。退出标准勘误：hy2 出站 UDP 承载经 P0-3 核查改判——hysteria2 0.1.6 公开 API 无 UDP 出口，移 P0-4；P0-4 完成时维持改判（终态 V2，载具 quinn 未决）。
 
 - **复用**：`seep-core` 的 `FlowTarget::Udp` 枚举与 `FlowSession`；`seep-routing` 不感知传输层，规则原样生效；Hysteria2/WireGuard/Shadowsocks 出站的既有握手/加密栈。
 - **新增**：
@@ -52,7 +52,7 @@
 
 **目标**：系统级流量接管 + 进程/端口分流，游戏流量不依赖代理入站即可进入数据通路。
 
-> **进度（2026-10）**：推进中；P1-1/P1-2/P1-3 实现级设计稿就绪——[tun-dataplane.md](tun-dataplane.md)（T0–T5 分步清单、错误路径 E1–E16、§6 假设 11 项；T2 已落地）、[network-route.md](network-route.md)（R0–R4 分步清单、NetworkManager 让路裁决、幂等/回滚状态机；R0 已落地）；P1-5 已完成（M0–M5 全部落地，见 S3）；P1-4 M0 已落地、余步推进中（前置 = 中间件挂载点，见 S3 注记）。
+> **进度（2026-10-03 收口）**：P1-1/P1-2（T0–T5 全部落地：设备/路由真实现 + TunIngress UDP/TCP 面接线 + 进程归因，[tun-dataplane.md](tun-dataplane.md) 分步表带提交锚）；P1-3（R0–R4 落地：network 配置区块接线 + 控制面三端点 + `seepctl route`，[network-route.md](network-route.md)）；P1-4 M0–M4 与 P1-5 M0–M5 均完成（见 S3 注记）。
 
 - **复用**：`seep-platform::network` 已有的 `TunProvider`/`RouteManager`/`PacketFilter` trait 与 TunConfig/规则模型（trait 与规则模型已成型——编译内约 3588 行；`platform.rs` 237 行未参与编译且仅含 macOS 草稿，见 [status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §1.2）；`seep-core` 路由决策不变——TUN 只是新增一种 ingress。
 - **新增**：
@@ -67,9 +67,9 @@
 
 **目标**：流量渗过识别（抗 QoS/DPI）+ 连接效率（网页场景）。
 
-- **复用**：`FlowMiddleware` trait（混淆以中间件形态挂载——核对注记：trait 已定义但数据通路**尚无挂载点**，P1-4 须先建静态中间件链，[status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §3）；各协议既有 TLS 伪装能力（Trojan/VLESS/Reality 类）；`seep-routing` 规则分流。
+- **复用**：`FlowMiddleware` trait（混淆以中间件形态挂载——P1-4 已建成静态中间件链（`obfs_config.rs::build_middleware_chain`），P3-2 在其上加 WASM 加载器；核对史见 [status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §3）；各协议既有 TLS 伪装能力（Trojan/VLESS/Reality 类）；`seep-routing` 规则分流。
 - **新增**：
-  1. 混淆中间件（`seep-protocols::middleware`）：`padding`（包长分布对齐）、`timing`（微抖动）、`shaping`（流形状归一），按 profile 开关；
+  1. 混淆中间件（`seep-protocols::middleware`）：`padding`（包长分布对齐）、`timing`（微抖动）、`shaping`（流形状归一），按 profile 开关（**已完成 2026-10：padding P1-4 M0–M4、timing/shaping P2-4 M0–M2**）；
   2. 客户端 TLS 指纹模拟（**已完成 2026-10，P2-5**——预设 chrome/ios/safari 形态参数表挂单漏斗 `build_client_config`，池键/工厂键扩展，见 [tls-fingerprint.md](tls-fingerprint.md)）；
   3. obfs 插件兼容（simple-obfs http/tls；salamander 随 hy2 配置暴露）；
   4. 出站连接池：同出口 keep-alive 复用 + TLS 会话恢复，服务于网页短连接（**已完成**，2026-10-02 P1-5 M0–M5——[egress-connection-pool.md](egress-connection-pool.md)，验收判据 1–3 经 TLS 集成测复现）；
@@ -94,9 +94,9 @@
 
 | 阶段 | seep-core | seep-routing | seep-protocols | seep-platform | seep-runtime | seep-mesh | seep-subscription | apps |
 |------|-----------|--------------|----------------|---------------|--------------|-----------|-------------------|------|
-| S0 ✅ | 会话/链路模型 | 规则+组策略 | TCP 入/出站 | trait 层 | chain+mesh TCP 面 | 注册/ACL/配额 | Clash+DSL+热更 | 控制面+CLI |
-| S1（4/5） | UDP 会话语义 | 不变 | UDP 入/出站 | 不变 | UDP 数据面 | link-state 扩展 | 不变 | UDP 配置 |
-| S2（设计） | 不变 | 进程匹配增强 | 不变 | Linux TUN 真实现 | TunIngress 接线 | 不变 | 不变 | route apply/clear |
+| S0（完成） | 会话/链路模型 | 规则+组策略 | TCP 入/出站 | trait 层 | chain+mesh TCP 面 | 注册/ACL/配额 | Clash+DSL+热更 | 控制面+CLI |
+| S1（5/5） | UDP 会话语义 | 不变 | UDP 入/出站 | 不变 | UDP 数据面 | link-state 扩展 | 不变 | UDP 配置 |
+| S2（完成） | 不变 | 进程匹配增强 | 不变 | Linux TUN 真实现 | TunIngress 接线 | 不变 | 不变 | route apply/clear |
 | S3 | 中间件挂点不变 | 不变 | 混淆中间件+连接池 | 不变 | envelope 二进制化 | 不变 | DSL 混淆字段 | profile 预设 |
 | S4 | SLO 打分输入 | 策略升级 | 指标埋点 | 平台打包 | 调度闭环 | 端到端安全 | 不变 | 发布产物 |
 

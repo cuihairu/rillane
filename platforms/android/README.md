@@ -61,7 +61,7 @@ adb install -r platforms/android/app/build/outputs/apk/debug/app-debug.apk
   在此之前不开启（避免流量黑洞）。
 - **wireguard 出站在 android 构建中剥离**：`defguard_boringtun` 0.6 无
   android 平台支撑（内部 `tun` crate 不识别目标 + cfg 面守卫类型错位，
-  实测编译失败）——`seep-protocols` 对 android 目标改出恒 Err 桩
+  实测编译失败）。`seep-protocols` 对 android 目标改出恒 Err 桩
   （`outbound/wireguard_stub.rs`），wireguard egress 在 android 配置下
   构建期即报错；其余出站/入口不受影响。宿主面零差异。
 - demo 用 `targetSdk 33`：免 Android 14+ 前台服务类型/通知权限样板；服务在

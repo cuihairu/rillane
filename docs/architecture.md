@@ -19,9 +19,9 @@ seep/
 ## crate 划分
 - `seep-core`：抽象统一的 Flow / Router / Middleware 接口，是所有协议实现的契约层。
 - `seep-config`：定义配置 schema、解析/校验逻辑，支持 YAML/JSON/TOML 自动识别。
-- `seep-routing`：策略与路由引擎，实现 PSL/GeoIP/度量等匹配逻辑，输出 `RouteDecision`。
+- `seep-routing`：策略与路由引擎，输出 `RouteDecision`；匹配以度量/条件为主——Geoip 仅读注解 `geoip.country`（当前无生产者写入该注解，条件恒不命中），PSL 匹配未实现。
 - `seep-protocols`：入口、出口协议栈（Socks5/HTTP/Hysteria/Trojan/...），通过 `IngressEndpoint` 与 `EgressConnector` 接口挂接。
-- `seep-telemetry`：日志、指标、Tracing 初始化，提供统一 `TelemetryOptions` 供 daemon / CLI 复用。
+- `seep-telemetry`：日志与 Tracing 初始化 + 日志捕获环（`logs_text`）；指标不在此注册——Prometheus 文本由控制面 `handle_metrics` 渲染，计数器散布各 crate（如 seep-core UDP metrics）。
 - `seep-platform`：封装各平台的安装、服务管理、权限处理，编译期通过 feature 划分实现。
 - `seep-runtime`：编排引擎，串联配置、路由、协议组件，启动监听及热更新逻辑。
 - `seep-mesh`：协作节点模型与注册表，维护节点角色（client/relay/exit）、能力与心跳，为后续组网/加速提供统一数据面。
@@ -46,7 +46,7 @@ seep/
 
 ## 控制面与生态
 - 控制面统一走 `control.api_bind` 的 HTTP/REST + `seepctl`（手写 HTTP 路由，无 gRPC/WebSocket 面）。
-- 支持热更新：守护进程 watch 配置文件变更 -> `RuntimeBuilder` reload（无 `seepctl reload` 子命令）。
+- 热更新口径：seepd 启动一次性读配置，**无配置文件 watch**（`seep-runtime::HotReloadManager` 导出但未接线，无 SIGHUP）；运行期热更新由订阅刷新与控制面端点驱动（路由/组/出站重建）。无 `seepctl reload` 子命令。
 - 文档及 ADR 集中在 `docs/`，重要决策使用 ADR 记录。
 
 ## Mesh / 协作加速 / 节点组（现状）
@@ -68,7 +68,7 @@ seep/
 
 - Clash 订阅（proxies/proxy-groups/rules）与分享链接（vmess/vless/trojan/hysteria2/ss，含 base64 整体编码）均可转换为 `SeepConfig`；类型自动识别（`detect_type`）。转换中产出暂未实现的出站类型（如 hysteria v1——schema/订阅转换已支持，出站连接器缺）会在运行时构建期报错提示。
 - 自有 Seep DSL（version/meta/nodes/groups/rulesets，含认证/传输层/TLS/地理位置字段）支持导入导出与校验。
-- 拉取器支持超时/UA/自定义头/代理与 ETag/Last-Modified 条件请求；缓存为 TTL+LRU；按订阅与全局两级刷新间隔定时刷新，内容哈希无变化时跳过重载；控制面提供订阅 CRUD 与手动/全量刷新端点，配置文件变更经文件监视热更新。
+- 拉取器支持超时/UA/自定义头/代理与 ETag/Last-Modified 条件请求；缓存为 TTL+LRU；按订阅与全局两级刷新间隔定时刷新，内容哈希无变化时跳过重载；控制面提供订阅 CRUD 与手动/全量刷新端点（配置文件本身无自动监视——见「控制面与生态」节热更新口径）。
 - 完整说明见 [subscription.md](subscription.md)。
 
 ## 协作节点安全（现状）与观测

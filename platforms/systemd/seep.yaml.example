@@ -1,7 +1,8 @@
 # SEEP 最小可运行配置（systemd/deb 装机模板——落位 /etc/seep/seep.yaml）
 #
 # 结构同 config/seep.yaml；最小面 = socks 入口 + direct 出口 + DNS 分流。
-# deb 包内仅带本示例（conffiles 只登记 /etc/seep/seep.yaml，升级不覆盖）：
+# deb 包内仅带本示例（conffiles 登记 /etc/seep/seep.yaml.example，升级不覆盖；
+# 真配置由部署者 cp 落位 /etc/seep/seep.yaml）：
 #   install -m644 /etc/seep/seep.yaml.example /etc/seep/seep.yaml
 #   # 先改 admin_token，再 systemctl start seep
 

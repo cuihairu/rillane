@@ -4,7 +4,7 @@
 > 策略；mesh 劣化时 chain 侧自动切换且原因入账本（P2-1）。「游戏 profile
 > 默认启用」归 P2-3（profile 预设落地时接线，本稿交付能力面）。
 >
-> **落地状态**：✅ 已实现（M1 a9c7e11：SloPolicy 配置 + 评分核心/门/
+> **落地状态**：已实现（M1 a9c7e11：SloPolicy 配置 + 评分核心/门/
 > 来源优先级；M2 本提交：mesh→routing 质量桥 + ChainManager SLO
 > watcher + `SwitchReason::SloDegraded` + `slo_watch` 程序化配置面）。
 > YAML 面归 P2-3（D-6/O-slo2）；`slo_watch` 当前仅程序化构造

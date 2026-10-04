@@ -50,9 +50,9 @@ journalctl -u seep -f                 # 日志走 journal（telemetry.log_level 
 
 | 层 | 内容 | 状态 |
 |---|---|---|
-| L1 脚本结构 | build.sh 语法（bash -n） | 本机验证 ✅ |
-| L2 静态核验 | file ELF 架构 + dpkg-deb -I/-c 布局断言 + 维护脚本齐 | 本机验证 ✅ |
-| L3 运行冒烟 | 抽取布局 `seepd --version`（amd64 native + arm64 qemu-user） | 本机验证 ✅ |
+| L1 脚本结构 | build.sh 语法（bash -n） | 本机已验 |
+| L2 静态核验 | file ELF 架构 + dpkg-deb -I/-c 布局断言 + 维护脚本齐 | 本机已验 |
+| L3 运行冒烟 | 抽取布局 `seepd --version`（amd64 native + arm64 qemu-user） | 本机已验 |
 | L4 真机面 | `dpkg -i` + postinst 用户面 + systemd enable/start/restart | **需真实 Debian/Ubuntu 环境未验** |
 
 注意：L4 中 postinst/systemd 交互（useradd、daemon-reload、enable）按 Debian

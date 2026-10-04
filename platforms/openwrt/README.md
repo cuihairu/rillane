@@ -12,7 +12,7 @@ musl 静态交叉编译 + ipk 组装。目标形态：路由器上 `opkg install
 | `x86_64-unknown-linux-musl` | `x86_64` | x86 软路由 |
 
 实际设备的架构名按 `/etc/openwrt_release` 的 `DISTRIB_ARCH` 用环境变量覆盖
-（映射表见 `build.sh::openwrt_arch`，如 `ROUTER_ARCH_AARCH64_UNKNOWN_LINUX_MUSL=aarch64_cortex-a76`）——
+（映射表见 `build.sh::openwrt_arch`，如 `ROUTER_ARCH_AARCH64_UNKNOWN_LINUX_MUSL=aarch64_cortex-a76`）。
 ipk 的 `Architecture` 字段不符时 opkg 拒装，覆盖后重打包即可。
 
 **mips / mipsel（32 位 MIPS，MT7621/ath79 一代经典）不在当前矩阵**

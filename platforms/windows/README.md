@@ -29,8 +29,8 @@ platforms/windows/build.sh          # → dist/windows/seep_0.1.0_x86_64_windows
 
 | 层 | 内容 | 状态 |
 |---|---|---|
-| L1 脚本结构 | build.sh 语法；ps1 参数/管理员检查/退出码面审读 | 本机验证 ✅ |
-| L2 静态核验 | file PE32+ x86-64 + zip 布局断言（python3 zipfile） | 本机验证 ✅ |
+| L1 脚本结构 | build.sh 语法；ps1 参数/管理员检查/退出码面审读 | 本机已验 |
+| L2 静态核验 | file PE32+ x86-64 + zip 布局断言（python3 zipfile） | 本机已验 |
 | L3 运行冒烟 | `seepd.exe --version` 运行 | **需 Windows 未验** |
 | L4 真机面 | `sc.exe create/start`、注册表 Environment 生效面 | **需 Windows 未验** |
 

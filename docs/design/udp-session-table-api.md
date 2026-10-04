@@ -172,7 +172,7 @@ in-flight 包安全：`resolve` 发出的 `SessionRef` 持 `Arc`，teardown 后�
 
 ### 3.5 准入控制
 
-`resolve` 慢路径先 `live_count.load(Relaxed) >= max_sessions` → `Err(CapacityLimited)`（对应指标 `dropped{SessionLimit}`，拒新不逐旧）。`live_count` 由 `resolve` 成功 +1、teardown −1 维护，与 DashMap 实际长度周期性对账（sweep 末尾 diff 即刻修正，防漂移）。
+`resolve` 慢路径先直读 `sessions.len()`（DashMap 长度，`table.rs:180`）≥ `max_sessions` → `Err(CapacityLimited)`（对应指标 `dropped{SessionLimit}`，拒新不逐旧）。草案中的独立 `live_count` 原子量**未实施**：容量门即直读实际长度，分片 map 软门语义下并发窗口允许极小超卖（§9-#12/#15），active 口径由 `TableMetrics` 原子量维护。
 
 ## 4. FlowSession 集成接口草案（SessionLedger）
 
@@ -220,6 +220,8 @@ impl SessionLedger {
 错误：binding send/recv Err → 分类（udp-relay-path.md §3.6）→ ledger.on_error(FailureType::*)
 ```
 
+实施注（§9-#16）：`on_link_failure` 实况只做 `on_error(FailureType::Route)` 并**原样返回 `failed_nodes`**（`ledger.rs:63-73`），不切换 fallback——`add_fallback_path`/`switch_fallback_path` 在 UDP 面无调用点，链路失效后的重路由由 runtime 侧 ChainFailureEvent 驱动（下一包重路由 → `on_route_changed`）；草案的 `reconnect_count += 1` 无对应自增点（字段仅透传）。
+
 ### 4.3 字段对照（承 udp-session-table.md §5.2，API 落点）
 
 `client_info.address` ← 键 `client`；`auth_info` ← ASSOCIATE 认证结果；`id` → mesh envelope `flow_id`；`usage.packets_count` 在 `on_packet` 维护（`update_usage` 不覆盖）；`current_path`/`route_history` 仅经 `on_route_changed`/`on_link_failure` 变更。
@@ -244,7 +246,7 @@ DashMap shard (读，判定用，最短)  →  inner.mappings Mutex  →  ledger
 | 变量 | 序 | 理由 |
 |------|-----|------|
 | `last_activity` / `created_at_epoch` | Relaxed | 单变量新鲜度判定，无跨变量顺序 |
-| `live_count` | Relaxed | 近似值：准入判定允许偏差，sweep 对账收敛 |
+| `live_count`（草案，未实施） | — | 实况无独立原子量：容量门直读 `sessions.len()`，软门允许偏差（§9-#15） |
 | `decision` / `ledger.session` | RwLock 默认 | 需要与映射变更互见，标准同步 |
 
 ### 5.3 task 生命周期
@@ -292,5 +294,7 @@ forwarder task 持 `Arc<Inner>` + 自己的 `UdpBinding` 一半；teardown 先 `
 | 12 | DashMap entry 内做容量判定 | 容量判定移到 `entry()` 之前 | entry 持分片写锁期间调 `len()` 有同 map 死锁风险（实施中发现）；并发窗口允许极小超卖（软门语义） |
 | 13 | `force_revoke` 无返回值 | `pub fn force_revoke(&self, key) -> bool` | ASSOCIATE 关闭路径需区分「确实回收」与「会话已不存在」，返回存在性布尔 |
 | 14 | `attach_chain_events(&self, …)` | `pub fn attach_chain_events(self: &Arc<Self>, …)` | 事件消费 task 需持表弱/强引用跨 await，`&self` 裸引用无法 `Arc::clone` 进 task |
+| 15 | 独立 `live_count` 原子量（§3.5 准入控制） | 无此变量：容量门直读 `sessions.len()`（`table.rs:180`），active 计数 = `TableMetrics` 原子量 | 独立计数与 DashMap 长度天然漂移、需 sweep 周期对账；直读零维护成本，软门语义（§8 放宽）允许并发窗口内极小超卖 |
+| 16 | `on_link_failure` 切换 fallback + `reconnect_count += 1`（§4.1/§4.2） | 只 `on_error(FailureType::Route)` + 原样返回 `failed_nodes`（`ledger.rs:63-73`） | fallback 切换属 TCP `add_fallback_path` 面（UDP 无调用点）；UDP 重路由由 runtime 侧 ChainFailureEvent 驱动下一包重路由；`reconnect_count` 无自增点 |
 
 测试锚点：`crates/seep-core/tests/udp_session_table.rs`（**26 项**：生命周期 2、快路径与映射复用 3、超时回收 4、容量与 LRU 2、决策失效与重路由 1、吊销/关停 2、上行失败与下行满载 5、并发契约 2、ledger 直测 3、chain_id 口径 1、表级聚合 1）。

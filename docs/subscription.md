@@ -48,12 +48,12 @@ Seep 订阅链路覆盖：拉取（条件请求/代理/自定义头）→ 类型
 | `DELETE /subscriptions/{name}` | 删除订阅 |
 
 - 刷新成功且内容变化时触发 runtime 热更新（路由/组/出站重建），订阅事件计入指标（`inc_subscription_event`）。
-- 配置文件本身的变更由 `seep-runtime::HotReloadManager` 监视（`notify` crate，`watch_config_file` 可关），走同一热更新路径。
+- 配置文件本身的变更**当前无自动监视**：seepd 启动一次性读配置，`seep-runtime::HotReloadManager`（`watch_config_file`）为导出能力但 seepd 未接线——改配置需重启进程或经订阅/控制面路径触发热更新。
 
 ## 6. CLI
 
 ```bash
-seepctl import-clash <url|file> --out seep.yaml   # 离线转换预览（不经守护进程）
+seepctl import-clash <url|file> --output seep.yaml   # 离线转换预览（不经守护进程；-o 同义，缺省 config/clash_import.yaml）
 seepctl subscription list|add|remove|refresh      # 经控制面管理
 ```
 

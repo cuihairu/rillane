@@ -10,7 +10,7 @@
 |-----------|-------------|
 | **WASM 载具**（wasmtime）：载入器 + `FlowMiddleware` 适配器 + 进程级 engine 单例；崩溃（trap）与超时（fuel 指令预算）隔离 | **动态库直载**（libloading 同进程）：无法兑现「崩溃有隔离」验收（同地址空间无隔离边界），待有真实需求另开条目（§9 偏差 1） |
 | **两个示例插件**：限速（令牌桶，实例内存态）+ 内容过滤（首块关键词扫描）；`plugins/` 目录独立构建（非 workspace 成员，wasm32-unknown-unknown 交叉编译） | 插件 I/O 面（网络/文件/时钟）：MVP 插件纯计算、零 WASI（宿主注入 `now_ms`——wasm32-unknown-unknown 无时钟）；异步 host function 归 V2 |
-| **配置面**：`obfuscation.plugins` 块（路径 + fuel 预算），build_middleware_chain 追加挂载；随既有配置热更新语义重建 | 插件热插拔/运行期装卸（MVP 随链重建自然生效，无独立装卸 API）|
+| **配置面**：`obfuscation.plugins` 块（路径 + fuel 预算），build_middleware_chain 追加挂载；seepd 现为启动时一次性读配置（配置热更新未接线），插件链进程内静态、随进程重启换代 | 插件热插拔/运行期装卸（无独立装卸 API）|
 | **首块探测内容过滤**：`wants_payload` 导出声明 + `Flow.io` 首块探测/回放包装 | 载荷**改写**（MVP 只 allow/deny 二值裁决，不改写流字节——HTTP 级改写语义面归 V2）|
 | **计数面**：per-plugin 原子计数（calls/denied/traps/fuel_exhausted）+ tracing 日志 | 控制面端点接线（观测面进 /metrics 或 /plugins/stats 归后续观测轮）|
 
@@ -145,7 +145,7 @@ obfuscation:
 
 - **P-load**：wasmtime 首编成本进 workspace（如实登记）；构建期 `plugins/` 不在 workspace members（wasm 专属 crate 不可宿主编译），seepd 发行物含 loader 不含示例产物（README 记构建法）；
 - **R-name**：`plugin_name()` 返回宿主 `Box::leak` 固化——泄漏量 = 插件数 × 名字长（载入一次，生命周期进程级，可接受；记录于源注释）；
-- **R-state**：插件实例状态（令牌桶）随 Store 存活至进程退出/链重建——配置热更新重建链时旧实例随 `MiddlewareChain` Arc 消亡，状态清零（与「随配置重建」语义一致，文档明示）。
+- **R-state**：插件实例状态（令牌桶）随 Store 存活至进程退出——seepd 无配置热更新接线（启动一次读入），链在进程内不重建，令牌桶实际随进程退出清零；若未来接入热更新重建链，旧实例随 `MiddlewareChain` Arc 消亡、状态同为清零语义。
 
 ## 9. 落地回填（2026-10-04，R1/R2 全部兑现）
 

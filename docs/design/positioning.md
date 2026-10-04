@@ -88,7 +88,7 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 
 这三者作为 `FlowMiddleware` 实现挂在 egress 之前/之后，**对三种场景统一生效**：代理用它过 DPI，游戏加速用它过 QoS，网页加速用它维持 TLS 正常形态。
 
-> **现状（2026-10，P1-4 落地，M0–M4）**：三者中的 `padding` 已以首个 `FlowMiddleware`（`PaddingMiddleware`）落地——策略/执行分离（`PaddingSpec` 策略引擎纯函数 + 帧载体执行侧），MVP 帧载体 = mesh chain 的 `MeshEnvelope` 帧（fixed/bucket/range 三形态、overhead 比例闸门、`seep_obfs_*` 指标族恒渲染 + `scripts/obfs_padding_dist.py` 分布检查脚本）；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 帧载体预留同 `PaddingSpec` 钩子（详见 [obfuscation-middleware.md](obfuscation-middleware.md)，验收口径 §0）。`timing`/`shaping` 待 P2-4；obfs/salamander 插件与 TLS 指纹模拟待 P2-4/P2-5。
+> **现状（2026-10，P1-4/P2-4/P2-5 落地）**：三者均已以 `FlowMiddleware` 落地——`padding`（P1-4 M0–M4，策略/执行分离：`PaddingSpec` 策略引擎纯函数 + 帧载体执行侧，MVP 帧载体 = mesh chain 的 `MeshEnvelope` 帧，fixed/bucket/range 三形态、overhead 比例闸门、`seep_obfs_*` 指标族恒渲染 + `scripts/obfs_padding_dist.py` 分布检查脚本）；`timing`/`shaping`（P2-4：`TimingMiddleware` 启动抖动 + `ShapingMiddleware` 写网格归一）。单跳 TCP 无自有帧 no-op；UDP 数据报填充载体（`UdpEnvelope`）已就绪而执行钩子未接（裁决见 udp-mesh-dataplane.md D-15）。TLS 指纹模拟已随 P2-5 落地（chrome/ios/safari 预设，见 [tls-fingerprint.md](tls-fingerprint.md)）；simple-obfs/salamander 生态插件兼容未做。详见 [obfuscation-middleware.md](obfuscation-middleware.md)。
 
 ### 2.5 数据通路视角的结论
 
@@ -99,14 +99,14 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 
 ## 3. 与现状的差距（结论性清单）
 
-| # | 缺口 | 影响 | 详见 |
-|---|------|------|------|
-| G1 | 协议层零 UDP（`seep-protocols` 无任何 UDP 转发路径） | 游戏加速不可用 | roadmap S1 |
-| G2 | TUN/系统路由为占位实现（`seep-platform::network::platform.rs` 各 Provider 均返回"未实现"，runtime 未接线） | 系统级接管/进程分流不可用 | roadmap S2 |
-| G3 | 无独立混淆横切层（仅协议自带伪装）**——2026-10 P1-4 padding 已落地**（`padding` 一项；`timing`/`shaping` 仍缺，见 §2.4 现状注记） | 抗 QoS/DPI 能力受限 | roadmap S3 |
-| G4 | 无出站连接复用/池化 | 网页短连接开销高 | roadmap S3 |
-| G5 | mesh data-plane 仅 TCP（JSON envelope 明文头） | 多跳 UDP 不可用；envelope 可优化为二进制 | roadmap S1/S3 |
-| G6 | per-link 时延分布/切换原因等细粒度指标缺失 | 调度缺少数据闭环 | roadmap S4 |
+| # | 缺口（2026-09 时点结论） | 影响 | 现状（2026-10-04） | 详见 |
+|---|------|------|------|------|
+| G1 | 协议层零 UDP（`seep-protocols` 无任何 UDP 转发路径） | 游戏加速不可用 | **已闭合**——P0-2/P0-3：UDP ASSOCIATE 入站 + direct/ss/wg 出站载荷 | roadmap S1 |
+| G2 | TUN/系统路由为占位实现（`seep-platform::network::platform.rs` 各 Provider 均返回"未实现"，runtime 未接线） | 系统级接管/进程分流不可用 | **已闭合**——P1-1/P1-2/P1-3：linux.rs 真实现 + TunIngress 接线 + network 配置区块与 `seepctl route` | roadmap S2 |
+| G3 | 无独立混淆横切层（仅协议自带伪装） | 抗 QoS/DPI 能力受限 | **已闭合**——P1-4 padding、P2-4 timing/shaping 落地；simple-obfs/salamander 生态插件兼容仍未做 | roadmap S3 |
+| G4 | 无出站连接复用/池化 | 网页短连接开销高 | **已闭合**——P1-5 M0–M5 连接池 + TLS 会话恢复 | roadmap S3 |
+| G5 | mesh data-plane 仅 TCP（JSON envelope 明文头） | 多跳 UDP 不可用；envelope 可优化为二进制 | **已闭合**——P0-4 UDP 多跳 + P2-6 二进制 envelope | roadmap S1/S3 |
+| G6 | per-link 时延分布/切换原因等细粒度指标缺失 | 调度缺少数据闭环 | **已闭合**——P2-1 `seep_mesh_link_*`/`seep_mesh_switch_total` + `GET /mesh/switches` | roadmap S4 |
 
 ## 4. 文档索引
 

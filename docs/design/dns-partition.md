@@ -167,8 +167,8 @@ pollution_suspected/组内 per-server 计数）。无新端点（复用 stats �
 
 | 步 | 内容与落点 | 依赖 | 验收 |
 |----|-----------|------|------|
-| M0 ✅ 750de34 | 设计稿 + dns_engine.rs 全量（§3）+ mod.rs 工厂切换 + §7-1..7 测 | — | §7 全绿；mock 双上游防污染三面成立（17 测） |
-| M1 ✅ | seep-config dns 子块（`DnsBlockConfig`/groups/rules/cache/listen，deny_unknown_fields + validate E1）+ runtime `dns_config.rs` 转换（domestic 缺省回落 tun.dns_servers:53——dns_servers 消费兑现）/`DnsService` 监听启停 + runtime_builder 装配（独立于网络虚拟化开关，§9-4）+ 控制面 `GET /dns/stats` + 文档回填 | M0 | 控制面可见命中率（端点测试钉暴露面）；dig 形端到端（dns_config 生命周期测钉） |
+| M0 已完成 750de34 | 设计稿 + dns_engine.rs 全量（§3）+ mod.rs 工厂切换 + §7-1..7 测 | — | §7 全绿；mock 双上游防污染三面成立（17 测） |
+| M1 已完成 | seep-config dns 子块（`DnsBlockConfig`/groups/rules/cache/listen，deny_unknown_fields + validate E1）+ runtime `dns_config.rs` 转换（domestic 缺省回落 tun.dns_servers:53——dns_servers 消费兑现）/`DnsService` 监听启停 + runtime_builder 装配（独立于网络虚拟化开关，§9-4）+ 控制面 `GET /dns/stats` + 文档回填 | M0 | 控制面可见命中率（端点测试钉暴露面）；dig 形端到端（dns_config 生命周期测钉） |
 
 ## 8.1 M1 落地补充（2026-10-02）
 

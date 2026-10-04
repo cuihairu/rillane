@@ -86,7 +86,7 @@ forward(decision, flow):
 
 ### 1.5 顺序语义与 P3-2 关系
 
-- 链内**声明顺序即执行顺序**，由 `obfuscation.middleware` 配置数组（§3.1）决定；MVP 仅 `padding` 一个实现，顺序无实义，但契约先钉（P2-4 多策略时会踩）；
+- 链内**声明顺序即执行顺序**，由 `obfuscation.middleware` 配置数组（§3.1）决定；P1-4 MVP 期仅 `padding` 一个实现、顺序无实义，但契约先钉——P2-4 落地 `timing`/`shaping` 后该契约已被消费（内置链按数组序装配）；
 - P3-2 动态加载 = 在该静态链之上加 loader：`MiddlewareChain` 的 `Vec<Arc<dyn FlowMiddleware>>` 由 loader 填充（原生动态库/WASM 适配器实现同一 trait）；**本条目不引入任何动态加载依赖**（workspace 现无 `libloading`/`wasmtime`/`wasmer`，已核对）。
 - **落地注记（2026-10-04，P3-2 已落地）**：trait 承诺兑现——`WasmPluginMiddleware` 实现同一 `FlowMiddleware` trait（`name()` 以 `Box::leak` 固化为 `&'static str`，本节 trait 签名不动承诺兑现）；载具按 WASM-only 裁决（`crates/seep-plugins`，wasmtime），链序 = 内置 `middleware` 声明序 + `plugins` 声明序，见 [plugin-loader.md](plugin-loader.md) §1.5/§2.3。
 
@@ -132,16 +132,18 @@ pub struct PaddingSpec {
 
 | 帧载体 | 是否存在 | MVP 处置 |
 |--------|---------|---------|
-| chain 的 `MeshEnvelope` 帧（JSON + 4 字节长度前缀，`mesh.md`） | ✅ 既有 | **本条目实现**：序列化后按 spec 填充 + 写 `pad_len`（§2.4） |
-| UDP 数据报（P0-4 §2 `UdpEnvelope` 二进制帧） | ❌ 设计已就绪未实现 | 预留执行钩子 + 同 `PaddingSpec`；实施随 P0-4 S5（§4.4） |
-| 单跳 TCP 出站载荷 | ❌ 无自有帧（协议各自封装，seep 不握边界） | **no-op**：middleware 可产出 spec 注解，执行侧无载体 → 不产生填充字节，`skipped_total{reason="no_frame"}` 计数 |
-| TUN 入站 IP 包（P1-2） | ❌ 未实现 | 归 P1-2；其下行 IP/UDP 包构造点与 UDP 帧同族，届时复用（§10 未决） |
+| chain 的 `MeshEnvelope` 帧（P1-4 时点为 JSON + 4 字节长度前缀；P2-6 后切二进制，`pad_len` 进二进制头） | 既有 | **本条目实现**：序列化后按 spec 填充 + 写 `pad_len`（§2.4；P2-6 迁移无损，golden 沿用） |
+| UDP 数据报（P0-4 §2 `UdpEnvelope` 二进制帧） | 载体已就绪（P0-4 S5 落地），padding 执行钩子未接 | 预留执行钩子 + 同 `PaddingSpec`；裁决见 udp-mesh-dataplane.md D-15（§4.4） |
+| 单跳 TCP 出站载荷 | 无自有帧（协议各自封装，seep 不握边界） | **no-op**：middleware 可产出 spec 注解，执行侧无载体 → 不产生填充字节，`skipped_total{reason="no_frame"}` 计数 |
+| TUN 入站 IP 包 | P1-2 数据面已落地，padding 未接 | 其下行 IP/UDP 包构造点与 UDP 帧同族，届时复用（§10 未决） |
 
-**验收口径落点**：可测的"出口包长分布偏移"= chain 帧（抓包/单测量帧长）；单跳 TCP 的偏移不由本条目承担（§0 说明）；游戏 UDP 的偏移随 P0-4。
+**验收口径落点**：可测的"出口包长分布偏移"= chain 帧（抓包/单测量帧长）；单跳 TCP 的偏移不由本条目承担（§0 说明）；游戏 UDP 的偏移依赖 §4.4 钩子接通（现状未接）。
 
 ### 2.4 `MeshEnvelope` 填充编解码与版本门
 
-- 帧格式现状 = `[len: u32][json]`（`MeshEnvelope{version, flow_id, target_host, target_port, path}`，`mesh_transport.rs:165-176`）；
+> **P2-6 落地后现状（2026-10-02）**：TCP 面 envelope 已切二进制（magic `SU` + `MESH_ENVELOPE_BIN_VERSION=2` 头），`pad_len` 为二进制头尾部的 4 字节 BE 字段，执行函数 `pad_envelope_frame`——本节以下按 P1-4 时点的 JSON 帧形叙述，机制（尾填充 + pad_len 声明 + 版本门）在两种编码下同构，golden 语义未变。
+
+- 帧格式（P1-4 时点）= `[len: u32][json]`（`MeshEnvelope{version, flow_id, target_host, target_port, path}`，`mesh_transport.rs:174` 起）；
 - 填充 = JSON 追加**尾部填充字节** + JSON 内新增**可选字段** `pad_len: u32`（缺省 0，serde 新增字段对旧端是未知字段）：
 
 ```
@@ -177,7 +179,7 @@ obfuscation:
   enabled: false                   # 总开关；false = 零开销（§2.5）
   default_padding: game            # 引用 profiles 中的名字；无则用内联 padding
   apply_to: chain                  # chain | single | all | "egress:<name>"
-  middleware: [padding]            # 声明链顺序（MVP 仅 padding 可写）
+  middleware: [padding]            # 声明链顺序（可写 padding/timing/shaping，后两者自 P2-4 起）
   profiles:
     game:                          # 命名策略集（P2-3 三预设将落在此处）
       padding:
@@ -201,7 +203,7 @@ seep-config 零依赖 seep-core/platform（deps 仅 anyhow/serde 系），保持
 
 | config 镜像类型（seep-config） | runtime 转换产物 |
 |-------------------------------|-----------------|
-| `ObfuscationConfig { enabled, default_padding: Option<String>, apply_to: ApplyTo, middleware: Vec<String>, profiles: BTreeMap<String, ObfsProfileConfig>, padding: Option<PaddingBlockConfig> }` | 构造 `Vec<Arc<dyn FlowMiddleware>>`（MVP 至多含一个 `PaddingMiddleware`）|
+| `ObfuscationConfig { enabled, default_padding: Option<String>, apply_to: ApplyTo, middleware: Vec<String>, profiles: BTreeMap<String, ObfsProfileConfig>, padding: Option<PaddingBlockConfig> }`（表为 P1-4 时点形状；P2-4 增 `default_timing/timing/default_shaping/shaping`，P3-2 增 `plugins`，见各文档） | 构造 `Vec<Arc<dyn FlowMiddleware>>`（P1-4 至多含一个 `PaddingMiddleware`；P2-4/P3-2 后按链装配）|
 | `ApplyTo::{Chain, Single, All, Egress(String)}` | middleware 内固化的选择器闭包（匹配 §1.4 注解） |
 | `ObfsProfileConfig { padding: Option<PaddingBlockConfig> }` | 解析出被选中的 `PaddingBlockConfig` |
 | `PaddingBlockConfig { mode, .. 各模式字段 }` | `PaddingSpec`（`mode` 字符串 → `PaddingMode` 枚举，字段按模式校验后填充） |
@@ -255,6 +257,7 @@ seep-config 零依赖 seep-core/platform（deps 仅 anyhow/serde 系），保持
 ### 4.5 与 P2-6 envelope 二进制化的关系
 
 - P2-6（TCP 面 envelope 二进制化）与本条目的 `pad_len` 字段**同处一个格式定稿点**：若 P2-6 先落地，`pad_len` 改为二进制头中的一个字段（语义不变，仅编码变化）；若 P1-4 先落地，P2-6 迁移时带上该字段。二者**不互斥、无先后硬依赖**，但实施时应对齐同一格式版本（记 §10）。
+- **时序结果（P2-6 已落地，2026-10-02）**：走的是后半分支——P1-4 先落地，P2-6 迁移时 `pad_len` 进二进制头（`MESH_ENVELOPE_BIN_VERSION=2`），`pad_envelope_frame` 切二进制，P1-4 golden 沿用；上段的条件推演保留为裁决记录。
 
 ## 5. 指标（`seep_obfs_*` 家族，封闭标签集）
 

@@ -63,7 +63,9 @@ cargo run -p seepctl -- nodes
 cargo run -p seepctl -- udp-probe --socks5 127.0.0.1:7890 --host example.com --port 53 --payload-hex 0001
 ```
 
-可选：在 `seepd` 进程环境中设置 `SEEP_CAPTURE_LOGS=1`，控制面会额外提供 `GET /logs`（用于 `seepctl diagnose` 抓取最近日志）。
+`seepd` 配置经 `SEEP_CONFIG` 环境变量指定（缺省 `config/seep.yaml`）；无 `--config` 旗标，多余命令行参数被忽略。平台模板的配置落位见 `platforms/` 各 README。
+
+可选：`telemetry.enable_tracing=true` 时（`config/seep.yaml` 缺省为 `false`），在 `seepd` 进程环境中设置 `SEEP_CAPTURE_LOGS=1`，控制面会额外提供 `GET /logs`（用于 `seepctl diagnose` 抓取最近日志）；未开启时该端点返回 404。
 
 当前可用能力：提供 Socks5 / HTTP CONNECT / Mixed 入站 + Direct / Socks5 / HTTP CONNECT / Shadowsocks / Trojan / Hysteria2 / VLESS / VMess / WireGuard 出站的数据通道，可通过 `config/seep.yaml` 配置监听端口、认证信息与路由策略；UDP 数据面（socks5/mixed 的 UDP ASSOCIATE 中继，`udp:` 配置块，缺省关闭）支持入口级开关与全套超时/上限参数。
 后台控制接口默认监听 `control.api_bind`，可访问 `http://127.0.0.1:9090/flows` 查看入口/出口之间的累计流量统计（或 `seepctl stats`——尾部附 UDP 段：会话/中继字节/丢弃/过期/mesh 面），访问 `http://127.0.0.1:9090/udp/stats` 取 UDP JSON 快照，访问 `http://127.0.0.1:9090/nodes` 或 `seepctl nodes` 查看 mesh 节点注册信息；`seepctl udp-probe` 为 SOCKS5 UDP ASSOCIATE 联调探测（退出码 0-4，见 `--help`）。

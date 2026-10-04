@@ -2,11 +2,10 @@
 
 Rust 核心（`crates/seep-ffi` cdylib）+ `NEPacketTunnelProvider` extension。
 本目录提供：Provider Swift 源码、macOS 侧 xcframework 构建脚本、集成步骤。
-（xcframework 现由 `libseep_ffi.dylib` 三面组装——dylib 面 extension 链接/分发
-形态**未在本仓实证**，无 macOS 工具链；静态 `.a` 路径见 `build.sh::build_one`
-备用函数，当前未接通。）
-**本仓开发环境为 Linux，iOS 面只能出源码与脚本，无法在本机完成 Xcode
-构建与真机/模拟器运行验证**（边界见下）。
+**本仓开发环境为 Linux，iOS 面只能出源码与脚本，无法在本机完成 Xcode 构建与
+真机/模拟器运行验证**（边界见下）。xcframework 现由 `libseep_ffi.dylib` 三面
+组装，dylib 面 extension 链接/分发形态**未在本仓实证**；静态 `.a` 路径见
+`build.sh::build_one` 备用函数，当前未接通。
 
 ## 内容
 
