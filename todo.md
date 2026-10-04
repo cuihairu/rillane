@@ -176,6 +176,7 @@
   ④**audit / coverage install 步**：`cargo install`（无 pin 无 `--locked`）按当下 registry 浮动解析，上游新发版即可漂移破坏可复现性 → 双步加 `--locked` 钉安装面（cargo-audit 0.22.2 / cargo-llvm-cov 0.9.1 均自带锁）。本地全等价复现（fresh `cargo install` 编译安装 + `cargo audit` 扫当前锁 + `cargo llvm-cov --all-features --workspace --lcov` 全量）均绿——该两 job 的历史红为本地不可复现的时点面（10-02 前后 runner 镜像/advisory DB 滚动），加固防复发、CI 实跑为准。
   ⑤cross-compile：9df4e46 干净 target 本地 `cross check` gnu/aarch64 复现绿、cross 版本无浮动（crates.io/GitHub release 停 0.2.5）、host 目标回退等价 `cargo check`——历史红亦含时点面（actions/cache 的 target/ 跨工具链产物混染是本地曾复现的 E0463 假象来源，CI 侧锁变即 key 变自然重建）；无代码面修复，CI 实跑为准。
   验收：本地门禁 fmt/clippy(-D warnings)/test 全绿 + docker build/run 冒烟 + 1.96 check + llvm-cov 全量全绿；CI 十四 job 实跑绿以 GitHub Actions 为准（新 run 日志可回读，若仍有红即取日志续修）。
+  **CI 实跑定案（6c74dd1 run 37196348814，同日）**：新 run 十四 job 仍全红，但性质已定案——**私有仓 GitHub Actions 配额耗尽/付款阻断**，非代码红：job `started_at→completed_at` 仅 14 秒、`runner_name` 空（从未分配 runner 即判失败）、日志从未上传（刚完成的 run 即 BlobNotFound、steps 恒 `[]`）、rerun 静默失效。时间线吻合：10 月免费 2000 分钟配额在本仓高 push 频率下单日烧尽（单 run 全绿约 200 分钟），27b4394（10-02 04:30 UTC）为配额余量内末绿、76920c0（08:38 UTC）起所有 run 秒红——首红时点与 commit 内容无关。本条目四项修复（MSRV 基线/预热层/nightly 去连坐/--locked）为真代码面根因修复，配额恢复后生效；**恢复动作在账户侧**（账单/提额/等 11-01 月度重置），待 CI 实跑全绿后本条目口径方闭环。
 
 ---
 
