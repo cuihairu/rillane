@@ -8,7 +8,7 @@
 
 | 在本条目内 | 归其他条目 |
 |-----------|-----------|
-| `platforms/systemd/`：`seep.service` unit + deb 组装产线（seepd/seepctl + conffile + postinst/prerm）+ 配置示例 | P3-5 零拷贝（维持登记不动）；libloading 动态库直载崩溃隔离（V2，随 P3-2 裁决） |
+| `platforms/systemd/`：`seep.service` unit + deb 组装产线（seepd/seepctl + conffile + postinst/prerm）+ 配置示例 | P3-5 零拷贝（已落地 2026-10，与打包产线无耦合，见 performance-io.md）；libloading 动态库直载崩溃隔离（V2，随 P3-2 裁决） |
 | `platforms/launchd/`：`com.seep.seepd.plist` + macOS 原生 build.sh（universal2）+ install.sh（脚本级，结构可验） | darwin 交叉编译产出 Mach-O（Apple SDK 再分发限制，同 CI 排除口径；待 macOS runner 原生跑） |
 | `platforms/windows/`：cross windows-gnu 产线 + zip 交付包 + `install-service.ps1`/`uninstall-service.ps1`（sc.exe 模板级） | Windows 真 SCM 协议集成（`windows-service` crate 让 seepd 自报 SERVICE_RUNNING——归后续增量，§3.3） |
 | `platforms/README.md` 矩阵回填 + todo P3-3 勾选注记 | CI 矩阵改动（打包脚本属发布工具，本地验证；windows-gnu build 已在 CI） |
@@ -190,7 +190,7 @@ seep_0.1.0_macos_universal2.tar.gz
 4. **`SystemCallFilter` 不设**：过紧易误伤 aws-lc-sys syscall 面；硬化收紧（含 seccomp profile 文件化）归后续。
 5. **CAP_NET_ADMIN 缺省授予**：TUN 全功能口径；纯代理部署应 drop-in 收窄（README 给法）。
 6. **CI 矩阵不动**：打包脚本属发布工具、本地验证；windows-gnu build 已在 CI 守护。
-7. **P3-5 零拷贝维持登记；libloading 崩溃隔离归 V2**（调度明示不动）。
+7. **P3-5 零拷贝已落地（2026-10，与打包产线无耦合）；libloading 崩溃隔离归 V2**（调度明示不动）。
 
 ## 7. 分步清单
 

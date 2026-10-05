@@ -322,7 +322,7 @@ Seep 入口与主流代理客户端互通（SOCKS5/HTTP CONNECT 口径；入口�
 - [ ] HTTP/3 代理
 - [ ] WireGuard v2
 - [x] 自定义协议插件系统（WASM 加载器已落地，2026-10-04 P3-2——[plugin-loader.md](design/plugin-loader.md)）
-- [ ] 协议性能基准测试工具
+- [x] 协议性能基准测试工具（已落地，2026-10 P3-5——criterion 基准：relay 8K–256K 缓冲对照中位吞吐与帧写 vectored 两段合一对照，数字与噪声口径见 [performance-io.md](design/performance-io.md) §5）
 
 ### 未来计划
 - [ ] QUIC 协议原生代理
