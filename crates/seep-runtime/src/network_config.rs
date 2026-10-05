@@ -150,6 +150,7 @@ mod tests {
 
     fn block() -> NetworkBlockConfig {
         NetworkBlockConfig {
+            egress_fwmark: None,
             mode: NetworkBlockMode::Tun,
             tun: Some(TunBlockConfig {
                 name: Some("seep0".to_string()),
@@ -293,6 +294,7 @@ mod tests {
             (NetworkBlockMode::Hybrid, NetworkMode::Hybrid),
         ] {
             let cfg = NetworkBlockConfig {
+                egress_fwmark: None,
                 mode: block_mode,
                 tun: None,
                 routing: None,

@@ -201,6 +201,12 @@ pub struct NetworkBlockConfig {
     /// DNS 分流块（P2-8 M1，dns-partition.md §4-3；None = 整体关闭零差异）
     #[serde(default)]
     pub dns: Option<DnsBlockConfig>,
+    /// 出站 fwmark（networking.md §2 direct 出口自环逃逸正解半边①）：出站
+    /// socket 打 `SO_MARK`，配套 `ip rule fwmark` 逃逸规则（半边② R3）把
+    /// seep 自身流量从 TUN include 路由拽回直连。缺省 None = 不打 mark
+    /// 零差异；0 同 None。运行期非 Linux/无 CAP_NET_ADMIN 降级直连（warn 一次）。
+    #[serde(default)]
+    pub egress_fwmark: Option<u32>,
 }
 
 /// network.mode（serde 名随 platform 枚举：transparent 弃 "redir"，§1.3 B4 收口）

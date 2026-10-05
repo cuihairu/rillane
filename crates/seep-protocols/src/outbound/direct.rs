@@ -5,7 +5,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use seep_core::{EgressConnector, Flow, FlowReport};
-use tokio::net::TcpStream;
 
 use crate::pool::{TransportKey, TransportPool};
 
@@ -56,7 +55,9 @@ impl EgressConnector for DirectConnector {
                 io
             }
             None => Box::new(
-                TcpStream::connect(&target)
+                // net_mark 统一拨号（缺省 mark=0 与 TcpStream::connect 零差异；
+                // fwmark ≠ 0 时 SO_MARK 逃逸 include 路由自环，networking.md §2）
+                seep_core::net_mark::connect_tcp(target.clone())
                     .await
                     .with_context(|| format!("连接目标 {} 失败", target))?,
             ),

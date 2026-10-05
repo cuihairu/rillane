@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
+pub mod net_mark;
 pub mod performance;
 pub mod udp;
 

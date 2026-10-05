@@ -161,6 +161,7 @@ mod tests {
             tun: None,
             routing: None,
             dns: None,
+            egress_fwmark: None,
         });
         let rc = derive_runtime_config(&cfg).unwrap();
         assert!(rc.enable_network_virtualization);

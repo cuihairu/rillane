@@ -3558,6 +3558,7 @@ mod tests {
             mode: seep_config::NetworkBlockMode::Tun,
             tun: None,
             routing: None,
+            egress_fwmark: None,
             dns: Some(seep_config::DnsBlockConfig {
                 enabled: true,
                 domestic: vec![],

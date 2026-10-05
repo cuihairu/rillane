@@ -138,6 +138,17 @@ impl RuntimeBuilder {
             }
         }
 
+        // networking.md §2 direct 出口自环逃逸（net_mark 半边①）：进程级出站
+        // fwmark 设定（network.egress_fwmark；缺省 None = 不设定不触碰，存量
+        // 零差异；变更需重启）。仅 Some 才写——同进程并行 build 不互踩。
+        if let Some(mark) = config_snapshot
+            .network
+            .as_ref()
+            .and_then(|n| n.egress_fwmark)
+        {
+            seep_core::net_mark::set_egress_fwmark(mark);
+        }
+
         // 创建路由引擎
         let router = Arc::new(RoutingEngine::new(config_snapshot.routing.clone()));
 
@@ -3720,6 +3731,30 @@ mod tests {
         assert!(err.to_string().contains("至少需要配置一个入口"), "{err:#}");
     }
 
+    /// 出站 fwmark 配置接线（networking.md §2 direct 出口自环逃逸半边①）：
+    /// `network.egress_fwmark: Some(m)` → build 期 `set_egress_fwmark` 生效
+    /// （net_mark 读回）；缺省 None 不触碰（存量零差异，且同进程并行 build
+    /// 不互踩）。
+    #[test]
+    fn egress_fwmark_config_wires_net_mark() {
+        let mut cfg = s5_udp_config(false);
+        cfg.network = Some(seep_config::NetworkBlockConfig {
+            mode: seep_config::NetworkBlockMode::Tun,
+            tun: None,
+            routing: None,
+            dns: None,
+            egress_fwmark: Some(0x5E45),
+        });
+        let _rt = RuntimeBuilder::new(cfg).build().expect("build");
+        assert_eq!(
+            seep_core::net_mark::egress_fwmark(),
+            0x5E45,
+            "build 期应设定出站 fwmark"
+        );
+        // 进程级单例复位（防泄漏到后续测试）
+        seep_core::net_mark::set_egress_fwmark(0);
+    }
+
     /// 口径 1：chain+udp 同启 + 显式允许明文 → build 成功；mesh-chain 装配落位
     /// （UDP 门折叠值与 §8 故障事件通道均在——chain 决策 UDP 可达的装配证据，
     /// 端到端往返归 §10 T2/S6）。
@@ -3786,6 +3821,7 @@ mod tests {
         let present = {
             let mut cfg = s5_udp_config(true);
             cfg.network = Some(seep_config::NetworkBlockConfig {
+                egress_fwmark: None,
                 mode: seep_config::NetworkBlockMode::Tun,
                 tun: None,
                 routing: None,
@@ -3831,6 +3867,7 @@ mod tests {
     async fn dns_block_disabled_builds_none() {
         let mut cfg = s5_udp_config(true);
         cfg.network = Some(seep_config::NetworkBlockConfig {
+            egress_fwmark: None,
             mode: seep_config::NetworkBlockMode::Tun,
             tun: None,
             routing: None,
@@ -3854,6 +3891,7 @@ mod tests {
     async fn dns_block_referenced_empty_group_rejected_at_build() {
         let mut cfg = s5_udp_config(true);
         cfg.network = Some(seep_config::NetworkBlockConfig {
+            egress_fwmark: None,
             mode: seep_config::NetworkBlockMode::Tun,
             tun: None,
             routing: None,

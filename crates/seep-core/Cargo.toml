@@ -13,10 +13,14 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+# 出站 fwmark（net_mark.rs，Linux cfg 内使用；set_mark 在 "all" feature 下）
+socket2 = { version = "0.5", features = ["all"] }
 
 [dev-dependencies]
 # P3-5 performance-io.md §5：基准仅本地实跑回填文档，不入 CI 门禁
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# net_mark root 守卫测试读 geteuid（Linux cfg 内）
+libc = "0.2"
 
 [[bench]]
 name = "relay_throughput"

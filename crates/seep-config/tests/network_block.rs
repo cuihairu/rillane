@@ -33,6 +33,10 @@ fn network_block_defaults_backward_compatible() {
     let cfg: SeepConfig = serde_yaml::from_str(&yaml).expect("含 network 块应可解析");
     let network = cfg.network.expect("network 块应存在");
     assert_eq!(network.mode, NetworkBlockMode::Tun, "mode 缺省 tun");
+    assert_eq!(
+        network.egress_fwmark, None,
+        "egress_fwmark 缺省 None = 不打 mark 零差异"
+    );
     let tun = network.tun.expect("tun 块应存在");
     assert_eq!(tun.name.as_deref(), Some("seep0"));
     assert_eq!(tun.mtu, 1500, "mtu 缺省 1500");
@@ -50,6 +54,15 @@ fn network_block_defaults_backward_compatible() {
     let yaml = format!("{BASE_YAML}network:\n  tun:\n    mtu: 1400\n");
     let cfg: SeepConfig = serde_yaml::from_str(&yaml).expect("仅 tun 块应可解析");
     assert!(cfg.network.unwrap().routing.is_none());
+
+    // egress_fwmark 显式给值可解析（缺省 None 半边见上）
+    let yaml = format!("{BASE_YAML}network:\n  egress_fwmark: 24165\n");
+    let cfg: SeepConfig = serde_yaml::from_str(&yaml).expect("egress_fwmark 应可解析");
+    assert_eq!(
+        cfg.network.expect("network 块").egress_fwmark,
+        Some(24165),
+        "egress_fwmark 应按值解析"
+    );
 }
 
 /// §1.5：块级 deny_unknown_fields——拼错子字段构建期即报（B2 定向收口）。
@@ -83,6 +96,7 @@ fn network_block_denies_unknown_fields() {
 #[test]
 fn network_block_serde_roundtrip() {
     let cfg = NetworkBlockConfig {
+        egress_fwmark: None,
         mode: NetworkBlockMode::Tun,
         tun: Some(TunBlockConfig {
             name: Some("seep0".to_string()),
@@ -114,6 +128,7 @@ fn network_block_rejects_non_tun_modes() {
         NetworkBlockMode::Hybrid,
     ] {
         let cfg = NetworkBlockConfig {
+            egress_fwmark: None,
             mode,
             tun: None,
             routing: None,
@@ -127,6 +142,7 @@ fn network_block_rejects_non_tun_modes() {
     }
     // tun 通过（空块 = 最小合法形态）
     NetworkBlockConfig {
+        egress_fwmark: None,
         mode: NetworkBlockMode::Tun,
         tun: None,
         routing: None,
@@ -140,6 +156,7 @@ fn network_block_rejects_non_tun_modes() {
 #[test]
 fn network_block_validate_rejects_illegal_values() {
     let base = || NetworkBlockConfig {
+        egress_fwmark: None,
         mode: NetworkBlockMode::Tun,
         tun: Some(TunBlockConfig {
             name: None,
