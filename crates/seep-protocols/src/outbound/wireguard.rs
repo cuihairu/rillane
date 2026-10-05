@@ -2,7 +2,7 @@
 //!
 //! 说明：
 //! - 该实现会创建/配置 WireGuard 接口并注入路由（wg-quick 风格），依赖系统权限。
-//! - 转发阶段仍使用常规 `TcpStream::connect`，由系统路由将流量导入 WireGuard 接口。
+//! - 转发阶段走 `net_mark::connect_tcp`（SO_MARK 统一拨号面），由系统路由将流量导入 WireGuard 接口。
 
 use std::{net::IpAddr, str::FromStr, sync::Arc};
 
