@@ -491,6 +491,23 @@ impl TunProvider for LinuxTunProvider {
     }
 }
 
+/// fwmark 逃逸表号（networking.md §2 半边②：seep 自身出站 SO_MARK 逃逸
+/// include 自环）——固定 100（用户自定义表段，避开 local/main/default
+/// 系统保留表 255/254/253）；与 `ip rule fwmark` 规则配套，undo 逆序删除
+const ESCAPE_TABLE: u32 = 100;
+
+/// 解析 `ip route show default table main` 输出的首行 → escape 表默认路由
+/// 模板（`default ` 后部分，如 `via 192.168.1.1 dev eth0 proto dhcp`）；
+/// 无默认路由（空/非 default 行/仅空白）→ None（escape 表无出口，跳过
+/// 逃逸面）。probe 与单测共用此纯函数，避免解析口径漂移
+fn parse_escape_route_template(text: &str) -> Option<&str> {
+    text.lines()
+        .next()
+        .and_then(|l| l.trim().strip_prefix("default "))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
 /// 已执行的配置步骤——apply 逆序撤销与 clear_routing 的事实源
 /// （tun-dataplane.md §1.3：ip addr/link/route replace 均幂等，
 /// 撤销对应 del/down）
@@ -506,6 +523,13 @@ pub enum AppliedStep {
         interface: String,
         metric: u32,
     },
+    /// `ip rule add fwmark <mark> table <escape>`（EEXIST 容忍 = 幂等；
+    /// iproute2 无 rule replace，重复 add 报 File exists 视为已生效）
+    FwmarkRule { mark: u32, table: u32 },
+    /// `ip route replace default <via_dev> table <escape>`（escape 表默认
+    /// 路由，via_dev 取 main 表首条默认路由——带 mark 的包查 escape 表
+    /// 需有出口，否则丢弃）
+    EscapeRoute { table: u32, via_dev: String },
 }
 
 impl AppliedStep {
@@ -527,6 +551,24 @@ impl AppliedStep {
                 interface,
                 metric,
             } => ip_argv_route_replace(cidr, interface, *metric),
+            AppliedStep::FwmarkRule { mark, table } => vec![
+                "ip".into(),
+                "rule".into(),
+                "add".into(),
+                "fwmark".into(),
+                mark.to_string(),
+                "table".into(),
+                table.to_string(),
+            ],
+            AppliedStep::EscapeRoute { table, via_dev } => vec![
+                "ip".into(),
+                "route".into(),
+                "replace".into(),
+                "default".into(),
+                via_dev.clone(),
+                "table".into(),
+                table.to_string(),
+            ],
         }
     }
 
@@ -538,7 +580,30 @@ impl AppliedStep {
             AppliedStep::RouteReplaced {
                 cidr, interface, ..
             } => ip_argv_route_del(cidr, interface),
+            AppliedStep::FwmarkRule { mark, table } => vec![
+                "ip".into(),
+                "rule".into(),
+                "del".into(),
+                "fwmark".into(),
+                mark.to_string(),
+                "table".into(),
+                table.to_string(),
+            ],
+            AppliedStep::EscapeRoute { table, .. } => vec![
+                "ip".into(),
+                "route".into(),
+                "del".into(),
+                "default".into(),
+                "table".into(),
+                table.to_string(),
+            ],
         }
+    }
+
+    /// EEXIST 是否视为成功（仅 `ip rule add`——iproute2 无 rule replace，
+    /// 重复 add 报 File exists 即规则已生效，幂等语义；其余步骤 false）
+    pub fn eexist_ok(&self) -> bool {
+        matches!(self, AppliedStep::FwmarkRule { .. })
     }
 }
 
@@ -554,6 +619,12 @@ impl fmt::Display for AppliedStep {
                 interface,
                 metric,
             } => write!(f, "RouteReplaced({cidr} dev {interface} metric {metric})"),
+            AppliedStep::FwmarkRule { mark, table } => {
+                write!(f, "FwmarkRule(fwmark {mark:#x} table {table})")
+            }
+            AppliedStep::EscapeRoute { table, via_dev } => {
+                write!(f, "EscapeRoute(default {via_dev} table {table})")
+            }
         }
     }
 }
@@ -688,12 +759,25 @@ pub struct LinuxRouteManager {
     /// mesh listen；run() 起始处再并入域名解析结果）——与 tun 网段合并后
     /// 即完整 auto-bypass 集
     extra_auto_bypass: Vec<RouteDestination>,
+    /// escape 表默认路由模板（networking.md §2 半边②）：probe 读 main 表
+    /// 首条默认路由填入（`ip route show default table main` 的 `default `
+    /// 后部分）；None = 未探测/无默认路由（跳过 escape 面）。仅 None 时
+    /// probe 执行——显式注入值（builder/测试）不被覆盖
+    escape_default_route: Mutex<Option<String>>,
     /// §7.1 mock executor：在场时 exec/undo 不跑真 ip，只记录调用序列，
     /// 可注入第 k 步非零退出（E7 语义单测；仅测试构建存在）
     #[cfg(test)]
     mock_exec: Option<Arc<Mutex<Vec<Vec<String>>>>>,
     #[cfg(test)]
     mock_fail_at: Option<usize>,
+    /// §7.1 mock：在第 k 步返回带 "File exists" 的失败（EEXIST 容忍语义
+    /// 单测；None = 不注入）
+    #[cfg(test)]
+    mock_eexist_at: Option<usize>,
+    /// §7.1 测试钩子：跳过 probe（直接控制 escape_default_route 字段，
+    /// 避免真环境默认路由干扰「无默认路由」测试）
+    #[cfg(test)]
+    skip_probe: bool,
 }
 
 impl LinuxRouteManager {
@@ -706,11 +790,23 @@ impl LinuxRouteManager {
             interface_name: None,
             device_up: AtomicBool::new(false),
             extra_auto_bypass: Vec::new(),
+            escape_default_route: Mutex::new(None),
             #[cfg(test)]
             mock_exec: None,
             #[cfg(test)]
             mock_fail_at: None,
+            #[cfg(test)]
+            mock_eexist_at: None,
+            #[cfg(test)]
+            skip_probe: false,
         }
+    }
+
+    /// 注入 escape 表默认路由模板（builder 形；测试与潜在调用方用——
+    /// 显式值不被 [`Self::probe_escape_default_route`] 覆盖）
+    pub fn with_escape_default_route(self, via_dev: Option<String>) -> Self {
+        *self.escape_default_route.lock().unwrap() = via_dev;
+        self
     }
 
     /// 设置 tun 配置（用于 auto-bypass 计算 tun 自身网段）
@@ -779,6 +875,24 @@ impl LinuxRouteManager {
         let auto_bypass = self.merged_auto_bypass();
         let mut planned = Vec::new();
 
+        // 0. escape 步骤（networking.md §2 半边②：seep 自身出站 SO_MARK
+        //    逃逸 include 自环）——fwmark ≠ 0 且 main 表默认路由在场时，
+        //    先建 `ip rule fwmark` 逃逸规则 + escape 表默认路由（带 mark
+        //    的包查 escape 表走真实默认网关，跳过 main 表 include 路由）
+        if let Some(via_dev) = &*self.escape_default_route.lock().unwrap() {
+            let mark = seep_core::net_mark::egress_fwmark();
+            if mark != 0 {
+                planned.push(AppliedStep::FwmarkRule {
+                    mark,
+                    table: ESCAPE_TABLE,
+                });
+                planned.push(AppliedStep::EscapeRoute {
+                    table: ESCAPE_TABLE,
+                    via_dev: via_dev.clone(),
+                });
+            }
+        }
+
         // 1. 地址步骤（configure_ip 已在 LinuxTunProvider 做；此处重复
         //    replace 幂等无害，且使 clear 能一并还原地址）
         if let Some(tun) = &self.tun_config {
@@ -825,20 +939,40 @@ impl LinuxRouteManager {
         Ok(planned)
     }
 
-    /// 执行单步 argv（§7.1 mock executor 挂点：测试在场时记录调用序列并
-    /// 可在第 fail_at 步注入非零退出——E7 语义无特权可测）
-    async fn exec_step(&self, _idx: usize, argv: &[String]) -> Result<()> {
+    /// 执行单步（§7.1 mock executor 挂点：测试在场时记录调用序列并
+    /// 可在第 fail_at 步注入非零退出、eexist_at 步注入 File exists——
+    /// E7/EEXIST 语义无特权可测）
+    async fn exec_step(&self, _idx: usize, step: &AppliedStep) -> Result<()> {
         #[cfg(test)]
         {
             if let Some(log) = &self.mock_exec {
-                log.lock().unwrap().push(argv.to_vec());
+                log.lock().unwrap().push(step.argv());
                 if self.mock_fail_at == Some(_idx) {
                     return Err(anyhow!("mock ip 非零退出（注入 E7）"));
+                }
+                if self.mock_eexist_at == Some(_idx) {
+                    // 模拟真实执行器的 EEXIST 容忍：FwmarkRule 容忍，其余步骤不容忍
+                    if step.eexist_ok() {
+                        return Ok(());
+                    } else {
+                        return Err(anyhow!(
+                            "mock ip 非零退出（注入 EEXIST）：RTNETLINK answers: File exists"
+                        ));
+                    }
                 }
                 return Ok(());
             }
         }
-        run_ip(argv).await
+        let argv = step.argv();
+        run_ip(&argv).await.or_else(|e| {
+            // ip rule add 幂等：规则已存在（File exists）视为生效——iproute2
+            // 无 rule replace，重复 apply 不能因 EEXIST 触发 E7 回滚
+            if step.eexist_ok() && e.to_string().contains("File exists") {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
     }
 
     /// 撤销单步 argv（mock 在场时只记录、恒成功——撤销阶段尽力而为的镜像）
@@ -853,6 +987,49 @@ impl LinuxRouteManager {
         run_ip(argv).await
     }
 
+    /// 探测 main 表首条默认路由作 escape 表路由模板（networking.md §2
+    /// 半边②）——`ip route show default table main` 输出 `default ` 后部分
+    /// （如 `via 192.168.1.1 dev eth0 proto dhcp`）；无默认路由/探测失败
+    /// → None（跳过 escape 面，不因逃逸功能自爆启动）。仅字段为 None 时
+    /// 执行——显式注入值（builder/测试）不被覆盖
+    async fn probe_escape_default_route(&self) {
+        #[cfg(test)]
+        if self.skip_probe {
+            return;
+        }
+        if self.escape_default_route.lock().unwrap().is_some() {
+            return;
+        }
+        let out = match Command::new("ip")
+            .args(["route", "show", "default", "table", "main"])
+            .output()
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(error = %e, "探测 main 表默认路由失败，跳过 fwmark 逃逸面");
+                return;
+            }
+        };
+        if !out.status.success() {
+            tracing::warn!(
+                status = %out.status,
+                "ip route show 非零退出，跳过 fwmark 逃逸面"
+            );
+            return;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        match parse_escape_route_template(&text) {
+            Some(v) => {
+                *self.escape_default_route.lock().unwrap() = Some(v.to_string());
+            }
+            None => {
+                // main 表无默认路由 → escape 表无出口，跳过逃逸面
+                debug!(target: "seep::route", "main 表无默认路由，跳过 fwmark 逃逸面");
+            }
+        }
+    }
+
     /// 幂等重放期望路由集（network-route.md §2.3/§5）——CLI apply 与启动
     /// apply 的同一入口。dry_run=true 只跑 planner 不执行不入账；执行失败
     /// 逆序撤销本批已执行步骤（E7，在册步骤不动），Err 携 rolled_back；
@@ -861,6 +1038,8 @@ impl LinuxRouteManager {
         &self,
         dry_run: bool,
     ) -> std::result::Result<ApplyOutcome, ApplyFailure> {
+        // escape 面探测（dry_run 也要——计划需含 escape 步骤；仅 None 时跑）
+        self.probe_escape_default_route().await;
         let planned = match self.plan_steps() {
             Ok(p) => p,
             Err(e) => {
@@ -879,7 +1058,7 @@ impl LinuxRouteManager {
         }
         let mut executed: Vec<AppliedStep> = Vec::new();
         for (idx, step) in planned.iter().enumerate() {
-            if let Err(e) = self.exec_step(idx, &step.argv()).await {
+            if let Err(e) = self.exec_step(idx, step).await {
                 let mut rolled_back = Vec::new();
                 for s in executed.iter().rev() {
                     let _ = self.undo_step(&s.undo_argv()).await; // 撤销尽力而为
@@ -940,15 +1119,26 @@ impl LinuxRouteManager {
     }
 
     /// §7.1 mock executor 开启（返回调用记录句柄；fail_at = 注入非零退出
-    /// 的正向步骤下标，None = 恒成功）
+    /// 的正向步骤下标，eexist_at = 注入 File exists 失败，None = 恒成功）
     #[cfg(test)]
     pub(crate) fn enable_mock_exec(
         &mut self,
         fail_at: Option<usize>,
     ) -> Arc<Mutex<Vec<Vec<String>>>> {
+        self.enable_mock_exec_with_eexist(fail_at, None)
+    }
+
+    /// §7.1 mock executor 全开（fail_at + eexist_at 双注入点）
+    #[cfg(test)]
+    pub(crate) fn enable_mock_exec_with_eexist(
+        &mut self,
+        fail_at: Option<usize>,
+        eexist_at: Option<usize>,
+    ) -> Arc<Mutex<Vec<Vec<String>>>> {
         let log = Arc::new(Mutex::new(Vec::new()));
         self.mock_exec = Some(Arc::clone(&log));
         self.mock_fail_at = fail_at;
+        self.mock_eexist_at = eexist_at;
         log
     }
 
@@ -967,6 +1157,11 @@ impl LinuxRouteManager {
                 metric,
             } => {
                 run_ip(&ip_argv_route_replace(cidr, interface, *metric)).await?;
+            }
+            // escape 步骤（动态面不经此——escape 只走 apply 批量面；
+            // match 穷尽需要，语义与 argv 执行一致）
+            AppliedStep::FwmarkRule { .. } | AppliedStep::EscapeRoute { .. } => {
+                run_ip(&step.argv()).await?;
             }
         }
         self.applied.lock().unwrap().push(AppliedRecord {
@@ -1135,6 +1330,11 @@ mod tests {
     use std::{net::IpAddr, time::Duration};
 
     use super::*;
+
+    /// 全局测试锁：`apply_desired` 的 planner 读全局 `net_mark` 单例
+    /// （escape 步骤生成依赖 mark 值）——并行测试会互踩，持锁串行化。
+    /// async-aware（tokio Mutex）：guard 跨 await 持有合法
+    static ROUTE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     // ---------- 单测（§4.1：无特权，任何环境） ----------
 
@@ -1313,6 +1513,8 @@ mod tests {
     /// 重叠项剔除）、不执行不入账；status 快照字段齐备
     #[tokio::test]
     async fn apply_desired_dry_run_plans_without_exec_or_record() {
+        let _guard = ROUTE_TEST_LOCK.lock().await;
+        seep_core::net_mark::set_egress_fwmark(0);
         let mut mgr =
             LinuxRouteManager::new(route_control_routing()).with_tun_config(route_control_tun());
         mgr.set_interface_name("seepR2dry".into());
@@ -1353,6 +1555,8 @@ mod tests {
     /// E10（§6）：接口未创建（TunIngress 未运行/已退）→ Err 携明确口径
     #[tokio::test]
     async fn apply_desired_without_interface_errors_e10() {
+        let _guard = ROUTE_TEST_LOCK.lock().await;
+        seep_core::net_mark::set_egress_fwmark(0);
         let mgr = LinuxRouteManager::new(RoutingConfig {
             enabled: true,
             ..RoutingConfig::default()
@@ -1373,6 +1577,8 @@ mod tests {
     /// undo argv、账本清空（失败批不入账）
     #[tokio::test]
     async fn apply_desired_e7_rolls_back_batch_in_reverse() {
+        let _guard = ROUTE_TEST_LOCK.lock().await;
+        seep_core::net_mark::set_egress_fwmark(0);
         let mut mgr =
             LinuxRouteManager::new(route_control_routing()).with_tun_config(route_control_tun());
         mgr.set_interface_name("seepR2e7".into());
@@ -1406,6 +1612,8 @@ mod tests {
     /// E8 空表幂等
     #[tokio::test]
     async fn apply_desired_idempotent_record_and_clear_e8() {
+        let _guard = ROUTE_TEST_LOCK.lock().await;
+        seep_core::net_mark::set_egress_fwmark(0);
         let mut mgr =
             LinuxRouteManager::new(route_control_routing()).with_tun_config(route_control_tun());
         mgr.set_interface_name("seepR2idem".into());
@@ -1440,6 +1648,8 @@ mod tests {
     /// 失败不入账（回滚面 mocked 路径已覆盖，此处在真 run_ip 上钉同一账目语义）
     #[tokio::test]
     async fn apply_desired_real_exec_failure_keeps_ledger_clean() {
+        let _guard = ROUTE_TEST_LOCK.lock().await;
+        seep_core::net_mark::set_egress_fwmark(0);
         let mut mgr =
             LinuxRouteManager::new(route_control_routing()).with_tun_config(route_control_tun());
         mgr.set_interface_name(format!("seep-no-dev-{}", std::process::id()));
@@ -1450,6 +1660,241 @@ mod tests {
             .expect_err("不存在的设备必失败");
         assert!(f.rolled_back.is_empty(), "首步即败无回滚步骤");
         assert!(mgr.status().applied.is_empty(), "失败不入账");
+    }
+
+    // ---------- fwmark 逃逸面（networking.md §2 半边②） ----------
+
+    /// escape 步骤 argv/undo_argv 形状 + eexist_ok 仅 FwmarkRule
+    #[test]
+    fn escape_step_argv_undo_and_eexist_flag() {
+        let rule = AppliedStep::FwmarkRule {
+            mark: 0x5E45,
+            table: ESCAPE_TABLE,
+        };
+        assert_eq!(
+            rule.argv(),
+            ["ip", "rule", "add", "fwmark", "24133", "table", "100"]
+        );
+        assert_eq!(
+            rule.undo_argv(),
+            ["ip", "rule", "del", "fwmark", "24133", "table", "100"]
+        );
+        assert!(rule.eexist_ok(), "ip rule add 幂等需容忍 EEXIST");
+
+        let route = AppliedStep::EscapeRoute {
+            table: ESCAPE_TABLE,
+            via_dev: "via 192.168.1.1 dev eth0 proto dhcp".into(),
+        };
+        assert_eq!(
+            route.argv(),
+            [
+                "ip",
+                "route",
+                "replace",
+                "default",
+                "via 192.168.1.1 dev eth0 proto dhcp",
+                "table",
+                "100"
+            ]
+        );
+        assert_eq!(
+            route.undo_argv(),
+            ["ip", "route", "del", "default", "table", "100"]
+        );
+        assert!(!route.eexist_ok(), "route replace 本身幂等无需 EEXIST 容忍");
+
+        // 其余步骤均不容忍 EEXIST
+        let addr = AppliedStep::AddrReplaced {
+            interface: "tun0".into(),
+            cidr: "10.0.0.1/24".into(),
+        };
+        assert!(!addr.eexist_ok());
+        let link = AppliedStep::LinkUp {
+            interface: "tun0".into(),
+        };
+        assert!(!link.eexist_ok());
+        let route_replaced = AppliedStep::RouteReplaced {
+            cidr: "1.2.3.0/24".into(),
+            interface: "tun0".into(),
+            metric: 7,
+        };
+        assert!(!route_replaced.eexist_ok());
+
+        // Display 渲染
+        assert_eq!(rule.to_string(), "FwmarkRule(fwmark 0x5e45 table 100)");
+        assert_eq!(
+            route.to_string(),
+            "EscapeRoute(default via 192.168.1.1 dev eth0 proto dhcp table 100)"
+        );
+    }
+
+    /// mark ≠ 0 + 默认路由在场 → planned 含 escape 步骤（addr 之前）；
+    /// mock 执行全成功、入账含 escape 两步
+    #[tokio::test]
+    async fn escape_steps_planned_and_applied_with_mark() {
+        let _guard = ROUTE_TEST_LOCK.lock().await;
+        seep_core::net_mark::set_egress_fwmark(0);
+        seep_core::net_mark::set_egress_fwmark(0x5E45);
+        let mut mgr = LinuxRouteManager::new(route_control_routing())
+            .with_tun_config(route_control_tun())
+            .with_escape_default_route(Some("via 192.168.1.1 dev eth0 proto dhcp".into()));
+        mgr.set_interface_name("seepR2esc".into());
+        let _log = mgr.enable_mock_exec(None);
+
+        let out = mgr.apply_desired(false).await.expect("应成功");
+        // planned: FwmarkRule + EscapeRoute + addr + 1 条不重叠 include
+        assert_eq!(out.planned.len(), 4, "含 escape 两步：{:?}", out.planned);
+        assert_eq!(
+            out.planned[0].argv(),
+            ["ip", "rule", "add", "fwmark", "24133", "table", "100"]
+        );
+        assert_eq!(
+            out.planned[1].argv(),
+            [
+                "ip",
+                "route",
+                "replace",
+                "default",
+                "via 192.168.1.1 dev eth0 proto dhcp",
+                "table",
+                "100"
+            ]
+        );
+        // addr 步骤仍在 escape 之后
+        assert_eq!(
+            out.planned[2].argv(),
+            ["ip", "addr", "replace", "10.90.0.1/24", "dev", "seepR2esc"]
+        );
+
+        let st = mgr.status();
+        assert_eq!(st.applied.len(), 4, "escape 两步入账");
+
+        // clear 逆序：先 route/addr，再 EscapeRoute，最后 FwmarkRule
+        let undone = mgr.clear().await.expect("clear 应成功");
+        assert_eq!(undone.len(), 4);
+        assert_eq!(
+            undone[3].undo_argv(),
+            ["ip", "rule", "del", "fwmark", "24133", "table", "100"]
+        );
+        seep_core::net_mark::set_egress_fwmark(0);
+    }
+
+    /// mark = 0（缺省）→ 无 escape 步骤（零差异）
+    #[tokio::test]
+    async fn escape_steps_absent_when_mark_zero() {
+        let _guard = ROUTE_TEST_LOCK.lock().await;
+        seep_core::net_mark::set_egress_fwmark(0);
+        seep_core::net_mark::set_egress_fwmark(0);
+        let mut mgr = LinuxRouteManager::new(route_control_routing())
+            .with_tun_config(route_control_tun())
+            .with_escape_default_route(Some("via 192.168.1.1 dev eth0".into()));
+        mgr.set_interface_name("seepR2noesc".into());
+
+        let out = mgr.apply_desired(true).await.expect("dry-run 应成功");
+        assert!(
+            !out.planned.iter().any(|s| matches!(
+                s,
+                AppliedStep::FwmarkRule { .. } | AppliedStep::EscapeRoute { .. }
+            )),
+            "mark=0 不应有 escape 步骤：{:?}",
+            out.planned
+        );
+        assert_eq!(out.planned.len(), 2, "addr + 1 条不重叠 include");
+    }
+
+    /// 无默认路由（main 表无出口）→ 无 escape 步骤（escape 表无出口会丢包）
+    #[tokio::test]
+    async fn escape_steps_absent_without_default_route() {
+        let _guard = ROUTE_TEST_LOCK.lock().await;
+        seep_core::net_mark::set_egress_fwmark(0);
+        seep_core::net_mark::set_egress_fwmark(0x5E45);
+        let mut mgr = LinuxRouteManager::new(route_control_routing())
+            .with_tun_config(route_control_tun())
+            .with_escape_default_route(None);
+        mgr.skip_probe = true; // 跳过 probe，字段保持 None = 无默认路由
+        mgr.set_interface_name("seepR2noroute".into());
+
+        let out = mgr.apply_desired(true).await.expect("dry-run 应成功");
+        assert!(
+            !out.planned.iter().any(|s| matches!(
+                s,
+                AppliedStep::FwmarkRule { .. } | AppliedStep::EscapeRoute { .. }
+            )),
+            "无默认路由不应有 escape 步骤：{:?}",
+            out.planned
+        );
+        seep_core::net_mark::set_egress_fwmark(0);
+    }
+
+    /// EEXIST 容忍：FwmarkRule 步注入 File exists → 视为成功（幂等），
+    /// 后续步骤继续执行
+    #[tokio::test]
+    async fn fwmark_rule_eexist_tolerated_keeps_batch_going() {
+        let _guard = ROUTE_TEST_LOCK.lock().await;
+        seep_core::net_mark::set_egress_fwmark(0);
+        seep_core::net_mark::set_egress_fwmark(0x5E45);
+        let mut mgr = LinuxRouteManager::new(route_control_routing())
+            .with_tun_config(route_control_tun())
+            .with_escape_default_route(Some("via 192.168.1.1 dev eth0".into()));
+        mgr.set_interface_name("seepR2eexist".into());
+        let log = mgr.enable_mock_exec_with_eexist(None, Some(0));
+
+        // 第 0 步（FwmarkRule）注入 File exists → 容忍成功
+        let out = mgr.apply_desired(false).await.expect("EEXIST 应容忍");
+        assert_eq!(out.planned.len(), 4);
+        assert_eq!(out.executed.len(), 4, "全部步骤执行（EEXIST 不中断）");
+        assert_eq!(mgr.status().applied.len(), 4, "全部入账");
+
+        // 调用序列：4 步正向（第 0 步的 File exists 在 mock 层注入，
+        // 不产生额外 undo 调用）
+        let calls = log.lock().unwrap().clone();
+        assert_eq!(calls.len(), 4, "无回滚调用：{calls:?}");
+        seep_core::net_mark::set_egress_fwmark(0);
+    }
+
+    /// 非 FwmarkRule 步骤注入 File exists → 不容忍，正常 E7 回滚
+    #[tokio::test]
+    async fn non_fwmark_step_eexist_triggers_e7_rollback() {
+        let _guard = ROUTE_TEST_LOCK.lock().await;
+        seep_core::net_mark::set_egress_fwmark(0);
+        seep_core::net_mark::set_egress_fwmark(0x5E45);
+        let mut mgr = LinuxRouteManager::new(route_control_routing())
+            .with_tun_config(route_control_tun())
+            .with_escape_default_route(Some("via 192.168.1.1 dev eth0".into()));
+        mgr.set_interface_name("seepR2eexist2".into());
+        let _log = mgr.enable_mock_exec_with_eexist(None, Some(2));
+
+        // 第 2 步（addr）注入 File exists → 不容忍 → E7 回滚前 2 步
+        let f = mgr.apply_desired(false).await.expect_err("应 E7");
+        assert_eq!(f.rolled_back.len(), 2, "前 2 步回滚");
+        assert!(mgr.status().applied.is_empty(), "失败批不入账");
+        seep_core::net_mark::set_egress_fwmark(0);
+    }
+
+    /// probe 解析（共用纯函数）：`default via ... dev ...` → via_dev 取
+    /// `default ` 后部分；空输出/仅空白/非 default 首行 → None（跳过
+    /// escape 面，escape 表无出口会丢包）
+    #[test]
+    fn probe_parses_default_route_output() {
+        // 有默认路由（典型 dhcp 输出）
+        assert_eq!(
+            parse_escape_route_template(
+                "default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.100 metric 100\n"
+            ),
+            Some("via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.100 metric 100")
+        );
+
+        // 无默认路由（空输出）
+        assert_eq!(parse_escape_route_template(""), None);
+
+        // 仅空白行
+        assert_eq!(parse_escape_route_template("\n"), None);
+
+        // 首行非 default（如只有 include 路由）→ None
+        assert_eq!(
+            parse_escape_route_template("10.90.0.0/24 dev seepTun0 scope link\n"),
+            None
+        );
     }
 
     #[test]
@@ -1654,6 +2099,10 @@ mod tests {
         if !tun_device_available() {
             return;
         }
+        // planner 读全局 net_mark 单例——与其他 apply_desired 测试串行；
+        // 显式 mark=0（本测不验 escape 面，避免真机 ip rule 变更）
+        let _guard = ROUTE_TEST_LOCK.lock().await;
+        seep_core::net_mark::set_egress_fwmark(0);
 
         async fn route_show(query: &str) -> String {
             let out = Command::new("ip")
