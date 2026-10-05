@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use seep_core::{EgressConnector, Flow, FlowReport};
 use sha2::{Digest, Sha224};
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::io::AsyncWriteExt;
 
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
@@ -175,8 +175,8 @@ impl TrojanConnector {
             "通过 Trojan 连接"
         );
 
-        // 建立 TCP 连接
-        let tcp_stream = TcpStream::connect(&server_addr)
+        // 建立 TCP 连接（net_mark 统一拨号：SO_MARK 逃逸面，networking.md §2）
+        let tcp_stream = seep_core::net_mark::connect_tcp(server_addr.clone())
             .await
             .with_context(|| format!("连接 Trojan 服务器失败: {}", server_addr))?;
 

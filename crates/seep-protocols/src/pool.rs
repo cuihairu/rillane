@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use crate::fingerprint::TlsFingerprint;
@@ -552,8 +551,9 @@ impl TransportPool {
     }
 
     /// 传输拨号（TCP [+TLS]；零协议字节写入——池与协议层的唯一契约 §2.2）。
+    /// net_mark 统一拨号（SO_MARK 逃逸面，networking.md §2；缺省 0 零差异）。
     async fn dial_uncounted(&self, key: &TransportKey) -> Result<BoxedIo> {
-        let tcp = TcpStream::connect((key.server.as_str(), key.port)).await?;
+        let tcp = seep_core::net_mark::connect_tcp((key.server.clone(), key.port)).await?;
         let _ = tcp.set_nodelay(true);
         if !key.tls {
             return Ok(Box::new(tcp));

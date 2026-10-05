@@ -6,10 +6,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use seep_core::{EgressConnector, Flow, FlowReport};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
@@ -170,8 +167,8 @@ impl HttpConnector {
             "通过 HTTP 代理连接"
         );
 
-        // 建立 TCP 连接
-        let tcp_stream = TcpStream::connect(&proxy_addr)
+        // 建立 TCP 连接（net_mark 统一拨号：SO_MARK 逃逸面，networking.md §2）
+        let tcp_stream = seep_core::net_mark::connect_tcp(proxy_addr.clone())
             .await
             .with_context(|| format!("连接 HTTP 代理失败: {}", proxy_addr))?;
 

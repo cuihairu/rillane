@@ -49,10 +49,7 @@ use rand::{rngs::OsRng, RngCore};
 use seep_core::{EgressConnector, Flow, FlowReport, TargetProto};
 use sha2::{Digest, Sha256};
 use sha3::digest::{ExtendableOutput, XofReader};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
 use super::ws::{ws_client_handshake, WsReader, WsWriter};
@@ -1017,7 +1014,8 @@ impl VmessConnector {
             "通过 VMess 连接"
         );
 
-        let mut tcp = TcpStream::connect(&server_addr)
+        // net_mark 统一拨号（SO_MARK 逃逸面，networking.md §2；缺省 0 零差异）
+        let mut tcp = seep_core::net_mark::connect_tcp(server_addr.clone())
             .await
             .with_context(|| format!("连接 VMess 服务器失败: {server_addr}"))?;
         let _ = tcp.set_nodelay(true);

@@ -19,7 +19,7 @@ use seep_core::{
 };
 #[cfg(not(windows))]
 use sha1::{Digest, Sha1};
-use tokio::{net::TcpStream, sync::OnceCell};
+use tokio::sync::OnceCell;
 
 // windows 侧 ensure_interface 走 Err 门，接口配置字段不再被读
 #[cfg_attr(windows, allow(dead_code))]
@@ -265,7 +265,8 @@ impl EgressConnector for WireguardConnector {
         self.ensure_interface().await?;
 
         let target = format!("{}:{}", flow.target.host, flow.target.port);
-        let mut outbound = TcpStream::connect(&target)
+        // net_mark 统一拨号（SO_MARK 逃逸面，networking.md §2；缺省 0 零差异）
+        let mut outbound = seep_core::net_mark::connect_tcp(target.clone())
             .await
             .with_context(|| format!("连接目标 {} 失败", target))?;
 

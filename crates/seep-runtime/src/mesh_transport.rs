@@ -1518,7 +1518,8 @@ impl MeshDataPlane {
     }
 
     async fn connect_next(&self, addr: SocketAddr) -> Result<Box<dyn MeshStream>> {
-        let stream = TcpStream::connect(addr).await?;
+        // net_mark 统一拨号（SO_MARK 逃逸面，networking.md §2；缺省 0 零差异）
+        let stream = seep_core::net_mark::connect_tcp(addr).await?;
         if let Some(tls) = &self.tls {
             let s = tls.connect(stream).await?;
             Ok(Box::new(s))
@@ -1953,7 +1954,9 @@ async fn connect_target(host: &str, port: u16) -> Result<TcpStream> {
     let addr = addrs
         .next()
         .ok_or_else(|| anyhow!("no resolved address for {host}:{port}"))?;
-    Ok(TcpStream::connect(addr).await?)
+    // 解析面保持 lookup_host 首址语义；连接面走 net_mark 统一拨号
+    // （SO_MARK 逃逸面，networking.md §2；缺省 0 零差异）
+    Ok(seep_core::net_mark::connect_tcp(addr).await?)
 }
 
 async fn read_envelope<R>(stream: &mut R) -> Result<MeshEnvelope>
