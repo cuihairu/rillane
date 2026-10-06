@@ -66,7 +66,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
 ## 出口协议 (Egress Protocols)
 
 ### 直连 (Direct)
-> 状态：已实现 TCP 直连与 **UDP 承载（2026-09，P0-3，direct 载体）**；「自动 IP 版本选择 / Happy Eyeballs」未实现（现状为直接 `TcpStream::connect`）——超前描述。
+> 状态：已实现 TCP 直连（多候选 **RFC 8305 Happy Eyeballs 竞速，2026-10-07**：IPv6 优先双栈交错、250ms 错峰补位、失败即刻补位、首个成功胜出）与 **UDP 承载（2026-09，P0-3，direct 载体）**——「自动 IP 版本选择 / Happy Eyeballs」超前描述已清账。
 
 - **描述**: 直接连接目标服务器，不经过代理
 - **支持协议**: TCP, UDP
