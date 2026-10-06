@@ -20,6 +20,7 @@
 //! - 单实例独立 tokio runtime（worker 2——移动端省电取舍，见 `start`）。
 
 use std::ffi::{c_char, CStr, CString};
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
@@ -30,7 +31,11 @@ use std::time::Duration;
 use seep_config::SeepConfig;
 use seep_runtime::runtime_builder::RuntimeBuilder;
 
+// TUN 接管面（fd 持有 + poll 循环）为 unix 语义（Android/iOS/Linux）；
+// 非 unix 编译面留空壳（tun_start 运行期 Err，口径同平台面非 Linux 恒 Err）
+#[cfg(unix)]
 mod tun;
+#[cfg(unix)]
 pub use tun::echo_reply;
 
 #[cfg(target_os = "android")]
@@ -282,6 +287,7 @@ pub unsafe extern "C" fn seep_ffi_tun_start(handle: *mut FfiHandle, fd: i32) -> 
     }
 }
 
+#[cfg(unix)]
 fn tun_start_inner(h: &mut FfiHandle, fd: i32) -> anyhow::Result<()> {
     tun_stop_inner(h);
     // 所有权转移：OwnedFd 接管 fd（Android 侧 pfd.detachFd() 后传入；线程
@@ -295,6 +301,11 @@ fn tun_start_inner(h: &mut FfiHandle, fd: i32) -> anyhow::Result<()> {
     let join = tun::spawn(file, writer, stop.clone(), h.tun_fd.clone())?;
     *h.tun_thread.lock().expect("tun thread lock") = Some(join);
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn tun_start_inner(_h: &mut FfiHandle, _fd: i32) -> anyhow::Result<()> {
+    anyhow::bail!("TUN 接管仅 unix 平台（Android/iOS/Linux）")
 }
 
 /// 停 TUN 线程（fd 随线程收尾关闭）；0 成功。未挂载亦返回 0（幂等）
