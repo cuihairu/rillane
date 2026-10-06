@@ -12,7 +12,7 @@ use rcgen::{
 };
 use reqwest::blocking::Client;
 use seep_config::{EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor, SeepConfig};
-use seep_subscription::ClashConverter;
+use seep_subscription::{ClashConverter, ClashExporter};
 use serde::Deserialize;
 use time::{Duration as TimeDuration, OffsetDateTime};
 
@@ -81,6 +81,14 @@ enum Command {
         source: String,
         /// 输出目标文件
         #[arg(short, long, default_value = "config/clash_import.yaml")]
+        output: String,
+    },
+    /// 将 Seep 配置回导出为 Clash YAML（preview，离线转换）
+    ExportClash {
+        /// Seep 配置文件路径
+        source: String,
+        /// 输出目标文件
+        #[arg(short, long, default_value = "config/clash_export.yaml")]
         output: String,
     },
     /// 订阅管理（seepd 控制面）
@@ -482,6 +490,24 @@ fn main() -> Result<()> {
             let rendered = serde_yaml::to_string(&converted)?;
             fs::write(&output, rendered)?;
             println!("已转换为 Seep 配置并保存至 {output}");
+        }
+        Command::ExportClash { source, output } => {
+            let config = SeepConfig::load_from_path(&source)
+                .with_context(|| format!("无法读取 Seep 配置 {source}"))?;
+            let (yaml, report) = ClashExporter.export(&config).context("Clash 回导出失败")?;
+            fs::write(&output, &yaml)?;
+            println!(
+                "回导出完成: proxies={}, proxy-groups={}, rules={}（含 MATCH），输出 {output}",
+                report.exported_proxies.len(),
+                report.exported_groups.len(),
+                report.exported_rules
+            );
+            if !report.skipped.is_empty() {
+                println!("降级/跳过 {} 条:", report.skipped.len());
+                for s in &report.skipped {
+                    println!("  - {s}");
+                }
+            }
         }
         Command::Chain { endpoint, command } => {
             let config = SeepConfig::load_from_path(&cli.config)?;
