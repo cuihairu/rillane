@@ -28,6 +28,7 @@ Seep 订阅链路覆盖：拉取（条件请求/代理/自定义头）→ 类型
 
 - 转换产出**当前未实现的出站类型**（如 hysteria v1——schema/订阅转换已支持，出站连接器缺）时不会静默丢弃：运行时构建（`RuntimeBuilder`）阶段报错提示。协议实现边界见 [PROTOCOLS.md](PROTOCOLS.md) 状态标注。
 - 亦支持导出为 Seep 自有 DSL 并回导入（`seep_dsl.rs`）：`version/meta/nodes（auth/transport/tls/location）/groups（strategy、嵌套成员）/rulesets`，附带校验器。
+- **Seep → Clash 回导出**（`clash_export.rs`，2026-10-07）：`ClashExporter::export(&SeepConfig)` 产出 Clash YAML + 报告（导出/降级清单）。proxies 覆盖 ss/vmess/vless/trojan/http(s)/socks5/hysteria2/hysteria/wireguard（direct 映射内置 `DIRECT`，不产出 proxy）；规则仅单条件可线性化（seep 多条件 AND ≠ Clash 首中即停，多条件跳过并登记）；组策略 Fixed→select、Latency→url-test（generate_204/300s）、Random/Weighted/Bandwidth/RoundRobin→load-balance(round-robin)、ConsistentHash→load-balance(consistent-hashing)；字段级无对应项（如 `tls_fingerprint`）逐条入 `skipped` 不阻塞导出。
 
 ## 4. 缓存与刷新（`cache.rs` + `lib.rs`）
 
@@ -54,11 +55,12 @@ Seep 订阅链路覆盖：拉取（条件请求/代理/自定义头）→ 类型
 
 ```bash
 seepctl import-clash <url|file> --output seep.yaml   # 离线转换预览（不经守护进程；-o 同义，缺省 config/clash_import.yaml）
+seepctl export-clash <seep配置> -o clash.yaml        # Seep → Clash 回导出（离线；缺省 config/clash_export.yaml，末尾打印降级/跳过清单）
 seepctl subscription list|add|remove|refresh      # 经控制面管理
 ```
 
 ## 7. 边界与未落地
 
 - 订阅拉取暂无内建定时重试退避（失败依赖下一轮全局刷新周期重试）；
-- DSL 与 Clash 双向转换以「Clash → Seep」为主，DSL → Clash 回导出未实现；
+- 「Clash → Seep」导入与「Seep → Clash」回导出双向已实现（`clash.rs` / `clash_export.rs`）；Seep 自有 DSL（`seep_dsl.rs`）→ Clash 未实现；
 - 订阅规则集（rulesets）转换粒度受 Clash 规则类型覆盖面限制，未覆盖类型在转换期提示。
