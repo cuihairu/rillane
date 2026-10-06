@@ -104,12 +104,18 @@ async fn connect_addr_marked(addr: std::net::SocketAddr, mark: u32) -> std::io::
     }
     let std_stream: std::net::TcpStream = sock.into();
     let stream = TcpStream::from_std(std_stream)?;
-    // 等连接完成（对齐 connect().await 语义），再收割异步错误
-    stream.writable().await?;
-    if let Some(e) = stream.take_error()? {
-        return Err(e);
+    // 等连接完成（对齐 connect().await 语义），再收割异步错误。
+    // writable 可能先于握手落定触发（内核/时序差），take_error 拿到
+    // InProgress 属「未落定」——继续等下一次可写事件，不当作失败冒泡。
+    loop {
+        stream.writable().await?;
+        match stream.take_error()? {
+            // EINPROGRESS：握手未落定，等下一次可写事件再收
+            Some(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => continue,
+            Some(e) => return Err(e),
+            None => return Ok(stream),
+        }
     }
-    Ok(stream)
 }
 
 #[cfg(test)]
