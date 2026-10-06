@@ -197,10 +197,13 @@ async fn connect_addr_marked(addr: std::net::SocketAddr, mark: u32) -> std::io::
         drop(sock);
         return TcpStream::connect(addr).await;
     }
-    // 非阻塞 connect：进行中（WouldBlock/EINPROGRESS）与即刻成败都收敛到
-    // 下方等待；即刻失败（如 ECONNREFUSED）由 connect 冒泡
+    // 非阻塞 connect：进行中与即刻成败都收敛到下方等待；即刻失败（如
+    // ECONNREFUSED）由 connect 冒泡。Linux 恒返 EINPROGRESS(115)——stable 上
+    // kind() 映射为 InProgress（不可命名变体）而非 WouldBlock，须按裸错码收敛，
+    // 否则凡 set_mark 生效的环境每次连接都误报（runner 实录：code 115 冒泡）
     match sock.connect(&addr.into()) {
         Ok(()) => {}
+        Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
         Err(e) => return Err(e),
     }
@@ -226,30 +229,18 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// 读 /proc/self/status CapEff 判 CAP_NET_ADMIN（bit 12）是否在——容器内
-    /// root 常剥该 cap，set_mark 降级后 SO_MARK 读回恒 0，读回断言需跳过。
-    #[cfg(target_os = "linux")]
-    fn has_cap_net_admin() -> bool {
-        const CAP_NET_ADMIN_BIT: u64 = 1 << 12;
-        std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find(|l| l.starts_with("CapEff:"))
-                    .map(|l| l.trim_start_matches("CapEff:").trim().to_string())
-            })
-            .and_then(|hex| u64::from_str_radix(&hex, 16).ok())
-            .map(|caps| caps & CAP_NET_ADMIN_BIT != 0)
-            .unwrap_or(false)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn has_cap_net_admin() -> bool {
-        true
+    /// mark 全局态串行化：egress_fwmark 是进程级单例，并行测试互相改写会把
+    /// plain 路径测成 marked 路径（runner 实录：readable 测试 panic 未复位，
+    /// 同进程 zero_mark/downgrades 连带全军覆没）。凡 `set_egress_fwmark`
+    /// 调用者先取锁；毒化容忍（前测 panic 不拖垮后测）。
+    fn mark_lock() -> std::sync::MutexGuard<'static, ()> {
+        static MARK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        MARK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
     fn set_get_roundtrip_and_reset() {
+        let _lk = mark_lock();
         set_egress_fwmark(0);
         assert_eq!(egress_fwmark(), 0, "缺省 0 不打 mark");
         set_egress_fwmark(0x5E45);
@@ -257,9 +248,11 @@ mod tests {
         set_egress_fwmark(0);
     }
 
+    #[allow(clippy::await_holding_lock)] // 测试有意持锁跨 await 串行化 mark 全局态
     /// mark=0 路径与 TcpStream::connect 等价（回环 echo 写读通）。
     #[tokio::test]
     async fn zero_mark_connects_like_plain() {
+        let _lk = mark_lock();
         set_egress_fwmark(0);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -277,10 +270,12 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[allow(clippy::await_holding_lock)] // 测试有意持锁跨 await 串行化 mark 全局态
     /// mark ≠ 0 但无 CAP_NET_ADMIN（常规测试环境）→ 降级直连，连接仍成功。
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn marked_connect_downgrades_without_cap() {
+        let _lk = mark_lock();
         set_egress_fwmark(0x5E45);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -296,20 +291,36 @@ mod tests {
         set_egress_fwmark(0);
     }
 
-    /// mark 生效面读回（root 守卫：SO_MARK getsockopt 仅特权可读；
-    /// 非 root 跳过——降级路径已由上测覆盖）。
+    #[allow(clippy::await_holding_lock)] // 测试有意持锁跨 await 串行化 mark 全局态
+    /// mark 生效面读回（root 守卫 + 直接探针）：SO_MARK getsockopt 仅特权可读；
+    /// 能力判定用 setsockopt 探针而非 CapEff——seccomp/权限面可在 cap 齐备下
+    /// 仍拦截 SO_MARK（runner 实录：CapEff bit 12 在、读回恒 0 假阳连红），
+    /// 探针失败 → 降级语义已由上测覆盖；探针成功 → 硬断言读回。
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn marked_connect_sets_mark_readable_as_root() {
+        let _lk = mark_lock();
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("跳过：需 root 验证 SO_MARK 读回");
             return;
         }
-        // 有 root 但无 CAP_NET_ADMIN（容器默认剥离）→ set_mark 降级，mark 读回恒 0，跳过
-        if !has_cap_net_admin() {
-            eprintln!("跳过：缺 CAP_NET_ADMIN，降级路径由上测覆盖");
+        let probe = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        );
+        let probe = match probe {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("跳过：无法建探针 socket（{e}）");
+                return;
+            }
+        };
+        if let Err(e) = probe.set_mark(0x5E45) {
+            eprintln!("跳过：环境不支持 SO_MARK（{e}），降级路径由上测覆盖");
             return;
         }
+        drop(probe);
         set_egress_fwmark(0x5E45);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -352,10 +363,12 @@ mod tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)] // 测试有意持锁跨 await 串行化 mark 全局态
     /// 竞速：首选候选快速失败（loopback :1 拒连）→ 即刻补位次选 →
     /// 次选回环 echo 胜出（失败加速语义，不等 HEAD_START 错峰）。
     #[tokio::test]
     async fn racing_second_candidate_wins_on_first_failure() {
+        let _lk = mark_lock();
         set_egress_fwmark(0);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let echo_addr = listener.local_addr().unwrap();
@@ -376,9 +389,11 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[allow(clippy::await_holding_lock)] // 测试有意持锁跨 await 串行化 mark 全局态
     /// 竞速：全部候选失败 → last_err 收敛（Err 上抛，不挂死）。
     #[tokio::test]
     async fn racing_all_fail_returns_error() {
+        let _lk = mark_lock();
         set_egress_fwmark(0);
         let refused_a: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
         let refused_b: std::net::SocketAddr = "127.0.0.1:2".parse().unwrap();
