@@ -47,7 +47,7 @@ pub struct LinuxRouteManager { config: RoutingConfig, applied: Mutex<Vec<Applied
 
 ### 1.3 接口属性与系统路由（最小 `LinuxRouteManager`）
 
-- **MVP 路由范围 = main 表显式路由（include 语义）**：只对纳入集（配置 CIDR / 进程规则配套端口段不可表达于路由层，仍走进程内）执行 `ip route replace <cidr> dev <tun> metric 0`。特定前缀天然优先于默认路由 → 流量入 tun；**不改默认路由、不用 ip rule、无需 fwmark**，seep 自身出站连 relay 地址不受影响（relay 地址同时进 §2.7 auto-bypass 集）。全局接管（默认路由 + `ip rule not fwmark` + seep 出站 socket `SO_MARK`，socket2 已备）整体归 P1-3/V2。
+- **MVP 路由范围 = main 表显式路由（include 语义）**：只对纳入集（配置 CIDR / 进程规则配套端口段不可表达于路由层，仍走进程内）执行 `ip route replace <cidr> dev <tun> metric 0`。特定前缀天然优先于默认路由 → 流量入 tun；**不改默认路由**，seep 自身出站连 relay 地址不受影响（relay 地址同时进 §2.7 auto-bypass 集）。**fwmark 逃逸面已落地（2026-10-05 出站 fwmark 批）**：`network.egress_fwmark` 配置 + 出站 TCP socket 统一 `SO_MARK`（`seep_core::net_mark::connect_tcp`，缺省 0 零差异）+ apply 期 `ip rule fwmark` escape 表/逃逸规则（AppliedStep 回滚入账，EEXIST 容忍）——配置了 fwmark 时 apply 即使用 ip rule；默认路由改写的全局接管仍归 V2。
 - 工具：`ip` 命令子进程（`tokio::process::Command`）。理由：Linux/OpenWrt 普适（busybox ip 子集够用）；netlink（`rtnetlink` crate）为 V2。注：这是仓库**首次库级写操作 shell-out**（既有先例仅 seepctl diagnose 只读采集），见 §6 偏差 #2。
 - **幂等**：`ip addr replace`/`ip link set up` 天然幂等；路由 `replace` 同。`AppliedStep` 日志记录已执行步骤；
 - **回滚**：apply 中途失败 → 逆序撤销已执行步骤再 bail（启动失败不静默）；`clear_routing` = 逆序撤销全部 AppliedStep（P1-3 的 `route clear` 将复用同一机制）。
@@ -207,7 +207,7 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 |---|------|------|
 | 1 | 假设 | smoltcp 为用户态 TCP 栈选型（仓库无先例；tun2proxy 先例），版本与 phy 适配细节实施时定 |
 | 2 | 偏差 | `ip` 命令子进程为 MVP 接口操纵方式（Linux/OpenWrt 普适）；仓库首次库级写操作 shell-out；netlink 为 V2 |
-| 3 | 假设 | MVP 路由范围 = main 表显式路由（include 语义）；全局接管（fwmark/ip rule/SO_MARK）整体归 P1-3/V2 |
+| 3 | 假设 | MVP 路由范围 = main 表显式路由（include 语义）＋ fwmark 逃逸面（`SO_MARK` + `ip rule fwmark` escape 表，2026-10-05 落地）；默认路由改写的全局接管归 V2 |
 | 4 | 裁决 | `IFF_NO_PI` 单 fd；multi-queue/TAP 归 V2 |
 | 5 | 裁决 | 不复用 `UdpSessionTable`，镜像其语义（理由 §2.2） |
 | 6 | 裁决 | 进程信息走 annotation（`process.name`/`process.pid`）而非 `FlowContext` 类型字段（先例 `geoip.country`；零破坏） |
@@ -225,7 +225,7 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 
 - **R-tun1（最大项，已消除）**：smoltcp 集成（phy 适配/waker/窗口调优）是 T4 主工作量——**T4 已落地 @b5785c2**（`tun_tcp.rs` SmolTcpStream 接管，回退路径未启用）；
 - **R-tun2**：`/proc` fd 扫描成本——仅新流 + 仅存在 Process 规则时触发；采样与开关留实施期调；
-- **R-tun3**：tun 全局接管场景下 seep 自身控制面/metrics 回流——include 模式天然豁免，全局模式随 P1-3 fwmark 设计一并解；
+- **R-tun3**：tun 全局接管场景下 seep 自身控制面/metrics 回流——include 模式天然豁免；fwmark 逃逸面已落地（出站 socket `SO_MARK` + `ip rule fwmark` escape 表），默认路由改写的全局模式仍归 V2；
 - **O-icmp**：ICMP（PMTUD/ping）不支持的补偿 = MTU 建议 1400；游戏场景是否需要 ICMP 透传待实测；
 - **O-quic**：QUIC 流量是否需要识别为 `TargetProto::Quic` 参与规则（枚举已留）——MVP 不做，规则需求出现时再议；
 - **O-netlink**：`ip` 命令 → rtnetlink 迁移窗口（P1-3 或 V2）。

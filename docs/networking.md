@@ -30,7 +30,7 @@
 
 - **跨平台 provider**：macOS/Windows/Android/iOS 未实现（`platform.rs` 死稿不编译；Android VpnService 仅 seep-ffi 最小 ICMP 通路，TCP/UDP 真代理路径归 TunIngress 移植面）。
 - **`filter.rs` 包过滤面**：trait 与配置模型在，无独立实现——分流由 routing 引擎承担（见 §1 口径）。
-- **direct 出口自环盲区（走查发现 → 已实现 P3-5 R1–R3）**：include 的 `/32` 路由把 seep(root) 自身 direct 出站也拽回 TUN（§2.7 auto-bypass 对 direct 出口无 server 字面量可排）——走查用 `ip rule uidrange 0-0` 逃逸绕行；正解：**出站 TCP socket 统一打 `SO_MARK`（`seep_core::net_mark::connect_tcp`，缺省 mark=0 零差异，`network.egress_fwmark` 配置）+ LinuxRouteManager TUN 模式 apply 时建 escape 表/`ip rule fwmark` 逃逸规则（AppliedStep 回滚入账，EEXIST 容忍），2026-10-05 实现落地**。缺省 None/0 不打 mark；无 CAP_NET_ADMIN 降级直连（warn 一次）；UDP 面（quinn/hy2）不覆盖，如实登记。
+- **direct 出口自环盲区（走查发现 → 已实现，2026-10-05 出站 fwmark 批 R1–R3）**：include 的 `/32` 路由把 seep(root) 自身 direct 出站也拽回 TUN（§2.7 auto-bypass 对 direct 出口无 server 字面量可排）——走查用 `ip rule uidrange 0-0` 逃逸绕行；正解：**出站 TCP socket 统一打 `SO_MARK`（`seep_core::net_mark::connect_tcp`，缺省 mark=0 零差异，`network.egress_fwmark` 配置）+ LinuxRouteManager TUN 模式 apply 时建 escape 表/`ip rule fwmark` 逃逸规则（AppliedStep 回滚入账，EEXIST 容忍）**。缺省 None/0 不打 mark；无 CAP_NET_ADMIN 降级直连（warn 一次）；UDP 面（quinn/hy2）不覆盖，如实登记。
 - **当前唯一只读能力**：`seepctl diagnose` 采集本机路由/DNS/接口快照，用于问题排查（不变）。
 
 ## 3. 目标形态（Linux 路径已实现）
