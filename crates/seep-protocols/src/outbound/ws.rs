@@ -259,6 +259,12 @@ where
     pub(crate) async fn write_pong(&mut self, data: &[u8]) -> Result<()> {
         write_ws_message(&mut self.stream, 0xA, data).await
     }
+
+    /// Close 帧半关传播：客户端 EOF 时通知服务端收尾（服务端回 Close 或
+    /// 关 TLS 后下行侧经 read_binary 的 None/EOF 语义同步收敛）
+    pub(crate) async fn write_close(&mut self) -> Result<()> {
+        write_ws_message(&mut self.stream, 0x8, &[]).await
+    }
 }
 
 pub(crate) struct WsFrame {

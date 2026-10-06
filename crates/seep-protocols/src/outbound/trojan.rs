@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use seep_core::{EgressConnector, Flow, FlowReport};
 use sha2::{Digest, Sha224};
 use tokio::io::AsyncWriteExt;
 
+use super::ws::{ws_client_handshake, WsClient};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
 use crate::tls::{create_tls_connector_with_profile, TlsConnectorFactory};
@@ -21,6 +22,12 @@ pub struct TrojanConnector {
     skip_cert_verify: bool,
     /// 客户端 TLS 指纹形态（P2-5；None = rustls 缺省形态）
     fingerprint: TlsFingerprint,
+    /// 传输层：tcp | ws（trojan-go 惯例，ws 恒叠 TLS；clash 订阅面 network 字段）
+    network: String,
+    /// ws 路径（缺省 /）
+    path: Option<String>,
+    /// ws Host 头/回退 SNI（取首值）
+    host: Option<Vec<String>>,
     /// 出站连接池（P1-5 §4.2；None = 旧行为内联路径，D-9）
     pool: Option<Arc<TransportPool>>,
     /// 共享 ClientConfig 工厂：pool=None 时使 TLS 会话恢复独立于池生效
@@ -37,6 +44,9 @@ impl TrojanConnector {
         sni: Option<String>,
         skip_cert_verify: bool,
         fingerprint: TlsFingerprint,
+        network: String,
+        path: Option<String>,
+        host: Option<Vec<String>>,
         pool: Option<Arc<TransportPool>>,
         factory: Option<Arc<TlsConnectorFactory>>,
     ) -> Self {
@@ -47,6 +57,9 @@ impl TrojanConnector {
             sni,
             skip_cert_verify,
             fingerprint,
+            network,
+            path,
+            host,
             pool,
             factory,
         }
@@ -90,16 +103,35 @@ impl TrojanConnector {
         request
     }
 
-    /// 传输键（§4.2：alpn 空 = 既有 trojan 路径不设 ALPN）
-    fn transport_key(&self) -> TransportKey {
+    /// 传输键（§4.2：alpn 空 = trojan 路径不设 ALPN；sni 取实际值——
+    /// tcp = sni ∥ server，ws = sni ∥ ws host 首值，同 vmess 口径）
+    fn transport_key(&self, sni_actual: &str) -> TransportKey {
         TransportKey::tls(
             &self.server,
             self.port,
-            self.sni.as_deref(),
+            Some(sni_actual),
             self.skip_cert_verify,
             &[],
             self.fingerprint,
         )
+    }
+
+    fn ws_host_header(&self) -> String {
+        self.host
+            .as_ref()
+            .and_then(|v| v.first())
+            .cloned()
+            .or_else(|| self.sni.clone())
+            .unwrap_or_else(|| self.server.clone())
+    }
+
+    fn ws_path(&self) -> String {
+        let path = self.path.clone().unwrap_or_else(|| "/".to_string());
+        if path.starts_with('/') {
+            path
+        } else {
+            format!("/{path}")
+        }
     }
 }
 
@@ -118,8 +150,8 @@ impl EgressConnector for TrojanConnector {
 }
 
 impl TrojanConnector {
-    /// 池借出路径（§4.2）：acquire → 写协议头（bind）→ 双向转发；首写失败
-    /// → stale 一次性重拨（D-11，[`TransportPool::acquire_bound`]）。
+    /// 池借出路径（§4.2）：acquire → 写协议头（bind）/ ws upgrade → 双向转发；
+    /// 首写/upgrade 失败 → stale 一次性重拨（D-11）。
     async fn forward_pooled(
         &self,
         mut flow: Flow,
@@ -132,36 +164,68 @@ impl TrojanConnector {
             id = %flow.id.as_uuid(),
             %target,
             server = %server_addr,
+            network = %self.network,
             pooled = true,
             "通过 Trojan 连接"
         );
 
-        let key = self.transport_key();
-        let request = self.build_request(&flow.target.host, flow.target.port);
-        let (mut outbound, _lease) = pool
-            .acquire_bound(&key, |io| {
-                let request = request.clone();
-                Box::pin(async move { io.write_all(&request).await.map_err(Into::into) })
-            })
-            .await
-            .with_context(|| format!("连接 Trojan 服务器失败: {server_addr}"))?;
+        match self.network.as_str() {
+            "tcp" => {
+                let sni_actual = self.sni.clone().unwrap_or_else(|| self.server.clone());
+                let key = self.transport_key(&sni_actual);
+                let request = self.build_request(&flow.target.host, flow.target.port);
+                let (mut outbound, _lease) = pool
+                    .acquire_bound(&key, |io| {
+                        let request = request.clone();
+                        Box::pin(async move { io.write_all(&request).await.map_err(Into::into) })
+                    })
+                    .await
+                    .with_context(|| format!("连接 Trojan 服务器失败: {server_addr}"))?;
 
-        let (up, down) = tokio::io::copy_bidirectional_with_sizes(
-            &mut flow.io,
-            &mut outbound,
-            seep_core::performance::relay_buffer(),
-            seep_core::performance::relay_buffer(),
-        )
-        .await
-        .context("双向转发失败")?;
+                let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                    &mut flow.io,
+                    &mut outbound,
+                    seep_core::performance::relay_buffer(),
+                    seep_core::performance::relay_buffer(),
+                )
+                .await
+                .context("双向转发失败")?;
 
-        Ok(FlowReport {
-            upstream: up,
-            downstream: down,
-        })
+                Ok(FlowReport {
+                    upstream: up,
+                    downstream: down,
+                })
+            }
+            "ws" | "websocket" => {
+                let ws_host = self.ws_host_header();
+                let ws_path = self.ws_path();
+                let sni_actual = self.sni.clone().unwrap_or_else(|| ws_host.clone());
+                let key = self.transport_key(&sni_actual);
+
+                // 借出传输层（TLS 已由池侧建立）；ws upgrade 借出后进行（§4.2）
+                let (boxed, first_lease) = pool
+                    .acquire(&key)
+                    .await
+                    .with_context(|| format!("连接 Trojan 服务器失败: {server_addr}"))?;
+                let handshake = ws_client_handshake(boxed, &ws_host, &ws_path).await;
+                let (ws, _lease) = match handshake {
+                    Ok(ws) => (ws, first_lease),
+                    Err(_) => {
+                        // upgrade 首写首读失败 → stale 一次性重拨（D-11）
+                        drop(first_lease);
+                        pool.note_stale(&key);
+                        let (boxed, lease) = pool.acquire_fresh(&key).await?;
+                        let ws = ws_client_handshake(boxed, &ws_host, &ws_path).await?;
+                        (ws, lease)
+                    }
+                };
+                self.relay_trojan_over_ws(flow, ws).await
+            }
+            other => Err(anyhow!("暂不支持的 Trojan network: {}", other)),
+        }
     }
 
-    /// 内联路径（pool=None）：与既有实现逐字节同构（D-9）；factory=Some 时
+    /// 内联路径（pool=None）：与既有实现逐 IO 序列同构（D-9）；factory=Some 时
     /// TLS 连接器改取共享 ClientConfig（tls_resumption 独立于池生效）。
     async fn forward_inline(&self, mut flow: Flow) -> Result<FlowReport> {
         let server_addr = format!("{}:{}", self.server, self.port);
@@ -172,38 +236,151 @@ impl TrojanConnector {
             id = %flow.id.as_uuid(),
             %target,
             server = %server_addr,
+            network = %self.network,
             "通过 Trojan 连接"
         );
 
-        // 建立 TCP 连接（net_mark 统一拨号：SO_MARK 逃逸面，networking.md §2）
-        let tcp_stream = seep_core::net_mark::connect_tcp(server_addr.clone())
-            .await
-            .with_context(|| format!("连接 Trojan 服务器失败: {}", server_addr))?;
+        match self.network.as_str() {
+            "tcp" => {
+                // 建立 TCP 连接（net_mark 统一拨号：SO_MARK 逃逸面，networking.md §2）
+                let tcp_stream = seep_core::net_mark::connect_tcp(server_addr.clone())
+                    .await
+                    .with_context(|| format!("连接 Trojan 服务器失败: {}", server_addr))?;
 
-        // TLS 握手
-        let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
-        let connector = match &self.factory {
-            Some(factory) => factory.connector(self.skip_cert_verify, &[], self.fingerprint)?,
-            None => {
-                create_tls_connector_with_profile(self.skip_cert_verify, None, self.fingerprint)?
+                // TLS 握手
+                let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
+                let connector = match &self.factory {
+                    Some(factory) => {
+                        factory.connector(self.skip_cert_verify, &[], self.fingerprint)?
+                    }
+                    None => create_tls_connector_with_profile(
+                        self.skip_cert_verify,
+                        None,
+                        self.fingerprint,
+                    )?,
+                };
+                let server_name =
+                    rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+                let mut tls_stream = connector.connect(server_name, tcp_stream).await?;
+
+                // 发送 Trojan 请求
+                let request = self.build_request(&flow.target.host, flow.target.port);
+                tls_stream.write_all(&request).await?;
+
+                // 双向转发
+                let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                    &mut flow.io,
+                    &mut tls_stream,
+                    seep_core::performance::relay_buffer(),
+                    seep_core::performance::relay_buffer(),
+                )
+                .await
+                .context("双向转发失败")?;
+
+                Ok(FlowReport {
+                    upstream: up,
+                    downstream: down,
+                })
             }
-        };
-        let server_name = rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
-        let mut tls_stream = connector.connect(server_name, tcp_stream).await?;
+            "ws" | "websocket" => {
+                let ws_host = self.ws_host_header();
+                let ws_path = self.ws_path();
 
-        // 发送 Trojan 请求
-        let request = self.build_request(&flow.target.host, flow.target.port);
-        tls_stream.write_all(&request).await?;
+                // ws 恒叠 TLS：SNI 缺省回退 ws host（同 vmess/vless 口径）
+                let sni = self.sni.clone().unwrap_or_else(|| ws_host.clone());
+                let connector = match &self.factory {
+                    Some(factory) => {
+                        factory.connector(self.skip_cert_verify, &[], self.fingerprint)?
+                    }
+                    None => create_tls_connector_with_profile(
+                        self.skip_cert_verify,
+                        None,
+                        self.fingerprint,
+                    )?,
+                };
+                let server_name =
+                    rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+                let tcp_stream = seep_core::net_mark::connect_tcp(server_addr.clone())
+                    .await
+                    .with_context(|| format!("连接 Trojan 服务器失败: {}", server_addr))?;
+                let tls_stream = connector.connect(server_name, tcp_stream).await?;
 
-        // 双向转发
-        let (up, down) = tokio::io::copy_bidirectional_with_sizes(
-            &mut flow.io,
-            &mut tls_stream,
-            seep_core::performance::relay_buffer(),
-            seep_core::performance::relay_buffer(),
-        )
-        .await
-        .context("双向转发失败")?;
+                let ws = ws_client_handshake(tls_stream, &ws_host, &ws_path)
+                    .await
+                    .with_context(|| "Trojan over WS upgrade 失败")?;
+                self.relay_trojan_over_ws(flow, ws).await
+            }
+            other => Err(anyhow!("暂不支持的 Trojan network: {}", other)),
+        }
+    }
+
+    /// Trojan over WS 双向转发（trojan-go 惯例：请求头 = 首个 binary 消息；
+    /// 成功后无独立应答头，直接双向泵；池路径复用——
+    /// `WsClient<ReadHalf<BoxedIo>, WriteHalf<BoxedIo>>` 同型可用）。
+    async fn relay_trojan_over_ws<R, W>(
+        &self,
+        flow: Flow,
+        mut ws: WsClient<R, W>,
+    ) -> Result<FlowReport>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        use tokio::io::AsyncReadExt;
+
+        // Trojan 请求作为首个 binary 消息发出
+        let req = self.build_request(&flow.target.host, flow.target.port);
+        ws.write_binary(&req).await?;
+
+        // 双向泵（与 vless relay 同构，去 VLESS 应答头段——trojan 无应答头）
+        let (mut client_r, mut client_w) = tokio::io::split(flow.io);
+        let (mut ws_r, mut ws_w) = ws.split();
+
+        let (pong_tx, mut pong_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        ws_r.set_pong_sender(pong_tx);
+
+        let up_task = tokio::spawn(async move {
+            let mut up: u64 = 0;
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                tokio::select! {
+                    biased;
+                    Some(payload) = pong_rx.recv() => {
+                        ws_w.write_pong(&payload).await?;
+                    }
+                    n = client_r.read(&mut buf) => {
+                        let n = n?;
+                        if n == 0 {
+                            break;
+                        }
+                        ws_w.write_binary(&buf[..n]).await?;
+                        up += n as u64;
+                    }
+                }
+            }
+            // 客户端半关 → 向服务端传播 ws Close（服务端对目标侧收尾后
+            // 回 Close/关 TLS，下行侧经 read_binary None 语义同步收敛）
+            let _ = ws_w.write_close().await;
+            Result::<u64>::Ok(up)
+        });
+
+        let down_task = tokio::spawn(async move {
+            let mut down: u64 = 0;
+            while let Some(msg) = ws_r.read_binary().await? {
+                if msg.is_empty() {
+                    continue;
+                }
+                client_w.write_all(&msg).await?;
+                down += msg.len() as u64;
+            }
+            let _ = client_w.shutdown().await;
+            Result::<u64>::Ok(down)
+        });
+
+        let (up, down) =
+            tokio::try_join!(up_task, down_task).context("Trojan over WS 双向转发任务失败")?;
+        let up = up?;
+        let down = down?;
 
         Ok(FlowReport {
             upstream: up,

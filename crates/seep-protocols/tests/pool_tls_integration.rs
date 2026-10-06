@@ -219,6 +219,9 @@ async fn trojan_tls_pooled_serial_reuse_and_resumption() {
         Some("localhost".to_string()),
         true,
         TlsFingerprint::None,
+        "tcp".to_string(),
+        None,
+        None,
         Some(pool.clone()),
         Some(factory.clone()),
     ));
@@ -285,4 +288,229 @@ async fn trojan_tls_pooled_serial_reuse_and_resumption() {
         "服务端连接数 ≥ 流数（消耗形；补充另增）"
     );
     let _ = payloads;
+}
+
+// ==== Trojan over WS（trojan-go 惯例；clash 导出/导入往返面，2026-10-07）====
+
+use base64::engine::general_purpose::STANDARD as WS_BASE64;
+use base64::Engine as _;
+use sha1::{Digest, Sha1};
+
+const WS_MAGIC: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// WS 帧解码（客户端→服务端恒掩码）；返回 opcode 与去掩码载荷
+async fn read_client_frame<S>(stream: &mut S) -> anyhow::Result<(u8, Vec<u8>)>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut hdr = [0u8; 2];
+    stream.read_exact(&mut hdr).await?;
+    let len = match hdr[1] & 0x7f {
+        126 => {
+            let mut l = [0u8; 2];
+            stream.read_exact(&mut l).await?;
+            u16::from_be_bytes(l) as usize
+        }
+        127 => {
+            let mut l = [0u8; 8];
+            stream.read_exact(&mut l).await?;
+            u64::from_be_bytes(l) as usize
+        }
+        n => n as usize,
+    };
+    let mut mask = [0u8; 4];
+    stream.read_exact(&mut mask).await?;
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).await?;
+    for (i, b) in payload.iter_mut().enumerate() {
+        *b ^= mask[i % 4];
+    }
+    Ok((hdr[0] & 0x0f, payload))
+}
+
+/// 服务端→客户端帧编码（无掩码）
+fn server_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+    let mut f = vec![0x80u8 | (opcode & 0x0f)];
+    if payload.len() <= 125 {
+        f.push(payload.len() as u8);
+    } else if payload.len() <= u16::MAX as usize {
+        f.push(126);
+        f.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        f.push(127);
+        f.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    }
+    f.extend_from_slice(payload);
+    f
+}
+
+/// mock trojan-ws TLS 服务端：TLS accept → HTTP Upgrade（解析 path/Host/Key，
+/// 回 101 + Sec-WebSocket-Accept）→ 首个 binary 帧应为一个完整 trojan 请求头
+/// → 逐帧 echo 至 Close。返回（地址，hash 集，见到的 path，见到的 Host）。
+#[allow(clippy::type_complexity)]
+async fn spawn_trojan_ws_tls_server() -> (
+    std::net::SocketAddr,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    Arc<std::sync::Mutex<String>>,
+    Arc<std::sync::Mutex<String>>,
+) {
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen 自签");
+    let cert_pem = certified.cert.pem();
+    let key_pem = certified.key_pair.serialize_pem();
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .expect("证书 PEM 解析");
+    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+        .expect("私钥读取")
+        .expect("PKCS8 私钥在位");
+
+    let provider = seep_tls_provider();
+    let builder = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("协议版本");
+    let config = Arc::new(
+        builder
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("服务端证书装配"),
+    );
+    let acceptor = TlsAcceptor::from(config);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().unwrap();
+    let hashes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let path_slot = Arc::new(std::sync::Mutex::new(String::new()));
+    let host_slot = Arc::new(std::sync::Mutex::new(String::new()));
+
+    let hashes_task = hashes.clone();
+    let path_task = path_slot.clone();
+    let host_task = host_slot.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                break;
+            };
+            let acceptor = acceptor.clone();
+            let hashes_task = hashes_task.clone();
+            let path_task = path_task.clone();
+            let host_task = host_task.clone();
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+
+                // HTTP Upgrade 请求（读至头部结束符）
+                let mut buf: Vec<u8> = Vec::new();
+                let mut tmp = [0u8; 1024];
+                loop {
+                    match tls.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf);
+                let mut lines = text.lines();
+                let req_line = lines.next().unwrap_or("");
+                let path = req_line.split_whitespace().nth(1).unwrap_or("").to_string();
+                let mut ws_key = String::new();
+                let mut ws_host = String::new();
+                for line in lines {
+                    if let Some((k, v)) = line.split_once(':') {
+                        let (k, v) = (k.trim(), v.trim());
+                        if k.eq_ignore_ascii_case("sec-websocket-key") {
+                            ws_key = v.to_string();
+                        }
+                        if k.eq_ignore_ascii_case("host") {
+                            ws_host = v.to_string();
+                        }
+                    }
+                }
+                let mut hasher = Sha1::new();
+                hasher.update(ws_key.as_bytes());
+                hasher.update(WS_MAGIC.as_bytes());
+                let accept = WS_BASE64.encode(hasher.finalize());
+                let resp = format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                );
+                if tls.write_all(resp.as_bytes()).await.is_err() {
+                    return;
+                }
+
+                // 首个 binary 帧 = 完整 trojan 请求头
+                let Ok((0x2, payload)) = read_client_frame(&mut tls).await else {
+                    return;
+                };
+                if payload.len() < 56 {
+                    return;
+                }
+                let hash = String::from_utf8_lossy(&payload[..56]).to_string();
+                assert!(
+                    hash.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "trojan 请求头应 56 位 hex：{hash}"
+                );
+                hashes_task.lock().expect("hashes lock").push(hash);
+                *path_task.lock().expect("path lock") = path;
+                *host_task.lock().expect("host lock") = ws_host;
+
+                // 逐帧 echo 至 Close（Close 后回 Close 并关 TLS——下行侧经
+                // read_binary 的 None 语义收敛）
+                loop {
+                    match read_client_frame(&mut tls).await {
+                        Ok((0x8, _)) | Err(_) => {
+                            let _ = tls.write_all(&server_frame(0x8, &[])).await;
+                            let _ = tls.shutdown().await;
+                            return;
+                        }
+                        Ok((0x2, p)) | Ok((0x0, p)) => {
+                            if tls.write_all(&server_frame(0x2, &p)).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(_) => {}
+                    }
+                }
+            });
+        }
+    });
+    (addr, hashes, path_slot, host_slot)
+}
+
+/// Trojan over WS（inline 路径）：upgrade path/Host 解析、请求头在首个
+/// binary 帧、echo 往返、客户端半关 → Close 传播收尾。
+#[tokio::test]
+async fn trojan_ws_inline_roundtrip_request_in_first_frame() {
+    let (addr, hashes, path_slot, host_slot) = spawn_trojan_ws_tls_server().await;
+
+    let factory = Arc::new(TlsConnectorFactory::new(256));
+    let connector = TrojanConnector::new(
+        addr.ip().to_string(),
+        addr.port(),
+        PASSWORD.to_string(),
+        None, // SNI 回退 ws Host 首值
+        true,
+        TlsFingerprint::None,
+        "ws".to_string(),
+        Some("/ray".to_string()),
+        Some(vec!["ws.example.com".to_string()]),
+        None,
+        Some(factory),
+    );
+
+    let (flow, client) = make_flow("www.example.com", 443);
+    let handle = tokio::spawn(async move { connector.forward(flow).await });
+    let payload = b"trojan-ws-echo";
+    let report = roundtrip_and_finish(client, handle, payload).await;
+    assert_eq!(report.upstream, payload.len() as u64, "上行计数");
+
+    assert_eq!(hashes.lock().expect("hashes lock").len(), 1, "一次请求头");
+    assert_eq!(path_slot.lock().expect("path lock").as_str(), "/ray");
+    assert_eq!(
+        host_slot.lock().expect("host lock").as_str(),
+        "ws.example.com"
+    );
 }

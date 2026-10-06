@@ -2536,18 +2536,24 @@ fn build_egress_outputs(
                 port,
                 password,
                 network,
+                path,
+                host,
                 tls,
                 skip_cert_verify,
                 sni,
                 tls_fingerprint,
                 ..
             } => {
-                if network != "tcp" {
-                    return Err(anyhow!(
-                        "暂不支持的 Trojan network: {} (egress={})",
-                        network,
-                        desc.name
-                    ));
+                // 传输层白名单 tcp/ws（ws = trojan-go 惯例，恒叠 TLS）
+                match network.as_str() {
+                    "tcp" | "ws" | "websocket" => {}
+                    other => {
+                        return Err(anyhow!(
+                            "Trojan network 仅支持 tcp/ws，当前: {} (egress={})",
+                            other,
+                            desc.name
+                        ));
+                    }
                 }
                 if !*tls {
                     return Err(anyhow!(
@@ -2563,6 +2569,9 @@ fn build_egress_outputs(
                     sni.clone(),
                     *skip_cert_verify,
                     parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
+                    network.clone(),
+                    path.clone(),
+                    host.clone(),
                     transport_pool.clone(),
                     tls_factory.clone(),
                 ));
