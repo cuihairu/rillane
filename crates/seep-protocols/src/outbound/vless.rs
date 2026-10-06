@@ -468,6 +468,9 @@ impl VlessConnector {
                     }
                 }
             }
+            // 客户端半关 → 向服务端传播 ws Close（服务端对目标侧收尾后
+            // 回 Close/关 TLS，下行侧经 read_binary None 语义同步收敛）
+            let _ = ws_w.write_close().await;
             Result::<u64>::Ok(up)
         });
 
