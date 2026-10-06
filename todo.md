@@ -180,6 +180,9 @@
   验收：本地门禁 fmt/clippy(-D warnings)/test 全绿 + docker build/run 冒烟 + 1.96 check + llvm-cov 全量全绿；CI 十四 job 实跑绿以 GitHub Actions 为准（新 run 日志可回读，若仍有红即取日志续修）。
   **CI 实跑定案（6c74dd1 run 37196348814，同日）**：新 run 十四 job 仍全红，但性质已定案——**私有仓 GitHub Actions 配额耗尽/付款阻断**，非代码红：job `started_at→completed_at` 仅 14 秒、`runner_name` 空（从未分配 runner 即判失败）、日志从未上传（刚完成的 run 即 BlobNotFound、steps 恒 `[]`）、rerun 静默失效。时间线吻合：10 月免费 2000 分钟配额在本仓高 push 频率下单日烧尽（单 run 全绿约 200 分钟），27b4394（10-02 04:30 UTC）为配额余量内末绿、76920c0（08:38 UTC）起所有 run 秒红——首红时点与 commit 内容无关。本条目四项修复（MSRV 基线/预热层/nightly 去连坐/--locked）为真代码面根因修复，配额恢复后生效；**恢复动作在账户侧**（账单/提额/等 11-01 月度重置），待 CI 实跑全绿后本条目口径方闭环。
 
+- [x] **Trojan over WS 出站传输（trojan-go 惯例）**（2026-10-07 登记；同日落地）：动因——Seep→Clash 回导出（`clash_export.rs`）已能产出 trojan `ws-opts` 代理，但 seep 自身构建面 `network != "tcp"` 即拒绝，回导出/订阅导入的 trojan ws 节点在 seep 侧存在「能写不能读」的往返缺口；VLESS ws 模式为现成参照。落地：①`trojan.rs` 双路 ws——`network: tcp | ws(websocket)` 分派（池路径 acquire → 借出后 upgrade → 失败 stale 一次性重拨（D-11）；内联路径 net_mark 统一拨号 → TLS → `ws_client_handshake`）；trojan-go 惯例 ws **恒叠 TLS**（SNI 缺省回退 ws Host 首值）、请求头（SHA224 hex + CMD + ATYP + target）作为**首个 binary 帧**发出、无独立应答头直接双向泵；`relay_trojan_over_ws` 双泵含 **Close 帧半关传播**（客户端 EOF → 发 Close 通知服务端收尾，服务端回 Close/关 TLS 后下行侧经 `read_binary` None 语义同步收敛——避免 relay 泵挂死）。②`ws.rs` 补 `WsWriter::write_close`（Close 帧编码复用既有 `write_ws_message`）。③`runtime_builder.rs` Trojan arm 白名单 `tcp | ws | websocket` 放开（其余 network 构建期报错），`tls: false` 拒绝校验保留（tcp/ws 同口径）。④集成测试 `pool_tls_integration.rs`：mock trojan-ws TLS 服务端（自签证书 + 101 握手 + 首帧请求头逐字节校验 56 hex SHA224 + 逐帧 echo + Close 语义）+ roundtrip 断言（SNI 缺省回退 Host、path 缺省 `/`）。
+  验收：`cargo test --workspace` 441 通过 0 失败；fmt/clippy（`-p seep-protocols -p seep-runtime --all-targets`）零警告；`docs/PROTOCOLS.md` Trojan 两处状态行同步（ws 已实现 / gRPC 未实现）。
+
 ---
 
 ## 统计
