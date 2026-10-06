@@ -124,6 +124,28 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    /// 读 /proc/self/status CapEff 判 CAP_NET_ADMIN（bit 12）是否在——容器内
+    /// root 常剥该 cap，set_mark 降级后 SO_MARK 读回恒 0，读回断言需跳过。
+    #[cfg(target_os = "linux")]
+    fn has_cap_net_admin() -> bool {
+        const CAP_NET_ADMIN_BIT: u64 = 1 << 12;
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("CapEff:"))
+                    .map(|l| l.trim_start_matches("CapEff:").trim().to_string())
+            })
+            .and_then(|hex| u64::from_str_radix(&hex, 16).ok())
+            .map(|caps| caps & CAP_NET_ADMIN_BIT != 0)
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn has_cap_net_admin() -> bool {
+        true
+    }
+
     #[test]
     fn set_get_roundtrip_and_reset() {
         set_egress_fwmark(0);
@@ -179,6 +201,11 @@ mod tests {
     async fn marked_connect_sets_mark_readable_as_root() {
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("跳过：需 root 验证 SO_MARK 读回");
+            return;
+        }
+        // 有 root 但无 CAP_NET_ADMIN（容器默认剥离）→ set_mark 降级，mark 读回恒 0，跳过
+        if !has_cap_net_admin() {
+            eprintln!("跳过：缺 CAP_NET_ADMIN，降级路径由上测覆盖");
             return;
         }
         set_egress_fwmark(0x5E45);
