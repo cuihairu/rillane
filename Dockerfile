@@ -35,11 +35,13 @@ RUN for c in seep-config seep-core seep-routing seep-protocols seep-telemetry \
              seep-plugins seep-ffi; do \
         mkdir -p "crates/$c/src" && touch "crates/$c/src/lib.rs"; \
     done \
+    && mkdir -p crates/seep-core/benches \
+    && touch crates/seep-core/benches/relay_throughput.rs crates/seep-core/benches/write_frame.rs \
     && mkdir -p apps/seepd/src apps/seepctl/src \
     && echo 'fn main() {}' > apps/seepd/src/main.rs \
     && echo 'fn main() {}' > apps/seepctl/src/main.rs \
     && cargo build --release \
-    && rm -rf crates/*/src apps/*/src
+    && rm -rf crates/*/src crates/*/benches apps/*/src
 
 # ---- 真实构建：源码全量拷入，仅 workspace 层重编 ----
 COPY . .
