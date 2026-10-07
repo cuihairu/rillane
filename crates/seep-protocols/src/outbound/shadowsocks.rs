@@ -15,12 +15,7 @@ use shadowsocks::{
     relay::Address,
     ServerAddr,
 };
-use std::{
-    net::SocketAddr,
-    process::Stdio,
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     net::TcpStream,
     process::{Child, Command},
@@ -106,14 +101,10 @@ impl EgressConnector for ShadowsocksConnector {
         // SIP003 插件桥模式：加密/混淆由插件进程负责，seep 只把客户端流量
         // 原样送进插件本地端口（_bridge 持子进程句柄，函数收尾 drop 即 kill）
         if let Some(plugin) = &self.plugin {
-            let (mut outbound, _bridge) = spawn_plugin(
-                plugin,
-                self.plugin_opts.as_deref(),
-                &self.server,
-                self.port,
-            )
-            .await
-            .with_context(|| format!("节点 {} 插件桥接失败", self.server))?;
+            let (mut outbound, _bridge) =
+                spawn_plugin(plugin, self.plugin_opts.as_deref(), &self.server, self.port)
+                    .await
+                    .with_context(|| format!("节点 {} 插件桥接失败", self.server))?;
 
             let (up, down) = tokio::io::copy_bidirectional_with_sizes(
                 &mut flow.io,
@@ -361,9 +352,10 @@ mod tests {
             .forward(duplex_flow())
             .await
             .expect_err("不存在的插件应失败");
+        let rendered = format!("{err:#}");
         assert!(
-            err.to_string().contains("seep-no-such-plugin-bin"),
-            "错误应含插件名: {err:#}"
+            rendered.contains("seep-no-such-plugin-bin"),
+            "错误链应含插件名: {rendered}"
         );
     }
 
@@ -391,6 +383,7 @@ mod tests {
             .await
             .expect("监听中的端口应立即就绪");
         let (accepted, _) = accept_task.await.unwrap().unwrap();
-        assert_eq!(stream.peer_addr().unwrap(), accepted.peer_addr().unwrap());
+        // 探测流本地端 == accept 侧看到的对端（同一条连接的两半）
+        assert_eq!(stream.local_addr().unwrap(), accepted.peer_addr().unwrap());
     }
 }
