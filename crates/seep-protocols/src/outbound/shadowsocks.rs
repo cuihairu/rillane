@@ -320,3 +320,76 @@ impl UdpRelay for SsUdpRelay {
         Ok((flow_target_of(&addr), n))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seep_core::{Flow, FlowId, FlowTarget};
+
+    fn connector_with_plugin(plugin: Option<&str>) -> ShadowsocksConnector {
+        ShadowsocksConnector::new(
+            "127.0.0.1".into(),
+            8388,
+            "aes-256-gcm".into(),
+            "pw".into(),
+            plugin.map(str::to_string),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn duplex_flow() -> Flow {
+        let (client, _server_side) = tokio::io::duplex(64);
+        Flow {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "example.com".into(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            io: Box::new(client),
+            metadata: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_spawn_failure_reports_binary_name() {
+        // 不存在的插件二进制：spawn 失败错误须含插件名（排障定位入口）
+        let conn = connector_with_plugin(Some("seep-no-such-plugin-bin"));
+        let err = conn
+            .forward(duplex_flow())
+            .await
+            .expect_err("不存在的插件应失败");
+        assert!(
+            err.to_string().contains("seep-no-such-plugin-bin"),
+            "错误应含插件名: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_plugin_ready_times_out_on_closed_port() {
+        // 占位拿空闲端口再让位（无监听）→ 限时内 refused 重试直至超时
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        let err = wait_plugin_ready(addr, Duration::from_millis(200))
+            .await
+            .expect_err("无监听端口应超时");
+        assert!(err.to_string().contains("未就绪"), "超时语义: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn wait_plugin_ready_reuses_listening_connection() {
+        // 已监听端口：探测连接直接复用为 outbound（accept 半边保活）
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept_task = tokio::spawn(async move { listener.accept().await });
+
+        let stream = wait_plugin_ready(addr, Duration::from_secs(2))
+            .await
+            .expect("监听中的端口应立即就绪");
+        let (accepted, _) = accept_task.await.unwrap().unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), accepted.peer_addr().unwrap());
+    }
+}
