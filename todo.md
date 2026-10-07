@@ -197,6 +197,8 @@
 
 - [x] **入站认证补全（Mixed/Http）**（2026-10-07 登记；同日落地）：走查确认 Socks5 认证三面齐全（config `auth` + 协议层 RFC 1929 + 装配接线，L79 口径准确），真缺口 = `IngressConfig::Mixed`/`Http` 无 auth 字段（PROTOCOLS L47/L60 超前描述）。落地：①config 两变体加 `auth: Option<Vec<Credential>>`（serde default/skip，缺省 None = 匿名放行零差异）；②`HttpIngress` 加 `Proxy-Authorization: Basic` 校验——凭据表非空即强制，缺头/错凭据统一应 `407 + Proxy-Authenticate: Basic realm="seep"`（先认证后 405 分派）；③`MixedIngress` 凭据透传两分支——socks5 走 RFC 1929（仅报无认证法回 0xFF）、http 同 HttpIngress；④RuntimeBuilder 两 arm + seepctl clash 导入字面量接线。测试 8 新增：http 四态（无配置匿名放行/缺头 407/错凭据 407/正确放行）+ verify_basic_auth 畸形值单测 + mixed 四态（http 407/socks5 拒匿名 0xFF/socks5 正确凭据 CONNECT 全程/空表匿名）。`docs/PROTOCOLS.md` HTTP/Mixed 状态行对账（Basic 实现如实写，Bearer/头修改/压缩仍标超前描述）。
 
+- [x] **SS 出站 SIP003 插件桥（v2ray-plugin/obfs 等）**（2026-10-07 登记；同日落地；注：代码面经他会话收编 commit a28fe44 落库，本条为收尾登记+测试+文档）：PROTOCOLS L102 登记的真缺口。落地：①config `Shadowsocks` 加 `plugin`/`plugin_opts` 字段（serde skip，None = crate 直连零差异）；②connector 插件桥——SIP003 四环境变量（SS_LOCAL_*/SS_REMOTE_*）+ opts 空白分词 argv + 本地空闲端口预留 + 就绪探测（refused 重试，探测连接直接复用为 outbound）+ 子进程随连接收尾（kill_on_drop）；③UDP 面 plugin 模式判负（SIP003 仅定义 TCP，`build_udp_connectors` 返回 None，scan_udp_capability 按既有口径构建期报错）；④订阅面——clash 导入加 `plugin` 字段捕获（防静默丢）遇插件节点拒导（直连无法通过混淆服务端，宁缺毋滥）、导出 degrade 提示降级不导出；seep_dsl 构造补 None（DSL 无此概念，无落差）。测试 3 新增（spawn 失败错误链含插件名/无监听端口超时/监听端口探测连接复用两半对账）；`PROTOCOLS.md` L102 状态行对账（插件桥实现如实写、动态端口仍超前描述、方法校验「运行时」笔误修正为构建期）+ udp-relay-path.md §3.1 能力表 SS 行加判负注。插件端到端（真实 v2ray-plugin/obfs 二进制）需外部环境，不在单测面，如实登记。
+
 ---
 
 ## 统计

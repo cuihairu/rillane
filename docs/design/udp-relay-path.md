@@ -82,7 +82,7 @@ RFC 1928：TCP 控制连接终止，服务器应结束该关联。落地：
 | EgressConfig 变体 | UDP 能力 | 承载方式 |
 |-------------------|---------|---------|
 | `Direct` | 是 | 本地 UDP socket（§3.2） |
-| `Shadowsocks` | 是 | crate UDP relay（§3.3） |
+| `Shadowsocks` | 是（`plugin` 字段非空时**判负**：SIP003 插件仅定义 TCP 数据面，插件模式该节点 UDP 需求由本扫描构建期报错，2026-10-07） | crate UDP relay（§3.3） |
 | `Hysteria2` | 是（以 V1 核查为前提） | QUIC 数据报（§3.4） |
 | `WireGuard` | 是 | IP 包封装（§3.5） |
 | `Socks5` / `Http` / `Trojan` / `Vless` | 否（S1 范围外，udp-dataplane.md §3.5） | 构建期报错 |
