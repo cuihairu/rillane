@@ -44,20 +44,20 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
 - **TLS 支持**: 支持通过 SOCKS5 建立 TLS 连接
 
 ### HTTP 代理
-> 状态：已实现 CONNECT 隧道（非 CONNECT 请求返回 405）。下列「支持方法」矩阵、Basic/Bearer 认证、请求/响应头修改、压缩均为**超前描述**——`IngressConfig::Http` 仅有 `bind` 字段，无认证与头处理逻辑。
+> 状态：已实现 CONNECT 隧道（非 CONNECT 请求返回 405）+ 入站 Basic 认证（`IngressConfig::Http.auth` 凭据表非空即强制：缺 `Proxy-Authorization` 头或凭据不符统一应 `407 Proxy Authentication Required` + `Proxy-Authenticate: Basic`，空表/缺省 = 匿名放行；仅 CONNECT 面校验，非 CONNECT 请求先过认证再应 405）。下列「支持方法」矩阵、Bearer 认证、请求/响应头修改、压缩仍为**超前描述**。
 
 - **协议版本**: HTTP/1.1
 - **支持方法**: GET, POST, PUT, DELETE, HEAD, OPTIONS, PATCH
 - **认证方式**:
-  - Basic 认证
-  - Bearer Token 认证
+  - Basic 认证（已实现，`auth` 字段 + `Proxy-Authorization` 校验）
+  - Bearer Token 认证（未实现，超前描述）
 - **特性**:
   - 支持 HTTP CONNECT 方法用于 HTTPS 代理
-  - 支持请求/响应头修改
-  - 支持压缩 (gzip, deflate)
+  - 支持请求/响应头修改（未实现，超前描述）
+  - 支持压缩 (gzip, deflate)（未实现，超前描述）
 
 ### 混合代理 (Mixed)
-> 状态：已实现协议自动识别与端口共享；认证未接入（`IngressConfig::Mixed` 无 auth 字段，认证列表为超前描述）。
+> 状态：已实现协议自动识别与端口共享；`IngressConfig::Mixed.auth` 已接线——socks5 分支强制 RFC 1929（仅提供无认证法时回 0xFF）、http 分支 Basic 认证（407 拒绝），空表/缺省 = 两分支均匿名放行，语义同 Socks5/Http。
 
 - **描述**: 同时支持 SOCKS5 和 HTTP 协议
 - **自动检测**: 根据请求特征自动识别协议类型

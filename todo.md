@@ -195,6 +195,8 @@
 
 - [x] **VLESS flow 构建期校验**（2026-10-07 登记；同日落地）：原状 `flow: Some(_)` 构建期不校验、该出站首条连接才在 `forward()` 报错——与 UDP 能力表 §3.1 / VMess security·alter_id 的构建期扫描惯例不一致，带伤等运行期。落地：RuntimeBuilder Vless arm 装配前 `flow.is_some()` 即报错（错误含节点名，与 forward 同口径）；新增 `build_egress_outputs_rejects_vless_flow_at_build_time`（拒绝 + 缺省照常装配两态）。`docs/PROTOCOLS.md` VLESS 状态行同步。
 
+- [x] **入站认证补全（Mixed/Http）**（2026-10-07 登记；同日落地）：走查确认 Socks5 认证三面齐全（config `auth` + 协议层 RFC 1929 + 装配接线，L79 口径准确），真缺口 = `IngressConfig::Mixed`/`Http` 无 auth 字段（PROTOCOLS L47/L60 超前描述）。落地：①config 两变体加 `auth: Option<Vec<Credential>>`（serde default/skip，缺省 None = 匿名放行零差异）；②`HttpIngress` 加 `Proxy-Authorization: Basic` 校验——凭据表非空即强制，缺头/错凭据统一应 `407 + Proxy-Authenticate: Basic realm="seep"`（先认证后 405 分派）；③`MixedIngress` 凭据透传两分支——socks5 走 RFC 1929（仅报无认证法回 0xFF）、http 同 HttpIngress；④RuntimeBuilder 两 arm + seepctl clash 导入字面量接线。测试 8 新增：http 四态（无配置匿名放行/缺头 407/错凭据 407/正确放行）+ verify_basic_auth 畸形值单测 + mixed 四态（http 407/socks5 拒匿名 0xFF/socks5 正确凭据 CONNECT 全程/空表匿名）。`docs/PROTOCOLS.md` HTTP/Mixed 状态行对账（Basic 实现如实写，Bearer/头修改/压缩仍标超前描述）。
+
 ---
 
 ## 统计
