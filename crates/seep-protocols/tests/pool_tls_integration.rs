@@ -408,7 +408,7 @@ async fn spawn_trojan_ws_tls_server(
                     return;
                 };
                 if dead_first && n == 1 {
-                    // 死闲连接：TLS 握手完成后立即断开(无 close_notify),
+                    // 死闲连接：TLS 握手完成后立即断开（无 close_notify），
                     // 池借出侧 upgrade 首读即败 → D-11 stale 重拨触发面
                     return;
                 }
@@ -496,7 +496,7 @@ async fn spawn_trojan_ws_tls_server(
 /// binary 帧、echo 往返、客户端半关 → Close 传播收尾。
 #[tokio::test]
 async fn trojan_ws_inline_roundtrip_request_in_first_frame() {
-    let (addr, hashes, path_slot, host_slot) = spawn_trojan_ws_tls_server().await;
+    let (addr, hashes, path_slot, host_slot) = spawn_trojan_ws_tls_server(false).await;
 
     let factory = Arc::new(TlsConnectorFactory::new(256));
     let connector = TrojanConnector::new(
@@ -525,4 +525,124 @@ async fn trojan_ws_inline_roundtrip_request_in_first_frame() {
         host_slot.lock().expect("host lock").as_str(),
         "ws.example.com"
     );
+}
+
+/// Trojan over WS（池路径，§4.2 借出后 upgrade）：预置 TLS 传输（warm）→
+/// acquire 命中 → upgrade 与协议段均在借出后进行（path/Host 上线）→
+/// 首 binary 帧请求头 + echo 往返；hit=1 / miss=0 / 无 stale。
+#[tokio::test]
+async fn trojan_ws_pooled_borrow_then_upgrade_roundtrip() {
+    let (addr, hashes, path_slot, host_slot) = spawn_trojan_ws_tls_server(false).await;
+    let server = addr.ip().to_string();
+    let port = addr.port();
+
+    let factory = Arc::new(TlsConnectorFactory::new(256));
+    let pool = TransportPool::new(pooled_policy(), Some(factory.clone()));
+    let connector = TrojanConnector::new(
+        server.clone(),
+        port,
+        PASSWORD.to_string(),
+        None, // SNI 回退 ws Host 首值 → 键的 sni 同此口径
+        true,
+        TlsFingerprint::None,
+        "ws".to_string(),
+        Some("/ray".to_string()),
+        Some(vec!["ws.example.com".to_string()]),
+        Some(pool.clone()),
+        Some(factory),
+    );
+
+    let key = TransportKey::tls(
+        &server,
+        port,
+        Some("ws.example.com"),
+        true,
+        &[],
+        TlsFingerprint::None,
+    );
+    pool.prewarm(&key, 1);
+    wait_until(|| pool.idle_count_of(&key) == 1).await;
+
+    let (flow, client) = make_flow("www.example.com", 443);
+    let handle = tokio::spawn(async move { connector.forward(flow).await });
+    let payload = b"trojan-ws-pooled";
+    let report = roundtrip_and_finish(client, handle, payload).await;
+    assert_eq!(report.upstream, payload.len() as u64, "上行计数");
+
+    let snap = pool.snapshot();
+    assert_eq!(snap.acquires_hit, 1, "预置连接命中");
+    assert_eq!(snap.acquires_miss, 0);
+    assert_eq!(snap.acquires_stale_redial, 0);
+    assert_eq!(snap.dials_warm_ok, 1, "预置 = warm 拨号");
+
+    // upgrade 在借出后进行:服务端面见到的 path/Host/请求头与内联路径同形
+    assert_eq!(hashes.lock().expect("hashes lock").len(), 1, "一次请求头");
+    assert_eq!(path_slot.lock().expect("path lock").as_str(), "/ray");
+    assert_eq!(
+        host_slot.lock().expect("host lock").as_str(),
+        "ws.example.com"
+    );
+}
+
+/// Trojan over WS（池路径 D-11）：预置连接已被服务端关闭 → 借出后 upgrade
+/// 首读失败 → note_stale + acquire_fresh 一次性重拨 → 新连接 upgrade +
+/// echo 成立；stale_redial=1 / hit=1（死连接按 hit 弹出，死活由 upgrade
+/// 判定）/ miss=0。path 缺省 `/` 随本用例钉住（None → 服务端见 `GET /`）。
+#[tokio::test]
+async fn trojan_ws_pooled_stale_redial_recovers_from_dead_idle() {
+    let (addr, hashes, path_slot, _host_slot) = spawn_trojan_ws_tls_server(true).await;
+    let server = addr.ip().to_string();
+    let port = addr.port();
+
+    let factory = Arc::new(TlsConnectorFactory::new(256));
+    let pool = TransportPool::new(pooled_policy(), Some(factory.clone()));
+    let connector = TrojanConnector::new(
+        server.clone(),
+        port,
+        PASSWORD.to_string(),
+        None,
+        true,
+        TlsFingerprint::None,
+        "ws".to_string(),
+        None, // 缺省路径 → "/"
+        Some(vec!["ws.example.com".to_string()]),
+        Some(pool.clone()),
+        Some(factory),
+    );
+
+    let key = TransportKey::tls(
+        &server,
+        port,
+        Some("ws.example.com"),
+        true,
+        &[],
+        TlsFingerprint::None,
+    );
+    // 预置死闲连接（TLS 握手完成后服务端即断开）
+    pool.prewarm(&key, 1);
+    wait_until(|| pool.idle_count_of(&key) == 1).await;
+
+    let (flow, client) = make_flow("www.example.com", 443);
+    let handle = tokio::spawn(async move { connector.forward(flow).await });
+    let payload = b"trojan-ws-stale";
+    let report = roundtrip_and_finish(client, handle, payload).await;
+    assert_eq!(report.upstream, payload.len() as u64, "上行计数");
+
+    let snap = pool.snapshot();
+    assert_eq!(snap.acquires_stale_redial, 1, "stale 一次性重拨");
+    assert_eq!(
+        snap.acquires_hit, 1,
+        "死连接按 hit 弹出（死活由 upgrade 判定）"
+    );
+    assert_eq!(snap.acquires_miss, 0, "stale_redial 独立计数不撞 miss");
+    assert_eq!(snap.dials_foreground_ok, 1, "重拨 = 前台新拨");
+    assert_eq!(snap.dials_warm_ok, 1, "预置 = warm 拨号");
+
+    // 仅重拨后的活连接完成 upgrade + 请求头;path 缺省归一为 "/"
+    assert_eq!(
+        hashes.lock().expect("hashes lock").len(),
+        1,
+        "死连接不应产生请求头"
+    );
+    assert_eq!(path_slot.lock().expect("path lock").as_str(), "/");
 }
