@@ -77,10 +77,18 @@ pub struct ClashProxy {
     /// 加密方法（用于 Shadowsocks）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cipher: Option<String>,
-    /// Shadowsocks: SIP003 插件名（捕获以防静默丢；导入时拒导——服务端开
-    /// 混淆后直连必败，宁缺毋滥，映射表归后续批）
+    /// Shadowsocks: SIP003 插件名（捕获以防静默丢；导入时按换算表转 SIP003——
+    /// 仅 obfs/v2ray-plugin 两族键名有把握，其余拒导）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin: Option<String>,
+    /// Shadowsocks: SIP003 插件参数（clash 侧为 map，导入时换算为分号 kv 串）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "plugin-opts",
+        alias = "plugin_opts"
+    )]
+    pub plugin_opts: Option<Value>,
     /// UUID（用于 VMess/VLESS）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
@@ -769,15 +777,11 @@ impl ClashConverter {
                 password: proxy.password.clone(),
             }),
             ClashProxyType::Ss => {
-                // plugin 模式拒导：SIP003 混淆由插件进程承载，直连 SS 协议对
-                // 开启插件的服务端必握手失败；宁缺毋滥（clash plugin-opts
-                // map → SIP003 argv 的逐插件换算归后续批）
-                if proxy.plugin.is_some() {
-                    return Err(anyhow!(
-                        "Shadowsocks 节点 {} 带 plugin（SIP003 插件），暂不支持导入（直连无法通过混淆服务端）",
-                        proxy.name
-                    ));
-                }
+                // plugin 模式：SIP003 混淆由插件进程承载，直连 SS 协议对开启
+                // 插件的服务端必握手失败——按换算表转 SIP003（仅 obfs/
+                // v2ray-plugin 两族键名有把握），其余插件拒导（宁缺毋滥）
+                let (plugin, plugin_opts) = clash_ss_plugin_to_sip003(proxy)?;
+
                 let method = proxy
                     .cipher
                     .clone()
@@ -789,8 +793,8 @@ impl ClashConverter {
                     port: proxy.port,
                     method,
                     password,
-                    plugin: None,
-                    plugin_opts: None,
+                    plugin,
+                    plugin_opts,
                 })
             }
             ClashProxyType::Vmess => {
@@ -1169,6 +1173,77 @@ impl Default for ClashConverter {
     }
 }
 
+/// clash SS 插件 → SIP003 (plugin 可执行名, plugin_opts 分号 kv 串)：
+/// - `obfs`（simple-obfs 族）→ `obfs-local`，键名换算 mode→obfs、host→obfs-host
+///   （mode 必填）；其他键拒导（simple-obfs 键名面仅此两个有把握）
+/// - `v2ray-plugin` → 原名；键名原样透传（bool true → 裸 flag，false → 丢弃；
+///   str/数值 → `key=value`；嵌套结构拒导）
+/// - 其余插件名（kcptun 等）→ 拒导（无换算表，宁缺毋滥）
+fn clash_ss_plugin_to_sip003(proxy: &ClashProxy) -> Result<(Option<String>, Option<String>)> {
+    let Some(name) = proxy.plugin.as_deref() else {
+        return Ok((None, None));
+    };
+    let opts = |what: &str| -> Result<serde_yaml::Mapping> {
+        proxy
+            .plugin_opts
+            .as_ref()
+            .and_then(|v| v.as_mapping().cloned())
+            .ok_or_else(|| anyhow!("Shadowsocks 节点 {} 的 plugin-opts {what}", proxy.name))
+    };
+
+    match name {
+        "obfs" | "obfs-local" | "simple-obfs" => {
+            let m = opts("缺失或非 map")?;
+            let mode = m
+                .get(Value::String("mode".into()))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Shadowsocks 节点 {} 的 obfs plugin-opts 缺 mode",
+                        proxy.name
+                    )
+                })?;
+            let mut parts = vec![format!("obfs={mode}")];
+            if let Some(h) = m.get(Value::String("host".into())).and_then(|v| v.as_str()) {
+                parts.push(format!("obfs-host={h}"));
+            }
+            Ok((Some("obfs-local".into()), Some(parts.join(";"))))
+        }
+        "v2ray-plugin" => {
+            let m = opts("缺失或非 map")?;
+            let mut parts = Vec::new();
+            for (k, v) in m.iter() {
+                let key = k.as_str().ok_or_else(|| {
+                    anyhow!(
+                        "Shadowsocks 节点 {} 的 v2ray-plugin plugin-opts 键非字符串",
+                        proxy.name
+                    )
+                })?;
+                match v {
+                    Value::Bool(true) => parts.push(key.to_string()),
+                    Value::Bool(false) => {}
+                    Value::String(s) => parts.push(format!("{key}={s}")),
+                    Value::Number(n) => parts.push(format!("{key}={n}")),
+                    _ => anyhow::bail!(
+                        "Shadowsocks 节点 {} 的 v2ray-plugin plugin-opts.{key} 为嵌套结构，无换算语义",
+                        proxy.name
+                    ),
+                }
+            }
+            let opts_str = if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(";"))
+            };
+            Ok((Some("v2ray-plugin".into()), opts_str))
+        }
+        other => Err(anyhow!(
+            "Shadowsocks 节点 {} 的 plugin {other} 无换算表，暂不支持导入",
+            proxy.name
+        )),
+    }
+}
+
 fn build_wireguard_address(proxy: &ClashProxy) -> Option<String> {
     let mut addrs: Vec<String> = Vec::new();
 
@@ -1210,6 +1285,131 @@ fn build_wireguard_address(proxy: &ClashProxy) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ss_plugin_obfs_import_converts_to_sip003() {
+        let yaml_content = r#"
+proxies:
+  - name: "ss-obfs"
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: password
+    plugin: obfs
+    plugin-opts:
+      mode: http
+      host: www.example.com
+
+proxy-groups:
+  - name: "auto"
+    type: select
+    proxies:
+      - "ss-obfs"
+rules:
+  - MATCH,auto
+        "#;
+        let converter = ClashConverter::new();
+        let config = converter.parse(yaml_content).unwrap();
+        let egress = converter
+            .convert_proxies_to_egress(&config.proxies)
+            .unwrap();
+        assert_eq!(egress.len(), 1);
+        match &egress[0].spec {
+            EgressConfig::Shadowsocks {
+                plugin,
+                plugin_opts,
+                ..
+            } => {
+                assert_eq!(plugin.as_deref(), Some("obfs-local"));
+                assert_eq!(
+                    plugin_opts.as_deref(),
+                    Some("obfs=http;obfs-host=www.example.com")
+                );
+            }
+            other => panic!("应为 Shadowsocks 配置: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ss_plugin_v2ray_import_converts_to_sip003() {
+        let yaml_content = r#"
+proxies:
+  - name: "ss-v2ray"
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: password
+    plugin: v2ray-plugin
+    plugin-opts:
+      mode: websocket
+      host: example.com
+      path: /ws
+      tls: true
+      mux: false
+
+proxy-groups:
+  - name: "auto"
+    type: select
+    proxies:
+      - "ss-v2ray"
+rules:
+  - MATCH,auto
+        "#;
+        let converter = ClashConverter::new();
+        let config = converter.parse(yaml_content).unwrap();
+        let egress = converter
+            .convert_proxies_to_egress(&config.proxies)
+            .unwrap();
+        assert_eq!(egress.len(), 1);
+        match &egress[0].spec {
+            EgressConfig::Shadowsocks {
+                plugin,
+                plugin_opts,
+                ..
+            } => {
+                assert_eq!(plugin.as_deref(), Some("v2ray-plugin"));
+                // tls: true → 裸 flag；mux: false → 丢弃
+                assert_eq!(
+                    plugin_opts.as_deref(),
+                    Some("mode=websocket;host=example.com;path=/ws;tls")
+                );
+            }
+            other => panic!("应为 Shadowsocks 配置: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ss_plugin_unknown_rejected() {
+        let yaml_content = r#"
+proxies:
+  - name: "ss-kcp"
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: password
+    plugin: kcptun-client
+
+proxy-groups:
+  - name: "auto"
+    type: select
+    proxies:
+      - "ss-kcp"
+rules:
+  - MATCH,auto
+        "#;
+        let converter = ClashConverter::new();
+        let config = converter.parse(yaml_content).unwrap();
+        let err = converter
+            .convert_proxies_to_egress(&config.proxies)
+            .expect_err("无换算表插件应拒导");
+        assert!(
+            err.to_string().contains("kcptun-client"),
+            "错误应含插件名: {err:#}"
+        );
+    }
 
     #[test]
     fn test_clash_config_parsing() {
