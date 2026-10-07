@@ -130,17 +130,15 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - 客户端 TLS 指纹形态（`tls_fingerprint`，P2-5）
 
 ### VLESS
-> 状态：部分实现——uuid 认证 + TCP 直连 / WebSocket 传输（可叠 TLS/SNI/ALPN，`network: ws`）；**flow（如 xtls-rprx-vision）显式拒绝**（构建期即拦，RuntimeBuilder 装配报错并列节点名，与 `forward()` 口径同为 `is_some()` 即拒）。「自动选择最优加密算法」「QoS 集成」「VLESS-Vision」系列与 H2/gRPC 传输为**超前描述**。
+> 状态：部分实现——uuid 认证 + TCP 直连 / WebSocket 传输（可叠 TLS/SNI/ALPN，`network: ws`）；**flow（如 xtls-rprx-vision）显式拒绝**（构建期即拦，RuntimeBuilder 装配报错并列节点名，与 `forward()` 口径同为 `is_some()` 即拒）。「QoS 集成」「VLESS-Vision」系列与 H2/gRPC 传输为**超前描述**。
 
-- **特点**: 轻量级协议，无状态加密
-- **加密**: 自动选择最优加密算法
+- **特点**: 轻量级协议，无内建加密（明文承载，机密性由 TLS 传输层负责）
 - **Flow 控制**:
   - VLESS-Vision-Stream (实时流)
   - VLESS-Vision-UDP (UDP 支持)
 - **传输层**: 同 VMess
 - **特性**:
-  - 更低的性能开销
-  - 更好的 QoS 集成
+  - 更低的性能开销（相比 VMess 少一层协议内加密）
 
 ### Trojan
 > 状态：部分实现——TCP 原生 + 完整 TLS（SNI/证书校验/`skip_cert_verify`/指纹），「流量看起来像标准 HTTPS」的目标由 TLS 形态达成；WebSocket 传输已实现（trojan-go 惯例：ws 恒叠 TLS，请求头作为首个 binary 帧，无独立应答头；池路径 upgrade 失败 stale 一次性重拨）；gRPC 传输**未实现**——超前描述。
