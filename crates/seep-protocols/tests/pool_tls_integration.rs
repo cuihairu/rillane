@@ -346,9 +346,14 @@ fn server_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
 
 /// mock trojan-ws TLS 服务端：TLS accept → HTTP Upgrade（解析 path/Host/Key，
 /// 回 101 + Sec-WebSocket-Accept）→ 首个 binary 帧应为一个完整 trojan 请求头
-/// → 逐帧 echo 至 Close。返回（地址，hash 集，见到的 path，见到的 Host）。
+/// → 逐帧 echo 至 Close。`dead_first` = 首条连接 TLS 握手完成后即关闭（死闲
+/// 连接槽，同 pool_connectors::spawn_vless_mock 的首连接死亡形态，供池借出
+/// 侧 upgrade 失败 → D-11 stale 重拨触发面）。返回（地址，hash 集，见到的
+/// path，见到的 Host）。
 #[allow(clippy::type_complexity)]
-async fn spawn_trojan_ws_tls_server() -> (
+async fn spawn_trojan_ws_tls_server(
+    dead_first: bool,
+) -> (
     std::net::SocketAddr,
     Arc<std::sync::Mutex<Vec<String>>>,
     Arc<std::sync::Mutex<String>>,
