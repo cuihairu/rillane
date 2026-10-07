@@ -193,6 +193,8 @@
   ④**CI 连红修复（2026-10-07）**：net_mark 测试在自托管 runner 连红两根因——`kind()==WouldBlock` 漏接 Linux 非阻塞 connect 恒返的 EINPROGRESS(115)（stable 映射 InProgress 不可名，marked 全路径曾整体不可用）；CapEff 判定被 seccomp 假阳（cap 齐备仍拦 SO_MARK）。修：裸错码收敛 + setsockopt 直接探针判定 + mark 全局态测试串行锁（`270e654`）。
   验收：本地 `cargo test -p seep-core` net_mark 7 测全绿（root/CAP_NET_ADMIN 环境下 SO_MARK 读回硬断言；seccomp 拦截环境探针跳过降级路径覆盖）；真实逃逸语义（fwmark + ip rule 端到端）以带 CAP_NET_ADMIN 的 TUN 环境实测为准。
 
+- [x] **VLESS flow 构建期校验**（2026-10-07 登记；同日落地）：原状 `flow: Some(_)` 构建期不校验、该出站首条连接才在 `forward()` 报错——与 UDP 能力表 §3.1 / VMess security·alter_id 的构建期扫描惯例不一致，带伤等运行期。落地：RuntimeBuilder Vless arm 装配前 `flow.is_some()` 即报错（错误含节点名，与 forward 同口径）；新增 `build_egress_outputs_rejects_vless_flow_at_build_time`（拒绝 + 缺省照常装配两态）。`docs/PROTOCOLS.md` VLESS 状态行同步。
+
 ---
 
 ## 统计

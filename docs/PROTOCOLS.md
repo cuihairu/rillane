@@ -130,7 +130,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - 客户端 TLS 指纹形态（`tls_fingerprint`，P2-5）
 
 ### VLESS
-> 状态：部分实现——uuid 认证 + TCP 直连 / WebSocket 传输（可叠 TLS/SNI/ALPN，`network: ws`）；**flow（如 xtls-rprx-vision）显式拒绝**（构建期不校验，该出站首条连接在 `forward()` 报错）。「自动选择最优加密算法」「QoS 集成」「VLESS-Vision」系列与 H2/gRPC 传输为**超前描述**。
+> 状态：部分实现——uuid 认证 + TCP 直连 / WebSocket 传输（可叠 TLS/SNI/ALPN，`network: ws`）；**flow（如 xtls-rprx-vision）显式拒绝**（构建期即拦，RuntimeBuilder 装配报错并列节点名，与 `forward()` 口径同为 `is_some()` 即拒）。「自动选择最优加密算法」「QoS 集成」「VLESS-Vision」系列与 H2/gRPC 传输为**超前描述**。
 
 - **特点**: 轻量级协议，无状态加密
 - **加密**: 自动选择最优加密算法
