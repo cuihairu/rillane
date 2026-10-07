@@ -200,6 +200,8 @@
 
 - [x] **SS 出站 SIP003 插件桥（v2ray-plugin/obfs 等）**（2026-10-07 登记；同日落地；注：代码面经他会话收编 commit a28fe44 落库，本条为收尾登记+测试+文档）：PROTOCOLS L102 登记的真缺口。落地：①config `Shadowsocks` 加 `plugin`/`plugin_opts` 字段（serde skip，None = crate 直连零差异）；②connector 插件桥——SIP003 四环境变量（SS_LOCAL_*/SS_REMOTE_*）+ opts 空白分词 argv + 本地空闲端口预留 + 就绪探测（refused 重试，探测连接直接复用为 outbound）+ 子进程随连接收尾（kill_on_drop）；③UDP 面 plugin 模式判负（SIP003 仅定义 TCP，`build_udp_connectors` 返回 None，scan_udp_capability 按既有口径构建期报错）；④订阅面——clash 导入加 `plugin` 字段捕获（防静默丢）遇插件节点拒导（直连无法通过混淆服务端，宁缺毋滥）、导出 degrade 提示降级不导出；seep_dsl 构造补 None（DSL 无此概念，无落差）。测试 3 新增（spawn 失败错误链含插件名/无监听端口超时/监听端口探测连接复用两半对账）；`PROTOCOLS.md` L102 状态行对账（插件桥实现如实写、动态端口仍超前描述、方法校验「运行时」笔误修正为构建期）+ udp-relay-path.md §3.1 能力表 SS 行加判负注。插件端到端（真实 v2ray-plugin/obfs 二进制）需外部环境，不在单测面，如实登记。
 
+- [x] **clash 订阅 SS 插件导入换算（SIP003）**（2026-10-07 登记；同日落地）：批11 遗留小件（原拒导注释「映射表归后续批」）。落地：①`ClashProxy` 加 `plugin_opts` 字段（alias plugin-opts/plugin_opts，serde_yaml Value 捕获防静默丢）；②换算表 `clash_ss_plugin_to_sip003`——obfs 族→`obfs-local`（mode→`obfs=`、host→`obfs-host=`，mode 必填）；v2ray-plugin 原名，键值透传（bool true→裸 flag、false→丢弃、str/数值→`key=value`、嵌套结构拒导）；其余插件名（kcptun 等）保持拒导（无换算表宁缺毋滥）；③导出侧不反向换算（clash plugin-opts 为 map、反向键名面未核），保持 degrade 提示如实。测试 3 新增（obfs 全字段/v2ray 含 tls 裸 flag+mux false 丢弃/未知插件拒导含插件名断言）。`PROTOCOLS.md` L102 换算表表述同步。
+
 ---
 
 ## 统计

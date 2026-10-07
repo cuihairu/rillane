@@ -99,7 +99,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - 自动处理隧道 (CONNECT)
 
 ### Shadowsocks
-> 状态：已实现 TCP（AEAD 加密由 `shadowsocks` crate 承载，可用方法以 crate 1.21 为准，`method` 为自由字符串、非法值构建期报错）与 **UDP（2026-09，P0-3：`ShadowsocksUdpConnector`，方法校验提前至构建期、目标地址固定 R7 语义；完整解密往返需 shadowsocks-service 服务端联调，归 P0-5）**与 **SIP003 插件桥（2026-10-07：`plugin`/`plugin_opts` 字段——TCP 数据面经插件进程桥接，SS_LOCAL_*/SS_REMOTE_* 环境变量约定 + 本地端口就绪探测 + 子进程随连接收尾 kill_on_drop；UDP 面不经插件（SIP003 仅定义 TCP），plugin 模式下 UDP 能力判负由 scan_udp_capability 构建期报错；订阅面 clash 导入遇 plugin 节点拒导、导出降级提示；插件端到端需真实插件二进制环境，单测覆盖 spawn 失败/端口探测两态）**；动态端口分配**未实现**——超前描述。
+> 状态：已实现 TCP（AEAD 加密由 `shadowsocks` crate 承载，可用方法以 crate 1.21 为准，`method` 为自由字符串、非法值构建期报错）与 **UDP（2026-09，P0-3：`ShadowsocksUdpConnector`，方法校验提前至构建期、目标地址固定 R7 语义；完整解密往返需 shadowsocks-service 服务端联调，归 P0-5）**与 **SIP003 插件桥（2026-10-07：`plugin`/`plugin_opts` 字段——TCP 数据面经插件进程桥接，SS_LOCAL_*/SS_REMOTE_* 环境变量约定 + 本地端口就绪探测 + 子进程随连接收尾 kill_on_drop；UDP 面不经插件（SIP003 仅定义 TCP），plugin 模式下 UDP 能力判负由 scan_udp_capability 构建期报错；订阅面 clash 导入按换算表转 SIP003（obfs→`obfs-local` mode/host→`obfs=`/`obfs-host=`、v2ray-plugin 原名键值透传 bool true→裸 flag，其余插件名拒导宁缺毋滥）、导出侧无 Clash 等价表达仅 degrade 提示；插件端到端需真实插件二进制环境，单测覆盖 spawn 失败/端口探测两态）**；动态端口分配**未实现**——超前描述。
 
 - **加密算法**:
   - AES-256-GCM
