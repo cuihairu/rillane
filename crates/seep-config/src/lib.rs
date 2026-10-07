@@ -1249,9 +1249,16 @@ pub enum IngressConfig {
     },
     Http {
         bind: String,
+        /// 入站认证（Proxy-Authorization: Basic）；None/空表 = 匿名放行，语义同 Socks5。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<Vec<Credential>>,
     },
     Mixed {
         bind: String,
+        /// 入站认证：socks5 分支走 RFC 1929、http 分支走 Proxy-Authorization
+        /// Basic（407 拒绝），语义同 Socks5；None/空表 = 匿名放行。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<Vec<Credential>>,
         /// per-ingress UDP 覆盖（P0-5 §1.3），语义同 Socks5。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         udp_enabled: Option<bool>,

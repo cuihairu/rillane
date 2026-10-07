@@ -1595,6 +1595,7 @@ fn build_ingress_from_clash(clash: &seep_subscription::ClashConfig) -> IngressDe
         name: "mixed-in".into(),
         spec: IngressConfig::Mixed {
             bind: format!("{bind_ip}:{port}"),
+            auth: None,
             udp_enabled: None,
         },
     }

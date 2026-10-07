@@ -2123,12 +2123,17 @@ fn build_ingress_endpoints(
                 auth.clone().unwrap_or_default(),
                 udp_here,
             )),
-            IngressConfig::Http { bind } => {
-                Arc::new(HttpIngress::new(desc.name.clone(), bind.clone()))
-            }
-            IngressConfig::Mixed { bind, .. } => {
-                Arc::new(MixedIngress::new(desc.name.clone(), bind.clone(), udp_here))
-            }
+            IngressConfig::Http { bind, auth } => Arc::new(HttpIngress::new(
+                desc.name.clone(),
+                bind.clone(),
+                auth.clone().unwrap_or_default(),
+            )),
+            IngressConfig::Mixed { bind, auth, .. } => Arc::new(MixedIngress::new(
+                desc.name.clone(),
+                bind.clone(),
+                auth.clone().unwrap_or_default(),
+                udp_here,
+            )),
         };
         map.insert(desc.name.clone(), endpoint);
     }
@@ -4268,6 +4273,7 @@ mod tests {
                     name: "s2-mixed".to_string(),
                     spec: IngressConfig::Mixed {
                         bind: free_bind(),
+                        auth: None,
                         udp_enabled: mixed_udp_enabled,
                     },
                 },
