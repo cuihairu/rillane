@@ -2329,20 +2329,35 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Result<Vec<TransportKey>
             EgressConfig::Trojan {
                 server,
                 port,
+                network,
                 tls,
                 skip_cert_verify,
                 sni,
+                host,
                 tls_fingerprint,
                 ..
             } => {
+                // 键与 forward_pooled 的 transport_key 同源（借出键恒
+                // Some(实际 SNI)：tcp = sni ∥ server；ws = sni ∥ ws Host
+                // 首值 ∥ server，trojan-go 惯例 ws 恒叠 TLS）。network 单值
+                // 决定分支，只推在用键（异于 vless 双键——vless 的 tcp 键
+                // 在 ws 节点上永不被借出，属既有预留）。
                 if *tls {
+                    let fp = parse_egress_fingerprint(tls_fingerprint, &desc.name)?;
+                    let sni_actual = if network == "ws" || network == "websocket" {
+                        sni.clone()
+                            .or_else(|| host.as_ref().and_then(|v| v.first().cloned()))
+                            .unwrap_or_else(|| server.clone())
+                    } else {
+                        sni.clone().unwrap_or_else(|| server.clone())
+                    };
                     keys.push(TransportKey::tls(
                         server,
                         *port,
-                        sni.as_deref(),
+                        Some(&sni_actual),
                         *skip_cert_verify,
                         &[],
-                        parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
+                        fp,
                     ));
                 }
             }
@@ -4612,8 +4627,9 @@ mod tests {
         );
     }
 
-    /// D-7 warm 键推导：trojan/http-tls 主键、vless ws 双键（ws SNI 归host），
-    /// 平文/无关出站不产键，跨条目同键去重。
+    /// D-7 warm 键推导：trojan tcp/ws 键与连接器 transport_key 同源（tcp
+    /// SNI 缺省回退 server、ws SNI 归 Host 首值）、http-tls 主键、vless ws
+    /// 双键，平文/无关出站不产键，跨条目同键去重。
     #[test]
     fn derive_tls_warm_keys_matches_connector_keys() {
         let egress = vec![
@@ -4629,6 +4645,38 @@ mod tests {
                     tls: true,
                     skip_cert_verify: false,
                     sni: Some("sni.example".to_string()),
+                    alpn: None,
+                    tls_fingerprint: None,
+                },
+            },
+            EgressDescriptor {
+                name: "tr-nosni".to_string(),
+                spec: EgressConfig::Trojan {
+                    server: "t.example".to_string(),
+                    port: 443,
+                    password: "pw".to_string(),
+                    network: "tcp".to_string(),
+                    path: None,
+                    host: None,
+                    tls: true,
+                    skip_cert_verify: false,
+                    sni: None,
+                    alpn: None,
+                    tls_fingerprint: None,
+                },
+            },
+            EgressDescriptor {
+                name: "trws".to_string(),
+                spec: EgressConfig::Trojan {
+                    server: "ws.example".to_string(),
+                    port: 443,
+                    password: "pw".to_string(),
+                    network: "ws".to_string(),
+                    path: Some("/ray".to_string()),
+                    host: Some(vec!["cdn.example".to_string()]),
+                    tls: true,
+                    skip_cert_verify: false,
+                    sni: None,
                     alpn: None,
                     tls_fingerprint: None,
                 },
@@ -4669,7 +4717,11 @@ mod tests {
             },
         ];
         let keys = derive_tls_warm_keys(&egress).expect("REASON");
-        assert_eq!(keys.len(), 3, "trojan 主键 + vless tcp/ws 双键");
+        assert_eq!(
+            keys.len(),
+            5,
+            "trojan tcp×2（显式 sni / 缺省回退 server）+ trojan ws 键 + vless tcp/ws 双键"
+        );
         assert!(
             keys.contains(&TransportKey::tls(
                 "e.example",
@@ -4680,6 +4732,28 @@ mod tests {
                 TlsFingerprint::None,
             )),
             "trojan 键与 forward_pooled 同源"
+        );
+        assert!(
+            keys.contains(&TransportKey::tls(
+                "t.example",
+                443,
+                Some("t.example"),
+                false,
+                &[],
+                TlsFingerprint::None,
+            )),
+            "trojan tcp sni 缺省回退 server（借出键恒 Some，裸 None 键永不相交）"
+        );
+        assert!(
+            keys.contains(&TransportKey::tls(
+                "ws.example",
+                443,
+                Some("cdn.example"),
+                false,
+                &[],
+                TlsFingerprint::None,
+            )),
+            "trojan ws 键（实际 SNI = sni ∥ Host 首值 ∥ server）"
         );
         assert!(
             keys.contains(&TransportKey::tls(
