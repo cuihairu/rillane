@@ -657,6 +657,8 @@ impl SeepDslConverter {
                     port,
                     method,
                     password,
+                    plugin: None,
+                    plugin_opts: None,
                 })
             }
             NodeType::Vmess => {

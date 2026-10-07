@@ -43,6 +43,8 @@ fn ss_method_rejected_at_construction() {
         8388,
         "no-such-method".into(),
         "pw".into(),
+        None,
+        None,
     ) {
         Err(e) => e,
         Ok(_) => panic!("无效加密方法应构建失败"),
@@ -61,6 +63,8 @@ async fn ss_udp_send_path_reaches_server_endpoint() {
         server_port,
         "aes-256-gcm".into(),
         "seep-test-password".into(),
+        None,
+        None,
     )
     .unwrap();
     let udp = ShadowsocksUdpConnector::from_connector(&conn);
@@ -109,6 +113,8 @@ async fn ss_udp_assoc_preserves_fixed_target_downlink_source() {
         server_port,
         "aes-256-gcm".into(),
         "seep-test-password".into(),
+        None,
+        None,
     )
     .unwrap();
     let udp = ShadowsocksUdpConnector::from_connector(&conn);

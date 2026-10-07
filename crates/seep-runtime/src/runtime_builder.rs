@@ -2188,17 +2188,27 @@ fn build_udp_connectors(
                 port,
                 method,
                 password,
+                plugin,
+                ..
             } => {
-                // 复用 TCP 面连接器的构建期校验（加密方法解析在 new 内完成），
-                // 保证 UDP 面与 TCP 面同一份 server_config
-                let conn = ShadowsocksConnector::new(
-                    server.clone(),
-                    *port,
-                    method.clone(),
-                    password.clone(),
-                )
-                .with_context(|| format!("节点 {} 的 shadowsocks 配置无效", desc.name))?;
-                Some(Arc::new(ShadowsocksUdpConnector::from_connector(&conn)))
+                // plugin 模式（SIP003）UDP 判负：SIP003 仅定义 TCP 数据面，
+                // 该节点 UDP 需求由 scan_udp_capability 按既有口径构建期报错
+                if plugin.is_some() {
+                    None
+                } else {
+                    // 复用 TCP 面连接器的构建期校验（加密方法解析在 new 内完成），
+                    // 保证 UDP 面与 TCP 面同一份 server_config
+                    let conn = ShadowsocksConnector::new(
+                        server.clone(),
+                        *port,
+                        method.clone(),
+                        password.clone(),
+                        None,
+                        None,
+                    )
+                    .with_context(|| format!("节点 {} 的 shadowsocks 配置无效", desc.name))?;
+                    Some(Arc::new(ShadowsocksUdpConnector::from_connector(&conn)))
+                }
             }
             EgressConfig::Wireguard {
                 allowed_ips, mtu, ..
@@ -2522,12 +2532,16 @@ fn build_egress_outputs(
                 port,
                 method,
                 password,
+                plugin,
+                plugin_opts,
             } => {
                 let connector: Arc<dyn EgressConnector> = Arc::new(ShadowsocksConnector::new(
                     server.clone(),
                     *port,
                     method.clone(),
                     password.clone(),
+                    plugin.clone(),
+                    plugin_opts.clone(),
                 )?);
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
@@ -4033,6 +4047,8 @@ mod tests {
             port: 8388,
             method: "aes-256-gcm".into(),
             password: "pw".into(),
+            plugin: None,
+            plugin_opts: None,
         }
     }
 

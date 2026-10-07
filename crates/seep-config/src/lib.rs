@@ -1304,6 +1304,13 @@ pub enum EgressConfig {
         port: u16,
         method: String,
         password: String,
+        /// SIP003 插件可执行名（如 v2ray-plugin / obfs-local）；None = 直连
+        /// SS 协议（shadowsocks crate）。插件模式下 TCP 数据面由插件进程桥接。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        plugin: Option<String>,
+        /// SIP003 插件参数（空格分词后作为插件 argv 追加；语义由插件自解析）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        plugin_opts: Option<String>,
     },
     Vmess {
         server: String,

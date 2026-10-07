@@ -196,12 +196,22 @@ fn proxy_mapping(
             port,
             method,
             password,
+            plugin,
+            plugin_opts,
         } => {
             ins(&mut m, "type", "ss");
             ins(&mut m, "server", server);
             ins(&mut m, "port", *port as u64);
             ins(&mut m, "cipher", method);
             ins(&mut m, "password", password);
+            // SIP003 插件面无 Clash 等价表达（clash 侧 plugin-opts 为 map，
+            // 语义换算归后续批）：插件字段降级不导出
+            degrade(
+                report,
+                name,
+                plugin.is_some() || plugin_opts.is_some(),
+                "shadowsocks.plugin/plugin_opts 无 Clash 对应",
+            );
             Some(m)
         }
         EgressConfig::Vmess {
@@ -684,6 +694,8 @@ mod tests {
                         port: 8388,
                         method: "aes-256-gcm".into(),
                         password: "pass-ss".into(),
+                        plugin: None,
+                        plugin_opts: None,
                     },
                 },
                 EgressDescriptor {

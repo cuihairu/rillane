@@ -77,6 +77,10 @@ pub struct ClashProxy {
     /// 加密方法（用于 Shadowsocks）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cipher: Option<String>,
+    /// Shadowsocks: SIP003 插件名（捕获以防静默丢；导入时拒导——服务端开
+    /// 混淆后直连必败，宁缺毋滥，映射表归后续批）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
     /// UUID（用于 VMess/VLESS）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
@@ -765,6 +769,15 @@ impl ClashConverter {
                 password: proxy.password.clone(),
             }),
             ClashProxyType::Ss => {
+                // plugin 模式拒导：SIP003 混淆由插件进程承载，直连 SS 协议对
+                // 开启插件的服务端必握手失败；宁缺毋滥（clash plugin-opts
+                // map → SIP003 argv 的逐插件换算归后续批）
+                if proxy.plugin.is_some() {
+                    return Err(anyhow!(
+                        "Shadowsocks 节点 {} 带 plugin（SIP003 插件），暂不支持导入（直连无法通过混淆服务端）",
+                        proxy.name
+                    ));
+                }
                 let method = proxy
                     .cipher
                     .clone()
@@ -776,6 +789,8 @@ impl ClashConverter {
                     port: proxy.port,
                     method,
                     password,
+                    plugin: None,
+                    plugin_opts: None,
                 })
             }
             ClashProxyType::Vmess => {

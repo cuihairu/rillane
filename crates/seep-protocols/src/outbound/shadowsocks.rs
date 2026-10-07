@@ -1,6 +1,6 @@
 //! Shadowsocks 出口连接器实现（TCP 面 + UDP 面，udp-relay-path.md §3.3）
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use seep_core::udp::{EgressUdpConnector, UdpRelay};
 use seep_core::{
@@ -15,18 +15,42 @@ use shadowsocks::{
     relay::Address,
     ServerAddr,
 };
-use std::sync::Arc;
+use std::{
+    net::SocketAddr,
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    net::TcpStream,
+    process::{Child, Command},
+};
+
+/// 插件端口就绪探测时限（插件进程冷启动通常 <100ms，留慢环境余量）
+const PLUGIN_READY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Shadowsocks 出口连接器
 pub struct ShadowsocksConnector {
     server: String,
+    port: u16,
     method: String,
     context: SharedContext,
     server_config: ServerConfig,
+    /// SIP003 插件可执行名；None = shadowsocks crate 直连
+    plugin: Option<String>,
+    /// SIP003 插件参数（空格分词后作为插件 argv 追加）
+    plugin_opts: Option<String>,
 }
 
 impl ShadowsocksConnector {
-    pub fn new(server: String, port: u16, method: String, password: String) -> Result<Self> {
+    pub fn new(
+        server: String,
+        port: u16,
+        method: String,
+        password: String,
+        plugin: Option<String>,
+        plugin_opts: Option<String>,
+    ) -> Result<Self> {
         let context = shadowsocks::context::Context::new_shared(ServerType::Local);
         // 加密方法校验提前到构建期（udp-relay-path.md §3.1 能力扫描同口径：
         // 配置错误在启动时暴露，而非首个连接时）
@@ -34,9 +58,12 @@ impl ShadowsocksConnector {
 
         Ok(Self {
             server,
+            port,
             method,
             context,
             server_config,
+            plugin,
+            plugin_opts,
         })
     }
 
@@ -76,6 +103,33 @@ impl EgressConnector for ShadowsocksConnector {
             "通过 Shadowsocks 连接"
         );
 
+        // SIP003 插件桥模式：加密/混淆由插件进程负责，seep 只把客户端流量
+        // 原样送进插件本地端口（_bridge 持子进程句柄，函数收尾 drop 即 kill）
+        if let Some(plugin) = &self.plugin {
+            let (mut outbound, _bridge) = spawn_plugin(
+                plugin,
+                self.plugin_opts.as_deref(),
+                &self.server,
+                self.port,
+            )
+            .await
+            .with_context(|| format!("节点 {} 插件桥接失败", self.server))?;
+
+            let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                &mut flow.io,
+                &mut outbound,
+                seep_core::performance::relay_buffer(),
+                seep_core::performance::relay_buffer(),
+            )
+            .await
+            .context("双向转发失败")?;
+
+            return Ok(FlowReport {
+                upstream: up,
+                downstream: down,
+            });
+        }
+
         // 解析目标地址
         let target_addr = Address::DomainNameAddress(flow.target.host.clone(), flow.target.port);
 
@@ -99,6 +153,80 @@ impl EgressConnector for ShadowsocksConnector {
             downstream: down,
         })
     }
+}
+
+/// SIP003 插件桥（plugin 模式 TCP 数据面）：
+/// 插件进程按 SS_LOCAL_*/SS_REMOTE_* 环境变量约定自监听本地端口，seep 连该
+/// 端口把明文目标流量交给插件（SS 协议加密与混淆由插件完成）；子进程随连接
+/// 生命周期收尾（kill_on_drop）。
+///
+/// UDP 数据面不经插件（SIP003 仅定义 TCP）：plugin 模式下 UDP 能力判负，
+/// 由 `scan_udp_capability` 按既有口径构建期报错。
+struct PluginBridge {
+    #[allow(dead_code)] // 仅持句柄：drop → kill_on_drop 收尾子进程
+    child: Child,
+}
+
+/// 分配本地空闲端口（SIP003：插件自 bind SS_LOCAL_*；bind 后让位存在极小
+/// 竞速窗口，与 ss-local 同惯例）
+fn reserve_local_addr() -> Result<SocketAddr> {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = std_listener.local_addr()?;
+    drop(std_listener);
+    Ok(addr)
+}
+
+/// 等插件端口就绪并把就绪连接直接复用为 outbound（省一次重连，且探测连接
+/// 即数据面连接，对插件无副作用——未发数据的半开连接由插件 accept 正常处理）
+async fn wait_plugin_ready(local: SocketAddr, deadline: Duration) -> Result<TcpStream> {
+    let attempt = async {
+        loop {
+            match TcpStream::connect(local).await {
+                Ok(s) => return Ok(s),
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => return Err(anyhow!(e)),
+            }
+        }
+    };
+    match tokio::time::timeout(deadline, attempt).await {
+        Ok(res) => res,
+        Err(_) => bail!("插件端口在限时内未就绪: {local}"),
+    }
+}
+
+async fn spawn_plugin(
+    plugin: &str,
+    plugin_opts: Option<&str>,
+    server: &str,
+    server_port: u16,
+) -> Result<(TcpStream, PluginBridge)> {
+    let local = reserve_local_addr().context("分配插件本地端口失败")?;
+
+    let mut cmd = Command::new(plugin);
+    if let Some(opts) = plugin_opts {
+        // SIP003：opts 按空白分词后追加 argv；分号串（如 tls;host=x）保持单参数
+        cmd.args(opts.split_whitespace());
+    }
+    cmd.env("SS_LOCAL_HOST", local.ip().to_string())
+        .env("SS_LOCAL_PORT", local.port().to_string())
+        .env("SS_REMOTE_HOST", server)
+        .env("SS_REMOTE_PORT", server_port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("插件进程启动失败: {plugin}（检查 PATH 与可执行位）"))?;
+
+    let stream = wait_plugin_ready(local, PLUGIN_READY_TIMEOUT)
+        .await
+        .with_context(|| format!("插件 {plugin} 未在限时内监听 {local}"))?;
+
+    Ok((stream, PluginBridge { child }))
 }
 
 /// Shadowsocks UDP 出站连接器（udp-relay-path.md §3.3 R7）：
