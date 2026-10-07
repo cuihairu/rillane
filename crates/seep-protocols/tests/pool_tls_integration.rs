@@ -393,10 +393,12 @@ async fn spawn_trojan_ws_tls_server(
     let path_task = path_slot.clone();
     let host_task = host_slot.clone();
     tokio::spawn(async move {
+        let mut n = 0usize;
         loop {
             let Ok((tcp, _)) = listener.accept().await else {
                 break;
             };
+            n += 1;
             let acceptor = acceptor.clone();
             let hashes_task = hashes_task.clone();
             let path_task = path_task.clone();
@@ -405,6 +407,11 @@ async fn spawn_trojan_ws_tls_server(
                 let Ok(mut tls) = acceptor.accept(tcp).await else {
                     return;
                 };
+                if dead_first && n == 1 {
+                    // 死闲连接：TLS 握手完成后立即断开(无 close_notify),
+                    // 池借出侧 upgrade 首读即败 → D-11 stale 重拨触发面
+                    return;
+                }
 
                 // HTTP Upgrade 请求（读至头部结束符）
                 let mut buf: Vec<u8> = Vec::new();

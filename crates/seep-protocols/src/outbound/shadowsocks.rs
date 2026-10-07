@@ -325,6 +325,7 @@ impl UdpRelay for SsUdpRelay {
 mod tests {
     use super::*;
     use seep_core::{Flow, FlowId, FlowTarget};
+    use tokio::net::TcpListener as TokioListener;
 
     fn connector_with_plugin(plugin: Option<&str>) -> ShadowsocksConnector {
         ShadowsocksConnector::new(
@@ -382,7 +383,7 @@ mod tests {
     #[tokio::test]
     async fn wait_plugin_ready_reuses_listening_connection() {
         // 已监听端口：探测连接直接复用为 outbound（accept 半边保活）
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TokioListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let accept_task = tokio::spawn(async move { listener.accept().await });
 
