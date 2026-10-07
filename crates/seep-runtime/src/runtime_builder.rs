@@ -2625,6 +2625,16 @@ fn build_egress_outputs(
                 alpn,
                 tls_fingerprint,
             } => {
+                // flow（如 xtls-rprx-vision）不支持——构建期即拦（对齐 UDP 能力表
+                // §3.1 / VMess security 校验的构建期扫描惯例，不带伤等运行期首条
+                // 连接），错误含节点名；口径与 VlessConnector::forward 同为
+                // `is_some()` 即拒
+                if flow.is_some() {
+                    return Err(anyhow!(
+                        "VLESS 暂不支持 flow（例如 xtls-rprx-vision），请设置为 null/省略 (egress={})",
+                        desc.name
+                    ));
+                }
                 let connector: Arc<dyn EgressConnector> = Arc::new(VlessConnector::new(
                     server.clone(),
                     *port,
@@ -4037,6 +4047,47 @@ mod tests {
             alpn: None,
             tls_fingerprint: None,
         }
+    }
+
+    fn vless_spec() -> EgressConfig {
+        EgressConfig::Vless {
+            server: "127.0.0.1".into(),
+            port: 443,
+            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            flow: None,
+            network: "tcp".into(),
+            path: None,
+            host: None,
+            tls: false,
+            skip_cert_verify: false,
+            sni: None,
+            alpn: None,
+            tls_fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn build_egress_outputs_rejects_vless_flow_at_build_time() {
+        // flow 非 None 构建期即报错（节点名列出），与 forward() 首条连接同口径
+        let mut bad_flow = vless_spec();
+        if let EgressConfig::Vless { flow, .. } = &mut bad_flow {
+            *flow = Some("xtls-rprx-vision".to_string());
+        }
+        let egress = vec![node("vl-bad-flow", bad_flow)];
+        let err = build_egress_outputs(&egress, None, None)
+            .err()
+            .expect("flow 必须构建期报错");
+        assert!(
+            err.to_string().contains("flow") && err.to_string().contains("vl-bad-flow"),
+            "实际：{err}"
+        );
+
+        // flow 缺省照常装配
+        let egress = vec![node("vl-ok", vless_spec())];
+        let (outputs, connectors) =
+            build_egress_outputs(&egress, None, None).expect("无 flow 应装配成功");
+        assert!(outputs.contains_key("vl-ok"));
+        assert_eq!(connectors.get("vl-ok").expect("connector").name(), "vless");
     }
 
     #[test]
