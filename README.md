@@ -1,3 +1,5 @@
+[English](README.md) | [中文](README.zh.md)
+
 <p align="center">
   <img src="docs/public/logo.svg" width="100" alt="Seep logo" />
 </p>
@@ -5,7 +7,7 @@
 <h1 align="center">Seep</h1>
 
 <p align="center">
-  Rust 代理内核，灵感来自 sing-box / Clash / Surge。协议栈按 crate 拆分（core/config/routing/protocols/…），跨平台 glue 收在 platforms/，由一套 monorepo 维护。
+  A proxy kernel in Rust, inspired by sing-box / Clash / Surge. The protocol stack is split into crates (core/config/routing/protocols/…), cross-platform glue lives under platforms/, and everything is maintained in a single monorepo.
 </p>
 
 <p align="center">
@@ -41,17 +43,17 @@
   <img src="https://img.shields.io/badge/Grafana-dashboards-2ea44f" alt="Grafana dashboards" />
 </p>
 
-## Workspace 布局
+## Workspace Layout
 ```
-apps/        # seepd 守护进程、seepctl CLI
-crates/      # 可复用库 (core/config/routing/protocols/telemetry/platform/runtime/mesh/subscription/plugins/ffi)
-docs/        # 架构文档与 ADR
-platforms/   # 各平台集成脚手架 (Android/iOS/OpenWrt/desktop)
+apps/        # seepd daemon, seepctl CLI
+crates/      # reusable libraries (core/config/routing/protocols/telemetry/platform/runtime/mesh/subscription/plugins/ffi)
+docs/        # architecture documents and ADRs
+platforms/   # platform integration scaffolding (Android/iOS/OpenWrt/desktop)
 ```
 
-更多细节见 `docs/architecture.md`。
+See `docs/architecture.md` for details.
 
-## 快速开始
+## Quick Start
 ```bash
 cargo run -p seepd
 cargo run -p seepctl -- --help
@@ -63,10 +65,10 @@ cargo run -p seepctl -- nodes
 cargo run -p seepctl -- udp-probe --socks5 127.0.0.1:7890 --host example.com --port 53 --payload-hex 0001
 ```
 
-`seepd` 配置经 `SEEP_CONFIG` 环境变量指定（缺省 `config/seep.yaml`）；无 `--config` 旗标，多余命令行参数被忽略。平台模板的配置落位见 `platforms/` 各 README。
+`seepd` reads its configuration from the `SEEP_CONFIG` environment variable (default `config/seep.yaml`); there is no `--config` flag, and extra command-line arguments are ignored. For where each platform template expects its configuration, see the READMEs under `platforms/`.
 
-可选：`telemetry.enable_tracing=true` 时（`config/seep.yaml` 缺省为 `false`），在 `seepd` 进程环境中设置 `SEEP_CAPTURE_LOGS=1`，控制面会额外提供 `GET /logs`（用于 `seepctl diagnose` 抓取最近日志）；未开启时该端点返回 404。
+Optional: with `telemetry.enable_tracing=true` (the default in `config/seep.yaml` is `false`) and `SEEP_CAPTURE_LOGS=1` set in the `seepd` process environment, the control plane additionally serves `GET /logs` (used by `seepctl diagnose` to fetch recent logs); when tracing is disabled the endpoint returns 404.
 
-当前可用能力：提供 Socks5 / HTTP CONNECT / Mixed 入站 + Direct / Socks5 / HTTP CONNECT / Shadowsocks / Trojan / Hysteria2 / VLESS / VMess / WireGuard 出站的数据通道，可通过 `config/seep.yaml` 配置监听端口、认证信息与路由策略；UDP 数据面（socks5/mixed 的 UDP ASSOCIATE 中继，`udp:` 配置块，缺省关闭）支持入口级开关与全套超时/上限参数。
-后台控制接口默认监听 `control.api_bind`，可访问 `http://127.0.0.1:9090/flows` 查看入口/出口之间的累计流量统计（或 `seepctl stats`——尾部附 UDP 段：会话/中继字节/丢弃/过期/mesh 面），访问 `http://127.0.0.1:9090/udp/stats` 取 UDP JSON 快照，访问 `http://127.0.0.1:9090/nodes` 或 `seepctl nodes` 查看 mesh 节点注册信息；`seepctl udp-probe` 为 SOCKS5 UDP ASSOCIATE 联调探测（退出码 0-4，见 `--help`）。
-`seepctl import-clash` 会尝试完整转换 Clash 的 `proxies`/`proxy-groups`/`rules`（含 socks5/http/ss/trojan/vmess/vless/hysteria2/wireguard 等），运行时若遇到暂未实现的出站类型会在构建阶段报错提示。
+Currently available capabilities: a data plane connecting Socks5 / HTTP CONNECT / Mixed inbound to Direct / Socks5 / HTTP CONNECT / Shadowsocks / Trojan / Hysteria2 / VLESS / VMess / WireGuard outbound. Listening ports, authentication, and routing policy are configured through `config/seep.yaml`. The UDP data plane (UDP ASSOCIATE relay for socks5/mixed, the `udp:` config block, disabled by default) supports per-ingress switches and the full set of timeout/limit parameters.
+The control API listens on `control.api_bind` by default. Visit `http://127.0.0.1:9090/flows` for cumulative traffic statistics between inbound and outbound (or run `seepctl stats` — the tail carries a UDP section: sessions / relay bytes / dropped / expired / mesh plane), visit `http://127.0.0.1:9090/udp/stats` for the UDP JSON snapshot, and visit `http://127.0.0.1:9090/nodes` or run `seepctl nodes` for mesh node registration. `seepctl udp-probe` is a probing tool for SOCKS5 UDP ASSOCIATE (exit codes 0-4, see `--help`).
+`seepctl import-clash` attempts to fully convert Clash `proxies`/`proxy-groups`/`rules` (covering socks5/http/ss/trojan/vmess/vless/hysteria2/wireguard and others); if it encounters an outbound type that is not yet implemented, the runtime reports an explicit error at the build stage.
