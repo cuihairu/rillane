@@ -121,6 +121,7 @@ seepctl route status  [--endpoint URL]
 ## 5. 幂等 / 回滚 / 还原语义（状态机）
 
 - **apply 幂等**：所有步骤 `ip addr replace`/`ip route replace` 天然幂等；重复 apply 产生的 AppliedStep 内容相同——**去重记录**（同 argv 已在册则不重复入账，status 稳定）；测试 = 连续两次 apply 后 `ip route show` 中 include 前缀唯一且属性一致；
+- **fwmark escape 步骤（2026-10-05 出站 fwmark 批半边②落地）**：`network.egress_fwmark` ≠ 0 时 planner 在 addr/route 步骤之前追加两步——`FwmarkRule`（`ip rule add fwmark <mark> table 100`；iproute2 无 rule replace，重复 add 报 File exists **视为已生效**——EEXIST 容忍即幂等，不触发 E7 回滚，其余步骤不容忍）+ `EscapeRoute`（`ip route replace default <via_dev> table 100`；via_dev 取 probe main 表首条默认路由（`ip route show default table main` 首行 `default ` 后部分），无默认路由 → 跳过整个逃逸面不报错）；两步同入 AppliedStep 账目，E7 逆序回滚与 clear 还原均覆盖（undo = `ip rule del` / `ip route del default table 100`）；缺省 mark=0 或无默认路由时零新增步骤，与既有行为零差异；dry-run 的 planned 同样可见这两步。escape 表号固定 100（用户自定义段，避开 255/254/253 系统保留）；
 - **失败回滚**：apply 中某步非零退出 → 逆序撤销本批已执行步骤 → Err 响应携带 `rolled_back`（tun-dataplane E7 同机制，本条目把它暴露到 CLI 可见）；
 - **clear 还原**：逆序撤销全部在册步骤 → 清空 AppliedStep；无步骤时 Ok 空表（E8）；clear 后 TunIngress **继续运行**（数据面空转，包不再入 tun）——语义即用户所求，`status` 可见 `applied: []` + 设备 up；
 - **并发**：apply/clear 互斥串行（§2.3）；apply 后紧接 clear = 净还原；
@@ -183,7 +184,7 @@ seepctl route status  [--endpoint URL]
 | 6 | 裁决 | RoutingMode/priority/metric 等策略维度不在 config 暴露（MVP 语义唯一，转换处固定 `Ip`/`100+i`/`Some(0)`） |
 | 7 | 澄清 | "clear 完全还原" = 撤销 seep 所加 AppliedStep，非清空系统路由表 |
 | 8 | 范围 | seepd 的 `enable_mesh`/`enable_chain` 硬编码 true 不动（既有行为，另行条目） |
-| 9 | 修正 | todo 验收"apply 后 `ip rule`/路由表符合预期" → MVP 不触碰 ip rule（main 表显式路由口径，tun-dataplane §1.3） |
+| 9 | 修正 | todo 验收"apply 后 `ip rule`/路由表符合预期" → MVP 不触碰 ip rule（main 表显式路由口径，tun-dataplane §1.3）；**2026-10-05 fwmark 批半边②修订**：配置 `network.egress_fwmark` 后 apply 期即在表 100 建 `ip rule fwmark` 逃逸规则 + escape 表默认路由（§5 逃逸面，非全局接管——默认路由改写仍归 V2） |
 | 10 | 假设 | include 仅收网络前缀 CIDR（/32 表达主机路由）；`RouteDestination::Default`/`Host` 变体不进 schema（V2 全局接管用 Default） |
 | 11 | 偏差 | §2.3 `apply_desired(&cfg, dry_run)` 签名落地为 `apply_desired(dry_run)`——manager 构造期已持 `RoutingConfig`（`with_tun_config` 同期注入），cfg 参数无第二来源；返回 `Result<ApplyOutcome, ApplyFailure>` 类型化失败（E7 的 `rolled_back` 结构化负载 anyhow 装不下，端点直接消费） |
 | 12 | 偏差 | §2.3「build() 构造 `Arc<LinuxRouteManager>` 双句柄」落地为 `TunIngress::route_manager()` 访问器——TunIngress 属主化设备+路由（tun-dataplane §2.6 延续），控制面经访问器取同一 `Arc<TokioMutex<LinuxRouteManager>>`，无双实例风险；操作级互斥由该 TokioMutex（端点间/与 run() 启动-teardown 串行）+ manager 内部 `Mutex<Vec<AppliedRecord>>`（入账原子）双层承担 |
