@@ -76,12 +76,12 @@ tokio-socks = "0.5"
 # default-features=false：弃默认 hickory-dns（DNS 子系统）——出口连接器只用
 # config/context/crypto/relay 核心，hostname 解析走 shadowsocks 内建 tokio 回退；
 # 顺带 hickory-resolver/hickory-proto 出锁（Dependabot GHSA-3v94-mw7p-v465 / GHSA-q2qq-hmj6-3wpp）
-shadowsocks = { version = "1.21", default-features = false, features = ["aead-cipher"] }
+shadowsocks = { version = "1.25", default-features = false, features = ["aead-cipher"] }
 httparse = "1.9"
 http = "1.1"
 pin-project-lite = "0.2"
 hysteria2 = "0.1.6"
-defguard_wireguard_rs = "0.8.0"
+defguard_wireguard_rs = "0.11"
 x509-parser = "0.16"
 time = "0.3"
 # VMess AEAD（RustCrypto 面：GCM/ChaCha20Poly1305/SHAKE128/ECB 单块/IEEE CRC32）

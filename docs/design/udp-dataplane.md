@@ -189,7 +189,7 @@ pub trait UdpRelay: Send {
 
 ### 3.4 wireguard（`outbound/wireguard.rs`）
 
-- 复用：现有 `WireguardConnector` 的密钥/`allowed_ips`/接口配置（`defguard_wireguard_rs 0.8.0`），以及"目标 IP 必须落在 allowed_ips"的现有校验语义；
+- 复用：现有 `WireguardConnector` 的密钥/`allowed_ips`/接口配置（`defguard_wireguard_rs 0.11`），以及"目标 IP 必须落在 allowed_ips"的现有校验语义；
 - 新增：UDP 承载 = 构造 IP 包写入 WG 接口再回收——新增**轻量 IPv4/IPv6 + UDP 头构造器**（源地址 = WG 接口地址，已有 `address` 配置字段）；解析收包方向同理剥头还原 `FlowTarget`；
 - 共存：与 TCP over WG 共用同一 WG 接口与会话（WG 本身就是 L3，天然共轨）；
 - 风险 **R5**：现有 WG 实现依赖系统 WG 接口（内核态/特权操作），UDP 版本不改变该前提——集成测试需特权环境，与 P1 TUN 测试环境需求重合，合并建设。

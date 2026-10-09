@@ -9,11 +9,11 @@ use std::{net::IpAddr, str::FromStr, sync::Arc};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use defguard_wireguard_rs::{net::IpAddrMask, Userspace, WGApi};
-// Windows：defguard_wireguard_rs 0.8 `mod wgapi_userspace` 仅 #[cfg(unix)]——
+// Windows：defguard_wireguard_rs（0.8 起至今）`mod wgapi_userspace` 仅 #[cfg(unix)]——
 // `WGApi<Userspace>` 无 `WireguardInterfaceApi` impl（windows 侧仅 `WGApi<Kernel>`
 // 面向 wireguard-windows 服务），接口配置面符号仅 unix 编译（ensure_interface 门见下）
 #[cfg(not(windows))]
-use defguard_wireguard_rs::{host::Peer, key::Key, InterfaceConfiguration, WireguardInterfaceApi};
+use defguard_wireguard_rs::{key::Key, peer::Peer, InterfaceConfiguration, WireguardInterfaceApi};
 use seep_core::{
     EgressConnector, Flow, FlowContext, FlowReport, FlowTarget, RouteDecision, TargetProto,
 };
@@ -205,6 +205,8 @@ impl WireguardConnector {
                                         port: listen_port,
                                         peers: vec![peer.clone()],
                                         mtu,
+                                        // 0.11 起新增字段：None = 不动系统当前 FwMark
+                                        fwmark: None,
                                     };
 
                                     wgapi.configure_interface(&iface).map_err(|e| {
