@@ -1,4 +1,4 @@
-//! VLESS 出口连接器实现（TCP/TLS/WS）
+//! VLESS 出口连接器实现（TCP/TLS/WS/gRPC）
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -10,6 +10,7 @@ use seep_core::{EgressConnector, Flow, FlowReport, TargetProto};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
+use super::grpc::grpc_tunnel;
 use super::ws::{ws_client_handshake, WsClient};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
@@ -23,6 +24,7 @@ pub struct VlessConnector {
     network: String,
     path: Option<String>,
     host: Option<Vec<String>>,
+    grpc_service_name: Option<String>,
     tls: bool,
     skip_cert_verify: bool,
     sni: Option<String>,
@@ -47,6 +49,7 @@ impl VlessConnector {
         network: String,
         path: Option<String>,
         host: Option<Vec<String>>,
+        grpc_service_name: Option<String>,
         tls: bool,
         skip_cert_verify: bool,
         sni: Option<String>,
@@ -63,6 +66,7 @@ impl VlessConnector {
             network,
             path,
             host,
+            grpc_service_name,
             tls,
             skip_cert_verify,
             sni,
@@ -110,6 +114,17 @@ impl VlessConnector {
         } else {
             format!("/{path}")
         }
+    }
+
+    /// gRPC 服务名（network=grpc 必填；缺省/空串构建期由 runtime_builder
+    /// 校验，此处运行期兜底）
+    fn grpc_service_name(&self) -> Result<String> {
+        self.grpc_service_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("VLESS gRPC 缺少 grpc_service_name"))
     }
 
     fn uuid_bytes(&self) -> Result<[u8; 16]> {
@@ -278,6 +293,44 @@ impl VlessConnector {
                 };
                 self.relay_vless_over_ws(flow, ws).await
             }
+            "grpc" => {
+                let service = self.grpc_service_name()?;
+                // grpc 恒叠 TLS + ALPN h2（gRPC over TLS 语义），SNI 回退 server
+                if !self.tls {
+                    return Err(anyhow!("VLESS network=grpc 需叠 TLS（gRPC over TLS 语义）"));
+                }
+                let sni_actual = self.sni.clone().unwrap_or_else(|| self.server.clone());
+                let alpn_h2 = vec!["h2".to_string()];
+                let key = TransportKey::tls(
+                    &self.server,
+                    self.port,
+                    Some(&sni_actual),
+                    self.skip_cert_verify,
+                    &alpn_h2,
+                    self.fingerprint,
+                );
+
+                // 借出传输层（TLS 已由池侧建立）；gRPC 隧道借出后进行（§4.2）
+                let (boxed, first_lease) = pool
+                    .acquire(&key)
+                    .await
+                    .with_context(|| format!("连接 VLESS 服务器失败: {server_addr}"))?;
+                let tunnel = grpc_tunnel(boxed, &sni_actual, &service).await;
+                let (tunnel, _lease) = match tunnel {
+                    Ok(t) => (t, first_lease),
+                    Err(_) => {
+                        // 隧道握手失败 → stale 一次性重拨（D-11）
+                        drop(first_lease);
+                        pool.note_stale(&key);
+                        let (boxed, lease) = pool.acquire_fresh(&key).await?;
+                        let t = grpc_tunnel(boxed, &sni_actual, &service)
+                            .await
+                            .with_context(|| "VLESS over gRPC 隧道握手失败")?;
+                        (t, lease)
+                    }
+                };
+                self.relay_vless_over_grpc(flow, tunnel).await
+            }
             other => Err(anyhow!("暂不支持的 VLESS network: {}", other)),
         }
     }
@@ -397,6 +450,34 @@ impl VlessConnector {
                         .await
                 }
             }
+            "grpc" => {
+                let service = self.grpc_service_name()?;
+                // grpc 恒叠 TLS + ALPN h2（gRPC over TLS 语义），SNI 回退 server
+                if !self.tls {
+                    return Err(anyhow!("VLESS network=grpc 需叠 TLS（gRPC over TLS 语义）"));
+                }
+                let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
+                let connector = match &self.factory {
+                    Some(factory) => factory.connector(
+                        self.skip_cert_verify,
+                        &["h2".to_string()],
+                        self.fingerprint,
+                    )?,
+                    None => create_tls_connector_with_profile(
+                        self.skip_cert_verify,
+                        Some(&["h2".to_string()]),
+                        self.fingerprint,
+                    )?,
+                };
+                let server_name =
+                    rustls::pki_types::ServerName::try_from(sni.clone()).context("无效的 SNI")?;
+                let tls_stream = connector.connect(server_name, tcp).await?;
+
+                let tunnel = grpc_tunnel(tls_stream, &sni, &service)
+                    .await
+                    .with_context(|| "VLESS over gRPC 隧道握手失败")?;
+                self.relay_vless_over_grpc(flow, tunnel).await
+            }
             other => Err(anyhow!("暂不支持的 VLESS network: {}", other)),
         }
     }
@@ -489,6 +570,68 @@ impl VlessConnector {
 
         let (up, down) =
             tokio::try_join!(up_task, down_task).context("VLESS over WS 双向转发任务失败")?;
+        let up = up?;
+        let down = down?;
+
+        Ok(FlowReport {
+            upstream: up,
+            downstream: down,
+        })
+    }
+
+    /// VLESS over gRPC 双向转发（请求头 = 首条 gRPC 消息；响应头 [ver][opt_len]
+    /// [+opt] 经跨消息 read_exact 抽取；客户端 EOF → 零长 DATA + END_STREAM
+    /// 收尾——服务端按流对目标侧收尾，下行侧经 message None 语义同步收敛）。
+    async fn relay_vless_over_grpc(
+        &self,
+        flow: Flow,
+        tunnel: super::grpc::GrpcTunnel,
+    ) -> Result<FlowReport> {
+        let req = self.build_vless_tcp_request(&flow.target.host, flow.target.port)?;
+        let (mut grpc_r, mut grpc_w) = tunnel.split();
+        grpc_w.message(&req).await?;
+
+        // 响应头：Version(1) + OptLen(1) + Opt(OptLen)（跨消息边界拼凑）
+        let mut hdr = [0u8; 2];
+        grpc_r.read_exact(&mut hdr).await?;
+        let opt_len = hdr[1] as usize;
+        if opt_len > 0 {
+            let mut opt = vec![0u8; opt_len];
+            grpc_r.read_exact(&mut opt).await?;
+        }
+
+        let (mut client_r, mut client_w) = tokio::io::split(flow.io);
+
+        let up_task = tokio::spawn(async move {
+            let mut up: u64 = 0;
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                let n = client_r.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                grpc_w.message(&buf[..n]).await?;
+                up += n as u64;
+            }
+            let _ = grpc_w.finish().await;
+            Result::<u64>::Ok(up)
+        });
+
+        let down_task = tokio::spawn(async move {
+            let mut down: u64 = 0;
+            while let Some(msg) = grpc_r.message().await? {
+                if msg.is_empty() {
+                    continue;
+                }
+                client_w.write_all(&msg).await?;
+                down += msg.len() as u64;
+            }
+            let _ = client_w.shutdown().await;
+            Result::<u64>::Ok(down)
+        });
+
+        let (up, down) =
+            tokio::try_join!(up_task, down_task).context("VLESS over gRPC 双向转发任务失败")?;
         let up = up?;
         let down = down?;
 

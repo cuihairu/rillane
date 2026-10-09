@@ -873,6 +873,7 @@ impl ClashConverter {
                     network: proxy.network.clone().unwrap_or_else(|| "tcp".to_string()),
                     path: proxy.ws_path(),
                     host: proxy.ws_host().map(|h| vec![h]),
+                    grpc_service_name: proxy.grpc_service(),
                     tls: proxy.tls,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),
