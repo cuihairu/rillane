@@ -332,7 +332,7 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；Ha
 | 6 | 裁决 | 池/工厂进程级单例跨热更新共享；参数变更重启生效（D-10，先例 network-route O-hot） |
 | 7 | 裁决 | `connection_pool_size` 收编为全局容量缺省（D-8）——孤儿字段首个消费者，关闭态仍零消费零行为 |
 | 8 | 裁决 | stale = 一次性前台重拨，不做主动探活（D-11）：预建立连接上主动 read 有消费边界歧义（TLS post-handshake 消息），重试以更低复杂度覆盖同场景 |
-| 9 | 假设（已收口） | 集成测试自签证书生成方式 → **实施选定 rcgen dev-dep**（`generate_simple_self_signed` + rustls-pemfile 解析，M4 `54df7cc`）；并发验收面（判据 1–3 串行形态）已可复现 |
+| 9 | 假设（已收口） | 集成测试自签证书生成方式 → **实施选定 rcgen dev-dep**（`generate_simple_self_signed` + rustls-pemfile 解析，M4 `54df7cc`；2026-10-10 起 rustls-pemfile 出仓 RUSTSEC-2025-0134，解析改 rustls-pki-types `PemObject`）；并发验收面（判据 1–3 串行形态）已可复现 |
 | 10 | 假设（部分收口） | 预热/补充拨号的并发有界性由每键不变式保证（§5.2），不做全局拨号速率限流——串行验收已过（M4）；真并发压测依赖真实出口流量形态，本仓 loopback 集成测不构造，R-pool3 观测面（dials/idle/leased gauge）已备，登记待真实流量期核 |
 | 11 | 偏差 | §6.2 `keys[]` 不含 per-key `leased`：D-1 借出即消费下 leased 归全局 gauge 记账（`seep_pool_leased_connections`），分键 leased 无运营动作，`KeySnapshot{key,idle}` 即终形（M4） |
 | 12 | 偏差 | `acquire_bound` 的 bind 闭包取 `FnMut(&mut dyn IoStream) -> Pin<Box<dyn Future>>` 装箱形而非 `AsyncFnMut`：当前 rustc（1.99）对 async 闭包 HRTB 泛化不过（"AsyncFnMut is not general enough"），装箱 future + `&mut dyn`（非 `&mut BoxedIo`——Box 内层 'static 固定）为稳定习语（tower service 同形，M2） |

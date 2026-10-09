@@ -210,6 +210,9 @@
   过程修复四笔：h2 单测挂死（客户端缺 shutdown 无 END_STREAM，服务端 read_to_end 不收敛——补 `stream.shutdown().await`）；vmess h2 回环 "stream no longer needed"（协议段服务器包 h2 流后必须显式 shutdown 发 END_STREAM，TCP 语境任务结束即关 socket 的惯例在 h2 语境掉流被 RST 连坐客户端读写半——per-stream 任务按引用 serve 后补 shutdown，本批新教训④）；vless h2 集成 echo 断言（mock 把 38B 请求头一并回显——hdr_skip 模式按 atyp 解析头长跳过）；clash `ClashH2Opts` 字段级 serde_as 缺容器级 `#[serde_as]` 编译红。
   验收：`cargo test --workspace --all-features` 全绿 0 失败；`cargo clippy --all-targets --all-features -- -D warnings` 全仓零警告；`cargo fmt --all -- --check` 全绿；CI 实跑绿为准。
 
+- [x] **rustls-pemfile 出仓（RUSTSEC-2025-0134）+ UDP 能力报错口径过时修正**（2026-10-10 登记；同日落地）：待派收尾两小件。①`rustls-pemfile` unmaintained（RUSTSEC-2025-0134）为 workspace 直依（seep-runtime 常规依赖 + seep-protocols dev-dep）——继任 `rustls-pki-types`（锁内既有 1.13.1，`PemObject` API 自 1.11）经 rustls 0.23 `pki_types` 重导出零新增依赖直迁：`mesh_transport.rs` `load_cert_chain/load_private_key`（文件面 `pem_file_iter`，私钥保留 "no private key found in {path}" 诊断口径）+ `pool_tls_integration.rs` 4 处 mock（内存面 `pem_slice_iter`/`from_pem_slice`）；workspace/Cargo.toml 三处声明删除，锁内 rustls-pemfile 清零。audit 剩 2 条 warning 均传递依赖（paste←defguard_wireguard_rs、spin←shadowsocks），上游面不可本地修，如实登记。②`scan_udp_capability` 错误消息「hysteria2 待 P0-4」过时（P0-4 已收口改判 V2）→「hysteria2 归 V2，载具 quinn 未决」。
+  验收：`cargo test --workspace --all-features` 全绿 0 失败；`cargo clippy --all-targets --all-features -- -D warnings` 零警告；`cargo fmt --all -- --check` 全绿；`cargo audit` 仅剩 paste/spin 两条传递 warning（无漏洞）；Cargo.lock rustls-pemfile 计数 0。
+
 ---
 
 ## 统计
