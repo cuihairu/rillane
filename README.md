@@ -28,8 +28,8 @@
   <img src="https://img.shields.io/badge/Direct-TCP%20%2B%20UDP-2ea44f" alt="Direct" />
   <img src="https://img.shields.io/badge/Shadowsocks-TCP%20%2B%20UDP-2ea44f" alt="Shadowsocks" />
   <img src="https://img.shields.io/badge/Trojan-TLS-2ea44f" alt="Trojan" />
-  <img src="https://img.shields.io/badge/VLESS-tcp%2Fws-2ea44f" alt="VLESS" />
-  <img src="https://img.shields.io/badge/VMess-AEAD%20tcp%2Fws-2ea44f" alt="VMess" />
+  <img src="https://img.shields.io/badge/VLESS-tcp%2Fws%2Fgrpc%2Fh2-2ea44f" alt="VLESS" />
+  <img src="https://img.shields.io/badge/VMess-AEAD%20tcp%2Fws%2Fgrpc%2Fh2-2ea44f" alt="VMess" />
   <img src="https://img.shields.io/badge/Hysteria2-TCP-2ea44f" alt="Hysteria2" />
   <img src="https://img.shields.io/badge/WireGuard-TCP%20%2B%20UDP-2ea44f" alt="WireGuard" />
   <img src="https://img.shields.io/badge/egress%20proxy-SOCKS5%20%2B%20HTTP-2ea44f" alt="egress SOCKS5 + HTTP" />
