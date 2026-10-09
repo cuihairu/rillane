@@ -197,6 +197,15 @@ pub struct ClashProxy {
         alias = "grpc_opts"
     )]
     pub grpc_opts: Option<ClashGrpcOpts>,
+    /// HTTP/2 传输选项（Clash 规范块键 `h2-opts`；network=h2 时的 path/host）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "h2-opts",
+        alias = "h2_opts",
+        alias = "h2Options"
+    )]
+    pub h2_opts: Option<ClashH2Opts>,
 }
 
 /// Clash `ws-opts` 子块（vmess/vless 的 ws 传输）
@@ -236,6 +245,19 @@ pub struct ClashGrpcOpts {
         alias = "service-name"
     )]
     pub grpc_service_name: Option<String>,
+}
+
+/// Clash `h2-opts` 子块（vmess/vless 的 HTTP/2 传输）
+#[serde_as]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClashH2Opts {
+    /// 请求路径
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Host/authority 列表（Clash 规范为数组；单值变体 OneOrMany 兜底）
+    #[serde_as(as = "Option<serde_with::OneOrMany<_>>")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<Vec<String>>,
 }
 
 /// Clash 代理组类型
@@ -308,6 +330,27 @@ impl ClashProxy {
             .as_ref()
             .and_then(|g| g.grpc_service_name.clone())
             .filter(|s| !s.is_empty())
+    }
+
+    /// h2 请求路径：平铺 `path` 优先（少数变体口径），否则 `h2-opts.path`。
+    /// 空串按缺省处理（h2 节点 path 缺失即 `/`）。
+    pub fn h2_path(&self) -> Option<String> {
+        self.path
+            .clone()
+            .filter(|p| !p.is_empty())
+            .or_else(|| self.h2_opts.as_ref().and_then(|h| h.path.clone()))
+            .filter(|p| !p.is_empty())
+    }
+
+    /// h2 Host/authority 列表：`h2-opts.host`（数组规范；单值变体已由
+    /// OneOrMany 收敛），平铺 `host` 单值兜底。空列表/空串按缺省处理
+    /// （authority 回落链 sni → server 由连接器侧负责）。
+    pub fn h2_hosts(&self) -> Option<Vec<String>> {
+        self.h2_opts
+            .as_ref()
+            .and_then(|h| h.host.clone())
+            .filter(|v| !v.is_empty())
+            .or_else(|| self.host.clone().filter(|h| !h.is_empty()).map(|h| vec![h]))
     }
 }
 
@@ -838,6 +881,15 @@ impl ClashConverter {
                     .clone()
                     .ok_or_else(|| anyhow!("VMess 缺少 UUID"))?;
                 let alter_id = 0; // Clash 默认 alterId 为 0
+                let network = proxy.network.clone().unwrap_or_else(|| "tcp".to_string());
+                // path/host 取值随传输面分派：ws 走 ws-opts 口径，h2 走
+                // h2-opts 口径（host 为数组）；其余 network 不消费两字段
+                let is_h2 = network == "h2";
+                let (path, host) = if is_h2 {
+                    (proxy.h2_path(), proxy.h2_hosts())
+                } else {
+                    (proxy.ws_path(), proxy.ws_host().map(|h| vec![h]))
+                };
 
                 Ok(EgressConfig::Vmess {
                     server: proxy.server.clone(),
@@ -845,9 +897,9 @@ impl ClashConverter {
                     uuid,
                     alter_id,
                     security: proxy.encrypt.clone().unwrap_or_else(|| "auto".to_string()),
-                    network: proxy.network.clone().unwrap_or_else(|| "tcp".to_string()),
-                    path: proxy.ws_path(),
-                    host: proxy.ws_host().map(|h| vec![h]),
+                    network,
+                    path,
+                    host,
                     grpc_service_name: proxy.grpc_service(),
                     tls: proxy.tls,
                     skip_cert_verify: proxy.skip_cert_verify,
@@ -865,15 +917,22 @@ impl ClashConverter {
                     .uuid
                     .clone()
                     .ok_or_else(|| anyhow!("VLESS 缺少 UUID"))?;
+                let network = proxy.network.clone().unwrap_or_else(|| "tcp".to_string());
+                let is_h2 = network == "h2";
+                let (path, host) = if is_h2 {
+                    (proxy.h2_path(), proxy.h2_hosts())
+                } else {
+                    (proxy.ws_path(), proxy.ws_host().map(|h| vec![h]))
+                };
 
                 Ok(EgressConfig::Vless {
                     server: proxy.server.clone(),
                     port: proxy.port,
                     uuid,
                     flow: None, // Clash VLESS 通常不使用 flow
-                    network: proxy.network.clone().unwrap_or_else(|| "tcp".to_string()),
-                    path: proxy.ws_path(),
-                    host: proxy.ws_host().map(|h| vec![h]),
+                    network,
+                    path,
+                    host,
                     grpc_service_name: proxy.grpc_service(),
                     tls: proxy.tls,
                     skip_cert_verify: proxy.skip_cert_verify,
@@ -1689,6 +1748,85 @@ rules: []
 
         assert_eq!(grab("vm-grpc"), ("grpc".into(), Some("GunService".into())));
         assert_eq!(grab("tr-grpc"), ("grpc".into(), Some("TrSvc".into())));
+    }
+
+    #[test]
+    fn test_h2_opts_converted_for_vmess_and_vless() {
+        // h2 传输：Clash 规范块键 h2-opts.host（标量或数组）/h2-opts.path →
+        // 平铺 path/host 字段（network=h2 缺 path 由协议连接器握手期报错）
+        let yaml_content = r#"
+proxies:
+  - name: "vm-h2"
+    type: vmess
+    server: 127.0.0.1
+    port: 8446
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    network: h2
+    tls: true
+    servername: vm.test
+    h2-opts:
+      host:
+        - cdn.example.com
+      path: /h2path
+  - name: "vl-h2"
+    type: vless
+    server: 127.0.0.1
+    port: 8447
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    network: h2
+    tls: true
+    servername: vl.test
+    h2-opts:
+      host: [alt.example.com]
+      path: /h2vl
+
+proxy-groups: []
+rules: []
+        "#;
+
+        let converter = ClashConverter::new();
+        let clash = converter.parse(yaml_content).unwrap();
+        let seep = converter.convert_to_seep(&clash).unwrap();
+
+        let grab = |name: &str| -> (String, Option<String>, Option<Vec<String>>) {
+            let egress = seep
+                .egress
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("缺少出口 {name}"));
+            match &egress.spec {
+                EgressConfig::Vmess {
+                    network,
+                    path,
+                    host,
+                    ..
+                }
+                | EgressConfig::Vless {
+                    network,
+                    path,
+                    host,
+                    ..
+                } => (network.clone(), path.clone(), host.clone()),
+                other => panic!("unexpected egress config: {other:?}"),
+            }
+        };
+
+        assert_eq!(
+            grab("vm-h2"),
+            (
+                "h2".into(),
+                Some("/h2path".into()),
+                Some(vec!["cdn.example.com".into()])
+            )
+        );
+        assert_eq!(
+            grab("vl-h2"),
+            (
+                "h2".into(),
+                Some("/h2vl".into()),
+                Some(vec!["alt.example.com".into()])
+            )
+        );
     }
 
     #[test]

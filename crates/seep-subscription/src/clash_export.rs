@@ -249,6 +249,7 @@ fn proxy_mapping(
                 ins(&mut m, "alpn", a.clone());
             }
             ws_opts(&mut m, network, path.as_deref(), host.as_deref());
+            h2_opts(&mut m, network, path.as_deref(), host.as_deref());
             if network == "grpc" {
                 if let Some(svc) = grpc_service_name {
                     let mut gopts = Mapping::new();
@@ -299,6 +300,7 @@ fn proxy_mapping(
                 ins(&mut m, "alpn", a.clone());
             }
             ws_opts(&mut m, network, path.as_deref(), host.as_deref());
+            h2_opts(&mut m, network, path.as_deref(), host.as_deref());
             if network == "grpc" {
                 if let Some(svc) = grpc_service_name {
                     let mut gopts = Mapping::new();
@@ -516,6 +518,25 @@ fn ws_opts(m: &mut Mapping, network: &str, path: Option<&str>, host: Option<&[St
         }
     }
     ins(m, "ws-opts", ws);
+}
+
+/// h2 传输导出：`network: h2` + `h2-opts` 块（host 数组 + path）。
+/// trojan 无 h2 传输（Clash 同口径），不调用本助手。
+fn h2_opts(m: &mut Mapping, network: &str, path: Option<&str>, host: Option<&[String]>) {
+    if network != "h2" {
+        return;
+    }
+    ins(m, "network", "h2");
+    let mut h = Mapping::new();
+    if let Some(p) = path {
+        ins(&mut h, "path", p);
+    }
+    if let Some(hosts) = host {
+        if !hosts.is_empty() {
+            ins(&mut h, "host", hosts.to_vec());
+        }
+    }
+    ins(m, "h2-opts", h);
 }
 
 fn condition_to_rules(cond: &MatchCondition, target: &str, rules: &mut Vec<String>) {
@@ -939,6 +960,34 @@ mod tests {
             yaml.contains("grpc-opts:") && yaml.contains("grpc-service-name: GunService"),
             "{yaml}"
         );
+        assert!(!yaml.contains("ws-opts:"), "{yaml}");
+    }
+
+    #[test]
+    fn h2_opts_exported_for_h2_network() {
+        let mut cfg = sample_config();
+        if let EgressConfig::Vmess {
+            network,
+            path,
+            host,
+            grpc_service_name,
+            ..
+        } = &mut cfg.egress[1].spec
+        {
+            *network = "h2".into();
+            *path = Some("/h2path".into());
+            *host = Some(vec!["cdn.example.com".into()]);
+            *grpc_service_name = None;
+        }
+        let (yaml, _) = ClashExporter.export(&cfg).unwrap();
+        assert!(yaml.contains("network: h2"), "{yaml}");
+        assert!(
+            yaml.contains("h2-opts:")
+                && yaml.contains("path: /h2path")
+                && yaml.contains("cdn.example.com"),
+            "{yaml}"
+        );
+        assert!(!yaml.contains("grpc-opts:"), "{yaml}");
         assert!(!yaml.contains("ws-opts:"), "{yaml}");
     }
 }

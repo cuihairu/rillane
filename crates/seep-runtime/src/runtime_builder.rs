@@ -2403,13 +2403,22 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Result<Vec<TransportKey>
                 let fp = parse_egress_fingerprint(tls_fingerprint, &desc.name)?;
                 // tcp 主键实际 SNI = sni ∥ server（与 forward_pooled tcp 分支同源）
                 let tcp_sni = sni.clone().unwrap_or_else(|| server.clone());
-                if network == "grpc" {
-                    // grpc 键 ALPN 固定 h2（gRPC over TLS 语义）；grpc 节点上
-                    // tcp/ws 借出键不存在，只推在用键
+                if network == "grpc" || network == "h2" {
+                    // grpc/h2 键 ALPN 固定 h2（gRPC/h2 over TLS 语义）；此类
+                    // 节点上 tcp/ws 借出键不存在，只推在用键。SNI 回退链随
+                    // 传输面：grpc = sni ∥ server，h2 同 ws（host 首值 → sni
+                    // → server，与 forward_pooled h2 分支同源）
+                    let h2_sni = if network == "h2" {
+                        sni.clone()
+                            .or_else(|| host.as_ref().and_then(|v| v.first().cloned()))
+                            .unwrap_or_else(|| server.clone())
+                    } else {
+                        tcp_sni.clone()
+                    };
                     keys.push(TransportKey::tls(
                         server,
                         *port,
-                        Some(&tcp_sni),
+                        Some(&h2_sni),
                         *skip_cert_verify,
                         &["h2".to_string()],
                         fp,
@@ -2456,13 +2465,22 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Result<Vec<TransportKey>
                 let fp = parse_egress_fingerprint(tls_fingerprint, &desc.name)?;
                 // tcp 主键实际 SNI = sni ∥ server
                 let tcp_sni = sni.clone().unwrap_or_else(|| server.clone());
-                if network == "grpc" {
-                    // grpc 键 ALPN 固定 h2（gRPC over TLS 语义）；grpc 节点上
-                    // tcp/ws 借出键不存在，只推在用键
+                if network == "grpc" || network == "h2" {
+                    // grpc/h2 键 ALPN 固定 h2（gRPC/h2 over TLS 语义）；此类
+                    // 节点上 tcp/ws 借出键不存在，只推在用键。SNI 回退链随
+                    // 传输面：grpc = sni ∥ server，h2 同 ws（host 首值 → sni
+                    // → server，与 forward_pooled h2 分支同源）
+                    let h2_sni = if network == "h2" {
+                        sni.clone()
+                            .or_else(|| host.as_ref().and_then(|v| v.first().cloned()))
+                            .unwrap_or_else(|| server.clone())
+                    } else {
+                        tcp_sni.clone()
+                    };
                     keys.push(TransportKey::tls(
                         server,
                         *port,
-                        Some(&tcp_sni),
+                        Some(&h2_sni),
                         *skip_cert_verify,
                         &["h2".to_string()],
                         fp,
@@ -2714,7 +2732,8 @@ fn build_egress_outputs(
                         desc.name
                     ));
                 }
-                // network=grpc 需非空服务名（恒叠 TLS，ALPN 固定 h2）
+                // network=grpc 需非空服务名（恒叠 TLS，ALPN 固定 h2）；
+                // network=h2 恒叠 TLS（mihomo 口径 h2 仅 TLS）
                 if network == "grpc" {
                     let svc = grpc_service_name.as_deref().map(str::trim).unwrap_or("");
                     if svc.is_empty() {
@@ -2729,6 +2748,12 @@ fn build_egress_outputs(
                             desc.name
                         ));
                     }
+                }
+                if network == "h2" && !*tls {
+                    return Err(anyhow!(
+                        "VLESS network=h2 需叠 TLS（h2 over TLS 语义） (egress={})",
+                        desc.name
+                    ));
                 }
                 let connector: Arc<dyn EgressConnector> = Arc::new(VlessConnector::new(
                     server.clone(),
@@ -2771,8 +2796,9 @@ fn build_egress_outputs(
                 tls_fingerprint,
             } => {
                 // build-time validation: security parse, alter_id==0, network
-                // tcp/ws/grpc（clash 侧 network 只产 tcp/ws，见 clash.rs convert
-                // 方；"websocket" 长形与 vless 口径一致予以兼容；grpc 需服务名）
+                // tcp/ws/grpc/h2（clash 侧 network 只产 tcp/ws/h2，见
+                // clash.rs convert 方；"websocket" 长形与 vless 口径一致予以
+                // 兼容；grpc 需服务名）
                 let parsed_security = VmessSecurity::parse(security)?;
                 if *alter_id != 0 {
                     return Err(anyhow!(
@@ -2784,9 +2810,10 @@ fn build_egress_outputs(
                     && network != "ws"
                     && network != "websocket"
                     && network != "grpc"
+                    && network != "h2"
                 {
                     return Err(anyhow!(
-                        "VMess network 仅支持 tcp/ws/grpc，当前: {}",
+                        "VMess network 仅支持 tcp/ws/grpc/h2，当前: {}",
                         network
                     ));
                 }
@@ -2804,6 +2831,12 @@ fn build_egress_outputs(
                             desc.name
                         ));
                     }
+                }
+                if network == "h2" && !*tls {
+                    return Err(anyhow!(
+                        "VMess network=h2 需叠 TLS（h2 over TLS 语义） (egress={})",
+                        desc.name
+                    ));
                 }
                 let connector: Arc<dyn EgressConnector> = Arc::new(VmessConnector::new(
                     server.clone(),
