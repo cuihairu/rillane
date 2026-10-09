@@ -71,7 +71,6 @@ serde_with = "3.8"
 tokio-rustls = "0.26"
 rustls = "0.23"
 webpki-roots = "0.26"
-rustls-pemfile = "2.2"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 tokio-socks = "0.5"
 # default-features=false：弃默认 hickory-dns（DNS 子系统）——出口连接器只用

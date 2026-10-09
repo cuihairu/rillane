@@ -17,6 +17,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
+use rustls::pki_types::pem::PemObject as _;
+
 const FLOWS: usize = 12;
 const PASSWORD: &str = "pool-tls-acceptance";
 
@@ -89,12 +91,11 @@ async fn spawn_trojan_tls_server() -> (
     let cert_pem = certified.cert.pem();
     let key_pem = certified.key_pair.serialize_pem();
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem.as_bytes())
             .collect::<Result<_, _>>()
             .expect("证书 PEM 解析");
-    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-        .expect("私钥读取")
-        .expect("PKCS8 私钥在位");
+    let key =
+        rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).expect("私钥读取");
 
     // 服务端与客户端同涉双提供方歧义：显式安装 ring（一次性；客户端工厂
     // 侧 tls.rs 亦同法，先到先装互尊重）
@@ -366,12 +367,11 @@ async fn spawn_trojan_ws_tls_server(
     let cert_pem = certified.cert.pem();
     let key_pem = certified.key_pair.serialize_pem();
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem.as_bytes())
             .collect::<Result<_, _>>()
             .expect("证书 PEM 解析");
-    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-        .expect("私钥读取")
-        .expect("PKCS8 私钥在位");
+    let key =
+        rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).expect("私钥读取");
 
     let provider = seep_tls_provider();
     let builder = rustls::ServerConfig::builder_with_provider(provider)
@@ -669,12 +669,11 @@ async fn spawn_trojan_grpc_tls_server() -> (
     let cert_pem = certified.cert.pem();
     let key_pem = certified.key_pair.serialize_pem();
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem.as_bytes())
             .collect::<Result<_, _>>()
             .expect("证书 PEM 解析");
-    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-        .expect("私钥读取")
-        .expect("PKCS8 私钥在位");
+    let key =
+        rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).expect("私钥读取");
 
     let provider = seep_tls_provider();
     let builder = rustls::ServerConfig::builder_with_provider(provider)
@@ -852,12 +851,11 @@ async fn spawn_vless_h2_tls_server() -> (
     let cert_pem = certified.cert.pem();
     let key_pem = certified.key_pair.serialize_pem();
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem.as_bytes())
             .collect::<Result<_, _>>()
             .expect("证书 PEM 解析");
-    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-        .expect("私钥读取")
-        .expect("PKCS8 私钥在位");
+    let key =
+        rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).expect("私钥读取");
 
     let provider = seep_tls_provider();
     let builder = rustls::ServerConfig::builder_with_provider(provider)

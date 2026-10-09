@@ -52,4 +52,3 @@ defguard_wireguard_rs.workspace = true
 [dev-dependencies]
 # §8.2 mock TLS 服务端（自签证书）
 rcgen.workspace = true
-rustls-pemfile.workspace = true

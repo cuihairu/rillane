@@ -5,8 +5,6 @@
 
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::{
-    fs::File,
-    io::BufReader,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
@@ -15,6 +13,7 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
+use rustls::pki_types::pem::PemObject;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -2258,9 +2257,8 @@ fn load_revoked_nodes(path: &PathBuf) -> Result<Vec<NodeId>> {
 }
 
 fn load_cert_chain(path: &PathBuf) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
-    let f = File::open(path)?;
-    let mut r = BufReader::new(f);
-    let certs = rustls_pemfile::certs(&mut r).collect::<Result<Vec<_>, _>>()?;
+    let certs =
+        rustls::pki_types::CertificateDer::pem_file_iter(path)?.collect::<Result<Vec<_>, _>>()?;
     if certs.is_empty() {
         return Err(anyhow!("no certificates found in {}", path.display()));
     }
@@ -2268,11 +2266,10 @@ fn load_cert_chain(path: &PathBuf) -> Result<Vec<rustls::pki_types::CertificateD
 }
 
 fn load_private_key(path: &PathBuf) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
-    let f = File::open(path)?;
-    let mut r = BufReader::new(f);
-    let key = rustls_pemfile::private_key(&mut r)?
-        .ok_or_else(|| anyhow!("no private key found in {}", path.display()))?;
-    Ok(key)
+    rustls::pki_types::PrivateKeyDer::pem_file_iter(path)?
+        .next()
+        .ok_or_else(|| anyhow!("no private key found in {}", path.display()))?
+        .map_err(|e| anyhow!("failed to parse private key {}: {e}", path.display()))
 }
 
 fn load_root_store(path: &PathBuf) -> Result<RootCertStore> {
