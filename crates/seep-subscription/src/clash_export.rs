@@ -223,6 +223,7 @@ fn proxy_mapping(
             network,
             path,
             host,
+            grpc_service_name,
             tls,
             skip_cert_verify,
             sni,
@@ -248,6 +249,13 @@ fn proxy_mapping(
                 ins(&mut m, "alpn", a.clone());
             }
             ws_opts(&mut m, network, path.as_deref(), host.as_deref());
+            if network == "grpc" {
+                if let Some(svc) = grpc_service_name {
+                    let mut gopts = Mapping::new();
+                    ins(&mut gopts, "grpc-service-name", svc.as_str());
+                    ins(&mut m, "grpc-opts", gopts);
+                }
+            }
             degrade(
                 report,
                 name,
@@ -696,6 +704,7 @@ mod tests {
                         network: "ws".into(),
                         path: Some("/ray".into()),
                         host: Some(vec!["cdn.example.com".into()]),
+                        grpc_service_name: None,
                         tls: true,
                         skip_cert_verify: false,
                         sni: Some("sni.example.com".into()),
@@ -908,5 +917,28 @@ mod tests {
             yaml.contains("path: /ray") && !yaml.contains("Host:"),
             "{yaml}"
         );
+    }
+
+    /// grpc 节点导出：grpc-opts.grpc-service-name 落块内键，ws-opts 不产
+    #[test]
+    fn grpc_opts_exported_for_grpc_network() {
+        let mut cfg = sample_config();
+        if let EgressConfig::Vmess {
+            network,
+            path,
+            grpc_service_name,
+            ..
+        } = &mut cfg.egress[1].spec
+        {
+            *network = "grpc".into();
+            *path = None;
+            *grpc_service_name = Some("GunService".into());
+        }
+        let (yaml, _) = ClashExporter.export(&cfg).unwrap();
+        assert!(
+            yaml.contains("grpc-opts:") && yaml.contains("grpc-service-name: GunService"),
+            "{yaml}"
+        );
+        assert!(!yaml.contains("ws-opts:"), "{yaml}");
     }
 }

@@ -1,5 +1,5 @@
 //! VMess 出站连接器实现（VMess AEAD 认证头 + AES-128-GCM / ChaCha20-Poly1305
-//! 数据面；tcp（可叠 TLS）/ ws（可叠 TLS）传输）
+//! 数据面；tcp（可叠 TLS）/ ws（可叠 TLS）/ gRPC（恒叠 TLS）传输）
 //!
 //! 依据 Xray-core 参考实现逐字段移植（proxy/vmess/aead/{kdf,authid,encrypt}.go、
 //! proxy/vmess/encoding/client.go、common/crypto/auth.go，main 与 v1.8.24 两版
@@ -52,6 +52,7 @@ use sha3::digest::{ExtendableOutput, XofReader};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
+use super::grpc::grpc_tunnel;
 use super::ws::{ws_client_handshake, WsReader, WsWriter};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
@@ -553,6 +554,15 @@ trait ChunkRead: Send {
     async fn exact(&mut self, out: &mut [u8]) -> Result<()>;
 }
 
+/// gRPC 消息流 → 字节流适配：跨消息边界拼凑语义见 GrpcReader::read_exact
+/// （消息边界与 vmess 块边界无对齐保证，同 ws）
+#[async_trait]
+impl ChunkRead for super::grpc::GrpcReader {
+    async fn exact(&mut self, out: &mut [u8]) -> Result<()> {
+        super::grpc::GrpcReader::read_exact(self, out).await
+    }
+}
+
 #[async_trait]
 impl<R: AsyncRead + Unpin + Send> ChunkRead for tokio::io::ReadHalf<R> {
     async fn exact(&mut self, out: &mut [u8]) -> Result<()> {
@@ -645,8 +655,20 @@ impl<W: AsyncWrite + Unpin + Send> ChunkWrite for WsWriter<W> {
     }
 }
 
+#[async_trait]
+impl ChunkWrite for super::grpc::GrpcWriter {
+    async fn put(&mut self, data: &[u8]) -> Result<()> {
+        super::grpc::GrpcWriter::message(self, data).await
+    }
+
+    /// 终止块为分块流信令；END_STREAM 面由上行 EOF 收尾处显式传播
+    async fn finish(&mut self) -> Result<()> {
+        super::grpc::GrpcWriter::finish(self).await
+    }
+}
+
 /// `&mut S`（S: AsyncWrite）的 ChunkWrite 面——测试侧回环服务端的直写复用
-/// （产线写面为 WriteHalf/WsWriter 两 impl）
+/// （产线写面为 WriteHalf/WsWriter/GrpcWriter 多 impl）
 #[cfg(test)]
 struct StreamSink<'a, S: ?Sized>(&'a mut S);
 
@@ -782,6 +804,7 @@ pub struct VmessConnector {
     network: String,
     path: Option<String>,
     host: Option<Vec<String>>,
+    grpc_service_name: Option<String>,
     tls: bool,
     skip_cert_verify: bool,
     sni: Option<String>,
@@ -807,6 +830,7 @@ impl VmessConnector {
         network: String,
         path: Option<String>,
         host: Option<Vec<String>>,
+        grpc_service_name: Option<String>,
         tls: bool,
         skip_cert_verify: bool,
         sni: Option<String>,
@@ -824,6 +848,7 @@ impl VmessConnector {
             network,
             path,
             host,
+            grpc_service_name,
             tls,
             skip_cert_verify,
             sni,
@@ -871,6 +896,17 @@ impl VmessConnector {
         } else {
             format!("/{path}")
         }
+    }
+
+    /// gRPC 服务名（network=grpc 必填；缺省/空串构建期由 runtime_builder
+    /// 校验，此处运行期兜底）
+    fn grpc_service_name(&self) -> Result<String> {
+        self.grpc_service_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("VMess gRPC 缺少 grpc_service_name"))
     }
 
     fn session(&self, target_host: &str, target_port: u16) -> Result<VmessSession> {
@@ -983,6 +1019,46 @@ impl VmessConnector {
                     }
                 };
                 self.relay_session_over_ws(flow, ws).await
+            }
+            "grpc" => {
+                let service = self.grpc_service_name()?;
+                // grpc 恒叠 TLS + ALPN h2（gRPC over TLS 语义），SNI 回退 server
+                if !self.tls {
+                    return Err(anyhow!("VMess network=grpc 需叠 TLS（gRPC over TLS 语义）"));
+                }
+                let sni_actual = self.sni.clone().unwrap_or_else(|| self.server.clone());
+                let alpn_h2 = vec!["h2".to_string()];
+                let key = TransportKey::tls(
+                    &self.server,
+                    self.port,
+                    Some(&sni_actual),
+                    self.skip_cert_verify,
+                    &alpn_h2,
+                    self.fingerprint,
+                );
+                let mut session = self.session(&flow.target.host, flow.target.port)?;
+
+                // 借出传输层（TLS 已由池侧建立）；gRPC 隧道借出后进行（§4.2）
+                let (boxed, first_lease) = pool
+                    .acquire(&key)
+                    .await
+                    .with_context(|| format!("连接 VMess 服务器失败: {server_addr}"))?;
+                let tunnel = grpc_tunnel(boxed, &sni_actual, &service).await;
+                let (tunnel, _lease) = match tunnel {
+                    Ok(t) => (t, first_lease),
+                    Err(_) => {
+                        // 隧道握手失败 → stale 一次性重拨（D-11）
+                        drop(first_lease);
+                        pool.note_stale(&key);
+                        let (boxed, lease) = pool.acquire_fresh(&key).await?;
+                        let t = grpc_tunnel(boxed, &sni_actual, &service)
+                            .await
+                            .with_context(|| "VMess over gRPC 隧道握手失败")?;
+                        (t, lease)
+                    }
+                };
+                self.relay_session_over_grpc(flow, tunnel, &mut session)
+                    .await
             }
             other => Err(anyhow!("暂不支持的 VMess network: {other}")),
         }
@@ -1102,6 +1178,35 @@ impl VmessConnector {
                         .await
                 }
             }
+            "grpc" => {
+                let service = self.grpc_service_name()?;
+                // grpc 恒叠 TLS + ALPN h2（gRPC over TLS 语义），SNI 回退 server
+                if !self.tls {
+                    return Err(anyhow!("VMess network=grpc 需叠 TLS（gRPC over TLS 语义）"));
+                }
+                let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
+                let mut session = self.session(&flow.target.host, flow.target.port)?;
+                let connector = match &self.factory {
+                    Some(factory) => factory.connector(
+                        self.skip_cert_verify,
+                        &["h2".to_string()],
+                        self.fingerprint,
+                    )?,
+                    None => create_tls_connector_with_profile(
+                        self.skip_cert_verify,
+                        Some(&["h2".to_string()]),
+                        self.fingerprint,
+                    )?,
+                };
+                let server_name =
+                    rustls::pki_types::ServerName::try_from(sni.clone()).context("无效的 SNI")?;
+                let tls_stream = connector.connect(server_name, tcp).await?;
+                let tunnel = grpc_tunnel(tls_stream, &sni, &service)
+                    .await
+                    .with_context(|| "VMess over gRPC 隧道握手失败")?;
+                self.relay_session_over_grpc(flow, tunnel, &mut session)
+                    .await
+            }
             other => Err(anyhow!("暂不支持的 VMess network: {other}")),
         }
     }
@@ -1198,6 +1303,94 @@ impl VmessConnector {
             let mut down: u64 = 0;
             loop {
                 let plain = read_chunk(resp_crypt, &mut msg_r).await?;
+                if plain.is_empty() {
+                    let _ = client_w.shutdown().await;
+                    break;
+                }
+                client_w.write_all(&plain).await?;
+                down += plain.len() as u64;
+            }
+            Ok::<u64, anyhow::Error>(down)
+        };
+
+        let (up, down) = tokio::try_join!(up, down)?;
+        Ok(FlowReport {
+            upstream: up,
+            downstream: down,
+        })
+    }
+
+    /// gRPC 传输（隧道完成后的协议段；池/内联同参）——会话已由调用方构建
+    async fn relay_session_over_grpc(
+        &self,
+        flow: Flow,
+        tunnel: super::grpc::GrpcTunnel,
+        session: &mut VmessSession,
+    ) -> Result<FlowReport> {
+        self.relay_session_over_grpc_with(flow, tunnel, session)
+            .await
+    }
+
+    /// VMess over gRPC：头‖首块合入首条 gRPC 消息（xray ws 同形语义——
+    /// 头独占一条消息服务端不产出下行，见 relay_session_over_ws_with 注）；
+    /// 响应头在下发任务内经跨消息 read_exact 抽取，随后分块流双向转发；
+    /// 上行 EOF → 终止块 + END_STREAM 收尾，下行至终止块关客户端写侧。
+    async fn relay_session_over_grpc_with(
+        &self,
+        flow: Flow,
+        tunnel: super::grpc::GrpcTunnel,
+        session: &mut VmessSession,
+    ) -> Result<FlowReport> {
+        let (mut grpc_r, mut grpc_w) = tunnel.split();
+        let expect_v = session.expect_v;
+        let resp_keys = session.resp_header_keys.clone();
+        let (mut client_r, mut client_w) = tokio::io::split(flow.io);
+
+        let req_crypt = &mut session.req_crypt;
+        let resp_crypt = &mut session.resp_crypt;
+        let sealed_header = std::mem::take(&mut session.sealed_header);
+
+        let up = async {
+            let mut up: u64 = 0;
+            let mut buf = vec![0u8; 16 * 1024];
+            let mut first = Some(sealed_header);
+            loop {
+                let n = client_r.read(&mut buf).await?;
+                if n == 0 {
+                    // 终止块：无数据则头‖终止块合一条消息，否则独条
+                    match first.take() {
+                        Some(header) => {
+                            let mut msg = header;
+                            append_chunk(req_crypt, &[], &mut msg)?;
+                            grpc_w.message(&msg).await?;
+                        }
+                        None => {
+                            write_chunk(req_crypt, &mut grpc_w, &[]).await?;
+                        }
+                    }
+                    grpc_w.finish().await?;
+                    break;
+                }
+                match first.take() {
+                    Some(header) => {
+                        let mut msg = header;
+                        append_chunk(req_crypt, &buf[..n], &mut msg)?;
+                        grpc_w.message(&msg).await?;
+                    }
+                    None => {
+                        write_chunk(req_crypt, &mut grpc_w, &buf[..n]).await?;
+                    }
+                }
+                up += n as u64;
+            }
+            Ok::<u64, anyhow::Error>(up)
+        };
+
+        let down = async {
+            read_response_header(&mut grpc_r, expect_v, &resp_keys).await?;
+            let mut down: u64 = 0;
+            loop {
+                let plain = read_chunk(resp_crypt, &mut grpc_r).await?;
                 if plain.is_empty() {
                     let _ = client_w.shutdown().await;
                     break;
@@ -1672,6 +1865,7 @@ mod tests {
             network.to_string(),
             Some("/ws".to_string()),
             None,
+            None,
             false,
             false,
             None,
@@ -1791,6 +1985,7 @@ mod tests {
             64,
             VmessSecurity::Aes128Gcm,
             "tcp".to_string(),
+            None,
             None,
             None,
             false,

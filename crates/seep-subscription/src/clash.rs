@@ -848,6 +848,7 @@ impl ClashConverter {
                     network: proxy.network.clone().unwrap_or_else(|| "tcp".to_string()),
                     path: proxy.ws_path(),
                     host: proxy.ws_host().map(|h| vec![h]),
+                    grpc_service_name: proxy.grpc_service(),
                     tls: proxy.tls,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),
@@ -1624,6 +1625,70 @@ rules: []
         let c2 = converter.parse(only_headers).unwrap();
         assert_eq!(c2.proxies[0].ws_path(), None);
         assert_eq!(c2.proxies[0].ws_host(), Some("h.test".to_string()));
+    }
+
+    #[test]
+    fn test_grpc_opts_service_name_converted() {
+        // grpc 传输：Clash 规范块键 grpc-opts.grpc-service-name →
+        // grpc_service_name（network=grpc 缺服务名由 RuntimeBuilder 构建期拦截）
+        let yaml_content = r#"
+proxies:
+  - name: "vm-grpc"
+    type: vmess
+    server: 127.0.0.1
+    port: 8446
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    network: grpc
+    tls: true
+    servername: vm.test
+    grpc-opts:
+      grpc-service-name: GunService
+  - name: "tr-grpc"
+    type: trojan
+    server: 127.0.0.1
+    port: 8447
+    password: pass
+    network: grpc
+    skip-cert-verify: true
+    grpc-opts:
+      grpc-service-name: TrSvc
+
+proxy-groups: []
+rules: []
+        "#;
+
+        let converter = ClashConverter::new();
+        let clash = converter.parse(yaml_content).unwrap();
+        let seep = converter.convert_to_seep(&clash).unwrap();
+
+        let grab = |name: &str| -> (String, Option<String>) {
+            let egress = seep
+                .egress
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("缺少出口 {name}"));
+            match &egress.spec {
+                EgressConfig::Vmess {
+                    network,
+                    grpc_service_name,
+                    ..
+                }
+                | EgressConfig::Vless {
+                    network,
+                    grpc_service_name,
+                    ..
+                }
+                | EgressConfig::Trojan {
+                    network,
+                    grpc_service_name,
+                    ..
+                } => (network.clone(), grpc_service_name.clone()),
+                other => panic!("unexpected egress config: {other:?}"),
+            }
+        };
+
+        assert_eq!(grab("vm-grpc"), ("grpc".into(), Some("GunService".into())));
+        assert_eq!(grab("tr-grpc"), ("grpc".into(), Some("TrSvc".into())));
     }
 
     #[test]

@@ -14,7 +14,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
 > | mesh UDP 多跳转发（UdpEnvelope over UDP 数据报） | **已实现（2026-09，P0-4）**：FULL/CACHED 跳缓存、exit per-flow socket、同端口双栈、明文门（chain+udp 未配加密构建期拒绝） | — |
 > | UDP 观测与联调（`seep_udp_*` 指标族 / `/udp/stats` / `seepctl stats` UDP 段 / `udp-probe`） | **已实现（2026-09，P0-5）**：`/metrics` 恒渲染（开关关闭全零、端点不消失）+ 入口级 `udp_enabled` 覆盖 + `udp:` 配置全字段 | — |
 > | 出站 UDP 承载（hy2） | 未实现（`hysteria2` 0.1.6 公开 API 无 UDP 出口；P0-4 已完成且**维持改判**） | V2（quinn 载具，未决） |
-> | 出站 vmess 连接器 | **已实现（2026-10）**：VMess AEAD 认证头（authID 时间窗+防重放）+ AES-128-GCM/ChaCha20-Poly1305 分块流数据面，tcp（可叠 TLS）/ws（可叠 TLS）；`alter_id=0` 限定，h2/gRPC 与 UDP 承载未实现 | todo「VMess 出站」条目 |
+> | 出站 vmess 连接器 | **已实现（2026-10）**：VMess AEAD 认证头（authID 时间窗+防重放）+ AES-128-GCM/ChaCha20-Poly1305 分块流数据面，tcp（可叠 TLS）/ws（可叠 TLS）/gRPC（恒叠 TLS）；`alter_id=0` 限定，h2 与 UDP 承载未实现 | todo「VMess 出站」条目 |
 > | hysteria v1 | **出站连接器未实现**（配置 schema 与订阅转换已支持，运行期构建期报错） | 无计划（仅 hy2） |
 > | 出站连接池 / TLS 会话恢复 | **已实现（2026-10，P1-5）**：`egress_pool:` 配置块 + 预建立/借出即消费池（trojan/http/vless + direct 选通）+ TLS 会话恢复（进程级共享 ClientConfig）+ `seep_pool_*`/`seep_tls_*` 指标 + `GET /egress/pool/stats` | — |
 > | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `seep_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
@@ -113,13 +113,14 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - 混淆和伪装
 
 ### VMess (V2Ray)
-> 状态：**已实现出站连接器（2026-10）**——VMess AEAD 认证头（authID = AES-ECB(unix 秒‖随机‖CRC32)，服务端 ±120s 时间窗 + 防重放）+ 分块流数据面（chunk-stream|chunk-masking|global-padding；SHAKE128(方向 IV) 出掩码与 padding 长度，**每块先抽 padding 再抽 mask**，块 nonce = 计数器‖IV[2..12] 递增）；KDF/请求头/封套/SHAKE 抽取序以 Xray-core kdf.go 原文实跑真值向量逐字节钉死（Go 1.27.1 对拍，V0–V16）。security 支持 `auto`/`aes-128-gcm`/`chacha20-poly1305`（xray AEAD 口径，legacy `alter_id>0` 与 none/zero 构建期拒绝）；传输 tcp（可叠 TLS/SNI/ALPN/指纹）与 ws（可叠 TLS，upgrade 失败 stale 一次性重拨）。h2/gRPC 传输未实现；UDP 承载未实现（构建期扫描即报错）。
+> 状态：**已实现出站连接器（2026-10）**——VMess AEAD 认证头（authID = AES-ECB(unix 秒‖随机‖CRC32)，服务端 ±120s 时间窗 + 防重放）+ 分块流数据面（chunk-stream|chunk-masking|global-padding；SHAKE128(方向 IV) 出掩码与 padding 长度，**每块先抽 padding 再抽 mask**，块 nonce = 计数器‖IV[2..12] 递增）；KDF/请求头/封套/SHAKE 抽取序以 Xray-core kdf.go 原文实跑真值向量逐字节钉死（Go 1.27.1 对拍，V0–V16）。security 支持 `auto`/`aes-128-gcm`/`chacha20-poly1305`（xray AEAD 口径，legacy `alter_id>0` 与 none/zero 构建期拒绝）；传输 tcp（可叠 TLS/SNI/ALPN/指纹）、ws（可叠 TLS，upgrade 失败 stale 一次性重拨）与 gRPC（2026-10：`network: grpc` + `grpc_service_name`，恒叠 TLS + ALPN h2，POST `/{service}/Tun` 单流隧道，请求头‖首块合入首条 gRPC 消息，5 字节长度前缀帧，16MiB 消息上限；池键携带 ALPN h2，隧道握手失败 stale 一次性重拨；订阅侧 clash `grpc-opts` 导入导出）。h2 传输未实现；UDP 承载未实现（构建期扫描即报错）。
 
 - **版本**: VMess (V2Ray Protocol)——AEAD 认证头（Xray-core 同源线形 authID‖sealedLen‖connNonce‖sealedHeader）
 - **安全**: auto / AES-128-GCM / ChaCha20-Poly1305（legacy MD5 认证与 none/zero 已随 xray 删除）
 - **传输层**:
   - TCP（可叠 TLS）
   - WebSocket (WS)（可叠 TLS）
+  - gRPC（恒叠 TLS，`grpc_service_name`）
 - **路径配置**:
   - 自定义路径（ws path，自动补 `/` 前缀）
   - Host 头部伪装（`host` 首值优先，回落 sni/server）
@@ -324,7 +325,7 @@ Seep 入口与主流代理客户端互通（SOCKS5/HTTP CONNECT 口径；入口�
 
 ### 未来计划
 - [ ] QUIC 协议原生代理
-- [ ] gRPC 协议支持
+- [x] gRPC 协议支持（2026-10：trojan/vless/vmess 出站 `network: grpc` 单流隧道）
 - [ ] eBPF 加速 (XDP)
 - [x] WebAssembly 协议插件（wasmtime 动态加载 + 示例插件，同 P3-2——[plugin-loader.md](design/plugin-loader.md)）
 - [ ] 自适应协议选择

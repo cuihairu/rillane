@@ -2456,27 +2456,40 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Result<Vec<TransportKey>
                 let fp = parse_egress_fingerprint(tls_fingerprint, &desc.name)?;
                 // tcp 主键实际 SNI = sni ∥ server
                 let tcp_sni = sni.clone().unwrap_or_else(|| server.clone());
-                keys.push(TransportKey::tls(
-                    server,
-                    *port,
-                    Some(&tcp_sni),
-                    *skip_cert_verify,
-                    alpn,
-                    fp,
-                ));
-                if network == "ws" || network == "websocket" {
-                    let ws_sni = sni
-                        .clone()
-                        .or_else(|| host.as_ref().and_then(|v| v.first().cloned()))
-                        .unwrap_or_else(|| server.clone());
+                if network == "grpc" {
+                    // grpc 键 ALPN 固定 h2（gRPC over TLS 语义）；grpc 节点上
+                    // tcp/ws 借出键不存在，只推在用键
                     keys.push(TransportKey::tls(
                         server,
                         *port,
-                        Some(&ws_sni),
+                        Some(&tcp_sni),
+                        *skip_cert_verify,
+                        &["h2".to_string()],
+                        fp,
+                    ));
+                } else {
+                    keys.push(TransportKey::tls(
+                        server,
+                        *port,
+                        Some(&tcp_sni),
                         *skip_cert_verify,
                         alpn,
                         fp,
                     ));
+                    if network == "ws" || network == "websocket" {
+                        let ws_sni = sni
+                            .clone()
+                            .or_else(|| host.as_ref().and_then(|v| v.first().cloned()))
+                            .unwrap_or_else(|| server.clone());
+                        keys.push(TransportKey::tls(
+                            server,
+                            *port,
+                            Some(&ws_sni),
+                            *skip_cert_verify,
+                            alpn,
+                            fp,
+                        ));
+                    }
                 }
             }
             _ => {}
@@ -2750,15 +2763,16 @@ fn build_egress_outputs(
                 network,
                 path,
                 host,
+                grpc_service_name,
                 tls,
                 skip_cert_verify,
                 sni,
                 alpn,
                 tls_fingerprint,
             } => {
-                // build-time validation: security parse, alter_id==0, network tcp/ws only
-                // （clash 侧 network 只产 tcp/ws，见 clash.rs convert 方；"websocket"
-                // 长形与 vless 口径一致予以兼容）
+                // build-time validation: security parse, alter_id==0, network
+                // tcp/ws/grpc（clash 侧 network 只产 tcp/ws，见 clash.rs convert
+                // 方；"websocket" 长形与 vless 口径一致予以兼容；grpc 需服务名）
                 let parsed_security = VmessSecurity::parse(security)?;
                 if *alter_id != 0 {
                     return Err(anyhow!(
@@ -2766,8 +2780,30 @@ fn build_egress_outputs(
                         desc.name
                     ));
                 }
-                if network != "tcp" && network != "ws" && network != "websocket" {
-                    return Err(anyhow!("VMess network 仅支持 tcp/ws，当前: {}", network));
+                if network != "tcp"
+                    && network != "ws"
+                    && network != "websocket"
+                    && network != "grpc"
+                {
+                    return Err(anyhow!(
+                        "VMess network 仅支持 tcp/ws/grpc，当前: {}",
+                        network
+                    ));
+                }
+                if network == "grpc" {
+                    let svc = grpc_service_name.as_deref().map(str::trim).unwrap_or("");
+                    if svc.is_empty() {
+                        return Err(anyhow!(
+                            "VMess network=grpc 需要非空 grpc_service_name (egress={})",
+                            desc.name
+                        ));
+                    }
+                    if !*tls {
+                        return Err(anyhow!(
+                            "VMess network=grpc 需叠 TLS（gRPC over TLS 语义） (egress={})",
+                            desc.name
+                        ));
+                    }
                 }
                 let connector: Arc<dyn EgressConnector> = Arc::new(VmessConnector::new(
                     server.clone(),
@@ -2778,6 +2814,7 @@ fn build_egress_outputs(
                     network.clone(),
                     path.clone(),
                     host.clone(),
+                    grpc_service_name.clone(),
                     *tls,
                     *skip_cert_verify,
                     sni.clone(),
@@ -3329,10 +3366,10 @@ mod tests {
             .expect("alter_id=1 必须报错");
         assert!(err.to_string().contains("alter_id"), "实际：{err}");
 
-        // 非法 network 构建期报错
+        // 非法 network 构建期报错（grpc 已为合法传输，用 quic 作非法值）
         let mut bad_network = vmess_spec();
         if let EgressConfig::Vmess { network, .. } = &mut bad_network {
-            *network = "grpc".to_string();
+            *network = "quic".to_string();
         }
         let egress = vec![node("vm-bad-net", bad_network)];
         let err = build_egress_outputs(&egress, None, None)
@@ -3355,6 +3392,7 @@ mod tests {
                     network: "tcp".to_string(),
                     path: None,
                     host: None,
+                    grpc_service_name: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: Some("sni.example".to_string()),
@@ -3373,6 +3411,7 @@ mod tests {
                     network: "ws".to_string(),
                     path: Some("/vm".to_string()),
                     host: Some(vec!["cdn.example".to_string()]),
+                    grpc_service_name: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,
@@ -4126,6 +4165,7 @@ mod tests {
             network: "tcp".into(),
             path: None,
             host: None,
+            grpc_service_name: None,
             tls: false,
             skip_cert_verify: false,
             sni: None,

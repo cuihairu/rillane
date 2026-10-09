@@ -677,35 +677,37 @@ impl SeepDslConverter {
                     return Err(anyhow!("VMess 节点缺少 UUID"));
                 };
 
-                let (network, path, host) = if let Some(transport) = &node.transport {
-                    match transport {
-                        TransportConfig::Tcp { path: tcp_path, .. } => {
-                            ("tcp".to_string(), tcp_path.clone(), None)
+                let (network, path, host, grpc_service_name) =
+                    if let Some(transport) = &node.transport {
+                        match transport {
+                            TransportConfig::Tcp { path: tcp_path, .. } => {
+                                ("tcp".to_string(), tcp_path.clone(), None, None)
+                            }
+                            TransportConfig::Ws {
+                                path: ws_path,
+                                headers,
+                            } => {
+                                let host = headers
+                                    .as_ref()
+                                    .and_then(|h| h.get("Host").cloned())
+                                    .or_else(|| node.server.clone())
+                                    .map(|h| vec![h]);
+                                ("ws".to_string(), Some(ws_path.clone()), host, None)
+                            }
+                            TransportConfig::Grpc { service_name, .. } => {
+                                // gRPC 服务名落专用字段（线上路径 = /{name}/Tun）
+                                ("grpc".to_string(), None, None, Some(service_name.clone()))
+                            }
+                            TransportConfig::H2 {
+                                host: h2_host,
+                                path: h2_path,
+                                ..
+                            } => ("h2".to_string(), h2_path.clone(), h2_host.clone(), None),
+                            TransportConfig::Quic { .. } => ("quic".to_string(), None, None, None),
                         }
-                        TransportConfig::Ws {
-                            path: ws_path,
-                            headers,
-                        } => {
-                            let host = headers
-                                .as_ref()
-                                .and_then(|h| h.get("Host").cloned())
-                                .or_else(|| node.server.clone())
-                                .map(|h| vec![h]);
-                            ("ws".to_string(), Some(ws_path.clone()), host)
-                        }
-                        TransportConfig::Grpc { service_name, .. } => {
-                            ("grpc".to_string(), Some(service_name.clone()), None)
-                        }
-                        TransportConfig::H2 {
-                            host: h2_host,
-                            path: h2_path,
-                            ..
-                        } => ("h2".to_string(), h2_path.clone(), h2_host.clone()),
-                        TransportConfig::Quic { .. } => ("quic".to_string(), None, None),
-                    }
-                } else {
-                    ("tcp".to_string(), None, None)
-                };
+                    } else {
+                        ("tcp".to_string(), None, None, None)
+                    };
 
                 let tls_config = node
                     .tls
@@ -721,6 +723,7 @@ impl SeepDslConverter {
                     network,
                     path,
                     host,
+                    grpc_service_name,
                     tls: tls_config.enabled,
                     skip_cert_verify: tls_config.skip_cert_verify,
                     sni: tls_config.server_name.clone(),
