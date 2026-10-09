@@ -53,6 +53,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
 use super::grpc::grpc_tunnel;
+use super::h2::h2_tunnel;
 use super::ws::{ws_client_handshake, WsReader, WsWriter};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
@@ -1060,6 +1061,63 @@ impl VmessConnector {
                 self.relay_session_over_grpc(flow, tunnel, &mut session)
                     .await
             }
+            "h2" => {
+                // h2 恒叠 TLS + ALPN h2（mihomo 口径 h2 仅 TLS；authority/SNI
+                // 回退链与 ws 同源：host 首值 → sni → server）
+                if !self.tls {
+                    return Err(anyhow!("VMess network=h2 需叠 TLS（h2 over TLS 语义）"));
+                }
+                let h2_host = self.ws_host_header();
+                let sni_actual = self.sni.clone().unwrap_or_else(|| h2_host.clone());
+                let alpn_h2 = vec!["h2".to_string()];
+                let key = TransportKey::tls(
+                    &self.server,
+                    self.port,
+                    Some(&sni_actual),
+                    self.skip_cert_verify,
+                    &alpn_h2,
+                    self.fingerprint,
+                );
+                let mut session = self.session(&flow.target.host, flow.target.port)?;
+
+                // 借出传输层（TLS 已由池侧建立）；h2 隧道借出后进行（§4.2）
+                let (boxed, first_lease) = pool
+                    .acquire(&key)
+                    .await
+                    .with_context(|| format!("连接 VMess 服务器失败: {server_addr}"))?;
+                let tunnel = h2_tunnel(boxed, &h2_host, &self.ws_path()).await;
+                let (stream, _lease) = match tunnel {
+                    Ok(s) => (s, first_lease),
+                    Err(_) => {
+                        // 隧道握手失败 → stale 一次性重拨（D-11）
+                        drop(first_lease);
+                        pool.note_stale(&key);
+                        let (boxed, lease) = pool.acquire_fresh(&key).await?;
+                        let s = h2_tunnel(boxed, &h2_host, &self.ws_path())
+                            .await
+                            .with_context(|| "VMess over h2 隧道握手失败")?;
+                        (s, lease)
+                    }
+                };
+
+                // 裸字节流协议段：请求头直写后拆半，分块流读写与 tcp 同构
+                let mut stream = stream;
+                stream.write_all(&session.sealed_header).await?;
+                stream.flush().await?;
+                let (rr, ww) = tokio::io::split(stream);
+                let expect_v = session.expect_v;
+                let resp_keys = session.resp_header_keys.clone();
+                relay_vmess_stream(
+                    flow,
+                    rr,
+                    ww,
+                    &mut session.req_crypt,
+                    &mut session.resp_crypt,
+                    expect_v,
+                    &resp_keys,
+                )
+                .await
+            }
             other => Err(anyhow!("暂不支持的 VMess network: {other}")),
         }
     }
@@ -1206,6 +1264,50 @@ impl VmessConnector {
                     .with_context(|| "VMess over gRPC 隧道握手失败")?;
                 self.relay_session_over_grpc(flow, tunnel, &mut session)
                     .await
+            }
+            "h2" => {
+                // h2 恒叠 TLS + ALPN h2（mihomo 口径 h2 仅 TLS）
+                if !self.tls {
+                    return Err(anyhow!("VMess network=h2 需叠 TLS（h2 over TLS 语义）"));
+                }
+                let h2_host = self.ws_host_header();
+                let sni = self.sni.clone().unwrap_or_else(|| h2_host.clone());
+                let mut session = self.session(&flow.target.host, flow.target.port)?;
+                let connector = match &self.factory {
+                    Some(factory) => factory.connector(
+                        self.skip_cert_verify,
+                        &["h2".to_string()],
+                        self.fingerprint,
+                    )?,
+                    None => create_tls_connector_with_profile(
+                        self.skip_cert_verify,
+                        Some(&["h2".to_string()]),
+                        self.fingerprint,
+                    )?,
+                };
+                let server_name =
+                    rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+                let tls_stream = connector.connect(server_name, tcp).await?;
+                let mut stream = h2_tunnel(tls_stream, &h2_host, &self.ws_path())
+                    .await
+                    .with_context(|| "VMess over h2 隧道握手失败")?;
+
+                // 裸字节流协议段：请求头直写后拆半，分块流读写与 tcp 同构
+                stream.write_all(&session.sealed_header).await?;
+                stream.flush().await?;
+                let (rr, ww) = tokio::io::split(stream);
+                let expect_v = session.expect_v;
+                let resp_keys = session.resp_header_keys.clone();
+                relay_vmess_stream(
+                    flow,
+                    rr,
+                    ww,
+                    &mut session.req_crypt,
+                    &mut session.resp_crypt,
+                    expect_v,
+                    &resp_keys,
+                )
+                .await
             }
             other => Err(anyhow!("暂不支持的 VMess network: {other}")),
         }
@@ -1950,6 +2052,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn echo_loopback_h2() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cmd_key = test_cmd_key();
+        tokio::spawn(async move {
+            while let Ok((st, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    if let Err(e) = serve_vmess_h2(st, cmd_key).await {
+                        eprintln!("测试服务端错误: {e:#}");
+                    }
+                });
+            }
+        });
+
+        let (client_io, test_end) = duplex(256 * 1024);
+        // 客户端侧复刻 h2 臂的隧道后序列（TLS 面由 pool_tls 集成测试覆盖，
+        // 此处以裸 h2 行使分块流读写语义）
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let mut stream = h2_tunnel(tcp, "localhost", "/").await.unwrap();
+        let connector = test_connector(port, "h2");
+        let mut session = connector.session("example.com", 443).unwrap();
+        stream.write_all(&session.sealed_header).await.unwrap();
+        stream.flush().await.unwrap();
+        let (rr, ww) = tokio::io::split(stream);
+        let expect_v = session.expect_v;
+        let resp_keys = session.resp_header_keys.clone();
+        let fwd = relay_vmess_stream(
+            test_flow(client_io),
+            rr,
+            ww,
+            &mut session.req_crypt,
+            &mut session.resp_crypt,
+            expect_v,
+            &resp_keys,
+        );
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(fwd, drive_echo(test_end))
+        })
+        .await
+        .expect("回环超时");
+        let (report, ()) = outcome;
+        let report = report.expect("forward 失败");
+        assert!(report.upstream >= 40 * 1024 + 11);
+        assert!(report.downstream >= 40 * 1024 + 11);
+    }
+
+    #[tokio::test]
     async fn wrong_uuid_rejected() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -2211,6 +2362,37 @@ mod tests {
             write_chunk(&mut down, &mut WsSrvWriter(&mut s), &chunk_plain).await?;
         }
         write_chunk(&mut down, &mut WsSrvWriter(&mut s), &[]).await?;
+        Ok(())
+    }
+
+    // ---- 测试侧 h2 服务端（裸 TCP 回环；响应 200 后以 H2Stream 面复用
+    //      serve_vmess_tcp 协议段——与产线 h2 臂同构的裸字节流读序）----
+    use crate::outbound::h2::H2Stream;
+
+    async fn serve_vmess_h2<S>(stream: S, cmd_key: [u8; 16]) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let mut conn = h2::server::handshake(stream).await?;
+        // h2 连接驱动须留在 accept 循环所在任务（await body.data() 期间须
+        // 有人推进连接，否则 socket 不再被读、双向挂死）；per-stream 独立
+        // spawn，流操作由连接任务唤醒
+        while let Some(req) = conn.accept().await {
+            let (req, mut respond) = req?;
+            assert_eq!(req.method(), http::Method::POST);
+            tokio::spawn(async move {
+                let response = http::Response::builder().status(200).body(()).unwrap();
+                let send = respond.send_response(response, false).unwrap();
+                let mut h2 = H2Stream::from_parts(send, req.into_body());
+                let res = serve_vmess_tcp(&mut h2, cmd_key).await;
+                // 协议段只写终止块不 shutdown（TCP 语境任务结束即关 socket）；
+                // h2 语境掉流缺 END_STREAM 会被 RST 连坐客户端读写半——完结后补发
+                let _ = h2.shutdown().await;
+                if let Err(e) = res {
+                    eprintln!("h2 vmess 服务段错误: {e:#}");
+                }
+            });
+        }
         Ok(())
     }
 }

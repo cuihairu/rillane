@@ -4,6 +4,7 @@
 
 mod direct;
 mod grpc;
+mod h2;
 mod http;
 mod hysteria2;
 mod shadowsocks;

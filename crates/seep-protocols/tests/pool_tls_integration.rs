@@ -11,6 +11,7 @@ use std::time::Duration;
 use seep_core::EgressConnector;
 use seep_protocols::{
     PoolPolicy, TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool, TrojanConnector,
+    VlessConnector,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -833,4 +834,178 @@ async fn trojan_grpc_inline_roundtrip_request_in_first_message() {
     );
     let hs = hashes.lock().expect("hashes lock");
     assert_eq!(hs.len(), 1, "应恰好一条请求头");
+}
+
+// ---------- VLESS over h2 ----------
+
+/// mock vless-h2 TLS 服务端：TLS accept → h2 握手 → 校验 POST path → 回 200
+/// → 先发 2B 应答头（ver+optlen=0），随后裸字节流原样 echo 至 EOS、回 EOS
+/// 收尾。返回（地址，上行原始捕获，见到的路径）。
+#[allow(clippy::type_complexity)]
+async fn spawn_vless_h2_tls_server() -> (
+    std::net::SocketAddr,
+    Arc<std::sync::Mutex<Vec<u8>>>,
+    Arc<std::sync::Mutex<String>>,
+) {
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen 自签");
+    let cert_pem = certified.cert.pem();
+    let key_pem = certified.key_pair.serialize_pem();
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .expect("证书 PEM 解析");
+    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+        .expect("私钥读取")
+        .expect("PKCS8 私钥在位");
+
+    let provider = seep_tls_provider();
+    let builder = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("协议版本");
+    let config = Arc::new(
+        builder
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("服务端证书装配"),
+    );
+    let acceptor = TlsAcceptor::from(config);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().unwrap();
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let path_slot = Arc::new(std::sync::Mutex::new(String::new()));
+
+    let captured_task = captured.clone();
+    let path_task = path_slot.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                break;
+            };
+            let acceptor = acceptor.clone();
+            let captured_task = captured_task.clone();
+            let path_task = path_task.clone();
+            tokio::spawn(async move {
+                let Ok(tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let mut conn = match h2::server::handshake(tls).await {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                while let Some(req) = conn.accept().await {
+                    let (req, mut respond) = match req {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
+                    // h2 连接驱动须留在 accept 循环所在任务：await body.data()
+                    // 期间若无人推进连接，socket 不再被读、双向挂死；per-stream
+                    // 处理独立 spawn，流操作由连接任务唤醒
+                    let captured_task = captured_task.clone();
+                    let path_task = path_task.clone();
+                    tokio::spawn(async move {
+                        assert_eq!(req.method(), http::Method::POST);
+                        *path_task.lock().expect("path lock") = req.uri().path().to_string();
+                        let response = http::Response::builder().status(200).body(()).unwrap();
+                        let mut stream = respond.send_response(response, false).unwrap();
+                        // vless 应答头：ver + optlen（opt 为空）
+                        stream
+                            .send_data(bytes::Bytes::from_static(&[0u8, 0u8]), false)
+                            .unwrap();
+                        let mut body = req.into_body();
+                        // 首块含 vless 请求头（头不回显，trojan-grpc mock 同款
+                        // 语义）；头长按寻址形从首块自解析
+                        let mut hdr_skip: Option<usize> = Some(0);
+                        loop {
+                            match body.data().await {
+                                Some(Ok(chunk)) => {
+                                    let len = chunk.len();
+                                    body.flow_control().release_capacity(len).unwrap();
+                                    if chunk.is_empty() {
+                                        continue;
+                                    }
+                                    captured_task
+                                        .lock()
+                                        .expect("capture lock")
+                                        .extend_from_slice(&chunk);
+                                    let data: &[u8] = match hdr_skip.take() {
+                                        Some(0) => {
+                                            let hlen = match chunk[21] {
+                                                0x03 => 23 + chunk[22] as usize,
+                                                0x01 => 22 + 4,
+                                                0x04 => 22 + 16,
+                                                other => panic!("未知 atyp: {other}"),
+                                            };
+                                            &chunk[hlen.min(chunk.len())..]
+                                        }
+                                        _ => &chunk,
+                                    };
+                                    if !data.is_empty() {
+                                        stream
+                                            .send_data(bytes::Bytes::copy_from_slice(data), false)
+                                            .unwrap();
+                                    }
+                                }
+                                Some(Err(_)) => return,
+                                None => break,
+                            }
+                        }
+                        stream.send_data(bytes::Bytes::new(), true).unwrap();
+                    });
+                }
+            });
+        }
+    });
+    (addr, captured, path_slot)
+}
+
+/// VLESS over h2（inline 路径）：TLS + ALPN h2 裸流隧道、请求头直写、
+/// 应答头 2B 直读、echo 往返、客户端半关 → EOS 传播收尾。
+#[tokio::test]
+async fn vless_h2_inline_roundtrip_raw_stream() {
+    let (addr, captured, path_slot) = spawn_vless_h2_tls_server().await;
+
+    let factory = Arc::new(TlsConnectorFactory::new(256));
+    let connector = VlessConnector::new(
+        addr.ip().to_string(),
+        addr.port(),
+        "b831381d-6324-4d2a-b1e7-1bf75a1db7b3".to_string(),
+        None,
+        "h2".to_string(),
+        Some("/h2-echo".to_string()),
+        None,
+        None,
+        true,
+        true,
+        Some("localhost".to_string()),
+        None,
+        TlsFingerprint::None,
+        None,
+        Some(factory),
+    );
+
+    let (flow, client) = make_flow("www.example.com", 443);
+    let handle = tokio::spawn(async move { connector.forward(flow).await });
+    let payload = b"vless-h2-echo";
+    let report = roundtrip_and_finish(client, handle, payload).await;
+    assert_eq!(report.upstream, payload.len() as u64, "上行计数");
+    assert_eq!(report.downstream, payload.len() as u64, "下行计数");
+
+    wait_until(|| !path_slot.lock().expect("path lock").is_empty()).await;
+    assert_eq!(
+        path_slot.lock().expect("path lock").as_str(),
+        "/h2-echo",
+        "h2 隧道路径取 h2-opts/path 配置"
+    );
+
+    // 请求头语义：ver=0、uuid 16B、optlen=0、cmd=TCP、端口 443（域寻址）
+    let cap = captured.lock().expect("capture lock");
+    assert!(cap.len() >= 21, "捕获长度: {}", cap.len());
+    assert_eq!(cap[0], 0x00, "version 字节");
+    let uuid = uuid::Uuid::parse_str("b831381d-6324-4d2a-b1e7-1bf75a1db7b3").unwrap();
+    assert_eq!(&cap[1..17], uuid.as_bytes(), "uuid 字节");
+    assert_eq!(cap[17], 0x00, "optlen");
+    assert_eq!(cap[18], 0x01, "cmd=TCP");
+    assert_eq!(&cap[19..21], &443u16.to_be_bytes(), "目标端口 BE");
 }

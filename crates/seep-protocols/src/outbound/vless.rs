@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
 use super::grpc::grpc_tunnel;
+use super::h2::h2_tunnel;
 use super::ws::{ws_client_handshake, WsClient};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
@@ -331,6 +332,62 @@ impl VlessConnector {
                 };
                 self.relay_vless_over_grpc(flow, tunnel).await
             }
+            "h2" => {
+                // h2 恒叠 TLS + ALPN h2（mihomo 口径 h2 仅 TLS；authority/SNI
+                // 回退链与 ws 同源：host 首值 → sni → server）
+                if !self.tls {
+                    return Err(anyhow!("VLESS network=h2 需叠 TLS（h2 over TLS 语义）"));
+                }
+                let h2_host = self.ws_host_header();
+                let sni_actual = self.sni.clone().unwrap_or_else(|| h2_host.clone());
+                let alpn_h2 = vec!["h2".to_string()];
+                let key = TransportKey::tls(
+                    &self.server,
+                    self.port,
+                    Some(&sni_actual),
+                    self.skip_cert_verify,
+                    &alpn_h2,
+                    self.fingerprint,
+                );
+
+                // 借出传输层（TLS 已由池侧建立）；h2 隧道借出后进行（§4.2）
+                let (boxed, first_lease) = pool
+                    .acquire(&key)
+                    .await
+                    .with_context(|| format!("连接 VLESS 服务器失败: {server_addr}"))?;
+                let tunnel = h2_tunnel(boxed, &h2_host, &self.ws_path()).await;
+                let (mut stream, _lease) = match tunnel {
+                    Ok(s) => (s, first_lease),
+                    Err(_) => {
+                        // 隧道握手失败 → stale 一次性重拨（D-11）
+                        drop(first_lease);
+                        pool.note_stale(&key);
+                        let (boxed, lease) = pool.acquire_fresh(&key).await?;
+                        let s = h2_tunnel(boxed, &h2_host, &self.ws_path())
+                            .await
+                            .with_context(|| "VLESS over h2 隧道握手失败")?;
+                        (s, lease)
+                    }
+                };
+
+                // 裸字节流协议段与 tcp 同序：请求头直写、响应头直读、双向泵
+                let req = self.build_vless_tcp_request(&flow.target.host, flow.target.port)?;
+                stream.write_all(&req).await?;
+                stream.flush().await?;
+                Self::read_vless_response_header(&mut stream).await?;
+
+                let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                    &mut flow.io,
+                    &mut stream,
+                    seep_core::performance::relay_buffer(),
+                    seep_core::performance::relay_buffer(),
+                )
+                .await?;
+                Ok(FlowReport {
+                    upstream: up,
+                    downstream: down,
+                })
+            }
             other => Err(anyhow!("暂不支持的 VLESS network: {}", other)),
         }
     }
@@ -477,6 +534,49 @@ impl VlessConnector {
                     .await
                     .with_context(|| "VLESS over gRPC 隧道握手失败")?;
                 self.relay_vless_over_grpc(flow, tunnel).await
+            }
+            "h2" => {
+                // h2 恒叠 TLS + ALPN h2（mihomo 口径 h2 仅 TLS）
+                if !self.tls {
+                    return Err(anyhow!("VLESS network=h2 需叠 TLS（h2 over TLS 语义）"));
+                }
+                let h2_host = self.ws_host_header();
+                let sni = self.sni.clone().unwrap_or_else(|| h2_host.clone());
+                let connector = match &self.factory {
+                    Some(factory) => factory.connector(
+                        self.skip_cert_verify,
+                        &["h2".to_string()],
+                        self.fingerprint,
+                    )?,
+                    None => create_tls_connector_with_profile(
+                        self.skip_cert_verify,
+                        Some(&["h2".to_string()]),
+                        self.fingerprint,
+                    )?,
+                };
+                let server_name =
+                    rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+                let tls_stream = connector.connect(server_name, tcp).await?;
+
+                let mut stream = h2_tunnel(tls_stream, &h2_host, &self.ws_path())
+                    .await
+                    .with_context(|| "VLESS over h2 隧道握手失败")?;
+                let req = self.build_vless_tcp_request(&flow.target.host, flow.target.port)?;
+                stream.write_all(&req).await?;
+                stream.flush().await?;
+                Self::read_vless_response_header(&mut stream).await?;
+
+                let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                    &mut flow.io,
+                    &mut stream,
+                    seep_core::performance::relay_buffer(),
+                    seep_core::performance::relay_buffer(),
+                )
+                .await?;
+                Ok(FlowReport {
+                    upstream: up,
+                    downstream: down,
+                })
             }
             other => Err(anyhow!("暂不支持的 VLESS network: {}", other)),
         }
