@@ -2281,7 +2281,7 @@ fn scan_udp_capability(
         anyhow::bail!(
             "udp.enabled 但以下出站节点不支持 UDP 转发（udp-relay-path.md §3.1 能力表）:\n\
              {detail}\n\
-             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard（hysteria2 待 P0-4）\n\
+             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard（hysteria2 归 V2，载具 quinn 未决）\n\
              请更换这些节点的出站类型，或将 udp.enabled 关闭并移除 UDP 相关规则"
         );
     }
