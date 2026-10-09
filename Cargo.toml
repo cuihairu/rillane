@@ -48,6 +48,9 @@ rand = "0.8"
 hyper = { version = "1.5", default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "server", "server-auto", "server-graceful", "tokio"] }
 http-body-util = "0.1"
+# gRPC 传输面（outbound/grpc.rs）：trojan/vless/vmess grpc 单流隧道；
+# 版本随 hyper 1.x 同源 h2 0.4（RUSTSEC-2026-0258 ≥0.4.16 已在锁）
+h2 = "0.4"
 serde_urlencoded = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 notify = { version = "8.0", features = ["serde"] }

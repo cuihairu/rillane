@@ -3,6 +3,7 @@
 //! 提供各种出口协议的客户端连接器实现。
 
 mod direct;
+mod grpc;
 mod http;
 mod hysteria2;
 mod shadowsocks;
