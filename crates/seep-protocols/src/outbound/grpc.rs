@@ -2,7 +2,7 @@
 //!
 //! h2 客户端握手 + 单流隧道：POST `/{service}/Tun`（content-type:
 //! application/grpc），数据面为 gRPC 消息帧——5 字节前缀（1B 压缩旗标
-//! + 4B BE 长度），双方向同构。这是 xray / mihomo / trojan-go 的 grpc
+//! 与 4B BE 长度），双方向同构。这是 xray / mihomo / trojan-go 的 grpc
 //! 传输共用的线格式。
 //!
 //! 帧边界按消息缓存重组（一条 DATA 帧可含多条消息、一条消息可跨多帧）；
