@@ -1252,6 +1252,10 @@ pub enum IngressConfig {
         /// 入站认证（Proxy-Authorization: Basic）；None/空表 = 匿名放行，语义同 Socks5。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth: Option<Vec<Credential>>,
+        /// Bearer Token 认证（Proxy-Authorization: Bearer <token>）；None/空表 = 不启用。
+        /// 与 auth 并列：任一 scheme 通过即放行，407 挑战同时通告两者。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bearer_tokens: Option<Vec<String>>,
     },
     Mixed {
         bind: String,
@@ -1262,6 +1266,9 @@ pub enum IngressConfig {
         /// per-ingress UDP 覆盖（P0-5 §1.3），语义同 Socks5。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         udp_enabled: Option<bool>,
+        /// Bearer Token 认证（仅 http 分支，语义同 Http）；None/空表 = 不启用。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bearer_tokens: Option<Vec<String>>,
     },
 }
 

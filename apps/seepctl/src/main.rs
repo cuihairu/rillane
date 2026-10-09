@@ -1597,6 +1597,7 @@ fn build_ingress_from_clash(clash: &seep_subscription::ClashConfig) -> IngressDe
             bind: format!("{bind_ip}:{port}"),
             auth: None,
             udp_enabled: None,
+            bearer_tokens: None,
         },
     }
 }

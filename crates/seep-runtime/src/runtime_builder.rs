@@ -2123,15 +2123,26 @@ fn build_ingress_endpoints(
                 auth.clone().unwrap_or_default(),
                 udp_here,
             )),
-            IngressConfig::Http { bind, auth } => Arc::new(HttpIngress::new(
+            IngressConfig::Http {
+                bind,
+                auth,
+                bearer_tokens,
+            } => Arc::new(HttpIngress::new(
                 desc.name.clone(),
                 bind.clone(),
                 auth.clone().unwrap_or_default(),
+                bearer_tokens.clone().unwrap_or_default(),
             )),
-            IngressConfig::Mixed { bind, auth, .. } => Arc::new(MixedIngress::new(
+            IngressConfig::Mixed {
+                bind,
+                auth,
+                bearer_tokens,
+                ..
+            } => Arc::new(MixedIngress::new(
                 desc.name.clone(),
                 bind.clone(),
                 auth.clone().unwrap_or_default(),
+                bearer_tokens.clone().unwrap_or_default(),
                 udp_here,
             )),
         };
@@ -4430,6 +4441,7 @@ mod tests {
                         bind: free_bind(),
                         auth: None,
                         udp_enabled: mixed_udp_enabled,
+                        bearer_tokens: None,
                     },
                 },
             ],

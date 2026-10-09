@@ -16,14 +16,23 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
-/// 407 响应体（认证强制时缺头/错凭据统一应答）
-const PROXY_AUTH_REQUIRED: &str = "HTTP/1.1 407 Proxy Authentication Required\r\n\
-     Proxy-Authenticate: Basic realm=\"seep\"\r\n\
-     Content-Length: 0\r\n\r\n";
+/// 407 响应体（认证强制时缺头/错凭据统一应答；按已配置 scheme 通告挑战）
+fn proxy_auth_required(basic: bool, bearer: bool) -> String {
+    let mut challenge = String::from("HTTP/1.1 407 Proxy Authentication Required\r\n");
+    if basic {
+        challenge.push_str("Proxy-Authenticate: Basic realm=\"seep\"\r\n");
+    }
+    if bearer {
+        challenge.push_str("Proxy-Authenticate: Bearer realm=\"seep\"\r\n");
+    }
+    challenge.push_str("Content-Length: 0\r\n\r\n");
+    challenge
+}
 
 pub(crate) async fn handle_http_connect_stream(
     ingress_node_name: &str,
     credentials: &[Credential],
+    bearer_tokens: &[String],
     mut stream: TcpStream,
     router: Arc<dyn FlowRouter>,
     output: Arc<dyn FlowOutput>,
@@ -55,10 +64,18 @@ pub(crate) async fn handle_http_connect_stream(
     let request = String::from_utf8_lossy(&buf);
     let (method, target, proxy_auth) = parse_http_request(&request)?;
 
-    // 入站认证：凭据表非空即强制（对齐 Socks5Ingress，语义同 RFC 1929 强制协商）
-    if !credentials.is_empty() && !verify_basic_auth(credentials, proxy_auth.as_deref()) {
-        stream.write_all(PROXY_AUTH_REQUIRED.as_bytes()).await?;
-        bail!("HTTP 代理认证失败");
+    // 入站认证：Basic 凭据表 / Bearer 令牌表任一非空即强制（对齐 Socks5Ingress
+    // 强制协商口径）；两 scheme 并列，任一通过即放行，407 挑战同时通告已配置者
+    let basic_forced = !credentials.is_empty();
+    let bearer_forced = !bearer_tokens.is_empty();
+    if basic_forced || bearer_forced {
+        let basic_ok = basic_forced && verify_basic_auth(credentials, proxy_auth.as_deref());
+        let bearer_ok = bearer_forced && verify_bearer_auth(bearer_tokens, proxy_auth.as_deref());
+        if !basic_ok && !bearer_ok {
+            let challenge = proxy_auth_required(basic_forced, bearer_forced);
+            stream.write_all(challenge.as_bytes()).await?;
+            bail!("HTTP 代理认证失败");
+        }
     }
 
     if method != "CONNECT" {
@@ -117,14 +134,22 @@ pub struct HttpIngress {
     bind: String,
     /// 入站凭据表（None/空表 = 匿名放行；非空强制 Proxy-Authorization: Basic）
     credentials: Vec<Credential>,
+    /// Bearer 令牌表（None/空表 = 不启用；非空强制 Proxy-Authorization: Bearer）
+    bearer_tokens: Vec<String>,
 }
 
 impl HttpIngress {
-    pub fn new(name: String, bind: String, credentials: Vec<Credential>) -> Self {
+    pub fn new(
+        name: String,
+        bind: String,
+        credentials: Vec<Credential>,
+        bearer_tokens: Vec<String>,
+    ) -> Self {
         Self {
             name,
             bind,
             credentials,
+            bearer_tokens,
         }
     }
 
@@ -137,6 +162,7 @@ impl HttpIngress {
         handle_http_connect_stream(
             self.name.as_str(),
             &self.credentials,
+            &self.bearer_tokens,
             stream,
             router,
             output,
@@ -236,6 +262,20 @@ fn verify_basic_auth(credentials: &[Credential], header: Option<&str>) -> bool {
         .any(|cred| cred.username == username && cred.password == password)
 }
 
+/// 校验 Proxy-Authorization: Bearer（RFC 6750 token 语义，明文比对）
+fn verify_bearer_auth(tokens: &[String], header: Option<&str>) -> bool {
+    let Some(value) = header else {
+        return false;
+    };
+    let Some(token) = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))
+    else {
+        return false;
+    };
+    tokens.iter().any(|t| t == token.trim())
+}
+
 /// 解析 CONNECT 目标地址
 fn parse_connect_target(target: &str) -> Result<(String, u16)> {
     // CONNECT host:port HTTP/1.1
@@ -288,16 +328,19 @@ mod tests {
     /// 一对一回环连接：accepted 半边交给 handler，返回客户端半边 + handler join
     async fn spawn_handler(
         credentials: &[Credential],
+        bearer_tokens: &[String],
     ) -> (TcpStream, tokio::task::JoinHandle<anyhow::Result<()>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let client = TcpStream::connect(addr).await.unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let credentials = credentials.to_vec();
+        let bearer_tokens = bearer_tokens.to_vec();
         let handle = tokio::spawn(async move {
             handle_http_connect_stream(
                 "test-http",
                 &credentials,
+                &bearer_tokens,
                 stream,
                 Arc::new(FixedRouter),
                 Arc::new(NullOutput),
@@ -324,7 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_without_auth_config_allows_anonymous() {
-        let (mut client, handle) = spawn_handler(&[]).await;
+        let (mut client, handle) = spawn_handler(&[], &[]).await;
         client
             .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
             .await
@@ -336,7 +379,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_missing_authorization_rejected_with_407() {
-        let (mut client, handle) = spawn_handler(&creds()).await;
+        let (mut client, handle) = spawn_handler(&creds(), &[]).await;
         client
             .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
             .await
@@ -353,7 +396,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_wrong_credentials_rejected_with_407() {
-        let (mut client, handle) = spawn_handler(&creds()).await;
+        let (mut client, handle) = spawn_handler(&creds(), &[]).await;
         let encoded = BASE64.encode("alice:wrong-pass");
         let req = format!(
             "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
@@ -367,7 +410,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_correct_basic_auth_passes() {
-        let (mut client, handle) = spawn_handler(&creds()).await;
+        let (mut client, handle) = spawn_handler(&creds(), &[]).await;
         let encoded = BASE64.encode("alice:wonderland");
         let req = format!(
             "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
@@ -392,5 +435,116 @@ mod tests {
             &creds,
             Some(&format!("basic {}", BASE64.encode("alice:wonderland")))
         ));
+    }
+
+    fn bearer() -> Vec<String> {
+        vec!["secret-token-123".to_string()]
+    }
+
+    #[tokio::test]
+    async fn http_bearer_token_passes() {
+        let (mut client, handle) = spawn_handler(&[], &bearer()).await;
+        let req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
+                    Proxy-Authorization: Bearer secret-token-123\r\n\r\n";
+        client.write_all(req.as_bytes()).await.unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(
+            resp.starts_with("HTTP/1.1 200"),
+            "正确 Bearer 应放行: {resp}"
+        );
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_wrong_bearer_token_rejected_with_407() {
+        let (mut client, handle) = spawn_handler(&[], &bearer()).await;
+        let req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
+                    Proxy-Authorization: Bearer wrong-token\r\n\r\n";
+        client.write_all(req.as_bytes()).await.unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(resp.starts_with("HTTP/1.1 407"), "错令牌应 407: {resp}");
+        assert!(
+            resp.to_ascii_lowercase()
+                .contains("proxy-authenticate: bearer"),
+            "应带 Bearer 挑战: {resp}"
+        );
+        assert!(handle.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn http_bearer_only_challenge_advertises_bearer_not_basic() {
+        let (mut client, handle) = spawn_handler(&[], &bearer()).await;
+        client
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+            .await
+            .unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(resp.starts_with("HTTP/1.1 407"));
+        assert!(
+            resp.to_ascii_lowercase()
+                .contains("proxy-authenticate: bearer"),
+            "应带 Bearer 挑战: {resp}"
+        );
+        assert!(
+            !resp
+                .to_ascii_lowercase()
+                .contains("proxy-authenticate: basic"),
+            "未配置 Basic 不应通告: {resp}"
+        );
+        assert!(handle.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn http_basic_and_bearer_both_configured_either_passes() {
+        // Basic 通过
+        let (mut client, handle) = spawn_handler(&creds(), &bearer()).await;
+        let encoded = BASE64.encode("alice:wonderland");
+        let req = format!(
+            "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
+             Proxy-Authorization: Basic {encoded}\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "Basic 应放行: {resp}");
+        handle.await.unwrap().unwrap();
+
+        // Bearer 通过
+        let (mut client, handle) = spawn_handler(&creds(), &bearer()).await;
+        let req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
+                    Proxy-Authorization: Bearer secret-token-123\r\n\r\n";
+        client.write_all(req.as_bytes()).await.unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "Bearer 应放行: {resp}");
+        handle.await.unwrap().unwrap();
+
+        // 407 同时通告两 scheme
+        let (mut client, handle) = spawn_handler(&creds(), &bearer()).await;
+        client
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+            .await
+            .unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(resp.starts_with("HTTP/1.1 407"));
+        let lower = resp.to_ascii_lowercase();
+        assert!(
+            lower.contains("proxy-authenticate: basic"),
+            "应通告 Basic: {resp}"
+        );
+        assert!(
+            lower.contains("proxy-authenticate: bearer"),
+            "应通告 Bearer: {resp}"
+        );
+        assert!(handle.await.unwrap().is_err());
+    }
+
+    #[test]
+    fn verify_bearer_auth_rejects_malformed_values() {
+        let tokens = bearer();
+        assert!(!verify_bearer_auth(&tokens, None));
+        assert!(!verify_bearer_auth(&tokens, Some("Basic abc")));
+        assert!(!verify_bearer_auth(&tokens, Some("Bearer ")));
+        assert!(!verify_bearer_auth(&tokens, Some("Bearer wrong")));
+        assert!(verify_bearer_auth(&tokens, Some("Bearer secret-token-123")));
+        assert!(verify_bearer_auth(&tokens, Some("bearer secret-token-123")));
     }
 }

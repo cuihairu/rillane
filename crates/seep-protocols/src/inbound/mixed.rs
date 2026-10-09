@@ -18,6 +18,8 @@ pub struct MixedIngress {
     /// 入站凭据表（socks5 分支 RFC 1929、http 分支 Proxy-Authorization Basic；
     /// 空表 = 两分支均匿名放行，语义同 Socks5/Http）
     credentials: Vec<Credential>,
+    /// Bearer 令牌表（仅 http 分支，语义同 Http；空表 = 不启用）
+    bearer_tokens: Vec<String>,
     /// UDP ASSOCIATE 服务（socks5 分支共享；None = 未启用）
     udp: Option<Arc<UdpAssociateService>>,
 }
@@ -27,12 +29,14 @@ impl MixedIngress {
         name: String,
         bind: String,
         credentials: Vec<Credential>,
+        bearer_tokens: Vec<String>,
         udp: Option<Arc<UdpAssociateService>>,
     ) -> Self {
         Self {
             name,
             bind,
             credentials,
+            bearer_tokens,
             udp,
         }
     }
@@ -63,6 +67,7 @@ impl MixedIngress {
             handle_http_connect_stream(
                 self.name.as_str(),
                 &self.credentials,
+                &self.bearer_tokens,
                 stream,
                 router,
                 output,
@@ -161,6 +166,7 @@ mod tests {
             "test-mixed".into(),
             addr.to_string(),
             credentials,
+            vec![],
             None,
         ));
         let handle = tokio::spawn(async move {
@@ -180,6 +186,78 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("Mixed 入口未在限时内就绪: {addr}");
+    }
+
+    /// 起 Mixed 入口（http 分支启用 Bearer，无 Basic 凭据）
+    async fn spawn_ingress_bearer(
+        bearer: Vec<String>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<Result<()>>) {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let ingress = Arc::new(MixedIngress::new(
+            "test-mixed".into(),
+            addr.to_string(),
+            vec![],
+            bearer,
+            None,
+        ));
+        let handle = tokio::spawn(async move {
+            ingress
+                .run(Arc::new(FixedRouter), Arc::new(NullOutput))
+                .await
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn mixed_http_branch_bearer_token_passes() {
+        let (addr, server) = spawn_ingress_bearer(vec!["mixed-token".to_string()]).await;
+        let mut client = connect_with_retry(addr).await;
+        let req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
+                    Proxy-Authorization: Bearer mixed-token\r\n\r\n";
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 256];
+        loop {
+            let n = client.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "对端提前关闭");
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let resp = String::from_utf8_lossy(&buf);
+        assert!(
+            resp.starts_with("HTTP/1.1 200"),
+            "http 分支正确 Bearer 应放行: {resp}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mixed_http_branch_wrong_bearer_rejected() {
+        let (addr, server) = spawn_ingress_bearer(vec!["mixed-token".to_string()]).await;
+        let mut client = connect_with_retry(addr).await;
+        let req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\
+                    Proxy-Authorization: Bearer nope\r\n\r\n";
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 256];
+        loop {
+            let n = client.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "对端提前关闭");
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let resp = String::from_utf8_lossy(&buf);
+        assert!(
+            resp.starts_with("HTTP/1.1 407"),
+            "http 分支错 Bearer 应 407: {resp}"
+        );
+        server.abort();
     }
 
     #[tokio::test]
