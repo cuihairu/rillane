@@ -14,7 +14,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
 > | mesh UDP 多跳转发（UdpEnvelope over UDP 数据报） | **已实现（2026-09，P0-4）**：FULL/CACHED 跳缓存、exit per-flow socket、同端口双栈、明文门（chain+udp 未配加密构建期拒绝） | — |
 > | UDP 观测与联调（`seep_udp_*` 指标族 / `/udp/stats` / `seepctl stats` UDP 段 / `udp-probe`） | **已实现（2026-09，P0-5）**：`/metrics` 恒渲染（开关关闭全零、端点不消失）+ 入口级 `udp_enabled` 覆盖 + `udp:` 配置全字段 | — |
 > | 出站 UDP 承载（hy2） | 未实现（`hysteria2` 0.1.6 公开 API 无 UDP 出口；P0-4 已完成且**维持改判**） | V2（quinn 载具，未决） |
-> | 出站 vmess 连接器 | **已实现（2026-10）**：VMess AEAD 认证头（authID 时间窗+防重放）+ AES-128-GCM/ChaCha20-Poly1305 分块流数据面，tcp（可叠 TLS）/ws（可叠 TLS）/gRPC（恒叠 TLS）；`alter_id=0` 限定，h2 与 UDP 承载未实现 | todo「VMess 出站」条目 |
+> | 出站 vmess 连接器 | **已实现（2026-10）**：VMess AEAD 认证头（authID 时间窗+防重放）+ AES-128-GCM/ChaCha20-Poly1305 分块流数据面，tcp（可叠 TLS）/ws（可叠 TLS）/gRPC（恒叠 TLS）/h2（恒叠 TLS）；`alter_id=0` 限定，UDP 承载未实现 | todo「VMess 出站」条目 |
 > | hysteria v1 | **出站连接器未实现**（配置 schema 与订阅转换已支持，运行期构建期报错） | 无计划（仅 hy2） |
 > | 出站连接池 / TLS 会话恢复 | **已实现（2026-10，P1-5）**：`egress_pool:` 配置块 + 预建立/借出即消费池（trojan/http/vless + direct 选通）+ TLS 会话恢复（进程级共享 ClientConfig）+ `seep_pool_*`/`seep_tls_*` 指标 + `GET /egress/pool/stats` | — |
 > | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `seep_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
@@ -113,7 +113,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - 混淆和伪装
 
 ### VMess (V2Ray)
-> 状态：**已实现出站连接器（2026-10）**——VMess AEAD 认证头（authID = AES-ECB(unix 秒‖随机‖CRC32)，服务端 ±120s 时间窗 + 防重放）+ 分块流数据面（chunk-stream|chunk-masking|global-padding；SHAKE128(方向 IV) 出掩码与 padding 长度，**每块先抽 padding 再抽 mask**，块 nonce = 计数器‖IV[2..12] 递增）；KDF/请求头/封套/SHAKE 抽取序以 Xray-core kdf.go 原文实跑真值向量逐字节钉死（Go 1.27.1 对拍，V0–V16）。security 支持 `auto`/`aes-128-gcm`/`chacha20-poly1305`（xray AEAD 口径，legacy `alter_id>0` 与 none/zero 构建期拒绝）；传输 tcp（可叠 TLS/SNI/ALPN/指纹）、ws（可叠 TLS，upgrade 失败 stale 一次性重拨）与 gRPC（2026-10：`network: grpc` + `grpc_service_name`，恒叠 TLS + ALPN h2，POST `/{service}/Tun` 单流隧道，请求头‖首块合入首条 gRPC 消息，5 字节长度前缀帧，16MiB 消息上限；池键携带 ALPN h2，隧道握手失败 stale 一次性重拨；订阅侧 clash `grpc-opts` 导入导出）。h2 传输未实现；UDP 承载未实现（构建期扫描即报错）。
+> 状态：**已实现出站连接器（2026-10）**——VMess AEAD 认证头（authID = AES-ECB(unix 秒‖随机‖CRC32)，服务端 ±120s 时间窗 + 防重放）+ 分块流数据面（chunk-stream|chunk-masking|global-padding；SHAKE128(方向 IV) 出掩码与 padding 长度，**每块先抽 padding 再抽 mask**，块 nonce = 计数器‖IV[2..12] 递增）；KDF/请求头/封套/SHAKE 抽取序以 Xray-core kdf.go 原文实跑真值向量逐字节钉死（Go 1.27.1 对拍，V0–V16）。security 支持 `auto`/`aes-128-gcm`/`chacha20-poly1305`（xray AEAD 口径，legacy `alter_id>0` 与 none/zero 构建期拒绝）；传输 tcp（可叠 TLS/SNI/ALPN/指纹）、ws（可叠 TLS，upgrade 失败 stale 一次性重拨）与 gRPC（2026-10：`network: grpc` + `grpc_service_name`，恒叠 TLS + ALPN h2，POST `/{service}/Tun` 单流隧道，请求头‖首块合入首条 gRPC 消息，5 字节长度前缀帧，16MiB 消息上限；池键携带 ALPN h2，隧道握手失败 stale 一次性重拨；订阅侧 clash `grpc-opts` 导入导出）。h2 传输已实现（2026-10：`network: h2` + `path`/`host`，恒叠 TLS + ALPN h2，POST `{path}` 单流隧道，`:authority` = host 首值 → sni → server，请求体/响应体即双方向裸字节流；请求头写入流后 `tokio::io::split` 复用既有分块流 relay；池键携带 ALPN h2，SNI 链 sni → host 首值 → server，隧道握手失败 stale 一次性重拨；订阅侧 clash `h2-opts` 导入导出）；UDP 承载未实现（构建期扫描即报错）。
 
 - **版本**: VMess (V2Ray Protocol)——AEAD 认证头（Xray-core 同源线形 authID‖sealedLen‖connNonce‖sealedHeader）
 - **安全**: auto / AES-128-GCM / ChaCha20-Poly1305（legacy MD5 认证与 none/zero 已随 xray 删除）
@@ -121,6 +121,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - TCP（可叠 TLS）
   - WebSocket (WS)（可叠 TLS）
   - gRPC（恒叠 TLS，`grpc_service_name`）
+  - HTTP/2 (h2)（恒叠 TLS，`path`/`host`，裸字节流单流隧道）
 - **路径配置**:
   - 自定义路径（ws path，自动补 `/` 前缀）
   - Host 头部伪装（`host` 首值优先，回落 sni/server）
@@ -131,7 +132,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - 客户端 TLS 指纹形态（`tls_fingerprint`，P2-5）
 
 ### VLESS
-> 状态：部分实现——uuid 认证 + TCP 直连 / WebSocket / gRPC 传输（tcp/ws 可叠 TLS/SNI/ALPN，`network: ws`；gRPC 2026-10：`network: grpc` + `grpc_service_name`，恒叠 TLS + ALPN h2，POST `/{service}/Tun` 单流隧道，请求头作为首条 gRPC 消息，应答头 `[ver][opt_len][opt]` 跨消息抽取，客户端 EOF → 零长 DATA + END_STREAM 收尾；池键携带 ALPN h2，隧道握手失败 stale 一次性重拨；订阅侧 clash `grpc-opts` 导入导出）；**flow（如 xtls-rprx-vision）显式拒绝**（构建期即拦，RuntimeBuilder 装配报错并列节点名，与 `forward()` 口径同为 `is_some()` 即拒）。「QoS 集成」「VLESS-Vision」系列与 H2 传输为**超前描述**。
+> 状态：部分实现——uuid 认证 + TCP 直连 / WebSocket / gRPC 传输（tcp/ws 可叠 TLS/SNI/ALPN，`network: ws`；gRPC 2026-10：`network: grpc` + `grpc_service_name`，恒叠 TLS + ALPN h2，POST `/{service}/Tun` 单流隧道，请求头作为首条 gRPC 消息，应答头 `[ver][opt_len][opt]` 跨消息抽取，客户端 EOF → 零长 DATA + END_STREAM 收尾；池键携带 ALPN h2，隧道握手失败 stale 一次性重拨；订阅侧 clash `grpc-opts` 导入导出）；h2 传输已实现（2026-10：`network: h2` + `path`/`host`，恒叠 TLS + ALPN h2，POST `{path}` 单流隧道，请求/响应体即双方向裸字节流，隧道建好后与 tcp 臂同构 `copy_bidirectional`；池键携带 ALPN h2，SNI 链 sni → host 首值 → server，隧道握手失败 stale 一次性重拨；订阅侧 clash `h2-opts` 导入导出）；**flow（如 xtls-rprx-vision）显式拒绝**（构建期即拦，RuntimeBuilder 装配报错并列节点名，与 `forward()` 口径同为 `is_some()` 即拒）。「QoS 集成」「VLESS-Vision」系列为**超前描述**。
 
 - **特点**: 轻量级协议，无内建加密（明文承载，机密性由 TLS 传输层负责）
 - **Flow 控制**:
@@ -142,7 +143,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - 更低的性能开销（相比 VMess 少一层协议内加密）
 
 ### Trojan
-> 状态：部分实现——TCP 原生 + 完整 TLS（SNI/证书校验/`skip_cert_verify`/指纹），「流量看起来像标准 HTTPS」的目标由 TLS 形态达成；WebSocket 传输已实现（trojan-go 惯例：ws 恒叠 TLS，请求头作为首个 binary 帧，无独立应答头；池路径 upgrade 失败 stale 一次性重拨）；gRPC 传输已实现（2026-10：`network: grpc` + `grpc_service_name`，恒叠 TLS + ALPN h2，POST `/{service}/Tun` 单流隧道，请求头作为首条 gRPC 消息，5 字节长度前缀帧，16MiB 消息上限；池键携带 ALPN h2，握手失败 stale 一次性重拨；订阅侧 clash `grpc-opts` 导入导出）。
+> 状态：部分实现——TCP 原生 + 完整 TLS（SNI/证书校验/`skip_cert_verify`/指纹），「流量看起来像标准 HTTPS」的目标由 TLS 形态达成；WebSocket 传输已实现（trojan-go 惯例：ws 恒叠 TLS，请求头作为首个 binary 帧，无独立应答头；池路径 upgrade 失败 stale 一次性重拨）；gRPC 传输已实现（2026-10：`network: grpc` + `grpc_service_name`，恒叠 TLS + ALPN h2，POST `/{service}/Tun` 单流隧道，请求头作为首条 gRPC 消息，5 字节长度前缀帧，16MiB 消息上限；池键携带 ALPN h2，握手失败 stale 一次性重拨；订阅侧 clash `grpc-opts` 导入导出）；h2 传输不实现（trojan 白名单仅 tcp/ws/grpc，`network: h2` 构建期拒绝）。
 
 - **协议**: 基于 TLS 伪装的代理协议
 - **TLS 特性**:
@@ -309,8 +310,8 @@ Seep 入口与主流代理客户端互通（SOCKS5/HTTP CONNECT 口径；入口�
 - **iOS**: Shadowrocket, Quantumult X, Surge, Stash
 
 ### 服务端互操作
-- **V2Ray**: 核心 VMess/VLESS 面互通（tcp/ws/gRPC；VLESS flow 与 h2 传输不支持，见各节状态行）
-- **Xray**: VMess AEAD（tcp/ws/gRPC）+ VLESS（tcp/ws/gRPC，无 flow）互通；h2 传输与 flow 不支持
+- **V2Ray**: 核心 VMess/VLESS 面互通（tcp/ws/gRPC/h2；VLESS flow 不支持，见各节状态行）
+- **Xray**: VMess AEAD（tcp/ws/gRPC/h2）+ VLESS（tcp/ws/gRPC/h2，无 flow）互通；flow 不支持
 - **Shadowsocks**: AEAD 方法互通（方法集以 `shadowsocks` crate 1.21 为准，非法 `method` 运行时报错）
 - **Trojan**: 标准 Trojan 协议实现（TCP 原生 + TLS；ws/gRPC 传输已实现）
 
