@@ -222,6 +222,7 @@ async fn trojan_tls_pooled_serial_reuse_and_resumption() {
         "tcp".to_string(),
         None,
         None,
+        None,
         Some(pool.clone()),
         Some(factory.clone()),
     ));
@@ -510,6 +511,7 @@ async fn trojan_ws_inline_roundtrip_request_in_first_frame() {
         Some("/ray".to_string()),
         Some(vec!["ws.example.com".to_string()]),
         None,
+        None,
         Some(factory),
     );
 
@@ -548,6 +550,7 @@ async fn trojan_ws_pooled_borrow_then_upgrade_roundtrip() {
         "ws".to_string(),
         Some("/ray".to_string()),
         Some(vec!["ws.example.com".to_string()]),
+        None,
         Some(pool.clone()),
         Some(factory),
     );
@@ -606,6 +609,7 @@ async fn trojan_ws_pooled_stale_redial_recovers_from_dead_idle() {
         "ws".to_string(),
         None, // 缺省路径 → "/"
         Some(vec!["ws.example.com".to_string()]),
+        None,
         Some(pool.clone()),
         Some(factory),
     );
@@ -645,4 +649,188 @@ async fn trojan_ws_pooled_stale_redial_recovers_from_dead_idle() {
         "死连接不应产生请求头"
     );
     assert_eq!(path_slot.lock().expect("path lock").as_str(), "/");
+}
+
+// ---------- Trojan over gRPC ----------
+
+/// mock trojan-grpc TLS 服务端：TLS accept → h2 握手 → 校验
+/// POST /{svc}/Tun + te: trailers + content-type: application/grpc → 回 200
+/// → 首条 gRPC 消息应为完整 trojan 请求头（56 hex + CRLF + 寻址 + CRLF）
+/// → 后续消息逐条 echo 至 EOS，回 EOS 收尾。返回（地址，hash 集，见到的路径）。
+#[allow(clippy::type_complexity)]
+async fn spawn_trojan_grpc_tls_server() -> (
+    std::net::SocketAddr,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    Arc<std::sync::Mutex<String>>,
+) {
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen 自签");
+    let cert_pem = certified.cert.pem();
+    let key_pem = certified.key_pair.serialize_pem();
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .expect("证书 PEM 解析");
+    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+        .expect("私钥读取")
+        .expect("PKCS8 私钥在位");
+
+    let provider = seep_tls_provider();
+    let builder = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("协议版本");
+    let config = Arc::new(
+        builder
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("服务端证书装配"),
+    );
+    let acceptor = TlsAcceptor::from(config);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().unwrap();
+    let hashes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let path_slot = Arc::new(std::sync::Mutex::new(String::new()));
+
+    let hashes_task = hashes.clone();
+    let path_task = path_slot.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                break;
+            };
+            let acceptor = acceptor.clone();
+            let hashes_task = hashes_task.clone();
+            let path_task = path_task.clone();
+            tokio::spawn(async move {
+                let Ok(tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let mut conn = match h2::server::handshake(tls).await {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                while let Some(req) = conn.accept().await {
+                    let (req, mut respond) = match req {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
+                    // h2 连接驱动须留在 accept 循环所在任务：await body.data()
+                    // 期间若无人推进连接，socket 不再被读、双向挂死；per-stream
+                    // 处理独立 spawn，流操作由连接任务唤醒
+                    let hashes_task = hashes_task.clone();
+                    let path_task = path_task.clone();
+                    tokio::spawn(async move {
+                        assert_eq!(req.method(), http::Method::POST);
+                        let path = req.uri().path().to_string();
+                        assert_eq!(req.headers().get("te").unwrap(), "trailers");
+                        assert_eq!(
+                            req.headers().get("content-type").unwrap(),
+                            "application/grpc"
+                        );
+                        *path_task.lock().expect("path lock") = path;
+                        let response = http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/grpc")
+                            .body(())
+                            .unwrap();
+                        let mut stream = respond.send_response(response, false).unwrap();
+
+                        // 重组 gRPC 消息（5B 前缀：旗标 + BE 长度）
+                        let mut body = req.into_body();
+                        let mut buf: Vec<u8> = Vec::new();
+                        let mut first = true;
+                        loop {
+                            let msg = 'extract: {
+                                loop {
+                                    if buf.len() >= 5 {
+                                        let len =
+                                            u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]])
+                                                as usize;
+                                        if buf.len() >= 5 + len {
+                                            let m = buf[5..5 + len].to_vec();
+                                            buf.drain(..5 + len);
+                                            break 'extract Some(m);
+                                        }
+                                    }
+                                    match body.data().await {
+                                        Some(Ok(chunk)) => {
+                                            let len = chunk.len();
+                                            body.flow_control().release_capacity(len).unwrap();
+                                            buf.extend_from_slice(&chunk);
+                                        }
+                                        _ => break 'extract None,
+                                    }
+                                }
+                            };
+                            match msg {
+                                None => break,
+                                Some(m) => {
+                                    if first {
+                                        first = false;
+                                        // 首条消息 = trojan 请求头
+                                        assert!(m.len() >= 56, "请求头长度: {}", m.len());
+                                        let hash = String::from_utf8_lossy(&m[..56]).to_string();
+                                        assert!(
+                                            hash.bytes().all(|b| b.is_ascii_hexdigit()),
+                                            "trojan 请求头应 56 位 hex：{hash}"
+                                        );
+                                        hashes_task.lock().expect("hashes lock").push(hash);
+                                    } else if !m.is_empty() {
+                                        // 数据消息 echo（回 5B 前缀帧）
+                                        let mut f = Vec::with_capacity(5 + m.len());
+                                        f.push(0u8);
+                                        f.extend_from_slice(&(m.len() as u32).to_be_bytes());
+                                        f.extend_from_slice(&m);
+                                        stream.send_data(bytes::Bytes::from(f), false).unwrap();
+                                    }
+                                }
+                            }
+                        }
+                        stream.send_data(bytes::Bytes::new(), true).unwrap();
+                    });
+                }
+            });
+        }
+    });
+    (addr, hashes, path_slot)
+}
+
+/// Trojan over gRPC（inline 路径）：TLS + ALPN h2 隧道、请求头在首条消息、
+/// echo 往返、客户端半关 → EOS 传播收尾。
+#[tokio::test]
+async fn trojan_grpc_inline_roundtrip_request_in_first_message() {
+    let (addr, hashes, path_slot) = spawn_trojan_grpc_tls_server().await;
+
+    let factory = Arc::new(TlsConnectorFactory::new(256));
+    let connector = TrojanConnector::new(
+        addr.ip().to_string(),
+        addr.port(),
+        PASSWORD.to_string(),
+        Some("localhost".to_string()),
+        true,
+        TlsFingerprint::None,
+        "grpc".to_string(),
+        None,
+        None,
+        Some("grpc-echo".to_string()),
+        None,
+        Some(factory),
+    );
+
+    let (flow, client) = make_flow("www.example.com", 443);
+    let handle = tokio::spawn(async move { connector.forward(flow).await });
+    let payload = b"trojan-grpc-echo";
+    let report = roundtrip_and_finish(client, handle, payload).await;
+    assert_eq!(report.upstream, payload.len() as u64, "上行计数");
+    assert_eq!(report.downstream, payload.len() as u64, "下行计数");
+
+    wait_until(|| !path_slot.lock().expect("path lock").is_empty()).await;
+    assert_eq!(
+        path_slot.lock().expect("path lock").as_str(),
+        "/grpc-echo/Tun",
+        "gRPC 隧道路径 = /service/Tun"
+    );
+    let hs = hashes.lock().expect("hashes lock");
+    assert_eq!(hs.len(), 1, "应恰好一条请求头");
 }

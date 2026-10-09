@@ -188,6 +188,15 @@ pub struct ClashProxy {
         alias = "wsOptions"
     )]
     pub ws_opts: Option<ClashWsOpts>,
+    /// gRPC 传输选项（Clash 规范块键 `grpc-opts.grpc-service-name`；
+    /// network=grpc 时承载线上路径 /{name}/Tun 的服务名）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "grpc-opts",
+        alias = "grpc_opts"
+    )]
+    pub grpc_opts: Option<ClashGrpcOpts>,
 }
 
 /// Clash `ws-opts` 子块（vmess/vless 的 ws 传输）
@@ -211,6 +220,22 @@ pub struct ClashWsHeaders {
         alias = "HOST"
     )]
     pub host: Option<String>,
+}
+
+/// Clash `grpc-opts` 子块（vmess/vless/trojan 的 gRPC 传输）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClashGrpcOpts {
+    /// gRPC 服务名（线上路径 = /{name}/Tun；Clash 规范内键为
+    /// `grpc-service-name`，其余为常见变体兜底）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "grpc-service-name",
+        alias = "grpc_service_name",
+        alias = "serviceName",
+        alias = "service-name"
+    )]
+    pub grpc_service_name: Option<String>,
 }
 
 /// Clash 代理组类型
@@ -273,6 +298,16 @@ impl ClashProxy {
                     .and_then(|h| h.host.clone())
             })
             .filter(|h| !h.is_empty())
+    }
+
+    /// gRPC 服务名：`grpc-opts.grpc-service-name`（Clash 规范块键；
+    /// 平铺变体由 serde 别名不覆盖——grpc 服务名无平铺口径）。空串按缺省处理
+    /// （缺服务名的 grpc 节点由 RuntimeBuilder 构建期拦截）。
+    pub fn grpc_service(&self) -> Option<String> {
+        self.grpc_opts
+            .as_ref()
+            .and_then(|g| g.grpc_service_name.clone())
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -862,6 +897,7 @@ impl ClashConverter {
                     network: proxy.network.clone().unwrap_or_else(|| "tcp".to_string()),
                     path: proxy.path.clone(),
                     host: proxy.host.clone().map(|h| vec![h]),
+                    grpc_service_name: proxy.grpc_service(),
                     tls: true,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),

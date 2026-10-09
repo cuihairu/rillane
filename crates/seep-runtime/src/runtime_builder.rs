@@ -2338,25 +2338,32 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Result<Vec<TransportKey>
                 ..
             } => {
                 // 键与 forward_pooled 的 transport_key 同源（借出键恒
-                // Some(实际 SNI)：tcp = sni ∥ server；ws = sni ∥ ws Host
+                // Some(实际 SNI)：tcp/grpc = sni ∥ server；ws = sni ∥ ws Host
                 // 首值 ∥ server，trojan-go 惯例 ws 恒叠 TLS）。network 单值
                 // 决定分支，只推在用键（异于 vless 双键——vless 的 tcp 键
-                // 在 ws 节点上永不被借出，属既有预留）。
+                // 在 ws 节点上永不被借出，属既有预留）。grpc 的池键携带
+                // ALPN h2（gRPC over TLS 语义），预热键同源。
                 if *tls {
                     let fp = parse_egress_fingerprint(tls_fingerprint, &desc.name)?;
-                    let sni_actual = if network == "ws" || network == "websocket" {
+                    let is_ws = network == "ws" || network == "websocket";
+                    let sni_actual = if is_ws {
                         sni.clone()
                             .or_else(|| host.as_ref().and_then(|v| v.first().cloned()))
                             .unwrap_or_else(|| server.clone())
                     } else {
                         sni.clone().unwrap_or_else(|| server.clone())
                     };
+                    let alpn: Vec<String> = if network == "grpc" {
+                        vec!["h2".to_string()]
+                    } else {
+                        Vec::new()
+                    };
                     keys.push(TransportKey::tls(
                         server,
                         *port,
                         Some(&sni_actual),
                         *skip_cert_verify,
-                        &[],
+                        &alpn,
                         fp,
                     ));
                 }
@@ -2572,18 +2579,28 @@ fn build_egress_outputs(
                 network,
                 path,
                 host,
+                grpc_service_name,
                 tls,
                 skip_cert_verify,
                 sni,
                 tls_fingerprint,
                 ..
             } => {
-                // 传输层白名单 tcp/ws（ws = trojan-go 惯例，恒叠 TLS）
+                // 传输层白名单 tcp/ws/grpc（ws/grpc 恒叠 TLS；grpc 需服务名）
                 match network.as_str() {
                     "tcp" | "ws" | "websocket" => {}
+                    "grpc" => {
+                        let svc = grpc_service_name.as_deref().map(str::trim).unwrap_or("");
+                        if svc.is_empty() {
+                            return Err(anyhow!(
+                                "Trojan network=grpc 需要非空 grpc_service_name (egress={})",
+                                desc.name
+                            ));
+                        }
+                    }
                     other => {
                         return Err(anyhow!(
-                            "Trojan network 仅支持 tcp/ws，当前: {} (egress={})",
+                            "Trojan network 仅支持 tcp/ws/grpc，当前: {} (egress={})",
                             other,
                             desc.name
                         ));
@@ -2606,6 +2623,7 @@ fn build_egress_outputs(
                     network.clone(),
                     path.clone(),
                     host.clone(),
+                    grpc_service_name.clone(),
                     transport_pool.clone(),
                     tls_factory.clone(),
                 ));
@@ -4211,6 +4229,7 @@ mod tests {
                     network: "tcp".into(),
                     path: None,
                     host: None,
+                    grpc_service_name: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,
@@ -4501,6 +4520,7 @@ mod tests {
                         network: "tcp".to_string(),
                         path: None,
                         host: None,
+                        grpc_service_name: None,
                         tls: true,
                         skip_cert_verify: false,
                         sni: Some("sni.example".to_string()),
@@ -4610,6 +4630,7 @@ mod tests {
                 network: "tcp".to_string(),
                 path: None,
                 host: None,
+                grpc_service_name: None,
                 tls: true,
                 skip_cert_verify: false,
                 sni: None,
@@ -4642,6 +4663,7 @@ mod tests {
                     network: "tcp".to_string(),
                     path: None,
                     host: None,
+                    grpc_service_name: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: Some("sni.example".to_string()),
@@ -4658,6 +4680,7 @@ mod tests {
                     network: "tcp".to_string(),
                     path: None,
                     host: None,
+                    grpc_service_name: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,
@@ -4674,6 +4697,7 @@ mod tests {
                     network: "ws".to_string(),
                     path: Some("/ray".to_string()),
                     host: Some(vec!["cdn.example".to_string()]),
+                    grpc_service_name: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,

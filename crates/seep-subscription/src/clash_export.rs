@@ -305,6 +305,7 @@ fn proxy_mapping(
             network,
             path,
             host,
+            grpc_service_name,
             tls: _,
             skip_cert_verify,
             sni,
@@ -326,6 +327,13 @@ fn proxy_mapping(
                 ins(&mut m, "alpn", a.clone());
             }
             ws_opts(&mut m, network, path.as_deref(), host.as_deref());
+            if network == "grpc" {
+                if let Some(svc) = grpc_service_name {
+                    let mut gopts = Mapping::new();
+                    ins(&mut gopts, "grpc-service-name", svc.as_str());
+                    ins(&mut m, "grpc-opts", gopts);
+                }
+            }
             degrade(
                 report,
                 name,

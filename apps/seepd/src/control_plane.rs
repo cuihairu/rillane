@@ -3282,6 +3282,7 @@ mod tests {
                     network: "tcp".to_string(),
                     path: None,
                     host: None,
+                    grpc_service_name: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,

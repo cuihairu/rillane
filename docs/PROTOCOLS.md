@@ -141,7 +141,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - 更低的性能开销（相比 VMess 少一层协议内加密）
 
 ### Trojan
-> 状态：部分实现——TCP 原生 + 完整 TLS（SNI/证书校验/`skip_cert_verify`/指纹），「流量看起来像标准 HTTPS」的目标由 TLS 形态达成；WebSocket 传输已实现（trojan-go 惯例：ws 恒叠 TLS，请求头作为首个 binary 帧，无独立应答头；池路径 upgrade 失败 stale 一次性重拨）；gRPC 传输**未实现**——超前描述。
+> 状态：部分实现——TCP 原生 + 完整 TLS（SNI/证书校验/`skip_cert_verify`/指纹），「流量看起来像标准 HTTPS」的目标由 TLS 形态达成；WebSocket 传输已实现（trojan-go 惯例：ws 恒叠 TLS，请求头作为首个 binary 帧，无独立应答头；池路径 upgrade 失败 stale 一次性重拨）；gRPC 传输已实现（2026-10：`network: grpc` + `grpc_service_name`，恒叠 TLS + ALPN h2，POST `/{service}/Tun` 单流隧道，请求头作为首条 gRPC 消息，5 字节长度前缀帧，16MiB 消息上限；池键携带 ALPN h2，握手失败 stale 一次性重拨；订阅侧 clash `grpc-opts` 导入导出）。
 
 - **协议**: 基于 TLS 伪装的代理协议
 - **TLS 特性**:
@@ -308,10 +308,10 @@ Seep 入口与主流代理客户端互通（SOCKS5/HTTP CONNECT 口径；入口�
 - **iOS**: Shadowrocket, Quantumult X, Surge, Stash
 
 ### 服务端互操作
-- **V2Ray**: 核心 VMess/VLESS 面互通（tcp/ws；VLESS flow 与 h2/gRPC 传输不支持，见各节状态行）
-- **Xray**: VMess AEAD（tcp/ws）+ VLESS（tcp/ws，无 flow）互通；扩展传输（h2/gRPC）与 flow 不支持
+- **V2Ray**: 核心 VMess/VLESS 面互通（tcp/ws/gRPC；VLESS flow 与 h2 传输不支持，见各节状态行）
+- **Xray**: VMess AEAD（tcp/ws/gRPC）+ VLESS（tcp/ws/gRPC，无 flow）互通；h2 传输与 flow 不支持
 - **Shadowsocks**: AEAD 方法互通（方法集以 `shadowsocks` crate 1.21 为准，非法 `method` 运行时报错）
-- **Trojan**: 标准 Trojan 协议实现（TCP 原生 + TLS；ws 传输已实现，gRPC 未实现）
+- **Trojan**: 标准 Trojan 协议实现（TCP 原生 + TLS；ws/gRPC 传输已实现）
 
 ## 路线图
 

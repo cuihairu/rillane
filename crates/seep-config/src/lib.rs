@@ -1370,6 +1370,9 @@ pub enum EgressConfig {
         path: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         host: Option<Vec<String>>,
+        /// gRPC 服务名（network=grpc 时必填；线上路径 = /{name}/Tun）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        grpc_service_name: Option<String>,
         #[serde(default = "default_tls_true")]
         tls: bool,
         #[serde(default)]
