@@ -88,6 +88,27 @@ export default defineConfig({
           { text: 'P1-5 出站连接池', link: '/design/egress-connection-pool' },
         ],
       },
+      {
+        text: '设计文档 — 调度、安全与场景（P2）',
+        items: [
+          { text: 'P2-1 per-link 细粒度指标', link: '/design/mesh-link-observability' },
+          { text: 'P2-2 SLO 打分选路', link: '/design/slo-scoring' },
+          { text: 'P2-3 场景 profile 预设', link: '/design/scenario-profiles' },
+          { text: 'P2-4 混淆扩展（timing / shaping）', link: '/design/obfuscation-timing-shaping' },
+          { text: 'P2-5 客户端 TLS 指纹模拟', link: '/design/tls-fingerprint' },
+          { text: 'P2-6 mesh envelope 二进制化', link: '/design/mesh-envelope-binary' },
+          { text: 'P2-7 mesh 高级安全（CRL + UDP 防重放）', link: '/design/mesh-advanced-security' },
+          { text: 'P2-8 DNS 分流解析', link: '/design/dns-partition' },
+        ],
+      },
+      {
+        text: '设计文档 — 收尾与发布（P3）',
+        items: [
+          { text: 'P3-2 插件动态加载（WASM）', link: '/design/plugin-loader' },
+          { text: 'P3-3 平台打包（systemd / launchd / Windows）', link: '/design/platform-packaging' },
+          { text: 'P3-5 零拷贝 / 批量收发', link: '/design/performance-io' },
+        ],
+      },
     ],
     outline: { level: [2, 3], label: '本页目录' },
     docFooter: { prev: '上一篇', next: '下一篇' },
