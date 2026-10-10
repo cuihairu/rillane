@@ -65,6 +65,13 @@ cargo run -p seepctl -- nodes
 cargo run -p seepctl -- udp-probe --socks5 127.0.0.1:7890 --host example.com --port 53 --payload-hex 0001
 ```
 
+`seepctl profile <proxy|game|web> --out <path>`（O-prof1）生成三选一即运行的场景骨架（profile 展开已内联）：
+
+```bash
+cargo run -p seepctl -- profile game --out /tmp/game.yaml
+SEEP_CONFIG=/tmp/game.yaml seepd
+```
+
 `seepd` 配置经 `SEEP_CONFIG` 环境变量指定（缺省 `config/seep.yaml`）；无 `--config` 旗标，多余命令行参数被忽略。平台模板的配置落位见 `platforms/` 各 README。
 
 可选：`telemetry.enable_tracing=true` 时（`config/seep.yaml` 缺省为 `false`），在 `seepd` 进程环境中设置 `SEEP_CAPTURE_LOGS=1`，控制面会额外提供 `GET /logs`（用于 `seepctl diagnose` 抓取最近日志）；未开启时该端点返回 404。

@@ -149,6 +149,9 @@ pub profile: Option<ProfileKind>,
 
 - **R-prof1**：预设值随生态漂移（游戏域清单、slo 阈值）——预设属
   配置层，示例 YAML 可独立修订不发版；
-- **O-prof1**：`seepctl profile` 子命令生成场景骨架配置（M1 后按需）；
+- **O-prof1**：~~`seepctl profile` 子命令生成场景骨架配置~~（**已落地
+  2026-10-10**：`seepctl profile <proxy|game|web> [--out <path>]` 经
+  `from_str` 解析校验并内联场景展开后输出 YAML——三选一即运行；白名单
+  外场景名报错并列合法值）；
 - **O-prof2**：profile 与订阅合并语义（订阅推 egress、主配置产策略，
   现状已自然正交；出现冲突诉求再设计）。

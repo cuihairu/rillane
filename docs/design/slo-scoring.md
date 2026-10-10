@@ -161,5 +161,7 @@ pub struct SloWatch {             // ChainConfig.slo_watch: Option<...>
   `GET /routing/stats` + `seepctl group`——成员数据源 real/legacy/unknown、
   p95/丢包、门判定与 latency 组当前确定性选点；选点/门/评分口径与
   select_latency_member 同源共用）；
-- **O-slo2**：游戏 profile 默认启用接线（P2-3）；
+- **O-slo2**：~~游戏 profile 默认启用接线（P2-3）~~（**已落地
+  2026-10-02**：`profile: game` 展开的 game-auto 组自带
+  `slo{p95_ms: 80, loss_ratio: 0.02}`，见 scenario-profiles.md §4）；
 - **O-slo3**：迟滞/去抖（连续 N 周期越门才切）按 R-slo1 观测定。

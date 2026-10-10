@@ -51,6 +51,14 @@ enum Command {
         #[arg(long)]
         endpoint: Option<String>,
     },
+    /// 生成场景骨架配置（O-prof1：proxy|game|web 三选一即运行）
+    Profile {
+        /// 场景：proxy | game | web
+        variant: String,
+        /// 输出文件路径（缺省打印到 stdout）
+        #[arg(long)]
+        out: Option<String>,
+    },
     /// UDP ASSOCIATE 联调探测（P0-5 §3.3：最小 RFC 1928 客户端）
     UdpProbe {
         /// SOCKS5 入口地址，如 127.0.0.1:1080
@@ -415,6 +423,18 @@ fn main() -> Result<()> {
             let stats: MeshSwitchesResponse =
                 resp.json().context("解析控制面返回数据失败")?;
             print!("{}", render_switches(&stats.events));
+        }
+        Command::Profile { variant, out } => {
+            let variant = parse_profile_variant(&variant)?;
+            let cfg = scenario_skeleton(&variant)?;
+            let yaml = serde_yaml::to_string(&cfg).context("场景骨架序列化失败")?;
+            match out {
+                Some(path) => {
+                    fs::write(&path, yaml).with_context(|| format!("写入 {path} 失败"))?;
+                    println!("已写入 {path}（SEEP_CONFIG={path} seepd）");
+                }
+                None => print!("{yaml}"),
+            }
         }
         Command::UdpProbe {
             socks5,
@@ -1680,6 +1700,31 @@ struct RoutingMemberQuality {
     gate_pass: Option<bool>,
 }
 
+// ---------- O-prof1：profile 场景骨架 ----------
+
+/// 场景名白名单（O-prof1）：报错给合法值
+fn parse_profile_variant(s: &str) -> Result<String> {
+    match s {
+        "proxy" | "game" | "web" => Ok(s.to_string()),
+        other => Err(anyhow::anyhow!("未知场景 {other}（合法值：proxy | game | web）")),
+    }
+}
+
+/// 场景骨架（O-prof1）：最小可运行配置 + `profile:` 行，经 from_str 解析
+/// 校验并展开（scenario-profiles.md §2-D2：显式空位由 profile 缺省填充）——
+/// 输出为展开后的完整配置，可直接 `SEEP_CONFIG=<path> seepd` 运行。
+fn scenario_skeleton(variant: &str) -> Result<SeepConfig> {
+    let raw = format!(
+        "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: seep\n\n\
+         telemetry:\n  log_level: info\n  enable_metrics: true\n  enable_tracing: false\n\n\
+         ingress:\n  - name: socks-in\n    type: socks5\n    bind: 127.0.0.1:7890\n\n\
+         egress:\n  - name: direct-main\n    type: direct\n\n\
+         routing:\n  default_node: direct-main\n  groups: []\n  rules: []\n\n\
+         profile: {variant}\n"
+    );
+    SeepConfig::from_str(&raw, Some("yaml")).context("场景骨架解析失败")
+}
+
 // ---------- O-link-obs2：switches 链路切换账本 ----------
 
 /// `/mesh/switches` 响应（seepd `MeshSwitchesDto` 的 seepctl 侧反序列化视图）
@@ -2383,5 +2428,53 @@ mod tests {
     #[test]
     fn switches_render_empty() {
         assert_eq!(render_switches(&[]), "暂无链路切换记录\n");
+    }
+
+    /// O-prof1：三场景骨架解析展开（P2-3 缺省填充 + 显式恒优先口径）
+    #[test]
+    fn scenario_skeleton_expands_all_variants() {
+        let proxy = scenario_skeleton("proxy").expect("proxy 骨架应可解析");
+        assert_eq!(proxy.profile, Some(seep_config::ProfileKind::Proxy));
+        assert_eq!(proxy.routing.groups.len(), 1);
+        assert_eq!(proxy.routing.groups[0].name, "auto");
+        assert!(proxy.routing.rules.iter().any(|r| r.name == "cn"));
+        assert!(proxy.obfuscation.is_none() && proxy.egress_pool.is_none());
+
+        let game = scenario_skeleton("game").expect("game 骨架应可解析");
+        assert_eq!(game.profile, Some(seep_config::ProfileKind::Game));
+        assert_eq!(game.routing.groups[0].name, "game-auto");
+        let slo = game
+            .routing
+            .groups[0]
+            .slo
+            .as_ref()
+            .expect("game 组应带 SLO 目标");
+        assert_eq!(slo.p95_ms, Some(80));
+        assert!(game.obfuscation.is_some());
+        assert!(game.egress_pool.is_none());
+
+        let web = scenario_skeleton("web").expect("web 骨架应可解析");
+        assert_eq!(web.routing.groups[0].name, "web-auto");
+        assert!(web.egress_pool.is_some());
+        assert!(web.obfuscation.is_none());
+        // 骨架恒含最小 ingress/egress 与 default_node（三场景同构部分）
+        assert_eq!(web.ingress.len(), 1);
+        assert_eq!(web.egress.len(), 1);
+        assert_eq!(web.routing.default_node, "direct-main");
+
+        // 序列化产物仍是合法配置（展开幂等，重载组模板不变）
+        let yaml = serde_yaml::to_string(&web).expect("应可序列化");
+        let reloaded =
+            SeepConfig::from_str(&yaml, Some("yaml")).expect("序列化产物应可重载");
+        assert_eq!(reloaded.routing.groups[0].name, "web-auto");
+    }
+
+    #[test]
+    fn profile_variant_whitelist() {
+        for v in ["proxy", "game", "web"] {
+            assert_eq!(parse_profile_variant(v).unwrap(), v);
+        }
+        let err = parse_profile_variant("fps").unwrap_err();
+        assert!(err.to_string().contains("fps"), "{}", err);
     }
 }
