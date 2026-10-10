@@ -53,8 +53,8 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - Bearer Token 认证（已实现，`bearer_tokens` 字段 + `Proxy-Authorization: Bearer` 校验）
 - **特性**:
   - 支持 HTTP CONNECT 方法用于 HTTPS 代理
-  - 支持请求/响应头修改（未实现，超前描述）
-  - 支持压缩 (gzip, deflate)（未实现，超前描述）
+  - 支持请求/响应头修改（未实现，超前描述——需全量转发代理数据面，本入口仅 CONNECT 隧道）
+  - 支持压缩 (gzip, deflate)（未实现，超前描述——同上）
 
 ### 混合代理 (Mixed)
 > 状态：已实现协议自动识别与端口共享；`IngressConfig::Mixed.auth` 已接线——socks5 分支强制 RFC 1929（仅提供无认证法时回 0xFF）、http 分支 Basic 认证（407 拒绝），空表/缺省 = 两分支均匿名放行，语义同 Socks5/Http；`bearer_tokens` 同 Http（仅 http 分支）。
@@ -109,7 +109,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
 - **支持协议**: TCP, UDP
 - **特性**:
   - 插件系统支持 (v2ray-plugin, obfs)
-  - 动态端口分配
+  - 动态端口分配（未实现，超前描述——SIP004 服务端特性，本仓 Shadowsocks 仅出站客户端）
   - 混淆和伪装
 
 ### VMess (V2Ray)
