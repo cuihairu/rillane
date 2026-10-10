@@ -13,8 +13,52 @@ use seep_config::{
     SloPolicy, Strategy,
 };
 use seep_core::{FlowContext, FlowRouter, RouteDecision};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::time::{interval, sleep};
+
+/// 单成员实时质量（O-slo1 观测面：控制面 `/routing/stats` 与 `seepctl group`
+/// 取数；取数/门/评分口径与 [`RoutingEngine::select_latency_member`] 同源）
+#[derive(Debug, Clone, Serialize)]
+pub struct MemberQuality {
+    pub name: String,
+    pub healthy: bool,
+    /// 数据源：`"real"`（link_quality TTL 内）/ `"legacy"`（latency_stats）/
+    /// `"unknown"`（两者皆无）
+    pub source: &'static str,
+    pub p95_ms: Option<u64>,
+    pub loss_ratio: Option<f64>,
+    /// score = p95 + loss × penalty（D-1 加性形；仅 latency 组计算）
+    pub score: Option<f64>,
+    /// 门判定（D-2）：仅 latency 组 + 有门 + real 数据成员有值；
+    /// legacy/unknown 自动合规记 `None`
+    pub gate_pass: Option<bool>,
+}
+
+/// 单组实时质量报告（O-slo1）
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupQuality {
+    pub name: String,
+    /// 策略名（serde snake_case 口径，与配置一致）
+    pub strategy: String,
+    /// 当前数据下 latency 策略的确定性选点（与 select_latency_member
+    /// 同口径）；非 latency 组 = `None`
+    pub selected: Option<String>,
+    pub members: Vec<MemberQuality>,
+}
+
+/// 策略显示名（serde snake_case 口径）
+fn strategy_name(s: &Strategy) -> &'static str {
+    match s {
+        Strategy::Fixed => "fixed",
+        Strategy::Latency => "latency",
+        Strategy::Random => "random",
+        Strategy::Bandwidth => "bandwidth",
+        Strategy::Weighted => "weighted",
+        Strategy::ConsistentHash => "consistent_hash",
+        Strategy::RoundRobin => "round_robin",
+    }
+}
 
 pub struct RoutingEngine {
     config: RwLock<RoutingConfig>,
@@ -313,48 +357,39 @@ impl RoutingEngine {
             .collect()
     }
 
-    /// 基于延迟选择成员（slo-scoring.md §2 D-2/D-3 升级：SLO 目标门 + 加性
-    /// 罚分评分；取数优先级 = 真链路质量（TTL 内）→ legacy latency_stats →
-    /// 首个健康成员）
-    fn select_latency_member<'a>(
+    /// 取数候选（D-3 优先级：真链路质量 TTL 内 → legacy latency_stats；
+    /// 缺席者不入候选）——select_latency_member 与 group_quality_report 共用
+    fn quality_candidates(
         &self,
-        members: &'a [&GroupDescriptorMember],
-        slo: Option<&SloPolicy>,
-    ) -> Option<&'a GroupDescriptorMember> {
-        if members.is_empty() {
-            return None;
-        }
-
+        member_names: impl Iterator<Item = String>,
+    ) -> Vec<(String, f64, f64, bool)> {
         let now = std::time::Instant::now();
         const QUALITY_TTL: Duration = Duration::from_secs(60);
-
-        // 取数：真链路质量优先；缺席回退 legacy 最后样本（loss 未知记 0——
-        // 语义 = legacy 源无丢包观测，§9 语义变化注记）
-        let candidates: Vec<(&GroupDescriptorMember, f64, f64, bool)> = members
-            .iter()
-            .filter_map(|member| {
-                if let Some(entry) = self.link_quality.get(member.as_name()) {
+        member_names
+            .filter_map(|name| {
+                // 取数：真链路质量优先；缺席回退 legacy 最后样本（loss 未知记
+                // 0——语义 = legacy 源无丢包观测，§9 语义变化注记）
+                if let Some(entry) = self.link_quality.get(&name) {
                     let (p95, loss, at) = entry.value();
                     if now.duration_since(*at) < QUALITY_TTL {
-                        return Some((*member, *p95 as f64, *loss, true));
+                        return Some((name, *p95 as f64, *loss, true));
                     }
                 }
                 self.latency_stats
-                    .get(member.as_name())
-                    .map(|latency| (*member, *latency.value() as f64, 0.0, false))
+                    .get(&name)
+                    .map(|latency| (name, *latency.value() as f64, 0.0, false))
             })
-            .collect();
+            .collect()
+    }
 
-        if candidates.is_empty() {
-            return members.first().copied();
-        }
-
+    /// 门 + 评分选点（D-1/D-2）：仅 real 成员受门约束（legacy/unknown 自动
+    /// 合规）；门内空 → 全体候选（不 dead-end）；score = p95 + loss × penalty
+    fn gate_and_pick<'a>(
+        &self,
+        candidates: &'a [(String, f64, f64, bool)],
+        slo: Option<&SloPolicy>,
+    ) -> Option<&'a (String, f64, f64, bool)> {
         let penalty = slo.map(SloPolicy::penalty_or_default).unwrap_or(1000.0);
-        // score = p95 + loss × penalty（D-1 加性形；legacy 源 loss=0）
-        let score =
-            |&(_, p95, loss, _): &(&GroupDescriptorMember, f64, f64, bool)| p95 + loss * penalty;
-        // 门（D-2）：仅真数据成员受门约束（legacy/unknown 视为合规）；
-        // 门内空 → 全体候选（不 dead-end）
         let compliant: Vec<_> = match slo {
             Some(slo) => {
                 let gated: Vec<_> = candidates
@@ -373,11 +408,107 @@ impl RoutingEngine {
             }
             None => candidates.iter().collect(),
         };
-
         compliant
             .into_iter()
-            .min_by(|a, b| score(a).total_cmp(&score(b)))
-            .map(|(member, _, _, _)| *member)
+            .min_by(|a, b| (a.1 + a.2 * penalty).total_cmp(&(b.1 + b.2 * penalty)))
+    }
+
+    /// 基于延迟选择成员（slo-scoring.md §2 D-2/D-3 升级：SLO 目标门 + 加性
+    /// 罚分评分；取数优先级 = 真链路质量（TTL 内）→ legacy latency_stats →
+    /// 首个健康成员）
+    fn select_latency_member<'a>(
+        &self,
+        members: &'a [&GroupDescriptorMember],
+        slo: Option<&SloPolicy>,
+    ) -> Option<&'a GroupDescriptorMember> {
+        if members.is_empty() {
+            return None;
+        }
+
+        let names: Vec<String> = members.iter().map(|m| m.as_name().to_string()).collect();
+        let candidates = self.quality_candidates(names.iter().cloned());
+
+        if candidates.is_empty() {
+            return members.first().copied();
+        }
+
+        let chosen = self.gate_and_pick(&candidates, slo)?;
+        members.iter().find(|m| m.as_name() == chosen.0).copied()
+    }
+
+    /// 组实时质量报告（O-slo1 观测面）：逐组列出成员数据源/质量/门/评分，
+    /// latency 组附当前确定性选点。只读，无副作用。
+    pub fn group_quality_report(&self) -> Vec<GroupQuality> {
+        let config = self.snapshot();
+        config
+            .groups
+            .iter()
+            .map(|group| {
+                // score/gate/selected 仅 latency 组有语义（其余策略不消费
+                // SLO 数据），如实留空不误导
+                let is_latency = matches!(group.strategy, Strategy::Latency);
+                let slo = if is_latency { group.slo.as_ref() } else { None };
+                let penalty = slo.map(SloPolicy::penalty_or_default).unwrap_or(1000.0);
+                let names: Vec<String> = group
+                    .members
+                    .iter()
+                    .map(|m| match m {
+                        seep_config::GroupMember::Node { name }
+                        | seep_config::GroupMember::WeightedNode { name, .. } => name.clone(),
+                        seep_config::GroupMember::Group { name }
+                        | seep_config::GroupMember::WeightedGroup { name, .. } => name.clone(),
+                    })
+                    .collect();
+                let candidates = self.quality_candidates(names.iter().cloned());
+                // selected 仅 latency 组计算（gate_and_pick 对 slo=None 也会
+                // 取最低分，非 latency 组的确定性选点无意义）
+                let chosen = if is_latency {
+                    self.gate_and_pick(&candidates, slo).map(|c| c.0.clone())
+                } else {
+                    None
+                };
+                let members = names
+                    .iter()
+                    .map(|name| {
+                        let (source, p95, loss, real) =
+                            match candidates.iter().find(|(n, ..)| n == name) {
+                                Some((_, p95, loss, real)) => {
+                                    (if *real { "real" } else { "legacy" }, Some(*p95), Some(*loss), *real)
+                                }
+                                None => ("unknown", None, None, false),
+                            };
+                        let score = if is_latency && p95.is_some() {
+                            Some(p95.unwrap() + loss.unwrap() * penalty)
+                        } else {
+                            None
+                        };
+                        let gate_pass = if is_latency && real {
+                            slo.map(|s| {
+                                s.p95_ms.is_none_or(|t| p95.unwrap() <= f64::from(t))
+                                    && s.loss_ratio.is_none_or(|t| loss.unwrap() <= t)
+                            })
+                        } else {
+                            None
+                        };
+                        MemberQuality {
+                            name: name.clone(),
+                            healthy: self.get_node_health(name),
+                            source,
+                            p95_ms: p95.map(|v| v as u64),
+                            loss_ratio: loss,
+                            score,
+                            gate_pass,
+                        }
+                    })
+                    .collect();
+                GroupQuality {
+                    name: group.name.clone(),
+                    strategy: strategy_name(&group.strategy).to_string(),
+                    selected: chosen,
+                    members,
+                }
+            })
+            .collect()
     }
 
     /// 更新节点带宽统计
@@ -856,5 +987,142 @@ mod tests {
             "direct",
             "注解缺席应落默认节点"
         );
+    }
+
+    /// O-slo1 观测面：报告逐成员标注数据源（real/legacy/unknown）
+    #[test]
+    fn quality_report_marks_sources() {
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![PolicyGroup {
+                name: "g".into(),
+                strategy: Strategy::Latency,
+                members: vec![
+                    seep_config::GroupMember::Node { name: "real".into() },
+                    seep_config::GroupMember::Node { name: "legacy".into() },
+                    seep_config::GroupMember::Node { name: "unknown".into() },
+                ],
+                slo: None,
+            }],
+            rules: vec![],
+        });
+        engine.update_link_quality("real", 30, 0.0);
+        engine.latency_stats.insert("legacy".into(), 40);
+
+        let report = engine.group_quality_report();
+        assert_eq!(report.len(), 1);
+        let g = &report[0];
+        assert_eq!(g.strategy, "latency");
+        let by_name = |n: &str| g.members.iter().find(|m| m.name == n).unwrap();
+        let real = by_name("real");
+        assert_eq!(real.source, "real");
+        assert_eq!(real.p95_ms, Some(30));
+        assert_eq!(real.loss_ratio, Some(0.0));
+        let legacy = by_name("legacy");
+        assert_eq!(legacy.source, "legacy");
+        assert_eq!(legacy.p95_ms, Some(40));
+        assert_eq!(legacy.loss_ratio, Some(0.0));
+        let unknown = by_name("unknown");
+        assert_eq!(unknown.source, "unknown");
+        assert_eq!(unknown.p95_ms, None);
+        assert_eq!(unknown.loss_ratio, None);
+        // 无门 → gate_pass 缺席；score 与 penalty 缺省 1000 口径
+        assert_eq!(real.gate_pass, None);
+        assert_eq!(real.score, Some(30.0));
+        assert_eq!(legacy.gate_pass, None);
+        assert_eq!(legacy.score, Some(40.0));
+        assert_eq!(unknown.score, None);
+        // 选点与 select 同源：real(30) < legacy(40)
+        assert_eq!(g.selected.as_deref(), Some("real"));
+    }
+
+    /// O-slo1 观测面：门判定仅在 real + 有门时给值；legacy/unknown 合规
+    #[test]
+    fn quality_report_gate_marks_only_real_members() {
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![PolicyGroup {
+                name: "g".into(),
+                strategy: Strategy::Latency,
+                members: vec![
+                    seep_config::GroupMember::Node { name: "ok".into() },
+                    seep_config::GroupMember::Node { name: "violator".into() },
+                    seep_config::GroupMember::Node { name: "legacy".into() },
+                    seep_config::GroupMember::Node { name: "unknown".into() },
+                ],
+                slo: Some(SloPolicy {
+                    p95_ms: Some(50),
+                    loss_ratio: Some(0.01),
+                    loss_penalty_ms: None,
+                }),
+            }],
+            rules: vec![],
+        });
+        engine.update_link_quality("ok", 30, 0.0);
+        engine.update_link_quality("violator", 80, 0.02);
+        engine.latency_stats.insert("legacy".into(), 90);
+
+        let g = &engine.group_quality_report()[0];
+        let by_name = |n: &str| g.members.iter().find(|m| m.name == n).unwrap();
+        assert_eq!(by_name("ok").gate_pass, Some(true));
+        assert_eq!(by_name("violator").gate_pass, Some(false));
+        // legacy/unknown 自动合规但无门判定语义 → None
+        assert_eq!(by_name("legacy").gate_pass, None);
+        assert_eq!(by_name("unknown").gate_pass, None);
+        // 选点：violator 越门被过滤 → ok(30) 胜 legacy(90)（与 select 同源）
+        assert_eq!(g.selected.as_deref(), Some("ok"));
+    }
+
+    /// O-slo1 观测面：门内空 → 回全体候选（不 dead-end）；非 latency 组
+    /// 不产 score/gate/selected（数据如实列出，选路语义不外推）
+    #[test]
+    fn quality_report_no_dead_end_and_non_latency_neutral() {
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![
+                PolicyGroup {
+                    name: "all-bad".into(),
+                    strategy: Strategy::Latency,
+                    members: vec![
+                        seep_config::GroupMember::Node { name: "a".into() },
+                        seep_config::GroupMember::Node { name: "b".into() },
+                    ],
+                    slo: Some(SloPolicy {
+                        p95_ms: Some(10),
+                        loss_ratio: None,
+                        loss_penalty_ms: None,
+                    }),
+                },
+                PolicyGroup {
+                    name: "fixed-g".into(),
+                    strategy: Strategy::Fixed,
+                    members: vec![seep_config::GroupMember::Node { name: "x".into() }],
+                    slo: Some(SloPolicy {
+                        p95_ms: Some(10),
+                        loss_ratio: None,
+                        loss_penalty_ms: None,
+                    }),
+                },
+            ],
+            rules: vec![],
+        });
+        engine.update_link_quality("a", 80, 0.0);
+        engine.update_link_quality("b", 60, 0.0);
+        engine.update_link_quality("x", 70, 0.0);
+
+        let report = engine.group_quality_report();
+        let all_bad = &report[0];
+        // 门内空 → 全体候选取最低分：b(60) < a(80)
+        assert_eq!(all_bad.selected.as_deref(), Some("b"));
+        assert_eq!(all_bad.members.iter().find(|m| m.name == "a").unwrap().gate_pass, Some(false));
+
+        let fixed = &report[1];
+        assert_eq!(fixed.strategy, "fixed");
+        assert_eq!(fixed.selected, None);
+        let x = fixed.members.iter().find(|m| m.name == "x").unwrap();
+        // 非 latency：原始质量如实，score/gate 不计算
+        assert_eq!(x.source, "real");
+        assert_eq!(x.score, None);
+        assert_eq!(x.gate_pass, None);
     }
 }
