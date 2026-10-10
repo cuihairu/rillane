@@ -25,6 +25,7 @@ pub mod clash;
 pub mod clash_export;
 pub mod converter;
 pub mod fetcher;
+pub mod rule_source;
 pub mod seep_dsl;
 
 pub use cache::*;
@@ -32,6 +33,7 @@ pub use clash::*;
 pub use clash_export::*;
 pub use converter::*;
 pub use fetcher::*;
+pub use rule_source::*;
 pub use seep_dsl::*;
 
 /// 订阅类型

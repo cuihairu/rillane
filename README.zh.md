@@ -61,6 +61,7 @@ cargo run -p seepctl -- stats
 cargo run -p seepctl -- diagnose
 cargo run -p seepctl -- mtls --help
 cargo run -p seepctl -- import-clash https://example.com/clash.yaml
+cargo run -p seepctl -- import-rules geosite-cn.txt --target direct-main
 cargo run -p seepctl -- nodes
 cargo run -p seepctl -- udp-probe --socks5 127.0.0.1:7890 --host example.com --port 53 --payload-hex 0001
 ```
@@ -79,3 +80,4 @@ SEEP_CONFIG=/tmp/game.yaml seepd
 当前可用能力：提供 Socks5 / HTTP CONNECT / Mixed 入站 + Direct / Socks5 / HTTP CONNECT / Shadowsocks / Trojan / Hysteria2 / VLESS / VMess / WireGuard 出站的数据通道，可通过 `config/seep.yaml` 配置监听端口、认证信息与路由策略；UDP 数据面（socks5/mixed 的 UDP ASSOCIATE 中继，`udp:` 配置块，缺省关闭）支持入口级开关与全套超时/上限参数。
 后台控制接口默认监听 `control.api_bind`，可访问 `http://127.0.0.1:9090/flows` 查看入口/出口之间的累计流量统计（或 `seepctl stats`——尾部附 UDP 段：会话/中继字节/丢弃/过期/mesh 面），访问 `http://127.0.0.1:9090/udp/stats` 取 UDP JSON 快照，访问 `http://127.0.0.1:9090/nodes` 或 `seepctl nodes` 查看 mesh 节点注册信息，运行 `seepctl group`（或访问 `http://127.0.0.1:9090/routing/stats`）查看各组实时质量——成员数据源、p95/丢包、SLO 门判定与 latency 组当前选点，运行 `seepctl switches`（或访问 `http://127.0.0.1:9090/mesh/switches`）查看链路切换账本（最近 100 次事件，含前后路径与原因）；运行 `seepctl tls-fingerprint` 查看 TLS 指纹形态预设对照表（none/chrome/ios/safari 及其四维 shape_material）；`seepctl udp-probe` 为 SOCKS5 UDP ASSOCIATE 联调探测（退出码 0-4，见 `--help`）。
 `seepctl import-clash` 会尝试完整转换 Clash 的 `proxies`/`proxy-groups`/`rules`（含 socks5/http/ss/trojan/vmess/vless/hysteria2/wireguard 等），运行时若遇到暂未实现的出站类型会在构建阶段报错提示。
+`seepctl import-rules <source> --target <name> [--face routing|dns]` 批量导入 v2fly 文本规则源（geosite 域名 / chnroutes CIDR）为 `routing.rules` 或 `network.dns.rules` YAML 片段；`regexp:`/`include:`/属性行逐条入跳过报告，所选面无对应模式的条目显式报错不静默降级。

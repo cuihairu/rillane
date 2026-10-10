@@ -61,6 +61,23 @@ enum Command {
     },
     /// TLS 指纹形态预设对照表（O-tfp1：各预设 shape_material 四维导出）
     TlsFingerprint,
+    /// 批量导入 geosite/chnroutes 文本规则源（O-dns1：路由或 DNS 分流规则）
+    ImportRules {
+        /// 规则源：文件路径或 http(s) URL（v2fly 文本清单行集）
+        source: String,
+        /// routing 面：组/出口名；dns 面：domestic | trusted
+        #[arg(long)]
+        target: String,
+        /// 目标面：routing | dns（缺省 routing）
+        #[arg(long, default_value = "routing")]
+        face: String,
+        /// 规则名（缺省取源文件名去扩展名）
+        #[arg(long)]
+        name: Option<String>,
+        /// 输出文件路径（缺省打印到 stdout）
+        #[arg(long)]
+        out: Option<String>,
+    },
     /// UDP ASSOCIATE 联调探测（P0-5 §3.3：最小 RFC 1928 客户端）
     UdpProbe {
         /// SOCKS5 入口地址，如 127.0.0.1:1080
@@ -438,6 +455,34 @@ fn main() -> Result<()> {
         }
         Command::TlsFingerprint => {
             print!("{}", render_tls_fingerprints());
+        }
+        Command::ImportRules {
+            source,
+            target,
+            face,
+            name,
+            out,
+        } => {
+            let raw = if source.starts_with("http://") || source.starts_with("https://") {
+                reqwest::blocking::get(&source)
+                    .with_context(|| format!("无法下载规则源 {source}"))?
+                    .text()
+                    .context("解析规则源内容失败")?
+            } else {
+                fs::read_to_string(&source).with_context(|| format!("无法读取文件 {source}"))?
+            };
+            let name = name.unwrap_or_else(|| derive_rule_name(&source));
+            let (yaml, skipped) = render_import_rules(&raw, &name, &target, &face)?;
+            for s in &skipped {
+                eprintln!("跳过: {s}");
+            }
+            match out {
+                Some(path) => {
+                    fs::write(&path, &yaml).with_context(|| format!("写入 {path} 失败"))?;
+                    println!("已写入 {path}");
+                }
+                None => print!("{yaml}"),
+            }
         }
         Command::UdpProbe {
             socks5,
@@ -1730,6 +1775,59 @@ fn scenario_skeleton(variant: &str) -> Result<SeepConfig> {
     SeepConfig::from_str(&raw, Some("yaml")).context("场景骨架解析失败")
 }
 
+// ---------- O-dns1：geosite/chnroutes 文本规则源批量导入 ----------
+
+/// 源路径/URL → 规则名：文件名去扩展名（URL 取末段 query 前）
+fn derive_rule_name(source: &str) -> String {
+    let trimmed = source.trim_end_matches('/');
+    let before_query = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
+    let file = before_query
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(before_query);
+    let stem = file.split('.').next().unwrap_or(file);
+    if stem.is_empty() {
+        "imported".to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+/// 规则源 → 目标面 YAML 片段 + 跳过清单（走 stderr，stdout 保持纯 YAML 可管道）
+fn render_import_rules(
+    raw: &str,
+    name: &str,
+    target: &str,
+    face: &str,
+) -> Result<(String, Vec<String>)> {
+    use seep_subscription::{parse_rule_source, to_dns_rules, to_routing_rules};
+    let src = parse_rule_source(raw);
+    match face {
+        "routing" => {
+            let rules = to_routing_rules(&src, name, target);
+            if rules.is_empty() {
+                anyhow::bail!("规则源无可导入条目（全部为注释/空行/跳过项）");
+            }
+            let yaml = serde_yaml::to_string(&rules).context("路由规则序列化失败")?;
+            Ok((yaml, src.skipped))
+        }
+        "dns" => {
+            let group = match target {
+                "domestic" => seep_config::DnsGroup::Domestic,
+                "trusted" => seep_config::DnsGroup::Trusted,
+                other => anyhow::bail!("未知 DNS 组 {other}（合法值：domestic | trusted）"),
+            };
+            let rules = to_dns_rules(&src, group)?;
+            if rules.is_empty() {
+                anyhow::bail!("规则源无可导入条目（全部为注释/空行/跳过项）");
+            }
+            let yaml = serde_yaml::to_string(&rules).context("DNS 规则序列化失败")?;
+            Ok((yaml, src.skipped))
+        }
+        other => anyhow::bail!("未知目标面 {other}（合法值：routing | dns）"),
+    }
+}
+
 // ---------- O-link-obs2：switches 链路切换账本 ----------
 
 /// `/mesh/switches` 响应（seepd `MeshSwitchesDto` 的 seepctl 侧反序列化视图）
@@ -2514,5 +2612,39 @@ mod tests {
             assert!(out.contains(p.as_str()), "{out}");
             assert!(out.contains(&p.shape_material()), "{out}");
         }
+    }
+
+    /// O-dns1：规则名派生与片段渲染（routing/dns 双面 + 面/组白名单）
+    #[test]
+    fn import_rules_helpers() {
+        assert_eq!(derive_rule_name("https://x.io/data/cn.txt?a=1"), "cn");
+        assert_eq!(derive_rule_name("/tmp/chnroutes.txt"), "chnroutes");
+        assert_eq!(derive_rule_name("/"), "imported");
+
+        // routing 面：域+CIDR 混源 → 两条规则 YAML，跳过项走报告
+        let (yaml, skipped) = render_import_rules(
+            "example.com\n10.0.0.0/8\nregexp:^x\n",
+            "cn",
+            "direct-main",
+            "routing",
+        )
+        .expect("routing 面应可渲染");
+        let rules: Vec<seep_config::RouteRule> = serde_yaml::from_str(&yaml).expect("应可读回");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(skipped.len(), 1);
+
+        // dns 面：裸域展开 exact + suffix，组随 target
+        let (yaml, _) =
+            render_import_rules("a.com\n", "n", "trusted", "dns").expect("dns 面应可渲染");
+        let rules: Vec<seep_config::DnsRuleConfig> = serde_yaml::from_str(&yaml).expect("应可读回");
+        assert_eq!(rules.len(), 2);
+        assert!(rules
+            .iter()
+            .all(|r| r.group == seep_config::DnsGroup::Trusted));
+
+        // 面白名单 / DNS 组白名单 / DNS 面拒 CIDR
+        assert!(render_import_rules("a.com", "n", "x", "lan").is_err());
+        assert!(render_import_rules("a.com", "bogus", "x", "dns").is_err());
+        assert!(render_import_rules("10.0.0.0/8", "domestic", "x", "dns").is_err());
     }
 }

@@ -208,5 +208,13 @@ pollution_suspected/组内 per-server 计数）。无新端点（复用 stats �
 
 - **R-dns1**：trusted 组可信性由部署者保证（明文 UDP 链路仍可被
   链路级污染）——文档注明；加密通道归 V2（§9-1）；
-- **O-dns1**：geosite/chnroutes 批量规则源导入（配置面 M1 之后按需）；
+- **O-dns1**：~~geosite/chnroutes 批量规则源导入~~（**已落地
+  2026-10-10**：`seepctl import-rules <source> --target <name>
+  [--face routing|dns] [--name <n>] [--out <p>]`——v2fly 文本清单行集
+  逐行解析；routing 面产 `routing.rules` 片段（域 → DomainSuffix 联合、
+  keyword → DomainKeyword、CIDR → Network，AND 语义故各类型分列）、
+  dns 面产 `network.dns.rules` 片段（裸域/`domain:` → exact + suffix
+  双 pattern，D-2 前导点口径；`full:` → exact）；`regexp:`/`include:`/
+  `@attr`/坏行逐条入跳过报告不阻塞，keyword/CIDR 在 dns 面显式报错
+  不静默降级；转换器在 seep-subscription `rule_source`）；
 - **O-dns2**：DoH/DoT 上游、EDNS0、TCP 面归 V2。

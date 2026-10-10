@@ -6,6 +6,8 @@
 
 Seep 订阅链路覆盖：拉取（条件请求/代理/自定义头）→ 类型自动识别（Clash YAML / 分享链接 / base64）→ 转换为 `SeepConfig` → TTL+LRU 缓存 → 两级定时刷新（内容哈希无变化跳过重载）→ 控制面 CRUD 与热更新。本文按代码实况描述各环节与边界。
 
+另有离线转换面：`rule_source.rs`（O-dns1，2026-10-10）把 geosite/chnroutes 文本规则源解析为路由/DNS 分流规则片段（`seepctl import-rules` 取数），不经订阅缓存链路。
+
 ## 1. 订阅源与类型识别
 
 - 支持源类型：**Clash YAML**（proxies/proxy-groups/rules）与**分享链接列表**（`vmess://`、`vless://`、`trojan://`、`hysteria2://`/`hy2://`、`ss://` 等，见 `converter.rs`）；整体为 base64 编码的链接列表会自动解码（`try_decode_base64`）。
@@ -57,6 +59,7 @@ Seep 订阅链路覆盖：拉取（条件请求/代理/自定义头）→ 类型
 ```bash
 seepctl import-clash <url|file> --output seep.yaml   # 离线转换预览（不经守护进程；-o 同义，缺省 config/clash_import.yaml）
 seepctl export-clash <seep配置> -o clash.yaml        # Seep → Clash 回导出（离线；缺省 config/clash_export.yaml，末尾打印降级/跳过清单）
+seepctl import-rules <url|file> --target <组或出口> [--face routing|dns]  # geosite/chnroutes 文本规则源批量导入（O-dns1；缺省 stdout，--out 写文件；跳过清单走 stderr）
 seepctl subscription list|add|remove|refresh      # 经控制面管理
 ```
 
