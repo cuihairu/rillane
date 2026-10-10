@@ -132,6 +132,53 @@ udp:
   # downlink_queue_depth: 64     # 下行队列深度（满即丢并计 downlink_full，须 ≥1）
   # max_associates: 256          # 并发 ASSOCIATE 上限（超限回 0x01 并计数，须 ≥1）
 
+# 场景预设（P2-3）：proxy | game | web——缺省填充展开为既有块（路由模板 +
+# 混淆开关 + 调度目标），显式配置恒优先、运行期零分支；三选一即运行，
+# 见 examples/profile-*.yaml。
+# profile: proxy
+
+# 系统级流量接管（P1-3，Linux 已落地）：mode: tun 启用 TUN ingress，捕获不经
+# 代理的流量（游戏进程分流）；路由经 seepctl route apply/clear 或控制面端点。
+# network:
+#   mode: tun                      # tun | transparent
+#   tun:
+#     name: seep0                  # 缺省自动命名
+#     mtu: 1500                    # 缺省 1500
+#     ipv4: 10.255.0.1/24          # 缺省 10.255.0.1/24
+#     # ipv6: fd00::1/128
+#   # routing: { ... }             # 镜像 routing 子块（TUN 面规则）
+#   # dns: { ... }                 # DNS 分流子块（见 networking.md / dns-partition.md）
+
+# 混淆横切层（P1-4/P2-4）：padding / timing / shaping，按 profile 组合；
+# 缺省关闭 = 零开销。
+# obfuscation:
+#   enabled: false
+#   default_padding: game
+#   apply_to: chain                # chain | single | all | "egress:<name>"
+#   middleware: [padding]          # 声明链顺序（可含 timing / shaping）
+#   # profiles:
+#   #   game:
+#   #     padding:
+#   #       mode: bucket
+#   #       buckets: [256, 512, 1024]
+#   #       max_overhead_ratio: 0.5
+
+# 出站连接池（P1-5）：同出口 keep-alive 复用 + TLS 会话恢复（网页加速）。
+# 块存在即生效（tls_resumption 独立于 enabled）；enabled 缺省 false。
+# egress_pool:
+#   enabled: false
+#   tls_resumption: true           # 缺省 true
+#   max_idle_per_key: 2            # 缺省 2
+#   low_watermark: 1               # 缺省 1
+#   idle_timeout_secs: 30          # 缺省 30
+#   dial_timeout_secs: 5           # 缺省 5
+#   session_cache_size: 256        # 缺省 256
+#   # pre_dial_direct: false       # direct 投机预拨（默认关）
+
+# 性能面（P3-5）：TCP relay 缓冲大小（1..=1048576 字节，启动期一次）。
+# performance:
+#   relay_buffer: 8192             # 缺省 8192
+
 # mesh UDP 明文数据面门（环境变量，非 YAML 字段）：
 # chain+udp 未配置加密时需显式放行明文转发，在运行 seepd 的环境中设置：
 #   export SEEP_MESH_UDP_ALLOW_PLAINTEXT=1
