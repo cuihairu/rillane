@@ -50,6 +50,8 @@ pub use runtime_builder::{
     RuntimeBuilder, RuntimeConfig, RuntimeEvent, RuntimeStats, SubscriptionEventType,
 };
 pub use seep_platform::network::NetworkMode;
+// O-slo1 观测面：路由组实时质量（控制面 /routing/stats 经 Runtime getter 取数）
+pub use seep_routing::{GroupQuality, MemberQuality};
 #[cfg(target_os = "linux")]
 pub use tun_ingress::{Proto as TunProto, TunIngress, TunIngressConfig};
 #[cfg(target_os = "linux")]

@@ -477,18 +477,23 @@ impl RoutingEngine {
                                 }
                                 None => ("unknown", None, None, false),
                             };
-                        let score = if is_latency && p95.is_some() {
-                            Some(p95.unwrap() + loss.unwrap() * penalty)
+                        let (score, gate_pass) = if is_latency {
+                            match (p95, loss) {
+                                (Some(p), Some(l)) => {
+                                    let gate_pass = if real {
+                                        slo.map(|s| {
+                                            s.p95_ms.is_none_or(|t| p <= f64::from(t))
+                                                && s.loss_ratio.is_none_or(|t| l <= t)
+                                        })
+                                    } else {
+                                        None
+                                    };
+                                    (Some(p + l * penalty), gate_pass)
+                                }
+                                _ => (None, None),
+                            }
                         } else {
-                            None
-                        };
-                        let gate_pass = if is_latency && real {
-                            slo.map(|s| {
-                                s.p95_ms.is_none_or(|t| p95.unwrap() <= f64::from(t))
-                                    && s.loss_ratio.is_none_or(|t| loss.unwrap() <= t)
-                            })
-                        } else {
-                            None
+                            (None, None)
                         };
                         MemberQuality {
                             name: name.clone(),

@@ -148,6 +148,7 @@ impl ControlPlane {
             (Method::GET, "/dns/stats") => self.handle_dns_stats().await,
             (Method::GET, "/plugins/stats") => self.handle_plugins_stats().await,
             (Method::GET, "/runtime/stats") => self.handle_runtime_stats().await,
+            (Method::GET, "/routing/stats") => self.handle_routing_stats().await,
             (Method::GET, "/runtime/config") => self.handle_runtime_config().await,
             (Method::GET, "/events") => self.handle_events().await,
             (Method::GET, "/logs") => self.handle_logs(req).await,
@@ -1328,6 +1329,18 @@ impl ControlPlane {
         json(StatusCode::OK, &dto)
     }
 
+    /// O-slo1 观测面（slo-scoring.md §10）：组实时质量快照——成员数据源
+    /// （real/legacy/unknown）、p95/丢包、门判定与 latency 组当前确定性选点。
+    async fn handle_routing_stats(&self) -> Response<RespBody> {
+        let groups: Vec<RoutingGroupQualityDto> = self
+            .runtime
+            .get_routing_quality()
+            .into_iter()
+            .map(RoutingGroupQualityDto::from)
+            .collect();
+        json(StatusCode::OK, &RoutingStatsDto { groups })
+    }
+
     async fn handle_runtime_config(&self) -> Response<RespBody> {
         let cfg = self.runtime.get_config();
         json(StatusCode::OK, &cfg)
@@ -2125,6 +2138,57 @@ struct RuntimeStatsDto {
     last_updated_ago_seconds: f64,
 }
 
+/// O-slo1 观测面 `/routing/stats` 响应体（seep-routing `GroupQuality`/
+/// `MemberQuality` 逐字段镜像）
+#[derive(Debug, Clone, Serialize)]
+struct RoutingStatsDto {
+    groups: Vec<RoutingGroupQualityDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RoutingGroupQualityDto {
+    name: String,
+    strategy: String,
+    selected: Option<String>,
+    members: Vec<RoutingMemberQualityDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RoutingMemberQualityDto {
+    name: String,
+    healthy: bool,
+    source: String,
+    p95_ms: Option<u64>,
+    loss_ratio: Option<f64>,
+    score: Option<f64>,
+    gate_pass: Option<bool>,
+}
+
+impl From<seep_runtime::GroupQuality> for RoutingGroupQualityDto {
+    fn from(g: seep_runtime::GroupQuality) -> Self {
+        Self {
+            name: g.name,
+            strategy: g.strategy,
+            selected: g.selected,
+            members: g.members.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<seep_runtime::MemberQuality> for RoutingMemberQualityDto {
+    fn from(m: seep_runtime::MemberQuality) -> Self {
+        Self {
+            name: m.name,
+            healthy: m.healthy,
+            source: m.source.to_string(),
+            p95_ms: m.p95_ms,
+            loss_ratio: m.loss_ratio,
+            score: m.score,
+            gate_pass: m.gate_pass,
+        }
+    }
+}
+
 impl From<seep_runtime::RuntimeStats> for RuntimeStatsDto {
     fn from(s: seep_runtime::RuntimeStats) -> Self {
         Self {
@@ -2899,6 +2963,36 @@ mod tests {
             .unwrap();
         let resp = cp.handle(req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// O-slo1 观测面：`/routing/stats` 返回配置组的实时质量报告
+    #[tokio::test]
+    async fn routing_stats_reports_configured_groups() {
+        let runtime = build_runtime(true, true).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/routing/stats")
+            .body(RespBody::new(Bytes::new()))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let groups = v["groups"].as_array().expect("groups 应为数组");
+        let auto = groups
+            .iter()
+            .find(|g| g["name"] == "auto")
+            .expect("模板组 auto 应在报告中");
+        assert_eq!(auto["strategy"], "latency");
+        let members = auto["members"].as_array().expect("members 应为数组");
+        assert!(
+            members
+                .iter()
+                .any(|m| m["name"] == "direct-main" && m["source"] == "unknown"),
+            "无质量数据成员应标 unknown: {auto}"
+        );
     }
 
     #[tokio::test]

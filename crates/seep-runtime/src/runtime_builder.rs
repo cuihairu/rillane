@@ -1375,6 +1375,12 @@ impl Runtime {
         self.config.read().expect("config lock poisoned").clone()
     }
 
+    /// 组实时质量报告（O-slo1 观测面：控制面 `/routing/stats` 取数；
+    /// 口径见 seep-routing `group_quality_report`）
+    pub fn get_routing_quality(&self) -> Vec<seep_routing::GroupQuality> {
+        self.router.group_quality_report()
+    }
+
     pub async fn update_config(&self, new_config: SeepConfig) -> Result<()> {
         // Build egress outputs/connectors before mutating runtime state.
         // D-10/§4.3：传同一池/工厂句柄重连装配（新块的池参数不热生效——

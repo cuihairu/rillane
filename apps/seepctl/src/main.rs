@@ -39,6 +39,12 @@ enum Command {
         #[arg(long)]
         endpoint: Option<String>,
     },
+    /// 查看组实时质量（O-slo1：成员数据源/门判定/当前选点）
+    Group {
+        /// 控制面完整 URL，如 http://127.0.0.1:9090/routing/stats
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
     /// UDP ASSOCIATE 联调探测（P0-5 §3.3：最小 RFC 1928 客户端）
     UdpProbe {
         /// SOCKS5 入口地址，如 127.0.0.1:1080
@@ -369,6 +375,23 @@ fn main() -> Result<()> {
                 Some(udp) => print!("{}", render_udp_section(&udp)),
                 None => println!("UDP:\n  (控制面无 UDP 段)"),
             }
+        }
+        Command::Group { endpoint } => {
+            let config = SeepConfig::load_from_path(&cli.config)?;
+            let target = endpoint
+                .unwrap_or_else(|| format!("http://{}/routing/stats", config.control.api_bind));
+            let client = Client::new();
+            let mut req = client.get(&target);
+            if let Some(token) = &config.control.admin_token {
+                req = req.header("x-admin-token", token);
+            }
+            let resp = req.send().with_context(|| format!("无法访问 {target}"))?;
+            if !resp.status().is_success() {
+                anyhow::bail!("控制面返回错误: {}", resp.status());
+            }
+            let stats: RoutingStatsResponse =
+                resp.json().context("解析控制面返回数据失败")?;
+            print!("{}", render_routing_stats(&stats.groups));
         }
         Command::UdpProbe {
             socks5,
@@ -1602,6 +1625,80 @@ fn build_ingress_from_clash(clash: &seep_subscription::ClashConfig) -> IngressDe
     }
 }
 
+// ---------- O-slo1：group 组实时质量 ----------
+
+/// `/routing/stats` 响应（seepd `RoutingStatsDto` 的 seepctl 侧反序列化视图）
+#[derive(Debug, Deserialize)]
+struct RoutingStatsResponse {
+    groups: Vec<RoutingGroupQuality>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoutingGroupQuality {
+    name: String,
+    strategy: String,
+    selected: Option<String>,
+    members: Vec<RoutingMemberQuality>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoutingMemberQuality {
+    name: String,
+    #[serde(default)]
+    healthy: bool,
+    source: String,
+    #[serde(default)]
+    p95_ms: Option<u64>,
+    #[serde(default)]
+    loss_ratio: Option<f64>,
+    #[serde(default)]
+    score: Option<f64>,
+    #[serde(default)]
+    gate_pass: Option<bool>,
+}
+
+fn render_routing_stats(groups: &[RoutingGroupQuality]) -> String {
+    if groups.is_empty() {
+        return "暂无路由组\n".to_string();
+    }
+    let mut out = String::new();
+    for g in groups {
+        match &g.selected {
+            Some(sel) => out.push_str(&format!("组 {} [{}] 当前选点: {sel}\n", g.name, g.strategy)),
+            None => out.push_str(&format!("组 {} [{}]\n", g.name, g.strategy)),
+        }
+        for m in &g.members {
+            let p95 = m
+                .p95_ms
+                .map(|v| format!("{v}ms"))
+                .unwrap_or_else(|| "-".into());
+            let loss = m
+                .loss_ratio
+                .map(|v| format!("{:.1}%", v * 100.0))
+                .unwrap_or_else(|| "-".into());
+            let score = m
+                .score
+                .map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "-".into());
+            let gate = match m.gate_pass {
+                Some(true) => "pass",
+                Some(false) => "FAIL",
+                None => "-",
+            };
+            let healthy = if m.healthy { "ok" } else { "down" };
+            let mark = match &g.selected {
+                Some(sel) if sel == &m.name => " *",
+                _ => "",
+            };
+            out.push_str(&format!(
+                "  {}{} | {} | {} | p95={} loss={} score={} gate={}\n",
+                m.name, mark, m.source, healthy, p95, loss, score, gate
+            ));
+        }
+    }
+    out
+}
+
 // ---------- P0-5 §3.2/§9-2：stats UDP 段 ----------
 
 /// `/udp/stats` 响应（§9-1 结构的 seepctl 侧反序列化视图；BTreeMap 固定序）
@@ -2156,5 +2253,45 @@ mod tests {
         assert_eq!(decode_hex("00ff 10").unwrap(), vec![0x00, 0xff, 0x10]);
         assert!(decode_hex("abc").is_err());
         assert!(decode_hex("zz").is_err());
+    }
+
+    /// O-slo1：`/routing/stats` 响应解析 + 渲染（选点标记/门判定/unknown 占位）
+    #[test]
+    fn routing_stats_parse_and_render() {
+        let body = r#"{
+          "groups": [
+            {
+              "name": "auto", "strategy": "latency", "selected": "real",
+              "members": [
+                {"name": "real", "healthy": true, "source": "real",
+                 "p95_ms": 30, "loss_ratio": 0.0, "score": 30.0, "gate_pass": true},
+                {"name": "violator", "healthy": true, "source": "real",
+                 "p95_ms": 80, "loss_ratio": 0.02, "score": 100.0, "gate_pass": false},
+                {"name": "ghost", "healthy": false, "source": "unknown",
+                 "p95_ms": null, "loss_ratio": null, "score": null, "gate_pass": null}
+              ]
+            },
+            {"name": "fixed-g", "strategy": "fixed", "selected": null,
+             "members": [{"name": "x", "healthy": true, "source": "real",
+                          "p95_ms": 70, "loss_ratio": 0.0, "score": null, "gate_pass": null}]}
+          ]
+        }"#;
+        let resp: RoutingStatsResponse =
+            serde_json::from_str(body).expect("routing stats 应可解析");
+        assert_eq!(resp.groups.len(), 2);
+
+        let out = render_routing_stats(&resp.groups);
+        assert!(out.contains("组 auto [latency] 当前选点: real\n"), "{out}");
+        assert!(out.contains("real * | real | ok | p95=30ms loss=0.0% score=30.0 gate=pass"));
+        assert!(out.contains("violator | real | ok | p95=80ms loss=2.0% score=100.0 gate=FAIL"));
+        assert!(out.contains("ghost | unknown | down | p95=- loss=- score=- gate=-"));
+        // 非 latency 组无选点标记，raw 数据照常渲染
+        assert!(out.contains("组 fixed-g [fixed]\n"));
+        assert!(out.contains("x | real | ok | p95=70ms loss=0.0% score=- gate=-"));
+    }
+
+    #[test]
+    fn routing_stats_render_empty() {
+        assert_eq!(render_routing_stats(&[]), "暂无路由组\n");
     }
 }
