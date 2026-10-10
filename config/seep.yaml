@@ -21,10 +21,15 @@ ingress:
   # - name: http-in
   #   type: http
   #   bind: 0.0.0.0:7891
+  #   auth:                          # Basic 认证（凭据表非空即强制；缺省 = 匿名放行）
+  #     - username: demo
+  #       password: demo
+  #   bearer_tokens: []              # Bearer Token（Proxy-Authorization: Bearer；与 auth 并列任一通过，缺省 = 匿名）
   # - name: mixed-in
   #   type: mixed
   #   bind: 0.0.0.0:7892
   #   udp_enabled: true
+  #   # auth/bearer_tokens 与 http 入口同语义（auth 兼顾 socks5 分支 RFC 1929；bearer_tokens 仅 http 分支）
 
 egress:
   - name: direct-main
