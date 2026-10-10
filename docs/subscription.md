@@ -27,6 +27,7 @@ Seep 订阅链路覆盖：拉取（条件请求/代理/自定义头）→ 类型
 | `rules` | `routing.rules` |
 
 - 转换产出**当前未实现的出站类型**（如 hysteria v1——schema/订阅转换已支持，出站连接器缺）时不会静默丢弃：运行时构建（`RuntimeBuilder`）阶段报错提示。协议实现边界见 [PROTOCOLS.md](PROTOCOLS.md) 状态标注。
+- **传输层字段**（`network` + 各 `*-opts` 块，2026-10 随协议批补齐）：导入识别 `network: tcp | ws | grpc | h2` 与 `ws-opts`（path / `headers.host`，Host 头键大小写三形兼容；平铺 `path`/`host` 优先兜底）、`grpc-opts`（`grpc-service-name` 规范键 + 变体别名）、`h2-opts`（path/host，host 标量或数组皆收）；SS 的 `plugin`/`plugin-opts` 按换算表转 SIP003（obfs 族→`obfs-local`、v2ray-plugin 原名键值透传、其余插件名拒导宁缺毋滥）。导出侧对称产出：ws/h2 按 `network` 出块（trojan 不产 h2——seep 侧 trojan 白名单无 h2 口径）、`grpc-opts` 仅 `network=grpc`；SS 插件无 Clash 等价表达，导出降级提示不产出。seep 白名单外的 `network` 值在 RuntimeBuilder 构建期报错。
 - 亦支持导出为 Seep 自有 DSL 并回导入（`seep_dsl.rs`）：`version/meta/nodes（auth/transport/tls/location）/groups（strategy、嵌套成员）/rulesets`，附带校验器。
 - **Seep → Clash 回导出**（`clash_export.rs`，2026-10-07）：`ClashExporter::export(&SeepConfig)` 产出 Clash YAML + 报告（导出/降级清单）。proxies 覆盖 ss/vmess/vless/trojan/http(s)/socks5/hysteria2/hysteria/wireguard（direct 映射内置 `DIRECT`，不产出 proxy）；规则仅单条件可线性化（seep 多条件 AND ≠ Clash 首中即停，多条件跳过并登记）；组策略 Fixed→select、Latency→url-test（generate_204/300s）、Random/Weighted/Bandwidth/RoundRobin→load-balance(round-robin)、ConsistentHash→load-balance(consistent-hashing)；字段级无对应项（如 `tls_fingerprint`）逐条入 `skipped` 不阻塞导出。
 
