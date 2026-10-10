@@ -312,7 +312,7 @@ Seep 入口与主流代理客户端互通（SOCKS5/HTTP CONNECT 口径；入口�
 ### 服务端互操作
 - **V2Ray**: 核心 VMess/VLESS 面互通（tcp/ws/gRPC/h2；VLESS flow 不支持，见各节状态行）
 - **Xray**: VMess AEAD（tcp/ws/gRPC/h2）+ VLESS（tcp/ws/gRPC/h2，无 flow）互通；flow 不支持
-- **Shadowsocks**: AEAD 方法互通（方法集以 `shadowsocks` crate 1.25 为准，非法 `method` 运行时报错）
+- **Shadowsocks**: AEAD 方法互通（方法集以 `shadowsocks` crate 1.25 为准，非法 `method` 构建期报错）
 - **Trojan**: 标准 Trojan 协议实现（TCP 原生 + TLS；ws/gRPC 传输已实现）
 
 ## 路线图
