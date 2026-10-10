@@ -15,8 +15,8 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
 > | UDP 观测与联调（`seep_udp_*` 指标族 / `/udp/stats` / `seepctl stats` UDP 段 / `udp-probe`） | **已实现（2026-09，P0-5）**：`/metrics` 恒渲染（开关关闭全零、端点不消失）+ 入口级 `udp_enabled` 覆盖 + `udp:` 配置全字段 | — |
 > | 出站 UDP 承载（hy2） | 未实现（`hysteria2` 0.1.6 公开 API 无 UDP 出口；P0-4 已完成且**维持改判**） | V2（quinn 载具，未决） |
 > | 出站 vmess 连接器 | **已实现（2026-10）**：VMess AEAD 认证头（authID 时间窗+防重放）+ AES-128-GCM/ChaCha20-Poly1305 分块流数据面，tcp（可叠 TLS）/ws（可叠 TLS）/gRPC（恒叠 TLS）/h2（恒叠 TLS）；`alter_id=0` 限定，UDP 承载未实现 | todo「VMess 出站」条目 |
-> | hysteria v1 | **出站连接器未实现**（配置 schema 与订阅转换已支持，运行期构建期报错） | 无计划（仅 hy2） |
-> | 出站连接池 / TLS 会话恢复 | **已实现（2026-10，P1-5）**：`egress_pool:` 配置块 + 预建立/借出即消费池（trojan/http/vless + direct 选通）+ TLS 会话恢复（进程级共享 ClientConfig）+ `seep_pool_*`/`seep_tls_*` 指标 + `GET /egress/pool/stats` | — |
+> | hysteria v1 | **出站连接器未实现**（配置 schema 与订阅转换已支持，构建期报错） | 无计划（仅 hy2） |
+> | 出站连接池 / TLS 会话恢复 | **已实现（2026-10，P1-5）**：`egress_pool:` 配置块 + 预建立/借出即消费池（trojan/http/vless/vmess + direct 选通）+ TLS 会话恢复（进程级共享 ClientConfig）+ `seep_pool_*`/`seep_tls_*` 指标 + `GET /egress/pool/stats` | — |
 > | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `seep_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
 > | mesh 链路可观测（per-link RTT 分位 / 观测形丢包 / 切换原因账本） | **已实现（2026-10，P2-1）**：`seep_mesh_link_rtt_ms{from,to,quantile}` + `seep_mesh_link_loss_ratio{from,to}` + `seep_mesh_switch_total{reason}`（chain 启用时恒渲染）+ `GET /mesh/switches` 最近 100 事件；mesh 未启用三族与端点均缺席 | [mesh-link-observability.md](design/mesh-link-observability.md) |
 > | mesh UDP 防重放 + 撤销可见性 | **已实现（2026-10-04，P2-7）**：UDP 面 v2 帧流序号 + per-(flow,dir) 64 位滑窗（`replay_dropped` 计数进 `/udp/stats` 与 `/metrics`）+ 撤销文件载体 mtime 热加载 + 运行期观测（`GET /mtls/revoked`、`seepctl mtls revoke status`）；OCSP/CA 直连撤销查询与端到端 MAC 归 V2 | [mesh-advanced-security.md](design/mesh-advanced-security.md) |
@@ -159,7 +159,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - DPI 抗审查能力强
 
 ### Hysteria
-> 状态：**v1 出站连接器未实现**（配置 schema 与订阅转换已支持，运行期构建期报错「暂不支持的出口类型」），本节保留为背景资料。
+> 状态：**v1 出站连接器未实现**（配置 schema 与订阅转换已支持，构建期报错「暂不支持的出口类型」），本节保留为背景资料。
 
 - **协议**: 基于 QUIC 的高性能代理
 - **版本**: Hysteria v1/v2

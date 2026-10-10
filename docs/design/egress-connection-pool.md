@@ -11,7 +11,7 @@
 | 在本条目内 | 归其他条目 |
 |-----------|-----------|
 | `egress_pool:` 配置区块（seep-config 镜像类型）+ `PoolPolicy`/`TransportPool`/`TlsConnectorFactory`（seep-protocols） | 多路复用（一条连接内并发多流，含 hy2/QUIC 会话复用）= V2——总拨号数不降的结构原因见 §0.2 注记 |
-| MVP 矩阵出站接入：trojan / http（含 tls）/ vless（tcp+ws，含 tls）/ direct（`pre_dial_direct` 选通） | socks5 / shadowsocks 池化 = 扩展（crate 合并拨号+绑定，D-6）；vmess = 未实现条目；wg = 系统接口无用户态拨号 |
+| MVP 矩阵出站接入：trojan / http（含 tls）/ vless（tcp+ws，含 tls）/ vmess（2026-10-02 出站落地随池透传）/ direct（`pre_dial_direct` 选通） | socks5 / shadowsocks 池化 = 扩展（crate 合并拨号+绑定，D-6）；wg = 系统接口无用户态拨号 |
 | TLS 会话恢复（进程级共享 `ClientConfig`）+ `HandshakeKind` 观测计数 | uTLS 指纹模拟 = P2-5（`tls.rs` 同一挂点，工厂为其收敛注入面，互指 §2.4） |
 | `connection_pool_size` 孤儿字段收编（全局容量缺省，D-8） | mesh hop 拨号复用（`connect_next` 每流拨号）= O 项非承诺（§11） |
 | `/metrics` `seep_pool_*`/`seep_tls_*` 序列 + `GET /egress/pool/stats` + 验收统计脚本 | UDP 面 = P0-4/P0-5（无连接建立语义，零交叠 §1.3）；混淆中间件 = P1-4（Flow 级，严格上下游 §1.3） |
@@ -66,7 +66,7 @@ mesh 面：`connect_next` 每流 hop 拨号（`mesh_transport.rs:406`）本条�
 | D-3 | 策略/执行分离（对齐 [obfuscation-middleware.md](obfuscation-middleware.md) §2.1 方法论） | 配置期策略 / 运行期执行 / 协议绑定三侧职责钉死（§2.3） |
 | D-4 | 零 trait 变更 | 不动 `EgressConnector`/`FlowOutput`/`FlowMiddleware`/`ConnectorFlowOutput`；连接器构造注入 `Option<Arc<…>>` |
 | D-5 | TLS 会话恢复 = 进程级共享 `ClientConfig` 工厂 | `tls.rs` 每流重建是恢复失效根因（§2.4）；`HandshakeKind` 公开 API 观测 |
-| D-6 | MVP 能力矩阵 | 池化 = trojan/http/vless + direct 选通；不池化 = socks5/ss/hy2/wg/vmess（§2.5） |
+| D-6 | MVP 能力矩阵 | 池化 = trojan/http/vless + direct 选通；不池化 = socks5/ss/hy2/wg/vmess（§2.5）。~~vmess 不池化~~——2026-10-02 vmess 出站落地随池透传（runtime_builder Vmess 臂注入 transport_pool，同 trojan/vless） |
 | D-7 | 预热：TLS 出站装配即预热；direct 不预热 | TLS 出站键装配期已知；direct 目标未知，流量驱动（首次 miss 后补充供后续命中） |
 | D-8 | `connection_pool_size` 收编 = 全局 idle 容量缺省 | 块存在且未写 `max_idle_global` → 取 `RuntimeConfig.connection_pool_size`（缺省 1024） |
 | D-9 | 关闭态零差异 | 无块 → 连接器 pool=None、tls 走今天每流路径，字节级行为不变（§2.6） |
@@ -114,10 +114,10 @@ impl TlsConnectorFactory {
 
 | 出站 | MVP 处置 | 依据（§1.1 可拆性） |
 |------|---------|---------------------|
-| trojan / http（含 tls）/ vless（tcp+ws，含 tls） | **池化**（装配注入池+工厂） | 绑定在传输建立后，天然可拆 |
+| trojan / http（含 tls）/ vless（tcp+ws，含 tls）/ vmess（2026-10-02 落地随池透传） | **池化**（装配注入池+工厂） | 绑定在传输建立后，天然可拆 |
 | direct | **选通池化**（`pre_dial_direct`，默认 false） | 键=target；投机预拨对目标产生"未请求的连接"，对外观感与成本由开关显式承担（R-pool2） |
 | socks5 / shadowsocks | 不池化（记扩展） | crate 合并拨号+绑定；socks5 无 TLS 层收益仅 1-RTT |
-| hysteria2 / wireguard / vmess | 不池化（各自归 V2 mux / 系统接口 / 未实现条目） | 非 TCP 传输模型 |
+| hysteria2 / wireguard | 不池化（各自归 V2 mux / 系统接口） | 非 TCP 传输模型 |
 
 预热（D-7）：`enabled=true` 时装配尾部对已知 TLS 出站键各拨 `min(max_idle_per_key, …)` 条 warm（失败退避重试，不阻塞启动——池是优化不是前置条件）；direct 不预热。
 
@@ -341,6 +341,7 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；Ha
 | 15 | 缺陷修复 | 实施期发现既有出站 TLS 首拨即崩的潜在生产缺陷：依赖图特征统一后 rustls 同持 ring 与 aws_lc_rs 两特征，`ClientConfig::builder()` 在双提供方歧义下运行时 panic（rustls crypto/mod.rs）——修复 = `tls.rs` OnceLock 显式安装 ring 默认提供方 + `builder_with_provider` 构造（M0）；mock 服务端同法（M4 测试） |
 | 16 | 偏差 | 水位补充拨号失败退避 + 有界重试：`spawn_fill` 单轮至多 `MAX_FILL_ATTEMPTS=5` 次尝试（退避 1s 起指数 30s 封顶，成功复位），防服务端持续不可达时的空转拨号风暴（M0） |
 | 17 | 观测注记 | rustls 对无 close_notify 的裸 EOF 视 `UnexpectedEof`（严格校验，0.22+ 行为）：`copy_bidirectional` 以 Err 收场——既有内联路径同形非池化引入；真实 trojan/http 上游普遍发送 close_notify，mock 服务端收尾显式 shutdown 发 close_notify（M4 测试注记） |
+| 18 | 偏差 | 能力矩阵后续扩展：vmess 出站落地（2026-10-02）随池透传——runtime_builder Vmess 臂注入 transport_pool + tls_factory 同 trojan/vless，§0.1/§2.5/D-6 已同步改判；socks5/ss 维持扩展不池化（crate 合并拨号+绑定） |
 
 ## 11. 风险与未决
 
