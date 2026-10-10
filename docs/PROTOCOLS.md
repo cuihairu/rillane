@@ -325,7 +325,7 @@ Seep 入口与主流代理客户端互通（SOCKS5/HTTP CONNECT 口径；入口�
 - [x] 协议性能基准测试工具（已落地，2026-10 P3-5——criterion 基准：relay 8K–256K 缓冲对照中位吞吐与帧写 vectored 两段合一对照，数字与噪声口径见 [performance-io.md](design/performance-io.md) §5）
 
 ### 未来计划
-- [ ] QUIC 协议原生代理
+- [ ] QUIC 协议原生代理（未排期——hy2 出站 UDP 承载随 V2 quinn 载具裁决，见 [design/udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)）
 - [x] gRPC 协议支持（2026-10：trojan/vless/vmess 出站 `network: grpc` 单流隧道）
 - [ ] eBPF 加速 (XDP)
 - [x] WebAssembly 协议插件（wasmtime 动态加载 + 示例插件，同 P3-2——[plugin-loader.md](design/plugin-loader.md)）

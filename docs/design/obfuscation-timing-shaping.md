@@ -1,6 +1,7 @@
 # P2-4 混淆中间件扩展（timing / shaping）（设计稿）
 
-> 2026-10-02 就绪。在 P1-4 静态 middleware 管线上扩两策略：
+> 2026-10-02 就绪并同轮落地（`TimingMiddleware` 启动抖动 + `ShapingMiddleware`
+> 写网格归一，见 roadmap S3 注记）。在 P1-4 静态 middleware 管线上扩两策略：
 > timing（微抖动注入）与 shaping（流形状归一），沿用 obfuscation-
 > middleware.md §2 的「策略/执行分离」与 §3 的配置镜像 + 转换模式。
 >
