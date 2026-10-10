@@ -93,9 +93,9 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
 - **支持版本**: HTTP/1.1, HTTP/1.0
 - **认证方式**:
   - Basic 认证
-  - Bearer Token 认证
+  - ~~Bearer Token 认证~~（Bearer 为入站能力——见 HTTP 入站节，出口不支持）
 - **特性**:
-  - 支持代理链
+  - ~~支持代理链~~（未实现——多跳经 mesh chain 表达，见状态注记）
   - 自动处理隧道 (CONNECT)
 
 ### Shadowsocks
