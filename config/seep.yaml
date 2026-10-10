@@ -61,7 +61,19 @@ egress:
   #   server: example.com
   #   port: 443
   #   uuid: 11111111-2222-3333-4444-555555555555
-  #   network: ws
+  #   network: ws                    # tcp | ws | grpc | h2（grpc 须配 grpc_service_name；grpc/h2 恒叠 TLS）
+  #   path: /ws
+  #   host: ["example.com"]
+  #   tls: true
+  #   sni: example.com
+  #   skip_cert_verify: false
+  # - name: vmess-node
+  #   type: vmess
+  #   server: example.com
+  #   port: 443
+  #   uuid: 11111111-2222-3333-4444-555555555555
+  #   alter_id: 0                    # 缺省 0（AEAD）；security 缺省 auto
+  #   network: ws                    # tcp | ws | grpc | h2（grpc 须配 grpc_service_name；grpc/h2 恒叠 TLS）
   #   path: /ws
   #   host: ["example.com"]
   #   tls: true
