@@ -403,8 +403,7 @@ fn main() -> Result<()> {
             if !resp.status().is_success() {
                 anyhow::bail!("控制面返回错误: {}", resp.status());
             }
-            let stats: RoutingStatsResponse =
-                resp.json().context("解析控制面返回数据失败")?;
+            let stats: RoutingStatsResponse = resp.json().context("解析控制面返回数据失败")?;
             print!("{}", render_routing_stats(&stats.groups));
         }
         Command::Switches { endpoint } => {
@@ -420,8 +419,7 @@ fn main() -> Result<()> {
             if !resp.status().is_success() {
                 anyhow::bail!("控制面返回错误: {}", resp.status());
             }
-            let stats: MeshSwitchesResponse =
-                resp.json().context("解析控制面返回数据失败")?;
+            let stats: MeshSwitchesResponse = resp.json().context("解析控制面返回数据失败")?;
             print!("{}", render_switches(&stats.events));
         }
         Command::Profile { variant, out } => {
@@ -1706,7 +1704,9 @@ struct RoutingMemberQuality {
 fn parse_profile_variant(s: &str) -> Result<String> {
     match s {
         "proxy" | "game" | "web" => Ok(s.to_string()),
-        other => Err(anyhow::anyhow!("未知场景 {other}（合法值：proxy | game | web）")),
+        other => Err(anyhow::anyhow!(
+            "未知场景 {other}（合法值：proxy | game | web）"
+        )),
     }
 }
 
@@ -2414,15 +2414,16 @@ mod tests {
              "epoch_seconds": 1750000001}
           ]
         }"#;
-        let resp: MeshSwitchesResponse =
-            serde_json::from_str(body).expect("switches 应可解析");
+        let resp: MeshSwitchesResponse = serde_json::from_str(body).expect("switches 应可解析");
         assert_eq!(resp.events.len(), 2);
 
         let out = render_switches(&resp.events);
         assert!(out.contains(
             "[1750000000] c1 client1 -> relay1 -> exit1 -> client1 -> exit1 | hop_failed | read error"
         ));
-        assert!(out.contains("[1750000001] c2 client1 -> exit2 -> (terminate) | terminated | manual"));
+        assert!(
+            out.contains("[1750000001] c2 client1 -> exit2 -> (terminate) | terminated | manual")
+        );
     }
 
     #[test]
@@ -2443,9 +2444,7 @@ mod tests {
         let game = scenario_skeleton("game").expect("game 骨架应可解析");
         assert_eq!(game.profile, Some(seep_config::ProfileKind::Game));
         assert_eq!(game.routing.groups[0].name, "game-auto");
-        let slo = game
-            .routing
-            .groups[0]
+        let slo = game.routing.groups[0]
             .slo
             .as_ref()
             .expect("game 组应带 SLO 目标");
@@ -2464,8 +2463,7 @@ mod tests {
 
         // 序列化产物仍是合法配置（展开幂等，重载组模板不变）
         let yaml = serde_yaml::to_string(&web).expect("应可序列化");
-        let reloaded =
-            SeepConfig::from_str(&yaml, Some("yaml")).expect("序列化产物应可重载");
+        let reloaded = SeepConfig::from_str(&yaml, Some("yaml")).expect("序列化产物应可重载");
         assert_eq!(reloaded.routing.groups[0].name, "web-auto");
     }
 

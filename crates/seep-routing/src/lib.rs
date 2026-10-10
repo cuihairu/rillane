@@ -472,9 +472,12 @@ impl RoutingEngine {
                     .map(|name| {
                         let (source, p95, loss, real) =
                             match candidates.iter().find(|(n, ..)| n == name) {
-                                Some((_, p95, loss, real)) => {
-                                    (if *real { "real" } else { "legacy" }, Some(*p95), Some(*loss), *real)
-                                }
+                                Some((_, p95, loss, real)) => (
+                                    if *real { "real" } else { "legacy" },
+                                    Some(*p95),
+                                    Some(*loss),
+                                    *real,
+                                ),
                                 None => ("unknown", None, None, false),
                             };
                         let (score, gate_pass) = if is_latency {
@@ -1003,9 +1006,15 @@ mod tests {
                 name: "g".into(),
                 strategy: Strategy::Latency,
                 members: vec![
-                    seep_config::GroupMember::Node { name: "real".into() },
-                    seep_config::GroupMember::Node { name: "legacy".into() },
-                    seep_config::GroupMember::Node { name: "unknown".into() },
+                    seep_config::GroupMember::Node {
+                        name: "real".into(),
+                    },
+                    seep_config::GroupMember::Node {
+                        name: "legacy".into(),
+                    },
+                    seep_config::GroupMember::Node {
+                        name: "unknown".into(),
+                    },
                 ],
                 slo: None,
             }],
@@ -1051,9 +1060,15 @@ mod tests {
                 strategy: Strategy::Latency,
                 members: vec![
                     seep_config::GroupMember::Node { name: "ok".into() },
-                    seep_config::GroupMember::Node { name: "violator".into() },
-                    seep_config::GroupMember::Node { name: "legacy".into() },
-                    seep_config::GroupMember::Node { name: "unknown".into() },
+                    seep_config::GroupMember::Node {
+                        name: "violator".into(),
+                    },
+                    seep_config::GroupMember::Node {
+                        name: "legacy".into(),
+                    },
+                    seep_config::GroupMember::Node {
+                        name: "unknown".into(),
+                    },
                 ],
                 slo: Some(SloPolicy {
                     p95_ms: Some(50),
@@ -1119,7 +1134,15 @@ mod tests {
         let all_bad = &report[0];
         // 门内空 → 全体候选取最低分：b(60) < a(80)
         assert_eq!(all_bad.selected.as_deref(), Some("b"));
-        assert_eq!(all_bad.members.iter().find(|m| m.name == "a").unwrap().gate_pass, Some(false));
+        assert_eq!(
+            all_bad
+                .members
+                .iter()
+                .find(|m| m.name == "a")
+                .unwrap()
+                .gate_pass,
+            Some(false)
+        );
 
         let fixed = &report[1];
         assert_eq!(fixed.strategy, "fixed");
