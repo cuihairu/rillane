@@ -114,6 +114,13 @@ enum Command {
         #[command(subcommand)]
         command: ChainCommand,
     },
+    /// 出站连接池（O-pool3：P1-5 §6.2 端点的 CLI 取数面）
+    Pool {
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[command(subcommand)]
+        command: PoolCommand,
+    },
     /// 从 Clash YAML 订阅转换为 Seep 配置 (preview)
     ImportClash {
         /// 订阅 URL 或文件路径
@@ -290,6 +297,13 @@ enum RevokeCommand {
     },
 }
 
+/// 出站连接池子命令（O-pool3）
+#[derive(Subcommand)]
+enum PoolCommand {
+    /// 池快照：开关/TLS 复会话/复用率/计数族/每键 idle
+    Status,
+}
+
 #[derive(Subcommand)]
 enum ChainCommand {
     /// 链路 dry-run（预检）
@@ -440,6 +454,24 @@ fn main() -> Result<()> {
             }
             let stats: MeshSwitchesResponse = resp.json().context("解析控制面返回数据失败")?;
             print!("{}", render_switches(&stats.events));
+        }
+        Command::Pool { endpoint, command } => {
+            let config = SeepConfig::load_from_path(&cli.config)?;
+            let target = endpoint
+                .unwrap_or_else(|| format!("http://{}/egress/pool/stats", config.control.api_bind));
+            let client = Client::new();
+            let mut req = client.get(&target);
+            if let Some(token) = &config.control.admin_token {
+                req = req.header("x-admin-token", token);
+            }
+            let resp = req.send().with_context(|| format!("无法访问 {target}"))?;
+            if !resp.status().is_success() {
+                anyhow::bail!("控制面返回错误: {}", resp.status());
+            }
+            let stats: EgressPoolStatsResponse = resp.json().context("解析控制面返回数据失败")?;
+            match command {
+                PoolCommand::Status => print!("{}", render_pool_status(&stats)),
+            }
         }
         Command::Profile { variant, out } => {
             let variant = parse_profile_variant(&variant)?;
@@ -1828,6 +1860,60 @@ fn render_import_rules(
     }
 }
 
+// ---------- O-pool3：出站连接池 CLI 取数面 ----------
+
+/// `/egress/pool/stats` 响应（seepd `EgressPoolStatsDto` 的 seepctl 侧反序列化视图）
+#[derive(Debug, Deserialize)]
+struct EgressPoolStatsResponse {
+    enabled: bool,
+    tls_resumption: bool,
+    keys: Vec<EgressPoolKeyDto>,
+    counters: EgressPoolCountersDto,
+    reuse_ratio: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct EgressPoolKeyDto {
+    key: String,
+    idle: usize,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct EgressPoolCountersDto {
+    hit: u64,
+    miss: u64,
+    stale_redial: u64,
+    dials_ok: u64,
+    dials_err: u64,
+}
+
+fn render_pool_status(s: &EgressPoolStatsResponse) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "出站连接池: {}（TLS 复会话: {}）\n",
+        if s.enabled { "启用" } else { "未启用" },
+        if s.tls_resumption { "开" } else { "关" },
+    ));
+    out.push_str(&format!(
+        "计数: hit={} miss={} stale_redial={} dials_ok={} dials_err={}\n",
+        s.counters.hit,
+        s.counters.miss,
+        s.counters.stale_redial,
+        s.counters.dials_ok,
+        s.counters.dials_err,
+    ));
+    out.push_str(&format!("复用率: {:.3}\n", s.reuse_ratio));
+    if s.keys.is_empty() {
+        out.push_str("暂无池键\n");
+    } else {
+        out.push_str("池键 (idle):\n");
+        for k in &s.keys {
+            out.push_str(&format!("  {} idle={}\n", k.key, k.idle));
+        }
+    }
+    out
+}
+
 // ---------- O-link-obs2：switches 链路切换账本 ----------
 
 /// `/mesh/switches` 响应（seepd `MeshSwitchesDto` 的 seepctl 侧反序列化视图）
@@ -2612,6 +2698,44 @@ mod tests {
             assert!(out.contains(p.as_str()), "{out}");
             assert!(out.contains(&p.shape_material()), "{out}");
         }
+    }
+
+    /// O-pool3：池快照渲染（启用含键 / 未启用空键两态）
+    #[test]
+    fn pool_status_renders_both_states() {
+        let s = EgressPoolStatsResponse {
+            enabled: true,
+            tls_resumption: true,
+            keys: vec![EgressPoolKeyDto {
+                key: "tls:sni=example.com:443".into(),
+                idle: 2,
+            }],
+            counters: EgressPoolCountersDto {
+                hit: 9,
+                miss: 1,
+                stale_redial: 0,
+                dials_ok: 12,
+                dials_err: 0,
+            },
+            reuse_ratio: 0.9,
+        };
+        let out = render_pool_status(&s);
+        assert!(out.contains("启用"), "{out}");
+        assert!(out.contains("复用率: 0.900"), "{out}");
+        assert!(out.contains("tls:sni=example.com:443 idle=2"), "{out}");
+        assert!(out.contains("hit=9 miss=1"), "{out}");
+        assert!(!out.contains("暂无池键"), "{out}");
+
+        let off = EgressPoolStatsResponse {
+            enabled: false,
+            tls_resumption: false,
+            keys: vec![],
+            counters: EgressPoolCountersDto::default(),
+            reuse_ratio: 0.0,
+        };
+        let out = render_pool_status(&off);
+        assert!(out.contains("未启用"), "{out}");
+        assert!(out.contains("暂无池键"), "{out}");
     }
 
     /// O-dns1：规则名派生与片段渲染（routing/dns 双面 + 面/组白名单）

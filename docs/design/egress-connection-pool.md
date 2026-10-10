@@ -265,7 +265,7 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；Ha
  "reuse_ratio": 0.9}
 ```
 
-数据源 = `Runtime::get_transport_pool()` 快照方法（§4.1 getter 先例）；鉴权继承控制面现状。`seepctl pool status` 子命令非 MVP（记 §11 O-pool3）。
+数据源 = `Runtime::get_transport_pool()` 快照方法（§4.1 getter 先例）；鉴权继承控制面现状。`seepctl pool status` 子命令已随 O-pool3 落地（2026-10-11，见 §11）。
 
 ## 7. 错误路径
 
@@ -351,5 +351,8 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；Ha
 - **R-pool4**：池化改变连接-请求时序（连接先于请求存在）——对 trojan/http/vless 服务端无协议差异（首字节仍是协议头）；DPI 视角的时序相关性分析归混淆层讨论，本条目不声称；
 - **O-pool1**：mesh hop 拨号复用（`connect_next` 形状兼容：键=hop 地址、MeshEnvelope 首写即绑定）——非承诺，需求出现再议；
 - **O-pool2**：socks5/shadowsocks 接入（crate 外部流注入口核查后同 vless 形状）；
-- **O-pool3**：`seepctl pool status` 子命令（端点已交付，CLI 包装随需求）；
+- **O-pool3**：~~`seepctl pool status` 子命令~~（**已落地 2026-10-11**：
+  `seepctl pool status`——`GET /egress/pool/stats` 的 CLI 取数面，渲染
+  开关/TLS 复会话/复用率/计数族（hit/miss/stale_redial/dials）与每键
+  idle；块未启用 = `enabled:false` 零值形态照常渲染）；
 - **O-pool4**：hy2/QUIC 会话复用（与 V2 多路复用统一设计，本条目明确不降总连接数的另一半答案）。
