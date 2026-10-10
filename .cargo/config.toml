@@ -1,0 +1,26 @@
+# HarmonyOS（aarch64-unknown-linux-ohos）交叉面（P3-4 鸿蒙 FFI 填空）
+#
+# 依赖宿主一次性安装 OHOS SDK native 组件到 /opt/ohos-sdk（rust-lang CI 同布局，
+# src/ci/docker/scripts/ohos-sdk.sh）：
+#   curl https://repo.huaweicloud.com/openharmony/os/5.0.0-Release/ohos-sdk-windows_linux-public.tar.gz \
+#     | tar xz -C /tmp linux/native-linux-x64-5.0.0.71-Release.zip
+#   sudo unzip /tmp/linux/native-linux-x64-5.0.0.71-Release.zip -d /opt/ohos-sdk（约 2.8G）
+#
+# wrapper 脚本（aarch64-unknown-linux-ohos-clang）自带 --target/--sysroot，
+# 无需手工 CFLAGS；验收口径 = cargo check -p seep-ffi --target aarch64-unknown-linux-ohos。
+# CI 自托管 runner 需同装 SDK 至 /opt/ohos-sdk 后此配置方可生效。
+
+[target.aarch64-unknown-linux-ohos]
+linker = "/opt/ohos-sdk/native/llvm/bin/aarch64-unknown-linux-ohos-clang"
+ar = "/opt/ohos-sdk/native/llvm/bin/llvm-ar"
+
+# ring / aws-lc-sys build script（cc/cmake crate）的目标编译器：cc crate 文档化
+# 键形为大写下划线（CC_aarch64_unknown_linux_ohos）；该变量对宿主目标构建无影响
+# （宿主读 CC_x86_64_unknown_linux_gnu）。
+[env]
+CC_aarch64_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/aarch64-unknown-linux-ohos-clang"
+CXX_aarch64_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/aarch64-unknown-linux-ohos-clang++"
+AR_aarch64_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/llvm-ar"
+# aws-lc-sys build script的 OHOS 探测面（configure_open_harmony）：读到即取
+# {sdk}/build/cmake/ohos.toolchain.cmake 走其内建 toolchain 路径
+OHOS_SDK_NATIVE = "/opt/ohos-sdk/native"

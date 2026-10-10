@@ -39,7 +39,31 @@ use super::route::{
 use super::tun::{InterfaceStats, PacketInfo, PacketType, TunConfig, TunProvider};
 
 // TUN ioctl（§1.1：libc 定义与内核 tun.h 同源——TUNSETIFF = _IOW('T', 202, int)）
+// ohos（musl 系 libc）：libc::ioctl 的 request 形参是 c_int（nix::sys::ioctl::ioctl_num_type
+// 在 linux 恒为 c_ulong，两代 nix 均无 ohos 面）——`_bad` 宏的 `as c_ulong` 转换与目标
+// libc 签名结构性冲突，故 ohos 面手写同形包装（-1 转 Errno，语义同 nix convert_ioctl_res）
+#[cfg(target_env = "ohos")]
+unsafe fn convert_ioctl_res(res: libc::c_int) -> nix::Result<libc::c_int> {
+    if res == -1 {
+        Err(Errno::last())
+    } else {
+        Ok(res)
+    }
+}
+
+#[cfg(target_env = "ohos")]
+pub unsafe fn tun_set_iff(fd: libc::c_int, data: *const libc::ifreq) -> nix::Result<libc::c_int> {
+    convert_ioctl_res(unsafe { libc::ioctl(fd, libc::TUNSETIFF as libc::c_int, data) })
+}
+
+#[cfg(target_env = "ohos")]
+pub unsafe fn tun_get_iff(fd: libc::c_int, data: *mut libc::ifreq) -> nix::Result<libc::c_int> {
+    convert_ioctl_res(unsafe { libc::ioctl(fd, libc::TUNGETIFF as libc::c_int, data) })
+}
+
+#[cfg(not(target_env = "ohos"))]
 nix::ioctl_write_ptr_bad!(tun_set_iff, libc::TUNSETIFF, libc::ifreq);
+#[cfg(not(target_env = "ohos"))]
 nix::ioctl_read_bad!(tun_get_iff, libc::TUNGETIFF, libc::ifreq);
 
 /// 构建 TUNSETIFF 请求：ifr_name 按给定名（空名 = 内核分配 tun%d）、
