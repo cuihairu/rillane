@@ -107,8 +107,9 @@ pub struct SloWatch {             // ChainConfig.slo_watch: Option<...>
 
 无新指标族/端点：劣化切换经 P2-1 `seep_mesh_switch_total{reason=
 "slo_degraded"}` 与 `/mesh/switches` 自动可见（D-5 选枚举化的原因即
-为此）。组策略选择结果属路由内部态，暴露归既有 diagnose 面（不在本
-条目范围）。
+为此）。组策略选择结果属路由内部态，本稿交付时暴露归既有 diagnose
+面；后续 O-slo1（2026-10-10）补了专用观测面：`GET /routing/stats` +
+`seepctl group`（组实时质量快照，选点/门/评分与选择同源）。
 
 ## 6. 错误路径
 
@@ -155,7 +156,10 @@ pub struct SloWatch {             // ChainConfig.slo_watch: Option<...>
 
 - **R-slo1**：watcher 误切（上报抖动瞬时越门）——MVP 无迟滞/去抖，
   interval 周期即天然平滑；误切率观察期后再定迟滞策略；
-- **O-slo1**：`seepctl group` 子命令展示各成员实时 SLO 分（能力已在
-  update_link_quality 快照，CLI 包装随需求）；
+- **O-slo1**：~~`seepctl group` 子命令展示各成员实时 SLO 分~~（**已落地
+  2026-10-10**：`RoutingEngine::group_quality_report` 快照面 + 控制面
+  `GET /routing/stats` + `seepctl group`——成员数据源 real/legacy/unknown、
+  p95/丢包、门判定与 latency 组当前确定性选点；选点/门/评分口径与
+  select_latency_member 同源共用）；
 - **O-slo2**：游戏 profile 默认启用接线（P2-3）；
 - **O-slo3**：迟滞/去抖（连续 N 周期越门才切）按 R-slo1 观测定。

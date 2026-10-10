@@ -76,7 +76,7 @@ seep/
 - Mesh data-plane mTLS：chain 启用时**默认强制**（dev 可 `SEEP_MESH_ALLOW_PLAINTEXT=1` 豁免）；证书由 `seepctl mtls` 生成（CA/节点证书/轮换/CA bundle 双信任窗口），经 `SEEP_MESH_MTLS_*` 环境变量注入；撤销采用最小实现（按节点 CN 的撤销列表，文件 mtime 热加载）。详见 [mesh.md](mesh.md)。
 - ACL 与配额：`NodeACL`（允许的 client CIDR、角色限制）与 `NodeQuota`（日/月带宽、并发连接数）在 registry 层强制，超限返回 `QuotaExceeded`。
 - 边界：OCSP/CA 直连撤销查询未实现（V2——节点间除 mTLS 数据面外无 CA 通道）；多跳端到端 MAC/认证未实现（无端到端密钥分发机制，记 mesh-advanced-security.md §6 偏差 1）。撤销分发与 UDP 面防重放已落地（todo P2-7）：撤销文件 mtime 热加载 + 运行期生效面可查（`/mtls/revoked`）；UDP 面 v2 流序号 + 滑窗拒重放并计数。
-- 观测：`telemetry.enable_metrics=true` 时 `GET /metrics` 暴露 Prometheus 文本（mesh per-link 计数、chain、subscription 事件等）；`GET /flows` 提供入口→出口流量统计；`GET /nodes` 提供节点快照。per-link 时延分布/切换原因等细粒度指标见 todo P2-1。
+- 观测：`telemetry.enable_metrics=true` 时 `GET /metrics` 暴露 Prometheus 文本（mesh per-link 计数、chain、subscription 事件等）；`GET /flows` 提供入口→出口流量统计；`GET /nodes` 提供节点快照；`GET /routing/stats` 提供组实时质量（成员数据源 real/legacy/unknown、p95/丢包、SLO 门判定与 latency 组当前选点——`seepctl group` 取数面，P2-2 O-slo1）。per-link 时延分布/切换原因等细粒度指标已随 P2-1 落地（`/mesh/switches` 切换账本，见 [mesh.md](mesh.md)）。
 
 ## 当前状态与路线
 

@@ -40,7 +40,8 @@ Endpoints (mesh scope):
 Other control-plane endpoints (outside mesh scope, dispatcher in
 `apps/seepd/src/control_plane.rs`):
 - Observability: `GET /flows` / `GET /metrics` / `GET /udp/stats` /
-  `GET /egress/pool/stats` / `GET /dns/stats` / `GET /runtime/stats`
+  `GET /egress/pool/stats` / `GET /dns/stats` / `GET /runtime/stats` /
+  `GET /routing/stats`（组实时质量：成员数据源/SLO 门判定/当前选点，`seepctl group` 取数面）
 - Subscriptions: `GET|POST /subscriptions`, `POST /subscriptions/refresh`,
   `POST /subscriptions/{name}/refresh`, `DELETE /subscriptions/{name}`
 - System routing (P1-3): `POST /network/route/apply` / `POST /network/route/clear`
