@@ -45,6 +45,7 @@ egress:
   #   server: example.com
   #   port: 443
   #   password: your_password
+  #   network: tcp                   # tcp | ws | grpc（grpc 须配 grpc_service_name；trojan 无 h2 口径）
   #   sni: example.com
   #   skip_cert_verify: false
   # - name: hy2-node
