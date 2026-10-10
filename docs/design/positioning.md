@@ -103,7 +103,7 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 |---|------|------|------|------|
 | G1 | 协议层零 UDP（`seep-protocols` 无任何 UDP 转发路径） | 游戏加速不可用 | **已闭合**——P0-2/P0-3：UDP ASSOCIATE 入站 + direct/ss/wg 出站载荷 | roadmap S1 |
 | G2 | TUN/系统路由为占位实现（`seep-platform::network::platform.rs` 各 Provider 均返回"未实现"，runtime 未接线） | 系统级接管/进程分流不可用 | **已闭合**——P1-1/P1-2/P1-3：linux.rs 真实现 + TunIngress 接线 + network 配置区块与 `seepctl route` | roadmap S2 |
-| G3 | 无独立混淆横切层（仅协议自带伪装） | 抗 QoS/DPI 能力受限 | **已闭合**——P1-4 padding、P2-4 timing/shaping 落地；simple-obfs/salamander 生态插件兼容仍未做 | roadmap S3 |
+| G3 | 无独立混淆横切层（仅协议自带伪装） | 抗 QoS/DPI 能力受限 | **已闭合**——P1-4 padding、P2-4 timing/shaping 落地；simple-obfs 经 SS SIP003 插件桥可用（2026-10-07，仅 SS TCP 面），salamander 归 V2 备选 | roadmap S3 |
 | G4 | 无出站连接复用/池化 | 网页短连接开销高 | **已闭合**——P1-5 M0–M5 连接池 + TLS 会话恢复 | roadmap S3 |
 | G5 | mesh data-plane 仅 TCP（JSON envelope 明文头） | 多跳 UDP 不可用；envelope 可优化为二进制 | **已闭合**——P0-4 UDP 多跳 + P2-6 二进制 envelope | roadmap S1/S3 |
 | G6 | per-link 时延分布/切换原因等细粒度指标缺失 | 调度缺少数据闭环 | **已闭合**——P2-1 `seep_mesh_link_*`/`seep_mesh_switch_total` + `GET /mesh/switches` | roadmap S4 |

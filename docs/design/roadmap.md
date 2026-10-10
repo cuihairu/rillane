@@ -71,9 +71,9 @@
 - **新增**：
   1. 混淆中间件（`seep-protocols::middleware`）：`padding`（包长分布对齐）、`timing`（微抖动）、`shaping`（流形状归一），按 profile 开关（**已完成 2026-10：padding P1-4 M0–M4、timing/shaping P2-4 M0–M2**）；
   2. 客户端 TLS 指纹模拟（**已完成 2026-10，P2-5**——预设 chrome/ios/safari 形态参数表挂单漏斗 `build_client_config`，池键/工厂键扩展，见 [tls-fingerprint.md](tls-fingerprint.md)）；
-  3. obfs 插件兼容（simple-obfs http/tls；salamander 随 hy2 配置暴露）；
+  3. obfs 插件兼容（**simple-obfs 已可用**，2026-10-07 SS 出站 SIP003 插件桥——`plugin: obfs-local`，仅 SS TCP 面；salamander 归 V2 备选，hy2 混淆配置未暴露——见 [PROTOCOLS.md](../PROTOCOLS.md) SS 节）；
   4. 出站连接池：同出口 keep-alive 复用 + TLS 会话恢复，服务于网页短连接（**已完成**，2026-10-02 P1-5 M0–M5——[egress-connection-pool.md](egress-connection-pool.md)，验收判据 1–3 经 TLS 集成测复现）；
-  5. mesh envelope 二进制化（替换 JSON 头，压缩固定开销）。
+  5. mesh envelope 二进制化（替换 JSON 头，压缩固定开销）（**已完成**，2026-10-02 P2-6——[mesh-envelope-binary.md](mesh-envelope-binary.md)，TCP 面补齐二进制编解码 + 接收侧 `{` 嗅探双格式兼容）。
 - **退出标准**：混淆开关开启后，包长/时序特征经统计脚本验证偏离默认分布；连接池使同目标重复请求握手次数下降（有指标佐证）；现有订阅/配置无破坏性变更。
 
 ## S4：调度闭环、观测与发布（对应 P2/P3）
