@@ -155,6 +155,8 @@ pub struct SwitchEvent { chain_id, from_path: Vec<String>,
 - **R-obs1**：上报值即样本（D-1）——上报方语义是"当时延迟"非"测得 RTT"，
   分布形受上报方诚实度影响；探测源落地后切真测，序列名不变；
 - **O-link-obs1**：主动探测源接线（LatencyProbe 注解回灌 / mesh ping 帧）；
-- **O-link-obs2**：`seepctl switches` 子命令（端点已交付，CLI 包装随需求）；
+- **O-link-obs2**：~~`seepctl switches` 子命令~~（**已落地 2026-10-10**：
+  `seepctl switches` 渲染 `/mesh/switches` 账本——epoch/chain_id/前后路径/
+  原因/细节，终止事件 to_path 缺席渲染 `(terminate)`）；
 - **O-link-obs3**：切换事件持久化（重启即失，MVP 不做——账本定位是
   近因观测非审计）。

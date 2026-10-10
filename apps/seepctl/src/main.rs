@@ -45,6 +45,12 @@ enum Command {
         #[arg(long)]
         endpoint: Option<String>,
     },
+    /// 查看链路切换账本（O-link-obs2：最近 100 次 chain 切换事件）
+    Switches {
+        /// 控制面完整 URL，如 http://127.0.0.1:9090/mesh/switches
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
     /// UDP ASSOCIATE 联调探测（P0-5 §3.3：最小 RFC 1928 客户端）
     UdpProbe {
         /// SOCKS5 入口地址，如 127.0.0.1:1080
@@ -392,6 +398,23 @@ fn main() -> Result<()> {
             let stats: RoutingStatsResponse =
                 resp.json().context("解析控制面返回数据失败")?;
             print!("{}", render_routing_stats(&stats.groups));
+        }
+        Command::Switches { endpoint } => {
+            let config = SeepConfig::load_from_path(&cli.config)?;
+            let target = endpoint
+                .unwrap_or_else(|| format!("http://{}/mesh/switches", config.control.api_bind));
+            let client = Client::new();
+            let mut req = client.get(&target);
+            if let Some(token) = &config.control.admin_token {
+                req = req.header("x-admin-token", token);
+            }
+            let resp = req.send().with_context(|| format!("无法访问 {target}"))?;
+            if !resp.status().is_success() {
+                anyhow::bail!("控制面返回错误: {}", resp.status());
+            }
+            let stats: MeshSwitchesResponse =
+                resp.json().context("解析控制面返回数据失败")?;
+            print!("{}", render_switches(&stats.events));
         }
         Command::UdpProbe {
             socks5,
@@ -1657,6 +1680,44 @@ struct RoutingMemberQuality {
     gate_pass: Option<bool>,
 }
 
+// ---------- O-link-obs2：switches 链路切换账本 ----------
+
+/// `/mesh/switches` 响应（seepd `MeshSwitchesDto` 的 seepctl 侧反序列化视图）
+#[derive(Debug, Deserialize)]
+struct MeshSwitchesResponse {
+    events: Vec<SwitchEventDto>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SwitchEventDto {
+    chain_id: String,
+    from_path: Vec<String>,
+    to_path: Option<Vec<String>>,
+    reason: String,
+    detail: String,
+    epoch_seconds: u64,
+}
+
+fn render_switches(events: &[SwitchEventDto]) -> String {
+    if events.is_empty() {
+        return "暂无链路切换记录\n".to_string();
+    }
+    let mut out = String::new();
+    for ev in events {
+        let from = ev.from_path.join(" -> ");
+        let to = ev
+            .to_path
+            .as_ref()
+            .map(|p| p.join(" -> "))
+            .unwrap_or_else(|| "(terminate)".into());
+        out.push_str(&format!(
+            "[{}] {} {} -> {} | {} | {}\n",
+            ev.epoch_seconds, ev.chain_id, from, to, ev.reason, ev.detail
+        ));
+    }
+    out
+}
+
 fn render_routing_stats(groups: &[RoutingGroupQuality]) -> String {
     if groups.is_empty() {
         return "暂无路由组\n".to_string();
@@ -2293,5 +2354,34 @@ mod tests {
     #[test]
     fn routing_stats_render_empty() {
         assert_eq!(render_routing_stats(&[]), "暂无路由组\n");
+    }
+
+    /// O-link-obs2：`/mesh/switches` 响应解析 + 渲染（路径/原因/终止事件）
+    #[test]
+    fn switches_parse_and_render() {
+        let body = r#"{
+          "events": [
+            {"chain_id": "c1", "from_path": ["client1", "relay1", "exit1"],
+             "to_path": ["client1", "exit1"], "reason": "hop_failed",
+             "detail": "read error", "epoch_seconds": 1750000000},
+            {"chain_id": "c2", "from_path": ["client1", "exit2"],
+             "to_path": null, "reason": "terminated", "detail": "manual",
+             "epoch_seconds": 1750000001}
+          ]
+        }"#;
+        let resp: MeshSwitchesResponse =
+            serde_json::from_str(body).expect("switches 应可解析");
+        assert_eq!(resp.events.len(), 2);
+
+        let out = render_switches(&resp.events);
+        assert!(out.contains(
+            "[1750000000] c1 client1 -> relay1 -> exit1 -> client1 -> exit1 | hop_failed | read error"
+        ));
+        assert!(out.contains("[1750000001] c2 client1 -> exit2 -> (terminate) | terminated | manual"));
+    }
+
+    #[test]
+    fn switches_render_empty() {
+        assert_eq!(render_switches(&[]), "暂无链路切换记录\n");
     }
 }

@@ -29,7 +29,7 @@ Endpoints (mesh scope):
 - `GET /nodes` (mesh node snapshots)
 - `POST /mesh/nodes/register` (register/update a node)
 - `POST /mesh/link-states` (update directed link-state)
-- `GET /mesh/switches` (最近 100 次 chain 切换事件，P2-1)
+- `GET /mesh/switches` (最近 100 次 chain 切换事件，P2-1；`seepctl switches` 取数面)
 - `GET /mtls/revoked` (撤销列表加载状态：mtime / 条目 / 加载错误，P2-7)
 - `POST /chains/dry-run` (chain build pre-check)
 - `POST /chains` (create/reuse chain; uses a session_id UUID)
