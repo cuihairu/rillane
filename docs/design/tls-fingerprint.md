@@ -163,6 +163,10 @@ seep-config 面（M1）：四个 TLS 承载 egress 变体（http/vmess/vless/tro
 
 - **R-tfp1**：指纹形态本身成为新特征（「会变形的 rustls」）——MVP
   面向「同形多实例打散」，拟真对抗归 V2 换栈后重评；
-- **O-tfp1**：`seepctl` 调试子命令输出各预设 shape_material 对照表；
+- **O-tfp1**：~~`seepctl` 调试子命令输出各预设 shape_material 对照表~~
+  （**已落地 2026-10-10**：`seepctl tls-fingerprint` 打印四预设
+  （none/chrome/ios/safari）及其 shape_material 四维形态串——
+  none 为 `default`，其余按版本|套件|群|签名方案导出，预设间
+  两两互异由 §7-3 构造保证）；
 - **O-tfp2**：自定义预设（配置直写套件/群清单）——预设表开放为配置
   形按需再做。

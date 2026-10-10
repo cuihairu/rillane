@@ -251,7 +251,7 @@ impl EgressConnector for MyProtocol {
 - **故障转移**: 自动检测故障并切换备用路径
 - **链路可观测**: per-link RTT p50/p95 分位、观测形丢包比、切换原因账本与计数（2026-10，P2-1，`/metrics` 三族 + `GET /mesh/switches`）
 - **SLO 打分选路**: `latency` 策略以 p95 RTT/丢包为目标打分（`slo:` 门 + penalty），chain 侧 `slo_watch` 劣化自动切换且原因入账本（2026-10，P2-2，见 [slo-scoring.md](design/slo-scoring.md)）
-- **TLS 指纹形态**: egress 四 TLS 变体 `tls_fingerprint: none|chrome|ios|safari`，池键/工厂键扩展（2026-10，P2-5，见 [tls-fingerprint.md](design/tls-fingerprint.md)）
+- **TLS 指纹形态**: egress 四 TLS 变体 `tls_fingerprint: none|chrome|ios|safari`，池键/工厂键扩展（2026-10，P2-5，`seepctl tls-fingerprint` 打印预设 shape_material 对照表，见 [tls-fingerprint.md](design/tls-fingerprint.md)）
 
 ## 安全特性
 

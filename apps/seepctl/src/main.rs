@@ -59,6 +59,8 @@ enum Command {
         #[arg(long)]
         out: Option<String>,
     },
+    /// TLS 指纹形态预设对照表（O-tfp1：各预设 shape_material 四维导出）
+    TlsFingerprint,
     /// UDP ASSOCIATE 联调探测（P0-5 §3.3：最小 RFC 1928 客户端）
     UdpProbe {
         /// SOCKS5 入口地址，如 127.0.0.1:1080
@@ -433,6 +435,9 @@ fn main() -> Result<()> {
                 }
                 None => print!("{yaml}"),
             }
+        }
+        Command::TlsFingerprint => {
+            print!("{}", render_tls_fingerprints());
         }
         Command::UdpProbe {
             socks5,
@@ -1763,6 +1768,25 @@ fn render_switches(events: &[SwitchEventDto]) -> String {
     out
 }
 
+/// O-tfp1：TLS 指纹形态预设对照表——各预设 shape_material 四维导出
+/// （版本/套件/群/签名方案），预设间两两互异由 fingerprint.rs §7-3 构造保证。
+fn render_tls_fingerprints() -> String {
+    use seep_protocols::TlsFingerprint;
+    let presets = [
+        TlsFingerprint::None,
+        TlsFingerprint::Chrome,
+        TlsFingerprint::Ios,
+        TlsFingerprint::Safari,
+    ];
+    let mut out = String::from("TLS 指纹形态预设对照表（shape_material）\n");
+    out.push_str("预设        形态串（版本|套件|群|签名方案，hex）\n");
+    out.push_str("----        -----------------------------------\n");
+    for p in presets {
+        out.push_str(&format!("{:<11} {}\n", p.as_str(), p.shape_material()));
+    }
+    out
+}
+
 fn render_routing_stats(groups: &[RoutingGroupQuality]) -> String {
     if groups.is_empty() {
         return "暂无路由组\n".to_string();
@@ -2474,5 +2498,21 @@ mod tests {
         }
         let err = parse_profile_variant("fps").unwrap_err();
         assert!(err.to_string().contains("fps"), "{}", err);
+    }
+
+    /// O-tfp1：对照表含四预设且各预设名与其 shape_material 均呈现
+    #[test]
+    fn tls_fingerprint_table_lists_all_presets() {
+        use seep_protocols::TlsFingerprint;
+        let out = render_tls_fingerprints();
+        for p in [
+            TlsFingerprint::None,
+            TlsFingerprint::Chrome,
+            TlsFingerprint::Ios,
+            TlsFingerprint::Safari,
+        ] {
+            assert!(out.contains(p.as_str()), "{out}");
+            assert!(out.contains(&p.shape_material()), "{out}");
+        }
     }
 }
