@@ -51,7 +51,7 @@ docs/        # 架构文档与 ADR
 platforms/   # 各平台集成脚手架 (Android/iOS/OpenWrt/desktop)
 ```
 
-更多细节见 `docs/architecture.md`。
+更多细节见 `docs/architecture.md`；完整 `seepctl` 命令参考（18 个子命令、旗标与控制面端点语义）见 `docs/cli.md`。
 
 ## 快速开始
 ```bash

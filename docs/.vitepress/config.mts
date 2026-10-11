@@ -20,6 +20,7 @@ export default defineConfig({
       {
         text: '指南',
         items: [
+          { text: 'seepctl CLI 参考', link: '/cli' },
           { text: 'Mesh & Chain', link: '/mesh' },
           { text: '系统路由与网络接管', link: '/networking' },
           { text: '订阅指南', link: '/subscription' },
@@ -50,6 +51,7 @@ export default defineConfig({
       {
         text: '指南',
         items: [
+          { text: 'seepctl CLI 参考', link: '/cli' },
           { text: 'Mesh & Chain Guide (MVP)', link: '/mesh' },
           { text: '系统路由与网络接管', link: '/networking' },
           { text: 'Grafana 仪表板模板', link: '/grafana/README' },

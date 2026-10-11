@@ -51,7 +51,7 @@ docs/        # architecture documents and ADRs
 platforms/   # platform integration scaffolding (Android/iOS/OpenWrt/desktop)
 ```
 
-See `docs/architecture.md` for details.
+See `docs/architecture.md` for details, and `docs/cli.md` for the full `seepctl` command reference (18 subcommands, flags, and control-plane endpoint semantics).
 
 ## Quick Start
 ```bash
