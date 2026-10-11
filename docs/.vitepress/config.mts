@@ -24,6 +24,7 @@ export default defineConfig({
           { text: 'Mesh & Chain', link: '/mesh' },
           { text: '系统路由与网络接管', link: '/networking' },
           { text: '订阅指南', link: '/subscription' },
+          { text: '配置参考', link: '/config' },
         ],
       },
       {
@@ -46,6 +47,7 @@ export default defineConfig({
           { text: '架构草图', link: '/architecture' },
           { text: '协议支持', link: '/PROTOCOLS' },
           { text: '订阅指南', link: '/subscription' },
+          { text: '配置参考', link: '/config' },
         ],
       },
       {

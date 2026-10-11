@@ -73,7 +73,7 @@ cargo run -p seepctl -- profile game --out /tmp/game.yaml
 SEEP_CONFIG=/tmp/game.yaml seepd
 ```
 
-`seepd` reads its configuration from the `SEEP_CONFIG` environment variable (default `config/seep.yaml`); there is no `--config` flag, and extra command-line arguments are ignored. For where each platform template expects its configuration, see the READMEs under `platforms/`.
+`seepd` reads its configuration from the `SEEP_CONFIG` environment variable (default `config/seep.yaml`); there is no `--config` flag, and extra command-line arguments are ignored. The full field reference (blocks, defaults, and validation rules) lives in `docs/config.md`. For where each platform template expects its configuration, see the READMEs under `platforms/`.
 
 Optional: with `telemetry.enable_tracing=true` (the default in `config/seep.yaml` is `false`) and `SEEP_CAPTURE_LOGS=1` set in the `seepd` process environment, the control plane additionally serves `GET /logs` (used by `seepctl diagnose` to fetch recent logs); when tracing is disabled the endpoint returns 404.
 
