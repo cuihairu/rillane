@@ -94,7 +94,7 @@ seepctl pool status [--endpoint <完整URL，含 /egress/pool/stats>]
 
 ### check / show
 
-无旗标；配置经全局 `-c` 指定。`show` 打印监听口、控制面、路由/组/出站摘要。
+无旗标；配置经全局 `-c` 指定。`show` 打印摘要（控制面监听地址 + 入口/出口计数）；`check` 输出「配置有效」。
 
 ### profile
 

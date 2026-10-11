@@ -63,6 +63,8 @@ seepctl import-rules <url|file> --target <组或出口> [--face routing|dns]  # 
 seepctl subscription list|add|remove|refresh      # 经控制面管理
 ```
 
+完整 `seepctl` 旗标（含 `--header`/`--refresh-interval`/`--timeout` 单位）与控制面端点语义见 [cli.md](cli.md)。
+
 ## 7. 边界与未落地
 
 - 订阅拉取暂无内建定时重试退避（失败依赖下一轮全局刷新周期重试）；
