@@ -17,9 +17,11 @@
 - `ios/`（P3-4，已落地脚手架）：Swift `NEPacketTunnelProvider` 源码 +
   macOS 侧 xcframework 构建脚本（本仓 Linux 环境无 Xcode，iOS 面仅源码
   级交付，边界见其 README）。
-- `ohos/`（P3-4 填空，2026-10-10 编译面落地）：`aarch64-unknown-linux-ohos`
-  下 seep-ffi 编译 + cdylib 链接 + ELF 静态核验（OHOS SDK native 工具链，
-  `.cargo/config.toml` 集中配置）；ArkTS 宿主与真机面边界见其 README。
+- `ohos/`（P3-4 填空，编译面落地：aarch64 2026-10-10、x86_64/armv7
+  2026-10-11）：三个 `*-unknown-linux-ohos` 目标下 seep-ffi 编译 + cdylib
+  链接 + ELF 静态核验（OHOS SDK native 工具链，`.cargo/config.toml`
+  集中配置）；armv7 因上游 defguard_boringtun 阻塞走 wireguard 恒 Err 桩；
+  ArkTS 宿主与真机面边界见其 README。
 
 各目录均共享上层 `crates/` 与 `apps/`，只补充平台 glue 与打包脚本。
 验证分层口径（L1 脚本结构 / L2 产物静态核验 / L3 运行冒烟 / L4 真平台面）

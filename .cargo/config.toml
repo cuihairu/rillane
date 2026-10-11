@@ -1,4 +1,4 @@
-# HarmonyOS（aarch64-unknown-linux-ohos）交叉面（P3-4 鸿蒙 FFI 填空）
+# HarmonyOS（aarch64/armv7/x86_64-unknown-linux-ohos）交叉面（P3-4 鸿蒙 FFI 填空）
 #
 # 依赖宿主一次性安装 OHOS SDK native 组件到 /opt/ohos-sdk（rust-lang CI 同布局，
 # src/ci/docker/scripts/ohos-sdk.sh）：
@@ -14,6 +14,15 @@
 linker = "/opt/ohos-sdk/native/llvm/bin/aarch64-unknown-linux-ohos-clang"
 ar = "/opt/ohos-sdk/native/llvm/bin/llvm-ar"
 
+# 同 SDK 自带对应 triple wrapper（armv7/x86_64），配置与 aarch64 同形
+[target.armv7-unknown-linux-ohos]
+linker = "/opt/ohos-sdk/native/llvm/bin/armv7-unknown-linux-ohos-clang"
+ar = "/opt/ohos-sdk/native/llvm/bin/llvm-ar"
+
+[target.x86_64-unknown-linux-ohos]
+linker = "/opt/ohos-sdk/native/llvm/bin/x86_64-unknown-linux-ohos-clang"
+ar = "/opt/ohos-sdk/native/llvm/bin/llvm-ar"
+
 # ring / aws-lc-sys build script（cc/cmake crate）的目标编译器：cc crate 文档化
 # 键形为大写下划线（CC_aarch64_unknown_linux_ohos）；该变量对宿主目标构建无影响
 # （宿主读 CC_x86_64_unknown_linux_gnu）。
@@ -21,6 +30,12 @@ ar = "/opt/ohos-sdk/native/llvm/bin/llvm-ar"
 CC_aarch64_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/aarch64-unknown-linux-ohos-clang"
 CXX_aarch64_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/aarch64-unknown-linux-ohos-clang++"
 AR_aarch64_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/llvm-ar"
+CC_armv7_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/armv7-unknown-linux-ohos-clang"
+CXX_armv7_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/armv7-unknown-linux-ohos-clang++"
+AR_armv7_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/llvm-ar"
+CC_x86_64_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/x86_64-unknown-linux-ohos-clang"
+CXX_x86_64_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/x86_64-unknown-linux-ohos-clang++"
+AR_x86_64_unknown_linux_ohos = "/opt/ohos-sdk/native/llvm/bin/llvm-ar"
 # aws-lc-sys build script的 OHOS 探测面（configure_open_harmony）：读到即取
 # {sdk}/build/cmake/ohos.toolchain.cmake 走其内建 toolchain 路径
 OHOS_SDK_NATIVE = "/opt/ohos-sdk/native"

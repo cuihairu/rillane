@@ -13,11 +13,17 @@ mod trojan;
 mod vless;
 mod vmess;
 mod ws;
-// android：defguard_boringtun 无平台支撑（见 wireguard_stub.rs 头注）——
+// android / armv7-ohos：defguard_boringtun 无平台支撑（见 wireguard_stub.rs 头注）——
 // 实现剥离为恒 Err 桩，类型名保形使 runtime 侧零改动
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(
+    target_os = "android",
+    all(target_os = "linux", target_env = "ohos", target_arch = "arm")
+)))]
 mod wireguard;
-#[cfg(target_os = "android")]
+#[cfg(any(
+    target_os = "android",
+    all(target_os = "linux", target_env = "ohos", target_arch = "arm")
+))]
 mod wireguard_stub;
 
 pub use direct::DirectConnector;
@@ -28,9 +34,15 @@ pub use socks5::Socks5Connector;
 pub use trojan::TrojanConnector;
 pub use vless::VlessConnector;
 pub use vmess::{VmessConnector, VmessSecurity};
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(
+    target_os = "android",
+    all(target_os = "linux", target_env = "ohos", target_arch = "arm")
+)))]
 pub use wireguard::{WireguardConnector, WireguardUdpConnector};
-#[cfg(target_os = "android")]
+#[cfg(any(
+    target_os = "android",
+    all(target_os = "linux", target_env = "ohos", target_arch = "arm")
+))]
 pub use wireguard_stub::{WireguardConnector, WireguardUdpConnector};
 
 use std::sync::Arc;

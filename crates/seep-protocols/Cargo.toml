@@ -45,8 +45,10 @@ shadowsocks.workspace = true
 hysteria2.workspace = true
 
 # android 不编 wireguard（defguard_boringtun 无平台支撑，见 outbound/wireguard_stub.rs）；
-# target 段置尾，防吞后续公共依赖（TOML 表语义）
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# armv7-ohos 同因剥离（boringtun epoll.rs 的 libc::timespec 字面量撞 32 位 ohos libc
+# 私有 __pad0 字段，E0451；aarch64/x86_64-ohos 上 boringtun 实测可编，不回退，见
+# platforms/ohos/README.md 踩坑实录）；target 段置尾，防吞后续公共依赖（TOML 表语义）
+[target.'cfg(not(any(target_os = "android", all(target_os = "linux", target_env = "ohos", target_arch = "arm"))))'.dependencies]
 defguard_wireguard_rs.workspace = true
 
 [dev-dependencies]

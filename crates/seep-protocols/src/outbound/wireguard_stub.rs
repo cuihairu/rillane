@@ -1,11 +1,14 @@
-//! wireguard 出站的 android 构建占位（P3-4）
+//! wireguard 出站的 android / armv7-ohos 构建占位（P3-4 / P3-4b）
 //!
 //! defguard_boringtun 0.6 无 android 支撑（内部 `tun` crate 不识别目标
 //! E0432 + cfg 面守卫类型错位 E0308，实测定；见 platforms/android/README.md
-//! 边界节）——android 目标下实现整体剥离，仅保留同形类型：构造恒 Err /
-//! forward 恒 Err，runtime 侧 egress 工厂构建期即拦截。口径同 network
-//! 四工厂非 Linux 恒 Err 与 windows `ensure_interface` 双定义先例。
-//! 宿主（linux/mac/windows）面零差异。
+//! 边界节）；armv7-ohos 同因剥离（boringtun epoll.rs:135 的 `libc::timespec`
+//! 字面量撞 32 位 ohos libc 私有 `__pad0`，E0451，实测定；见
+//! platforms/ohos/README.md 踩坑实录）。两目标下实现整体剥离，仅保留
+//! 同形类型：构造恒 Err / forward 恒 Err，runtime 侧 egress 工厂构建期
+//! 即拦截。口径同 network 四工厂非 Linux 恒 Err 与 windows
+//! `ensure_interface` 双定义先例。宿主（linux/mac/windows）与
+//! aarch64/x86_64-ohos（boringtun 实测可编）面零差异。
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;

@@ -63,7 +63,8 @@ adb install -r platforms/android/app/build/outputs/apk/debug/app-debug.apk
   android 平台支撑（内部 `tun` crate 不识别目标 + cfg 面守卫类型错位，
   实测编译失败）。`seep-protocols` 对 android 目标改出恒 Err 桩
   （`outbound/wireguard_stub.rs`），wireguard egress 在 android 配置下
-  构建期即报错；其余出站/入口不受影响。宿主面零差异。
+  构建期即报错；其余出站/入口不受影响。宿主面零差异。同一桩现亦覆盖
+  armv7-ohos（上游另一形态阻塞，见 `platforms/ohos/README.md` 踩坑实录）。
 - demo 用 `targetSdk 33`：免 Android 14+ 前台服务类型/通知权限样板；服务在
   应用前台期间运行即可完成验收，后台常驻（FGS 声明 + 通知）归正式面。
 - gradle 不走 wrapper：gradle 发行版由 `build.sh` 按需下载到 `~/.seep-tools/`
