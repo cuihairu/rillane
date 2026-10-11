@@ -1,4 +1,4 @@
-# SEEP HarmonyOS（鸿蒙）适配（P3-4 填空，2026-10-10 编译面落地）
+# SEEP HarmonyOS（鸿蒙）适配（P3-4 填空；aarch64 编译面 2026-10-10、x86_64/armv7 2026-10-11）
 
 Rust 核心（`crates/seep-ffi` cdylib，C ABI 面）在三个
 `*-unknown-linux-ohos` 目标下编译面打通：aarch64 与 x86_64 走真实
@@ -21,9 +21,9 @@ Android/iOS 共享同一 C ABI 层（`lib.rs`/`tun.rs`，unix 家族零改动）
    rm /tmp/linux/native-linux-x64-5.0.0.71-Release.zip
    ```
 
-3. 仓库根 `.cargo/config.toml` 已提交 target 段（linker/ar + cc/cmake 的
-   `CC_/CXX_/AR_aarch64_unknown_linux_ohos` + `OHOS_SDK_NATIVE`）。wrapper
-   脚本自带 `--target`/`--sysroot`，无需手工 CFLAGS。
+3. 仓库根 `.cargo/config.toml` 已提交三个 target 段（linker/ar +
+   cc/cmake 的 `CC_/CXX_/AR_*_unknown_linux_ohos` + `OHOS_SDK_NATIVE`）。
+   wrapper 脚本自带 `--target`/`--sysroot`，无需手工 CFLAGS。
 
 ## 验收（aarch64 已实证 2026-10-10；x86_64/armv7 已实证 2026-10-11）
 
