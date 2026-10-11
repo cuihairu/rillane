@@ -18,6 +18,43 @@
 - **离线命令**（`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / `mtls` 证书工具）：不经控制面，只读本地文件（`udp-probe` 例外——直接连 SOCKS5 入口实测）。
 - 无 `seepctl reload` 子命令：seepd 启动一次性读配置，运行期热更新仅由订阅刷新与控制面端点驱动（见 [architecture.md](architecture.md) 热更新口径）。
 
+## 控制面 REST 端点总表
+
+按 `apps/seepd/src/control_plane.rs` 路由表对账（2026-10-11）。除注明外均需 `x-admin-token` 头（配置 `control.admin_token` 非空时）。
+
+| 方法 | 路径 | 说明 | seepctl 对应 |
+|------|------|------|--------------|
+| GET | `/health` | 存活探针 | — |
+| GET | `/nodes` | mesh 节点快照 | `nodes` |
+| GET | `/flows` | 入口→出口累计流量统计 | `stats` |
+| GET | `/udp/stats` | UDP 会话/中继统计快照 | `stats`（UDP 段同取） |
+| GET | `/routing/stats` | 组实时质量（成员数据源/p95/丢包/SLO 门/当前选点） | `group` |
+| GET | `/mesh/switches` | 链路切换账本（最近 100 次） | `switches` |
+| GET | `/egress/pool/stats` | 出站连接池快照 | `pool status` |
+| GET | `/dns/stats` | DNS 服务统计快照 | —（仅 REST） |
+| GET | `/plugins/stats` | 插件统计 | —（仅 REST） |
+| GET | `/runtime/stats` | runtime 统计 | —（仅 REST） |
+| GET | `/runtime/config` | 当前生效配置快照 | —（仅 REST） |
+| GET | `/events` | 事件日志（最近 N 行） | —（仅 REST） |
+| GET | `/logs` | 最近日志（需 `SEEP_CAPTURE_LOGS=1`） | `diagnose`（采集） |
+| GET | `/metrics` | Prometheus 文本 | —（Prometheus 抓取） |
+| GET | `/mtls/revoked` | 撤销列表生效面（mtime/条目/加载错误） | `mtls revoke status` |
+| GET | `/chains/stats` | 链路统计 | `chain stats` |
+| GET | `/chains/{chain_id}` | 链路详情 | `chain get` |
+| POST | `/chains/dry-run` | 链路预检 | `chain dry-run` |
+| POST | `/chains` | 创建链路（同 session_id 复用） | `chain create` |
+| DELETE | `/chains/{chain_id}` | 终止链路 | `chain terminate` |
+| GET | `/subscriptions` | 订阅列表与状态 | `subscription list` |
+| POST | `/subscriptions` | 添加订阅 | `subscription add` |
+| POST | `/subscriptions/refresh` | 全量刷新 | `subscription refresh` |
+| POST | `/subscriptions/{name}/refresh` | 单订阅刷新 | `subscription refresh <NAME>` |
+| DELETE | `/subscriptions/{name}` | 删除订阅 | `subscription remove` |
+| POST | `/network/route/apply` | 应用路由规则（幂等） | `route apply` |
+| POST | `/network/route/clear` | 撤销已应用规则 | `route clear` |
+| GET | `/network/route/status` | 路由应用状态 | `route status` |
+| POST | `/mesh/nodes/register` | 节点注册（mesh 面内部） | —（节点间） |
+| POST | `/mesh/link-states` | 链路状态上报（mesh 面内部） | —（节点间） |
+
 ## 命令总览
 
 | 命令 | 说明 | 面 |
