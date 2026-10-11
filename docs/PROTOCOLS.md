@@ -274,6 +274,8 @@ impl EgressConnector for MyProtocol {
 
 ## 配置示例
 
+> 字段级完整参考（各块缺省值与构建期校验）见 [config.md](config.md)。
+
 ```yaml
 ingress:
   - name: socks5-proxy
