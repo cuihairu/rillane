@@ -31,7 +31,7 @@ seep/
 
 ## 应用层
 - `apps/seepd`：常驻守护进程 (service/daemon)，负责加载配置、初始化 Telemetry、启动 runtime。
-- `apps/seepctl`：命令行控制台，用于配置校验、热更新、查看状态；后续可扩展远程 API。
+- `apps/seepctl`：命令行控制台——配置校验与状态查看（18 个子命令），并经控制面触发路由/出站/订阅的运行时重建与 mTLS 证书管理；远程控制面为内置 HTTP/REST（端点总表与 seepctl 对应见 [docs/cli.md](cli.md)），无 gRPC/WebSocket 面。
 
 ## 关键接口
 - `Flow`：一次代理会话的上下文，包含目标信息、标签等；`FlowRouter` 根据 `FlowContext` 决策。
@@ -42,7 +42,8 @@ seep/
 ## 平台策略
 - **桌面/服务器**：提供 `seepd` 二进制 + systemd/launchd/Windows Service 模板。
 - **Android/iOS**：核心以 `cdylib` 形式暴露 FFI，UI 侧使用 Kotlin/Swift/Flutter 调用。
-- **OpenWrt**：默认构建 `musl` 静态包，并提供 UCI/ubus 适配器；LuCI 插件单独维护在 `platforms/openwrt`。
+- **OpenWrt**：musl 静态包（ipk 产线 + procd init.d）；LuCI/UCI 适配未做（LuCI 页面后置，见 `platforms/openwrt/README.md`）。
+- **HarmonyOS（鸿蒙）**：`crates/seep-ffi` cdylib 在 aarch64/armv7/x86_64-ohos 三目标编译面 + ELF 静态核验已打通（armv7 走 wireguard 恒 Err 桩）；宿主接入（ArkTS/ArkUI）与真机面未做，见 `platforms/ohos/README.md`。
 
 ## 控制面与生态
 - 控制面统一走 `control.api_bind` 的 HTTP/REST + `seepctl`（手写 HTTP 路由，无 gRPC/WebSocket 面）。
