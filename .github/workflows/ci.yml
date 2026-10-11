@@ -36,7 +36,10 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
+      # action ref 钉 stable 分支（与 coverage/audit/cross 三 job 同口径）：
+      # @master 随上游主分支滚动，action 自身代码变更即可漂移；toolchain
+      # 仍按矩阵跑 stable/beta/nightly 通道，通道覆盖面不变
+      uses: dtolnay/rust-toolchain@stable
       with:
         toolchain: ${{ matrix.rust }}
         components: rustfmt, clippy
@@ -112,8 +115,9 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
 
     - name: Install cargo-audit
-      # --locked 钉安装面依赖（同 coverage install 步口径）
-      run: cargo install cargo-audit --locked
+      # 版本钉死 + --locked 钉安装面依赖（同 coverage install 步口径）。
+      # 0.22.2 = 2026-10-11 自托管 runner 实证绿版本（run 38109201127 audit job）
+      run: cargo install cargo-audit --version 0.22.2 --locked
 
     - name: Run security audit
       # RUSTSEC-2026-0258（h2 <0.4.16 空 DATA 帧放大）已随 hyper 0.14 → 1.x
