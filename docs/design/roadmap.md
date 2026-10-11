@@ -105,4 +105,4 @@
 - **S1 是 S2/S4 的前置**：没有 UDP，TUN 接管的游戏流量无处可去，SLO 调度也无对象；
 - **S2 依赖真实内核交互**，需要集成测试环境（Linux CI + NetworkNamespace 级测试）；trait 口径 = **语义稳定而非方法集冻结**（已授权裁剪：tun-dataplane.md §1.2 删 `packet_stream`/`TunPacketStream`/`TunInterface` 三项假 I/O 占位）；
 - **S3 混淆的有效性验证**依赖测量方法（统计脚本/对抗样本），先建度量再调参；
-- 协议文档 `PROTOCOLS.md` 存在超前描述（VMess、连接池、hy2 UDP 等；UDP ASSOCIATE 已随 P0-2 回填），以 todo.md 勘误与阶段退出标准为准回填。
+- 协议文档 `PROTOCOLS.md` 清账进度（2026-10-11 对账）：原超前项中 VMess 出站、出站连接池、UDP ASSOCIATE、Happy Eyeballs、SS SIP003 插件桥、gRPC/h2 传输、TLS 指纹形态等均已回填「已实现」；现存超前描述仅余边界外/出界项——HTTP 请求头修改与压缩、SOCKS5 出站 UDP 中继（不在 S1 范围）、SS 动态端口分配（SIP004 服务端特性）、VLESS QoS/Vision、mesh 自动密钥轮换/MFA/JWT，以及 hy2 UDP 承载（终态 V2，quinn 载具未决）。
