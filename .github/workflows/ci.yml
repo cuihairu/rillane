@@ -75,9 +75,10 @@ jobs:
         components: llvm-tools-preview
 
     - name: Install cargo-llvm-cov
-      # --locked 钉安装面依赖：无 pin 的 cargo install 每次按当下 registry
-      # 重新解析，上游新发版即可漂移破坏可复现性（0.9.1 起锁定）
-      run: cargo install cargo-llvm-cov --locked
+      # 版本钉死 + --locked 钉安装面依赖：无 pin 的 cargo install 每次按当下
+      # registry 重新解析，上游新发版即可漂移破坏可复现性。0.9.1 =
+      # 2026-10-11 自托管 runner 实证绿版本（run 38109201127 coverage job）
+      run: cargo install cargo-llvm-cov --version 0.9.1 --locked
 
     - name: Cache dependencies
       uses: actions/cache@v4
