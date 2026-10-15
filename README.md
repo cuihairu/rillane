@@ -1,7 +1,7 @@
 [English](README.md) | [中文](README.zh.md)
 
 <p align="center">
-  <img src="docs/public/logo.svg" width="100" alt="Seep logo" />
+  <img src="docs/public/logo.svg" width="64" alt="Seep logo" />
 </p>
 
 <h1 align="center">Seep</h1>
