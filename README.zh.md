@@ -6,6 +6,8 @@
 
 <h1 align="center">Seep</h1>
 
+<p align="center">[![Status](https://img.shields.io/badge/status-in%20development-orange)](https://github.com/cuihairu/seep/releases)</p>
+
 <p align="center">
   Rust 代理内核，灵感来自 sing-box / Clash / Surge。协议栈按 crate 拆分（core/config/routing/protocols/…），跨平台 glue 收在 platforms/，由一套 monorepo 维护。
 </p>
