@@ -6,7 +6,9 @@
 
 <h1 align="center">Seep</h1>
 
-<p align="center">[![Status](https://img.shields.io/badge/status-in%20development-orange)](https://github.com/cuihairu/seep/releases)</p>
+<p align="center">
+<a href="https://github.com/cuihairu/seep/releases"><img alt="Status" src="https://img.shields.io/badge/status-in%20development-orange"></a>
+</p>
 
 <p align="center">
   A proxy kernel in Rust, inspired by sing-box / Clash / Surge. The protocol stack is split into crates (core/config/routing/protocols/…), cross-platform glue lives under platforms/, and everything is maintained in a single monorepo.
