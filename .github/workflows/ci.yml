@@ -33,19 +33,19 @@ jobs:
 
     steps:
     - name: Checkout source code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
 
     - name: Install Rust
       # action ref 钉 stable 分支（与 coverage/audit/cross 三 job 同口径）：
       # @master 随上游主分支滚动，action 自身代码变更即可漂移；toolchain
       # 仍按矩阵跑 stable/beta/nightly 通道，通道覆盖面不变
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@v1
       with:
         toolchain: ${{ matrix.rust }}
         components: rustfmt, clippy
 
     - name: Cache dependencies
-      uses: actions/cache@v4
+      uses: actions/cache@v6.1.0
       with:
         path: |
           ~/.cargo/registry
@@ -70,10 +70,10 @@ jobs:
     runs-on: [self-hosted, seep]
     steps:
     - name: Checkout source code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@v1
       with:
         components: llvm-tools-preview
 
@@ -84,7 +84,7 @@ jobs:
       run: cargo install cargo-llvm-cov --version 0.9.1 --locked
 
     - name: Cache dependencies
-      uses: actions/cache@v4
+      uses: actions/cache@v6.1.0
       with:
         path: |
           ~/.cargo/registry
@@ -96,7 +96,7 @@ jobs:
       run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
+      uses: codecov/codecov-action@v7.1.1
       with:
         files: lcov.info
         # 上传尽力而为：仓库未配置 CODECOV_TOKEN secret，codecov v4 起
@@ -109,10 +109,10 @@ jobs:
     runs-on: [self-hosted, seep]
     steps:
     - name: Checkout source code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@v1
 
     - name: Install cargo-audit
       # 版本钉死 + --locked 钉安装面依赖（同 coverage install 步口径）。
@@ -129,13 +129,13 @@ jobs:
     runs-on: [self-hosted, seep]
     steps:
     - name: Checkout source code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@1.96.0  # MSRV 随锁上调：wasmtime 49.0.2 / cranelift-* 0.136=1.96、smoltcp 0.14=1.91（1.88 基线在 wasmtime 49 入锁后已红；前值 1.88=shadowsocks 1.24.0 / time 0.3.47 / serde_with 3.21）
+      uses: dtolnay/rust-toolchain@v1  # MSRV 随锁上调：wasmtime 49.0.2 / cranelift-* 0.136=1.96、smoltcp 0.14=1.91（1.88 基线在 wasmtime 49 入锁后已红；前值 1.88=shadowsocks 1.24.0 / time 0.3.47 / serde_with 3.21）
 
     - name: Cache dependencies
-      uses: actions/cache@v4
+      uses: actions/cache@v6.1.0
       with:
         path: |
           ~/.cargo/registry
@@ -171,20 +171,20 @@ jobs:
 
     steps:
     - name: Checkout source code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@v1
       with:
         targets: ${{ matrix.target }}
 
     - name: Install cross
-      uses: taiki-e/install-action@v2
+      uses: taiki-e/install-action@v2.87.30
       with:
         tool: cross
 
     - name: Cache dependencies
-      uses: actions/cache@v4
+      uses: actions/cache@v6.1.0
       with:
         path: |
           ~/.cargo/registry
@@ -206,10 +206,10 @@ jobs:
     runs-on: [self-hosted, seep]
     steps:
     - name: Checkout source code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7.0.1
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v4.4.1
 
     - name: Build Docker image
       run: |
