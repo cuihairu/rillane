@@ -15,36 +15,19 @@
 </p>
 
 <p align="center">
-  <img src="https://github.com/cuihairu/seep/actions/workflows/ci.yml/badge.svg" alt="CI" />
-  <img src="https://img.shields.io/badge/Rust-2021-000000?logo=rust&amp;logoColor=DEA584" alt="Rust 2021" />
-  <img src="https://img.shields.io/badge/tokio-1.48-000000" alt="tokio 1.48" />
-  <img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version 0.1.0" />
-  <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="license Apache-2.0" />
+<img src="https://github.com/cuihairu/seep/actions/workflows/ci.yml/badge.svg" alt="CI" /> <img src="https://img.shields.io/badge/Rust-2021-000000?logo=rust&amp;logoColor=DEA584" alt="Rust 2021" /> <img src="https://img.shields.io/badge/tokio-1.48-000000" alt="tokio 1.48" /> <img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version 0.1.0" /> <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="license Apache-2.0" />
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/SOCKS5-CONNECT%20%2B%20UDP%20ASSOCIATE-2ea44f" alt="SOCKS5" />
-  <img src="https://img.shields.io/badge/HTTP-CONNECT-2ea44f" alt="HTTP CONNECT" />
-  <img src="https://img.shields.io/badge/Mixed-auto%20detect-2ea44f" alt="Mixed" />
+<img src="https://img.shields.io/badge/SOCKS5-CONNECT%20%2B%20UDP%20ASSOCIATE-2ea44f" alt="SOCKS5" /> <img src="https://img.shields.io/badge/HTTP-CONNECT-2ea44f" alt="HTTP CONNECT" /> <img src="https://img.shields.io/badge/Mixed-auto%20detect-2ea44f" alt="Mixed" />
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Direct-TCP%20%2B%20UDP-2ea44f" alt="Direct" />
-  <img src="https://img.shields.io/badge/Shadowsocks-TCP%20%2B%20UDP-2ea44f" alt="Shadowsocks" />
-  <img src="https://img.shields.io/badge/Trojan-TLS-2ea44f" alt="Trojan" />
-  <img src="https://img.shields.io/badge/VLESS-tcp%2Fws%2Fgrpc%2Fh2-2ea44f" alt="VLESS" />
-  <img src="https://img.shields.io/badge/VMess-AEAD%20tcp%2Fws%2Fgrpc%2Fh2-2ea44f" alt="VMess" />
-  <img src="https://img.shields.io/badge/Hysteria2-TCP-2ea44f" alt="Hysteria2" />
-  <img src="https://img.shields.io/badge/WireGuard-TCP%20%2B%20UDP-2ea44f" alt="WireGuard" />
-  <img src="https://img.shields.io/badge/egress%20proxy-SOCKS5%20%2B%20HTTP-2ea44f" alt="egress SOCKS5 + HTTP" />
+<img src="https://img.shields.io/badge/Direct-TCP%20%2B%20UDP-2ea44f" alt="Direct" /> <img src="https://img.shields.io/badge/Shadowsocks-TCP%20%2B%20UDP-2ea44f" alt="Shadowsocks" /> <img src="https://img.shields.io/badge/Trojan-TLS-2ea44f" alt="Trojan" /> <img src="https://img.shields.io/badge/VLESS-tcp%2Fws%2Fgrpc%2Fh2-2ea44f" alt="VLESS" /> <img src="https://img.shields.io/badge/VMess-AEAD%20tcp%2Fws%2Fgrpc%2Fh2-2ea44f" alt="VMess" /> <img src="https://img.shields.io/badge/Hysteria2-TCP-2ea44f" alt="Hysteria2" /> <img src="https://img.shields.io/badge/WireGuard-TCP%20%2B%20UDP-2ea44f" alt="WireGuard" /> <img src="https://img.shields.io/badge/egress%20proxy-SOCKS5%20%2B%20HTTP-2ea44f" alt="egress SOCKS5 + HTTP" />
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/UDP-relay%20%2B%20egress-2ea44f" alt="UDP relay + egress" />
-  <img src="https://img.shields.io/badge/Mesh-mTLS%20multi--hop-2ea44f" alt="Mesh mTLS" />
-  <img src="https://img.shields.io/badge/Subscription-hot%20reload-2ea44f" alt="Subscription hot reload" />
-  <img src="https://img.shields.io/badge/Prometheus-metrics-2ea44f" alt="Prometheus metrics" />
-  <img src="https://img.shields.io/badge/Grafana-dashboards-2ea44f" alt="Grafana dashboards" />
+<img src="https://img.shields.io/badge/UDP-relay%20%2B%20egress-2ea44f" alt="UDP relay + egress" /> <img src="https://img.shields.io/badge/Mesh-mTLS%20multi--hop-2ea44f" alt="Mesh mTLS" /> <img src="https://img.shields.io/badge/Subscription-hot%20reload-2ea44f" alt="Subscription hot reload" /> <img src="https://img.shields.io/badge/Prometheus-metrics-2ea44f" alt="Prometheus metrics" /> <img src="https://img.shields.io/badge/Grafana-dashboards-2ea44f" alt="Grafana dashboards" />
 </p>
 
 ## Workspace 布局
