@@ -1,0 +1,197 @@
+# seepctl CLI reference
+
+> Status: reconciled against the clap definitions in `apps/seepctl/src/main.rs` (2026-10-11, 18 top-level subcommands) · this page only describes implemented behavior; flags/defaults are authoritative in the actual output of `seepctl <command> --help` · Related: [subscription guide](subscription.md) · [Mesh & Chain](mesh.md) · [system routing and network takeover](networking.md)
+
+## Global options
+
+| Option | Description |
+|------|------|
+| `-c, --config <CONFIG>` | config file path (default `config/seep.yaml`); control-plane commands use it to read `control.api_bind` / `control.admin_token` |
+| `-V, --version` | print version |
+
+## Data sources
+
+- **Control-plane commands** (`stats` / `group` / `switches` / `nodes` / `chain` / `pool` / `subscription` / `route` / `diagnose` / `mtls revoke status`): HTTP against the `seepd` control plane; when `control.admin_token` is non-empty an `x-admin-token` header is attached, otherwise the request is anonymous.
+  - `--endpoint` comes in two flavors (easy to confuse):
+    - **Full-URL flavor** (replaces the whole target URL, must include the path): `stats` (default `http://{api_bind}/flows`), `group` (`/routing/stats`), `switches` (`/mesh/switches`), `pool status` (`/egress/pool/stats`), `nodes` (`/nodes`);
+    - **Base-URL flavor** (replaces only the base, path appended internally): `chain`, `subscription`, `route`, `diagnose`, `mtls revoke status`.
+- **Offline commands** (`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / the `mtls` cert tools): no control plane, only local files are read (exception: `udp-probe` dials the SOCKS5 ingress directly).
+- There is no `seepctl reload` subcommand: seepd reads config once at startup, and runtime hot reloads are driven only by subscription refresh and control-plane endpoints (see the hot-reload scope in [architecture.md](architecture.md)).
+
+## Control-plane REST endpoint reference
+
+Reconciled against the routing table in `apps/seepd/src/control_plane.rs` (2026-10-11). Unless noted, all require the `x-admin-token` header (when `control.admin_token` is configured non-empty).
+
+| Method | Path | Description | seepctl counterpart |
+|------|------|------|--------------|
+| GET | `/health` | liveness probe | — |
+| GET | `/nodes` | mesh node snapshot | `nodes` |
+| GET | `/flows` | cumulative ingress->egress traffic stats | `stats` |
+| GET | `/udp/stats` | UDP session/relay stats snapshot | `stats` (UDP section fetched together) |
+| GET | `/routing/stats` | real-time group quality (member data source/p95/loss/SLO gate/current selected endpoint) | `group` |
+| GET | `/mesh/switches` | chain switch ledger (last 100) | `switches` |
+| GET | `/egress/pool/stats` | egress connection pool snapshot | `pool status` |
+| GET | `/dns/stats` | DNS service stats snapshot | — (REST only) |
+| GET | `/plugins/stats` | plugin stats | — (REST only) |
+| GET | `/runtime/stats` | runtime stats | — (REST only) |
+| GET | `/runtime/config` | snapshot of the currently effective config | — (REST only) |
+| GET | `/events` | event log (last N lines) | — (REST only) |
+| GET | `/logs` | recent logs (requires `SEEP_CAPTURE_LOGS=1`) | `diagnose` (collects) |
+| GET | `/metrics` | Prometheus text | — (Prometheus scraping) |
+| GET | `/mtls/revoked` | effective view of the revocation list (mtime/entries/load errors) | `mtls revoke status` |
+| GET | `/chains/stats` | chain stats | `chain stats` |
+| GET | `/chains/{chain_id}` | chain details | `chain get` |
+| POST | `/chains/dry-run` | chain pre-check | `chain dry-run` |
+| POST | `/chains` | create a chain (reuses the same session_id) | `chain create` |
+| DELETE | `/chains/{chain_id}` | terminate a chain | `chain terminate` |
+| GET | `/subscriptions` | subscription list with status | `subscription list` |
+| POST | `/subscriptions` | add a subscription | `subscription add` |
+| POST | `/subscriptions/refresh` | refresh all | `subscription refresh` |
+| POST | `/subscriptions/{name}/refresh` | refresh one subscription | `subscription refresh <NAME>` |
+| DELETE | `/subscriptions/{name}` | delete a subscription | `subscription remove` |
+| POST | `/network/route/apply` | apply route rules (idempotent) | `route apply` |
+| POST | `/network/route/clear` | undo applied rules | `route clear` |
+| GET | `/network/route/status` | route application status | `route status` |
+| POST | `/mesh/nodes/register` | node registration (internal to the mesh plane) | — (inter-node) |
+| POST | `/mesh/link-states` | link state reporting (internal to the mesh plane) | — (inter-node) |
+
+## Command overview
+
+| Command | Description | Surface |
+|------|------|----|
+| `check` | validate a config file | offline |
+| `show` | print a config summary | offline |
+| `stats` | view traffic stats (UDP section appended: sessions/relay bytes/drops/expiry/mesh plane) | control plane `/flows` |
+| `group` | view real-time group quality: member data source, p95/loss, SLO gate decisions, the latency group's current selected endpoint | control plane `/routing/stats` |
+| `switches` | view the chain switch ledger (last 100 events, with before/after paths and reasons) | control plane `/mesh/switches` |
+| `profile` | generate a scenario skeleton config (`proxy\|game\|web`) | offline |
+| `tls-fingerprint` | TLS fingerprint preset comparison table (four-dimension shape_material export of none/chrome/ios/safari) | offline |
+| `import-rules` | batch import geosite/chnroutes text rule sources as routing/DNS rule YAML | offline |
+| `udp-probe` | UDP ASSOCIATE integration probe (minimal RFC 1928 client; exit codes 0-4) | dials the SOCKS5 ingress directly |
+| `nodes` | view mesh node registration info | control plane `/nodes` |
+| `chain` | chain management (dry-run/create/get/terminate/stats) | control plane |
+| `pool` | egress connection pool snapshot (status) | control plane `/egress/pool/stats` |
+| `import-clash` | Clash YAML -> Seep config (offline preview) | offline |
+| `export-clash` | Seep config -> Clash YAML reverse export (offline) | offline |
+| `subscription` | subscription management (list/add/remove/refresh) | control plane |
+| `route` | system route management (apply/clear/status) | control plane + local ip commands |
+| `diagnose` | one-shot diagnostics collection (creates a diagnostics directory) | control plane + local snapshot |
+| `mtls` | mesh mTLS certificate tools (init-ca/issue/rotate/bundle-ca/rotate-ca/revoke) | offline (except revoke status, which uses the control plane) |
+
+## Flags per command
+
+### Control-plane data
+
+```bash
+seepctl stats   [--endpoint <full URL including /flows>]
+seepctl group   [--endpoint <full URL including /routing/stats>]
+seepctl switches [--endpoint <full URL including /mesh/switches>]
+seepctl nodes   [--endpoint <full URL including /nodes>]
+seepctl pool status [--endpoint <full URL including /egress/pool/stats>]
+```
+
+The UDP section of `stats` is derived from the same base as `/flows`: the `--endpoint` override only affects the `/flows` side.
+
+### check / show
+
+No flags; the config is given through the global `-c`. `show` prints a summary (control-plane listen address + ingress/egress counts); `check` prints "config valid".
+
+### profile
+
+```bash
+seepctl profile <proxy|game|web> [--out <path>]   # default prints to stdout
+```
+
+### tls-fingerprint
+
+No flags; prints the comparison table of `shape_material` shape strings for the four presets (version|cipher suite|group|signature scheme).
+
+### import-rules
+
+```bash
+seepctl import-rules <SOURCE> --target <TARGET> [--face routing|dns] [--name <NAME>] [--out <path>]
+```
+
+- `<SOURCE>`: a file path or http(s) URL (a v2fly text manifest line set);
+- `--target`: routing face = a group/egress name; dns face = `domestic | trusted`;
+- `--face`: defaults to `routing`;
+- `--name`: rule name, defaults to the source file name without extension;
+- `--out`: defaults to stdout (pipeable); the skip list goes to **stderr**.
+
+### udp-probe
+
+```bash
+seepctl udp-probe --socks5 <address> --host <host> --port <port> --payload-hex <hex>
+                  [--timeout <3s>] [--user <U>] [--pass <P>]
+```
+
+`--timeout` accepts `s/ms/m` units; exit code 0-4 semantics are in `--help`.
+
+### chain
+
+```bash
+seepctl chain dry-run   --source <S> --target <T>
+seepctl chain create    --source <S> --target <T> [--session-id <UUID>]   # reuses the chain for the same session_id
+seepctl chain get       <CHAIN_ID>
+seepctl chain terminate <CHAIN_ID>
+seepctl chain stats
+```
+
+`--endpoint` for the `chain` group is the **base-URL flavor**.
+
+### import-clash / export-clash
+
+```bash
+seepctl import-clash <url|file> [-o config/clash_import.yaml]   # -o is equivalent to --output
+seepctl export-clash <seep config> [-o config/clash_export.yaml]   # prints the degraded/skipped list at the end
+```
+
+### subscription
+
+```bash
+seepctl subscription list
+seepctl subscription add <NAME> <URL> [--type <T>] [--enabled true|false]
+                       [--refresh-interval <min>] [--timeout <sec>]
+                       [--header k=v]... [--user-agent <UA>]
+seepctl subscription remove <NAME>
+seepctl subscription refresh [NAME]    # refreshes all when no name given
+```
+
+`--header` can be passed multiple times. `--endpoint` is the base-URL flavor.
+
+### route
+
+```bash
+seepctl route apply   [--dry-run]   # idempotently replays the include targets from the config; --dry-run only prints the ip commands
+seepctl route clear               # removes all applied rules in reverse order
+seepctl route status              # device state + table of applied steps
+```
+
+`--endpoint` is the base-URL flavor. apply/clear need root or `CAP_NET_ADMIN`.
+
+### diagnose
+
+```bash
+seepctl diagnose [--endpoint <base URL>] [--output <dir>] [--no-redact] [--no-local]
+```
+
+By default the config is redacted (token/password/private_key etc.); `--no-local` skips the local snapshot (routes/DNS/interfaces).
+
+### mtls
+
+```bash
+seepctl mtls init-ca    --out-dir <dir> [--common-name seep-mesh-ca] [--valid-days 3650]
+seepctl mtls issue      --node-id <ID> --ca-cert <pem> --ca-key <pem> --out-dir <dir>
+                        [--server-name seep] [--valid-days 365]
+seepctl mtls rotate     --node-id <ID> --ca-cert <pem> --ca-key <pem> --out-dir <dir>
+                        [--no-backup] [--valid-days 365]    # backs up to *.bak.<epoch> by default; new connections pick it up automatically
+seepctl mtls bundle-ca  --ca-cert <pem>... --out-path <bundle.pem>
+seepctl mtls rotate-ca  --old-ca-cert <pem> --out-dir <dir>
+                        [--common-name seep-mesh-ca-next] [--valid-days 3650]   # outputs an old+new dual-trust bundle
+seepctl mtls revoke list   [--file <path>]
+seepctl mtls revoke add    --file <path> --node-id <ID>
+seepctl mtls revoke remove --file <path> --node-id <ID>
+seepctl mtls revoke status [--endpoint <base URL>]   # GET /mtls/revoked: the "effective" leg of the distribution -> effect -> verification loop
+```
+
+The revocation list file holds one `node_id` per line (empty lines/`#` comments/commas ignored); the recommended path matches `SEEP_MESH_MTLS_REVOKED_NODES_FILE`.
