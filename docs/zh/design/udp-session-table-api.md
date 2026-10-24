@@ -1,6 +1,6 @@
 # P0-1 接口草案：UDP 会话表 API 与回收算法
 
-> 状态：**已实施（todo P0-1 完成，2026-09）**· 实施面 = `crates/seep-core/src/udp/`（下文 §2.2 草案签名与实施的差异以 §9 裁决表为准）· 设计依据：[udp-session-table.md](udp-session-table.md)（本文不重复论证，只给可转录的 API/算法）· 总设计：[udp-dataplane.md](udp-dataplane.md) · 中继路径契约：[udp-relay-path.md](udp-relay-path.md) §4 · 对应 [todo.md](../../todo.md) P0-1
+> 状态：**已实施（todo P0-1 完成，2026-09）**· 实施面 = `crates/seep-core/src/udp/`（下文 §2.2 草案签名与实施的差异以 §9 裁决表为准）· 设计依据：[udp-session-table.md](udp-session-table.md)（本文不重复论证，只给可转录的 API/算法）· 总设计：[udp-dataplane.md](udp-dataplane.md) · 中继路径契约：[udp-relay-path.md](udp-relay-path.md) §4 · 对应 [todo.md](../../../todo.md) P0-1
 > 假设（如与实施冲突需回改本稿）：A1 时基用进程单调时钟秒值（免 NTP 跳变）；A2 下行通道容量 64 沿用 udp-relay-path.md §4.3；A3 `FlowSession` 结构不改（O7 走 wrapper，见 §4.4）；A4 指标命名沿 [udp-observability.md](udp-observability.md) §2.4（落地定稿）。
 
 ## 执行摘要

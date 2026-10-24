@@ -1,6 +1,6 @@
 # P0-1 实现级设计：seep-core NAT 式 UDP 会话表
 
-> 状态：**已落地（todo P0-1 完成，2026-09）**· 本文是 [udp-dataplane.md](udp-dataplane.md) §1 的展开，是该条目的实现口径 · 对应 [todo.md](../../todo.md) P0-1 · 上游：[roadmap.md](roadmap.md) S1 · 缺口来源 [positioning.md](positioning.md) G1
+> 状态：**已落地（todo P0-1 完成，2026-09）**· 本文是 [udp-dataplane.md](udp-dataplane.md) §1 的展开，是该条目的实现口径 · 对应 [todo.md](../../../todo.md) P0-1 · 上游：[roadmap.md](roadmap.md) S1 · 缺口来源 [positioning.md](positioning.md) G1
 > 实施面 = `crates/seep-core/src/udp/`（`table.rs`/`inner.rs`/`reclaim.rs` 等）· 接口草案（可转录签名/算法伪码）：[udp-session-table-api.md](udp-session-table-api.md)（已实施，差异以 §9 为准）。
 > 设计原文保留；实施差异与指标实况见 api 稿 §9 与 [udp-observability.md](udp-observability.md) §2.4。
 

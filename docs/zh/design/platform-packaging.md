@@ -1,6 +1,6 @@
 # P3-3 平台打包（systemd / launchd / Windows Service 模板）— 实现级设计
 
-> 上游：[roadmap.md](roadmap.md) 原 §6（平台适配）· [todo.md](../../todo.md) P3-3 ·
+> 上游：[roadmap.md](roadmap.md) 原 §6（平台适配）· [todo.md](../../../todo.md) P3-3 ·
 > 先例：[platforms/openwrt/](https://github.com/cuihairu/seep/tree/main/platforms/openwrt/)（2026-10-02 已落地半边：musl 静态交叉 + ipk + procd init.d，其产线约定与验证分层是本文的复用基线）。
 > 本文是落地定稿：**三平台交付物形态、验证层级（模板验证 ≠ 真机验证，逐层如实登记）、unit/plist/service 脚本内容、deb/zip/tar 打包产线、边界登记**。落地后偏差回填 §9。
 

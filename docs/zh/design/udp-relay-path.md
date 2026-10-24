@@ -1,6 +1,6 @@
 # P0-2 / P0-3 实现级设计：单跳 UDP 中继路径
 
-> 状态：**已落地（todo P0-2/P0-3 完成，2026-09）**· 本文是 [udp-dataplane.md](udp-dataplane.md) §2/§3 的展开，为两条目的实现口径 · 依赖会话表契约：[udp-session-table.md](udp-session-table.md) · 对应 [todo.md](../../todo.md) P0-2/P0-3 · 上游：[roadmap.md](roadmap.md) S1
+> 状态：**已落地（todo P0-2/P0-3 完成，2026-09）**· 本文是 [udp-dataplane.md](udp-dataplane.md) §2/§3 的展开，为两条目的实现口径 · 依赖会话表契约：[udp-session-table.md](udp-session-table.md) · 对应 [todo.md](../../../todo.md) P0-2/P0-3 · 上游：[roadmap.md](roadmap.md) S1
 > 实施面 = `seep-core/src/udp/associate.rs`（入站）+ `seep-protocols` 出站承载连接器；设计原文保留，偏差以各节落地注记为准。
 
 ## 执行摘要

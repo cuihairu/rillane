@@ -82,4 +82,4 @@ seep/
 ## 当前状态与路线
 
 - **已完成底座**（roadmap S0）：socks5/http/mixed 入站 + direct/ss/trojan/hysteria2/vmess/vless/wireguard/socks/http TCP 出站；组策略路由；mesh 控制面 + TCP 数据面 + mTLS；订阅全链路；控制面与 seepctl；基础 Prometheus 指标。协议实现边界见 [PROTOCOLS.md](PROTOCOLS.md) 状态标注。
-- **进行中/规划**（见 [design/roadmap.md](design/roadmap.md)）：S1 UDP 全链路（P0-1..P0-5 会话表/入站/出站/mesh 数据面/观测与配置**全部已落地**——[设计稿](design/udp-dataplane.md)、[观测设计稿](design/udp-observability.md)）→ S2 TUN 系统接管 → S3 混淆横切层与连接复用 → S4 调度闭环与发布。可执行条目见根目录 [todo.md](../todo.md)。
+- **进行中/规划**（见 [design/roadmap.md](design/roadmap.md)）：S1 UDP 全链路（P0-1..P0-5 会话表/入站/出站/mesh 数据面/观测与配置**全部已落地**——[设计稿](design/udp-dataplane.md)、[观测设计稿](design/udp-observability.md)）→ S2 TUN 系统接管 → S3 混淆横切层与连接复用 → S4 调度闭环与发布。可执行条目见根目录 [todo.md](../../todo.md)。

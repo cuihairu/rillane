@@ -1,6 +1,6 @@
 # P3-5 零拷贝/批量收发（实现级设计）
 
-> 上游：[todo.md](../../todo.md) P3-5（2026-09-30 自 PROTOCOLS.md「性能优化」降级登记）·
+> 上游：[todo.md](../../../todo.md) P3-5（2026-09-30 自 PROTOCOLS.md「性能优化」降级登记）·
 > [PROTOCOLS.md](../PROTOCOLS.md) 性能节。
 > 本文是落地定稿：**范围裁决（splice/recvmmsg 出界）、进程级 relay 缓冲参数、
 > 帧写 vectored 化、基准方案、分步清单**。落地后偏差回填 §7。

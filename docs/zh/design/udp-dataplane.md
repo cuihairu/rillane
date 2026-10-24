@@ -1,6 +1,6 @@
 # S1 UDP 全链路设计稿（UDP Data-Plane）
 
-> 状态：**已落地（todo P0-1..P0-5 完成，2026-09）**· 对应 [roadmap.md](roadmap.md) S1 · 覆盖 [todo.md](../../todo.md) P0-1..P0-5
+> 状态：**已落地（todo P0-1..P0-5 完成，2026-09）**· 对应 [roadmap.md](roadmap.md) S1 · 覆盖 [todo.md](../../../todo.md) P0-1..P0-5
 > 上游文档：[positioning.md](positioning.md)（定位与缺口 G1）· [architecture.md](../architecture.md)（crate 划分与关键接口）· [mesh.md](../mesh.md)（TCP 数据面/envelope/mTLS）· [PROTOCOLS.md](../PROTOCOLS.md)（能力声明，部分超前，见 §0.2 状态标注）
 > 实施状态以各节「状态注记」与子稿状态行为准；设计期表述与实况的偏差已随落地回填。
 
