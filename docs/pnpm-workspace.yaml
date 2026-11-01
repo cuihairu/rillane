@@ -1,0 +1,11 @@
+# pnpm 12 起 settings 改读本文件（不再读 package.json 的 "pnpm" 字段）。
+# 漏洞钉版（VitePress/Vite/esbuild 漏洞链，见仓库 memory vitepress-vite-esbuild-vuln-override）：
+#   vite@<6.4.4 → 6.4.4；esbuild@<0.25.0 → 0.25.0。package.json 顶层 "overrides" 保留 vite ^6.4.3。
+overrides:
+  vite@<6.4.4: 6.4.4
+  esbuild@<0.25.0: 0.25.0
+# pnpm 12 需显式声明 esbuild 的安装后脚本处理：esbuild 0.25 的二进制经
+# @esbuild/<platform> 可选依赖交付（锁内含 linux-x64/arm64 等），postinstall 仅为
+# 兜底下载，本机构建实测无需运行，故列为 intentionally-ignored（build 已两轮全绿）。
+ignoredBuiltDependencies:
+  - esbuild
