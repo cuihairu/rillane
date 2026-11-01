@@ -1,6 +1,8 @@
 [English](README.md) | [中文](README.zh.md)
 
-<p align="center"><a href="https://cuihairu.github.io/seep//"><img src="https://img.shields.io/badge/docs-docs-blue" alt="docs"></a> <a href="https://cuihairu.github.io/seep/"><img src="https://img.shields.io/badge/docs-docs-blue" alt="docs"></a></p>
+<p align="center">
+  <img src="docs/public/logo.svg" width="64" alt="Seep logo" /> <a href="https://cuihairu.github.io/seep//"><img src="https://img.shields.io/badge/docs-blue" alt="docs"></a>
+</p>
 
 <h1 align="center">Seep</h1>
 
