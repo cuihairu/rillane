@@ -375,41 +375,54 @@ impl SubscriptionCache {
 
     /// 清理过期条目
     pub fn cleanup_expired(&self) -> Result<usize> {
-        let mut cache = self.memory_cache.write().expect("cache lock poisoned");
-        let mut removed_count = 0;
-        let mut total_size_removed = 0;
+        // P2（2026-11-03）：磁盘删除移到所有锁外。此前持 memory_cache 写锁跨
+        // 同步 fs::remove_file——同步 IO 阻塞执行线程并串行化全部缓存操作。
+        // 锁内只做内存突变（remove + 记账），磁盘路径收集后在锁外删除。
+        //
+        // 锁外删除引入窄窗口：并发 get() 在条目出内存、磁盘文件未删之间
+        // load_from_disk 会以全新 TTL 复活该条目（load_from_disk:555 重置 TTL）。
+        // 该窗口窄且自愈——复活副本最终重新过期并被再次清理。
+        let (removed_count, total_size_removed, disk_paths) = {
+            let mut cache = self.memory_cache.write().expect("cache lock poisoned");
 
-        let expired_keys: Vec<String> = cache
-            .iter()
-            .filter(|(_, entry)| entry.is_expired())
-            .map(|(key, _)| key.clone())
-            .collect();
+            let expired_keys: Vec<String> = cache
+                .iter()
+                .filter(|(_, entry)| entry.is_expired())
+                .map(|(key, _)| key.clone())
+                .collect();
 
-        for key in expired_keys {
-            if let Some(entry) = cache.remove(&key) {
-                total_size_removed += entry.content.len() as u64;
-                removed_count += 1;
-
-                // 删除磁盘文件
-                let disk_path = self.get_disk_path(&key);
-                if let Err(err) = fs::remove_file(&disk_path) {
-                    warn!(
-                        target: "seep::subscription::cache",
-                        path = %disk_path.display(),
-                        error = %err,
-                        "删除过期缓存文件失败"
-                    );
+            let mut removed_count = 0;
+            let mut total_size_removed = 0;
+            let mut disk_paths = Vec::new();
+            for key in expired_keys {
+                if let Some(entry) = cache.remove(&key) {
+                    total_size_removed += entry.content.len() as u64;
+                    removed_count += 1;
+                    disk_paths.push(self.get_disk_path(&key));
                 }
             }
-        }
+            (removed_count, total_size_removed, disk_paths)
+        };
 
-        // 更新大小统计
+        // 更新大小统计（memory_cache 锁已释放）
         {
             let mut current_size = self
                 .current_size
                 .write()
                 .expect("current_size lock poisoned");
             *current_size = current_size.saturating_sub(total_size_removed);
+        }
+
+        // 锁外删除磁盘文件（不持 memory_cache / current_size 任一锁）
+        for disk_path in disk_paths {
+            if let Err(err) = fs::remove_file(&disk_path) {
+                warn!(
+                    target: "seep::subscription::cache",
+                    path = %disk_path.display(),
+                    error = %err,
+                    "删除过期缓存文件失败"
+                );
+            }
         }
 
         if removed_count > 0 {
@@ -426,30 +439,50 @@ impl SubscriptionCache {
 
     /// 清理过期的条目（内存缓存）
     pub fn cleanup_lru(&self, needed_space: u64) -> Result<usize> {
-        let mut cache = self.memory_cache.write().expect("cache lock poisoned");
+        // P2（2026-11-03）：磁盘删除移到所有锁外（见 cleanup_expired 同型注释）。
+        let (freed_space, removed_count, disk_paths) = {
+            let mut cache = self.memory_cache.write().expect("cache lock poisoned");
 
-        if cache.is_empty() {
-            return Ok(0);
+            if cache.is_empty() {
+                return Ok(0);
+            }
+
+            // 按最后访问时间排序，收集键和元数据
+            let mut entries: Vec<(String, u64, SystemTime)> = cache
+                .iter()
+                .map(|(k, v)| (k.clone(), v.content.len() as u64, v.last_accessed))
+                .collect();
+
+            entries.sort_by_key(|(_, _, last_accessed)| *last_accessed);
+
+            let mut freed_space = 0;
+            let mut removed_count = 0;
+            let mut disk_paths = Vec::new();
+
+            for (key, size, _) in entries {
+                cache.remove(&key);
+                freed_space += size;
+                removed_count += 1;
+                disk_paths.push(self.get_disk_path(&key));
+
+                if freed_space >= needed_space {
+                    break;
+                }
+            }
+            (freed_space, removed_count, disk_paths)
+        };
+
+        // 更新大小统计（memory_cache 锁已释放）
+        {
+            let mut current_size = self
+                .current_size
+                .write()
+                .expect("current_size lock poisoned");
+            *current_size = current_size.saturating_sub(freed_space);
         }
 
-        // 按最后访问时间排序，收集键和元数据
-        let mut entries: Vec<(String, u64, SystemTime)> = cache
-            .iter()
-            .map(|(k, v)| (k.clone(), v.content.len() as u64, v.last_accessed))
-            .collect();
-
-        entries.sort_by_key(|(_, _, last_accessed)| *last_accessed);
-
-        let mut freed_space = 0;
-        let mut removed_count = 0;
-
-        for (key, size, _) in entries {
-            cache.remove(&key);
-            freed_space += size;
-            removed_count += 1;
-
-            // 删除磁盘文件
-            let disk_path = self.get_disk_path(&key);
+        // 锁外删除磁盘文件
+        for disk_path in disk_paths {
             if let Err(err) = fs::remove_file(&disk_path) {
                 warn!(
                     target: "seep::subscription::cache",
@@ -458,19 +491,6 @@ impl SubscriptionCache {
                     "删除LRU缓存文件失败"
                 );
             }
-
-            if freed_space >= needed_space {
-                break;
-            }
-        }
-
-        // 更新大小统计
-        {
-            let mut current_size = self
-                .current_size
-                .write()
-                .expect("current_size lock poisoned");
-            *current_size = current_size.saturating_sub(freed_space);
         }
 
         debug!(
@@ -485,30 +505,46 @@ impl SubscriptionCache {
 
     /// 按数量清理 LRU 条目
     pub fn cleanup_lru_by_count(&self, count: usize) -> Result<usize> {
-        let mut cache = self.memory_cache.write().expect("cache lock poisoned");
+        // P2（2026-11-03）：磁盘删除移到所有锁外（见 cleanup_expired 同型注释）。
+        let (freed_space, removed_count, disk_paths) = {
+            let mut cache = self.memory_cache.write().expect("cache lock poisoned");
 
-        if cache.len() <= count {
-            return Ok(0);
+            if cache.len() <= count {
+                return Ok(0);
+            }
+
+            // 按最后访问时间排序，收集键和元数据
+            let mut entries: Vec<(String, u64, SystemTime)> = cache
+                .iter()
+                .map(|(k, v)| (k.clone(), v.content.len() as u64, v.last_accessed))
+                .collect();
+
+            entries.sort_by_key(|(_, _, last_accessed)| *last_accessed);
+
+            let mut removed_count = 0;
+            let mut freed_space = 0;
+            let mut disk_paths = Vec::new();
+
+            for (key, size, _) in entries.into_iter().take(count) {
+                cache.remove(&key);
+                freed_space += size;
+                removed_count += 1;
+                disk_paths.push(self.get_disk_path(&key));
+            }
+            (freed_space, removed_count, disk_paths)
+        };
+
+        // 更新大小统计（memory_cache 锁已释放）
+        {
+            let mut current_size = self
+                .current_size
+                .write()
+                .expect("current_size lock poisoned");
+            *current_size = current_size.saturating_sub(freed_space);
         }
 
-        // 按最后访问时间排序，收集键和元数据
-        let mut entries: Vec<(String, u64, SystemTime)> = cache
-            .iter()
-            .map(|(k, v)| (k.clone(), v.content.len() as u64, v.last_accessed))
-            .collect();
-
-        entries.sort_by_key(|(_, _, last_accessed)| *last_accessed);
-
-        let mut removed_count = 0;
-        let mut freed_space = 0;
-
-        for (key, size, _) in entries.into_iter().take(count) {
-            cache.remove(&key);
-            freed_space += size;
-            removed_count += 1;
-
-            // 删除磁盘文件
-            let disk_path = self.get_disk_path(&key);
+        // 锁外删除磁盘文件
+        for disk_path in disk_paths {
             if let Err(err) = fs::remove_file(&disk_path) {
                 warn!(
                     target: "seep::subscription::cache",
@@ -517,15 +553,6 @@ impl SubscriptionCache {
                     "删除LRU缓存文件失败"
                 );
             }
-        }
-
-        // 更新大小统计
-        {
-            let mut current_size = self
-                .current_size
-                .write()
-                .expect("current_size lock poisoned");
-            *current_size = current_size.saturating_sub(freed_space);
         }
 
         debug!(
@@ -831,6 +858,98 @@ mod tests {
         cache.set_with_ttl("k", "v", Some(Duration::ZERO)).unwrap();
         let got = run_with_timeout(move || cache.get("k"), 2_000);
         assert_eq!(got.as_deref(), Some("v"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// cleanup_expired 回归（P2 2026-11-03）：锁外删除磁盘文件后，功能不变
+    /// ——过期条目从内存移除、磁盘文件删除、容量统计归零。
+    #[test]
+    fn cleanup_expired_removes_entry_and_disk_file() {
+        let dir = temp_cache_dir("cleanup-expired");
+        let cache = SubscriptionCache::with_config(CacheConfig {
+            cache_dir: dir.clone(),
+            default_ttl: Duration::from_secs(3600),
+            max_entries: 16,
+            max_size_bytes: 10 * 1024 * 1024,
+            ..Default::default()
+        });
+        cache
+            .set_with_ttl("exp", "payload", Some(Duration::from_millis(1)))
+            .unwrap();
+        let disk_path = cache.get_disk_path("exp");
+        assert!(disk_path.exists(), "set 应落盘");
+
+        std::thread::sleep(Duration::from_millis(5));
+        let removed = cache.cleanup_expired().unwrap();
+        assert_eq!(removed, 1, "应清 1 条过期条目");
+        assert!(
+            !cache.memory_cache.read().unwrap().contains_key("exp"),
+            "过期条目应移出内存"
+        );
+        assert!(!disk_path.exists(), "磁盘缓存文件应被删除");
+        assert_eq!(
+            *cache.current_size.read().unwrap(),
+            0,
+            "容量统计应归零"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// cleanup_lru 回归（P2 2026-11-03）：按最后访问升序驱逐，先逐最旧；
+    /// 锁外删盘不改驱逐顺序与容量记账。
+    #[test]
+    fn cleanup_lru_evicts_least_recently_used_first() {
+        let dir = temp_cache_dir("cleanup-lru");
+        let cache = SubscriptionCache::with_config(CacheConfig {
+            cache_dir: dir.clone(),
+            default_ttl: Duration::from_secs(3600),
+            max_entries: 16,
+            max_size_bytes: 10 * 1024 * 1024,
+            ..Default::default()
+        });
+        cache.set("drop1", "11111").unwrap();
+        cache.set("drop2", "22222").unwrap();
+        cache.set("keep", "33333").unwrap();
+        // 触碰 keep，使其 last_accessed 最新 → 驱逐顺序 drop1/drop2 先于 keep
+        assert_eq!(cache.get("keep").as_deref(), Some("33333"));
+
+        let needed = 5u64 + 5; // 恰为 drop1+drop2 字节数
+        let removed = cache.cleanup_lru(needed).unwrap();
+        assert_eq!(removed, 2, "应驱逐 2 条");
+        let mem = cache.memory_cache.read().unwrap();
+        assert!(mem.contains_key("keep"), "最近访问的 keep 应保留");
+        assert!(!mem.contains_key("drop1") && !mem.contains_key("drop2"));
+        assert_eq!(
+            *cache.current_size.read().unwrap(),
+            "33333".len() as u64,
+            "容量记账仅剩 keep"
+        );
+        drop(mem);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// cleanup_lru_by_count 回归（P2 2026-11-03）：按数量驱逐最旧条目。
+    #[test]
+    fn cleanup_lru_by_count_evicts_oldest() {
+        let dir = temp_cache_dir("cleanup-lru-count");
+        let cache = SubscriptionCache::with_config(CacheConfig {
+            cache_dir: dir.clone(),
+            default_ttl: Duration::from_secs(3600),
+            max_entries: 16,
+            max_size_bytes: 10 * 1024 * 1024,
+            ..Default::default()
+        });
+        cache.set("drop1", "11111").unwrap();
+        cache.set("drop2", "22222").unwrap();
+        cache.set("keep", "33333").unwrap();
+        assert_eq!(cache.get("keep").as_deref(), Some("33333"));
+
+        let removed = cache.cleanup_lru_by_count(2).unwrap();
+        assert_eq!(removed, 2, "应驱逐 2 条");
+        let mem = cache.memory_cache.read().unwrap();
+        assert!(mem.contains_key("keep"), "最近访问的 keep 应保留");
+        assert!(!mem.contains_key("drop1") && !mem.contains_key("drop2"));
+        drop(mem);
         let _ = fs::remove_dir_all(&dir);
     }
 }
