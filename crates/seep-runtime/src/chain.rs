@@ -854,17 +854,25 @@ impl ChainManager {
 
         // 尝试切换到备用路径
         if chain.switch_fallback_path() {
+            // 快照返回值并在释放分片守卫后再做账本/统计操作：RefMut 跨
+            // stats.write().await 会与 get_or_create_chain 的 stats→len() 锁序
+            // 成环（分片写→stats vs stats→分片读），先释放守卫再统计。
+            let current_path = chain.get_current_path();
+            let fallback_index = chain.current_fallback_index;
+            let switched = chain.clone();
+            drop(chain);
+
             self.record_switch(
                 chain_id,
                 path_before,
-                chain.get_current_path(),
+                current_path,
                 reason,
                 failure_reason,
             );
             info!(
                 target: "seep::chain",
                 chain_id = %chain_id,
-                fallback_index = chain.current_fallback_index,
+                fallback_index = fallback_index,
                 "切换到备用路径"
             );
 
@@ -875,7 +883,7 @@ impl ChainManager {
                 stats.last_failover_epoch_seconds = Some(current_epoch_seconds());
             }
 
-            Ok(Some(chain.clone()))
+            Ok(Some(switched))
         } else {
             // 没有更多备用路径
             self.record_switch(
