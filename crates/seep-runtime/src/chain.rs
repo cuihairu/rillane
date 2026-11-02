@@ -862,13 +862,7 @@ impl ChainManager {
             let switched = chain.clone();
             drop(chain);
 
-            self.record_switch(
-                chain_id,
-                path_before,
-                current_path,
-                reason,
-                failure_reason,
-            );
+            self.record_switch(chain_id, path_before, current_path, reason, failure_reason);
             info!(
                 target: "seep::chain",
                 chain_id = %chain_id,
