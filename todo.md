@@ -136,6 +136,47 @@
 
 ---
 
+## 2026-11-01 代码深审发现（P2/P3，源自 docs/review/2026-11-01-code-review.md）
+
+P2（下一步修）：
+- [ ] **订阅缓存 get/cleanup 持 memory_cache 写锁跨同步磁盘 IO**——`cache.rs:150-176`（get→load_from_disk 读盘）、`:360/:411/:470`（cleanup→fs::remove_file）。异步上下文阻塞执行线程并串行化全部缓存操作。
+  evidence：`cache.rs:150` `memory_cache.write()` 持锁调 `load_from_disk`（fs::read_to_string）。
+- [ ] **配置热交换非原子（check-then-act）**——`runtime_builder.rs:1120-1146` / `update_config:1384-1408`：读 config → 长 await（egress 构建拨号）→ 四次独立写（config/router/flow_outputs/egress_connectors）。窗口内丢失更新 + 路由表引用未就绪 egress 名。
+  evidence：`runtime_builder.rs:1120` `config.read().clone()` → `build_egress_outputs` await → `*config.write()=merged` + `router.reload` + 两个独立 write。
+- [ ] **mesh TLS 重载在 write 锁下做同步文件 IO**——`mesh_transport.rs:2136-2153` `maybe_reload`：`inner.write().await` 下 `MeshTlsInner::load` 读 CA/私钥/吊销列表；慢盘阻塞所有 mesh 握手快路径。generation 双检正确，仅 IO-under-lock 问题。
+  evidence：`mesh_transport.rs` `let mut guard = self.inner.write().await;` 后同步 fs 读。
+- [ ] **DNS 解析缓存未命中 stampede**——`dns_engine.rs:695-738`：N 并发冷名全部 miss 全部上游 `query_group`/`cross_check` 再各自插入，无 singleflight；突发时击穿上游解析器。
+  evidence：`dns_engine.rs:695` check-then-act，`724/726` await 上游后 `728` insert。
+- [ ] **control-plane 无 token 时鉴权门整体跳过**——`control_plane.rs:129-140`：`admin_token=None`（serde 缺省）+ 非回环 `api_bind` 时 mutating 端点与 `/runtime/config`、`/events`、`/logs` 全开放。建议非回环绑定无 token 时启动告警/拒启。
+  evidence：`control_plane.rs:135-137` `(is_mutating||is_sensitive_read) && admin_token.is_some() && !is_authorized`——None 即短路放行。注释 "if token configured" 示有意设计，故 P2。
+
+P3（收尾）：
+- [ ] **hysteria2 连接器持 client mutex 跨 QUIC/HTTP3 握手**——`hysteria2.rs:119-124`：cache-miss 持锁跨 `connect_client()`（秒级或挂起拨号）；有意的 single-flight（防连接风暴），但握手无显式超时则永久钉住全部该出站流。建议 connect 超时。
+  evidence：`hysteria2.rs:119` `client.lock().await` 持至 `:124` `connect_client().await?` 完成。
+- [ ] **无界 pong/keepalive 通道**——`vless.rs:630` / `trojan.rs:473` / `vmess.rs:1349` `mpsc::unbounded_channel`：对端洪泛 PONG 时队列无界内存增长（流量生命周期有界）。
+- [ ] **mesh 信封 `as u8` 长度截断**——`mesh_transport.rs:379-386/616-631`（flow_id/target_host/path 长度）+ `trojan.rs:99` / `udp/associate.rs:96`（域名长度）：无 `>255` 守卫，超长静默截断长度字节产畸形帧；对照 `vless.rs:165` 有守卫。
+- [ ] **padding.rs range span 下溢**——`middleware/padding.rs:71` `spec.max - spec.min + 1`：仅 config validate 保证 min≤max；绕过校验（或未来路径）即 usize wrap。
+- [ ] **seep-core 链路质量 NaN**——`seep-core/lib.rs:744-745`：`hop_bandwidths` 空而 `hop_latencies` 非空时 `0.0/0.0=NaN` 传播进 `calculate_quality_score`；两 pub 向量常规同长（update_path），需外部独立变更。
+- [ ] **非常量时间认证比对**——`inbound/http.rs:262/276` + `socks5.rs:253` + `control_plane.rs:266`：`String ==` 短路径；网络时序攻击对本地代理密码实际难利用，防御纵深。
+- [ ] **runtime 无限循环任务无 stop 标志、JoinHandle 丢弃**——`runtime_builder.rs:1007-1225/2924-2954`（mesh stats/chain health/mesh quality/health checker/topology updater）+ `pool.rs:714-725`（sweeper）：重载路径每轮泄漏一组 loopers（各持 Arc）；单进程守护进程生命周期内良性，seepd 以进程退出掩盖。
+- [ ] **DNS start() shutdown_tx mutex 跨 await**——`dns_engine.rs:1072-1086`：持 `shutdown_tx` tokio mutex 跨取 `task` 与 spawn；生命周期串行化，有界。
+- [ ] **FFI raw-pointer 别名（UB 风险）**——`seep-ffi/lib.rs`：`seep_ffi_tun_start/stop` 取 `&mut *handle` 而 `is_running/stats_json` 取 `&*handle`；内嵌方并发调用即数据竞争 UB，无内部同步。
+- [ ] **connect_racing 落选候选不中止**——`net_mark.rs:111-145`：胜出后落选拨号任务不自中止（channel drop 时自终止），慢候选短暂持套接字/TLS 握手。
+- [ ] **订阅刷新 read-modify-write 复活已删订阅**——`subscription/lib.rs:380-455`：`refresh_subscription` 克隆后长 fetch，`update_subscription_in_map` 回写；fetch 期间热更删除的订阅被复活。
+- [ ] **process 归因缓存重复工作**——`tun_process.rs:165-178`：并发 miss 重复扫 /proc 并插入等价值；幂等仅性能。
+- [ ] **事件广播 fire-and-forget**——`runtime_builder.rs:538`：`broadcast::channel(1024)` 首 receiver 丢弃；生产 `ControlPlane::new` 立即订阅且 Lagged 已处理，订阅前事件静默丢失。
+- [ ] **TUN 设备锁全生命周期持有**——`tun_ingress.rs:221-268`：`tun.lock()` 跨多 await 持进程生命周期；有意单主设计，正确性依赖该不变式。
+- [ ] **poll_read/poll_write 内 std Mutex**——`tun_tcp.rs:502,538`：无 await 持锁（短临界），争用下可 stall tokio worker。
+- [ ] **DefaultHasher 缓存文件名**——`cache.rs:584-595`：确定性哈希（跨进程稳定），非密码用途可接受；文件名碰撞极低。
+- [ ] **wasmtime Engine 初始化 expect**——`plugins/loader.rs:26`：进程级全局 `LazyLock` init，平台不支持/feature 不匹配时首插件加载即 panic（罕见且致命）。
+- [ ] **TLS CryptoProvider get_default().expect**——`protocols/tls.rs:57`：ring feature 缺失或竞争 provider 时首次 TLS 握手 panic；`let _ =` 忽略 install 失败致仅剩 expect。
+- [ ] **HotReloadManager Default panic + reload_rx 一次性槽位**——`hot_reload.rs:623`（Default 恒 panic）/`:353`（`take().expect("reload_rx already taken")`）：现无双重调用，不变式仅由 expect 维持。
+- [ ] **不变式 expect（结构上恒真，重构漂移即启动 panic）**——`tun_ingress.rs:214`（flow_router 未注入）/`runtime_builder.rs:479`（tun_enabled 蕴含 network_config）。
+- [ ] **插件/FFI mutex poison 级联**——`plugins/plugin.rs:133`（std Mutex 跨 wasm 调用，宿主 panic 即毒化后续全插件流）/`ffi/lib.rs:302,328`（tun_thread lock）。
+- [ ] **unmaintained 依赖**——`serde_yaml`/`unsafe-libyaml`（RUSTSEC-2024-0449）、`basic-toml`（RUSTSEC-2026-0374）：cargo audit 信息级；升级候选。
+
+---
+
 ## 统计
 
 | 优先级 | 条目 | 对应阶段 | 状态 |
