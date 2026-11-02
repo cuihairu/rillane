@@ -116,6 +116,11 @@ impl HttpConnector {
         pool: &Arc<TransportPool>,
     ) -> Result<FlowReport> {
         let target = format!("{}:{}", flow.target.host, flow.target.port);
+        // P1 安全（出口层最后防线）：host 内插进 CONNECT 请求行与 Host 头，
+        // 含 CR/LF/控制字符即请求走私/头注入——拒绝而非注入上游。
+        if crate::host_has_injection_chars(&flow.target.host) {
+            bail!("HTTP CONNECT 目标主机含非法控制字符（拒绝头注入）");
+        }
         let proxy_addr = self.proxy_addr();
         tracing::debug!(
             target: "seep::http_out",
@@ -156,6 +161,10 @@ impl HttpConnector {
     /// 且 tls 时 TLS 连接器改取共享 ClientConfig（tls_resumption 独立于池生效）。
     async fn forward_inline(&self, mut flow: Flow) -> Result<FlowReport> {
         let target = format!("{}:{}", flow.target.host, flow.target.port);
+        // P1 安全（出口层最后防线）：见 forward_pooled 同型守卫。
+        if crate::host_has_injection_chars(&flow.target.host) {
+            bail!("HTTP CONNECT 目标主机含非法控制字符（拒绝头注入）");
+        }
         let proxy_addr = self.proxy_addr();
 
         tracing::debug!(

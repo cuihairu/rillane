@@ -288,7 +288,15 @@ where
             let len = read_u8(stream).await? as usize;
             let mut buf = vec![0u8; len];
             stream.read_exact(&mut buf).await?;
-            String::from_utf8(buf)?
+            let host = String::from_utf8(buf)?;
+            // P1 安全：域名字符串不得含空/CR/LF/控制字符——HTTP CONNECT
+            // 出口把 host 内插进请求行与 Host 头，未校验即请求走私/头注入
+            // （SOCKS5 客户端可向上游代理注入任意头）。
+            if crate::host_has_injection_chars(&host) {
+                send_error(stream, 0x08).await?; // 地址类型不支持（拒绝语义）
+                bail!("SOCKS5 域名含非法控制字符或为空");
+            }
+            host
         }
         // IPv6
         0x04 => {
@@ -343,4 +351,38 @@ where
     let mut buf = [0u8; 2];
     stream.read_exact(&mut buf).await?;
     Ok(u16::from_be_bytes(buf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    /// P1 回归：SOCKS5 域名字符串含 CR/LF/控制字符 → parse_request_cmd 拒绝。
+    /// 此前未校验，HTTP CONNECT 出口把 host 内插进请求行与 Host 头，
+    /// 客户端可经此向上游代理注入任意头（请求走私/头伪造）。
+    #[tokio::test]
+    async fn rejects_crlf_in_domain() {
+        // VER=5 CMD=CONNECT RSV=0 ATYP=0x03(域名) LEN=11 "evil.com\r\n"
+        let mut payload = vec![0x05, 0x01, 0x00, 0x03, 0x0B];
+        payload.extend_from_slice(b"evil.com\r\nX-Injected: 1");
+        let (mut client, mut server) = tokio::io::duplex(256);
+        client.write_all(&payload).await.unwrap();
+        let res = parse_request_cmd(&mut server).await;
+        assert!(res.is_err(), "含 CRLF 的域名字符串应被拒绝（头注入防御）");
+    }
+
+    /// 合法域名（纯 ASCII 字母数字点横）应正常解析。
+    #[tokio::test]
+    async fn accepts_plain_domain() {
+        let mut payload = vec![0x05, 0x01, 0x00, 0x03, 0x0B];
+        payload.extend_from_slice(b"example.com");
+        payload.extend_from_slice(&[0x00, 0x50]); // 端口 80
+        let (mut client, mut server) = tokio::io::duplex(256);
+        client.write_all(&payload).await.unwrap();
+        let (cmd, host, port) = parse_request_cmd(&mut server).await.unwrap();
+        assert_eq!(cmd, 0x01);
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 80);
+    }
 }

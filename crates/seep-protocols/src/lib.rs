@@ -34,3 +34,12 @@ pub use pool::{
     SystemClock, TransportKey, TransportPool,
 };
 pub use tls::TlsConnectorFactory;
+
+/// 目标主机是否含 HTTP 请求行/头注入字符（空 / CR / LF / 控制字符）。
+///
+/// P1 安全：SOCKS5 入口的域名字符串与 HTTP CONNECT 出口都把 host 内插进
+/// 请求行与 `Host` 头。未校验即允许 SOCKS5 客户端向上游代理注入任意头
+/// （请求走私/头伪造）——出口层为最后防线，入口层为第一道闸。
+pub(crate) fn host_has_injection_chars(host: &str) -> bool {
+    host.is_empty() || host.bytes().any(|b| b < 0x20 || b == 0x7F)
+}
