@@ -67,8 +67,8 @@ throughput/latency gains with benchmark tests, and backfill the PROTOCOLS.md per
   per-connector parameters: the trait has no config channel (section 1), and the relay buffer has no per-egress
   differentiation need (BDP is determined by the path, not the egress type); precedent is the P1-5 pool/factory
   process-level singleton (egress-connection-pool.md D-10).
-- **D-2 Vectorized frame write**: `write_frame` changes to `stream.write_all_vectored(&mut
-  [IoSlice::new(&len_be), IoSlice::new(payload)])` -- streams where `is_write_vectored()` is true (TcpStream)
+- **D-2 Vectorized frame write**: `write_frame` changes to a two-buffer `stream.write_vectored(&mut
+  [IoSlice::new(&len_be), IoSlice::new(payload)])` + a short-write advance loop -- streams where `is_write_vectored()` is true (TcpStream)
   submit in one syscall; false (rustls) falls back per segment with zero rollback cost. The 4-byte header from
   `write_u32` is carried by a stack array `len_be`, with no heap allocation.
 - **D-3 splice out of scope**: kernel-side zero-copy (splice/tee) only applies to "plaintext<->plaintext with
@@ -98,7 +98,7 @@ pub fn relay_buffer() -> usize;                    // read by all relay points
 
 ```rust
 // seep-config: new top-level block (deny_unknown_fields, Option default)
-pub struct PerformanceConfig {
+pub struct PerformanceBlock {
     pub relay_buffer: Option<u32>,   // bytes; 8192..=1 MiB validation
 }
 ```

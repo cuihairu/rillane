@@ -56,8 +56,8 @@ client (MeshUdpRelay)          relay (MeshDataPlane UDP)        exit (MeshDataPl
 ```
 offset  field
 0       magic(2) = 'S''U'
-2       ver(1)   = 1
-3       flags(1) : bit0 = dir (0=uplink, 1=downlink); bit1..7 reserved, must be 0
+2       ver(1)   = 1   (v1; the in-band V2 frame uses `ver = 2`, see the P2-7 note in mesh-advanced-security.md §3.2)
+3       flags(1) : bit0 = dir (0=uplink, 1=downlink); bit1 = has_seq (V2, P2-7); bit2..7 reserved, must be 0
 4       flow_id(16)  raw UUID bytes (uuid::Uuid::as_bytes, not a string)
 20      atyp(1)  : 1=IPv4, 4=IPv6, 3=domain
 21      addr     : 4 / 16 / len(1)+bytes (domain ≤255)
@@ -72,7 +72,7 @@ offset  field
 pub enum UdpDir { Up, Down }
 pub enum UdpPathMode { Full, Cached }
 pub struct UdpEnvelope {
-    pub version: u8,                    // always 1; other values are decode refusals
+    pub version: u8,                    // 1 (v1) or 2 (in-band V2, P2-7: HAS_SEQ + seq + replay window); other values are decode refusals
     pub dir: UdpDir,
     pub flow_id: [u8; 16],
     pub target_host: String,            // domain/v4/v6 stringified (used by exit)
@@ -264,7 +264,7 @@ S2 UdpFlowCache hop cache ─┘   S4 UdpChainRouter/MeshUdpRelay ─┴─► S
 
 - Landing point: `mesh_transport.rs`: `UdpDir` / `UdpPathMode` / `UdpEnvelope` + the pure functions `encode_udp_envelope` / `decode_udp_envelope`.
 - Dependencies: none.
-- Implementation points: field order and byte layout strictly per §2; `version != 1` / nonzero reserved bits / domain length >255 / CACHED carrying path / truncation → all decode errors.
+- Implementation points: field order and byte layout strictly per §2; `version` not in {1,2} / nonzero reserved bits / domain length >255 / CACHED carrying path / truncation → all decode errors (v2 = the P2-7 in-band V2 frame, see [mesh-advanced-security.md](mesh-advanced-security.md) §3.2).
 - Acceptance: §10 T1 all green (roundtrip × FULL/CACHED × v4/v6/domain × both dir bits; each of the 5 rejection classes asserted).
 
 **S2 UdpFlowCache hop cache** (§3)
@@ -414,7 +414,7 @@ The result is passed explicitly as `MeshUdpGate { allow_plaintext: bool }` into 
 - **no payload-level deduplication**: UDP semantics themselves allow duplicate delivery (best-effort), and QUIC/DNS/game protocols handle it at the application layer; the cost of a per-flow sequence/hash window on the mesh plane (per-hop state, false kills on reordering, cross-hop inconsistency) exceeds the benefit -- the MVP explicitly does not do it; this is a ruling, not an omission;
 - **the FULL periodic resend is the only normal form of a "duplicate packet"**: hitting an existing cache = refreshing the entry (§3 already decided), idempotent with no side effects, no dedup needed;
 - **stale/misrouted packets**: flow expired/evicted → CACHED miss → `unknown_flow` drop (existing); a flow_id not matching the cache key is handled the same way;
-- **replay (malicious copy / delayed injection)**: under the MVP plaintext gate there is no way to authenticate the source; this is grouped with O3 (relay back-to-source check deferred) into V2 -- a QUIC vehicle carries connection ID + packet number for anti-replay; the plaintext-gate dev scenario does not do it;
+- **replay (malicious copy / delayed injection)**: **flow-level anti-replay has landed in-band (2026-10, P2-7)** -- the V2 frame carries a stream sequence number and each receiving hop runs a per-(flow,dir) 64-bit sliding window (`ReplayWindow`), with `replay_dropped` counters; the plaintext-gate dev scenario still has no source authentication (the V2 frame is not MAC'd), which stays grouped with O3 into the V2 QUIC vehicle -- quinn's connection ID + packet number anti-replay is another layer and does not substitute;
 - **loops**: not blocked by dedup -- FULL relies on path validation (14-1), CACHED on the TTL breaker (14-1).
 
 ## 15. Core ruling index (D-x; fourth-round spec alignment 2026-09-30)
@@ -436,7 +436,7 @@ Existing rulings numbered -- the content stays in its original §section; this i
 | D-11 | serve is a single sequential loop, no per-packet spawn; the exit downlink task is independently concurrent | §13-5 |
 | D-12 | The envelope ceiling is 65507 (encode refuses); no reliability promise for >1400-byte business packets (stated in docs, no config added) | §13-3 |
 | D-13 | hop_index = hops crossed, +1 per hop, symmetric up/down; the real target surface of `MAX_UDP_HOPS=16` is the CACHED loop breaker (FULL is naturally loop-safe via the strictly decreasing path) | §14-1 |
-| D-14 | No payload-level deduplication (UDP semantics allow duplication; the FULL resend is idempotent); replay protection belongs to the V2 QUIC vehicle | §14-2 |
+| D-14 | No payload-level deduplication (UDP semantics allow duplication; the FULL resend is idempotent); replay protection = flow-level anti-replay landed in-band (P2-7 v2 frame + sliding window, `replay_dropped`); end-to-end source authentication belongs to the V2 QUIC vehicle | §14-2 |
 | D-15 | **UDP padding spec production point = associate session-level evaluation** (reusing `PaddingSpec` and the policy pure functions + the obfuscation selector), not through `FlowMiddleware::handle` -- the UDP session path has no Flow, and the stream signature does not fit (same cause as P1-4 §2.1) | §17-P1-4 (new this round) |
 | D-16 | **Padding execution point = the envelope wrapping side** (client FULL first send / exit downlink wrapping, after encoding and before send_to); relay re-encoding (strip self, hop_index+1) keeps `pad_len` unchanged without appending; CACHED forwarding segments add no padding | §17-P1-4 (new this round) |
 

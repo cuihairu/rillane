@@ -166,7 +166,7 @@ Same port, same process: the TCP listener handles the CONNECT control flow (curr
 
 ### 3.0 General mechanism
 
-`seep-protocols::outbound` gains a `udp.rs` collecting the four `EgressUdpConnector` implementations; at build time (`RuntimeBuilder`/seepd startup) it scans the egress types reachable from `routing`: when UDP traffic is routed to a **trojan/vless/socks5/http** or other type with no UDP capability, **startup fails immediately and lists the conflicting node names** (aligned to todo acceptance "unsupported egress types error clearly at build time") -- runtime silent dropping is not used. The existing hy2/wg egress already has a `TargetProto` dispatch skeleton (`Tcp => {}` + fallback error); the UDP branch falls straight into the same match.
+`seep-protocols::outbound` gains the UDP-capable connectors (`DirectUdpConnector` in `seep_core::udp::relay`, `ShadowsocksUdpConnector` in `outbound/shadowsocks.rs`, `WireguardUdpConnector` in `outbound/wireguard.rs`; hy2 is deferred to V2); at build time (`RuntimeBuilder`/seepd startup) it scans the egress types reachable from `routing`: when UDP traffic is routed to a **trojan/vless/socks5/http** or other type with no UDP capability, **startup fails immediately and lists the conflicting node names** (aligned to todo acceptance "unsupported egress types error clearly at build time") -- runtime silent dropping is not used. The existing hy2/wg egress already has a `TargetProto` dispatch skeleton (`Tcp => {}` + fallback error); the UDP branch falls straight into the same match.
 
 ### 3.1 direct (`outbound/direct.rs`)
 
@@ -319,7 +319,7 @@ seep_udp_relay_handshake_errors_total   # mesh UDP plane (reserved)
 
 > The as-landed metric names are authoritative per [udp-observability.md](udp-observability.md) §2.4 (landed final) and the `apps/seepd/src/control_plane.rs` rendering.
 
-The `/flows` control plane interface likewise distinguishes TCP/UDP direction counters (the existing cumulative traffic structure gains a proto dimension).
+The `/flows` control plane interface keeps the TCP direction counters; **the UDP plane is NOT folded into `/flows`** (UDP never enters `FlowOutputRouter`, so there is no proto dimension -- UDP is observed through `/udp/stats` and the `seep_udp_*` metric family, see [udp-observability.md](udp-observability.md) §2.6; the `seepctl stats` tail carries the UDP section).
 
 ### 5.4 Coexistence with the TCP plane
 

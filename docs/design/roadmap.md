@@ -40,7 +40,7 @@ No new development; this phase's output is the contract layer for S1-S4 (the `In
 
 > **Progress (closed out 2026-10-02)**: 5/5 complete -- P0-1 session table / P0-2 UDP ASSOCIATE / P0-3 egress payload (direct/ss/wg) / P0-4 mesh UDP plane ([udp-mesh-dataplane.md](udp-mesh-dataplane.md) S0-S6 all landed, all 27 tests green) / P0-5 observability and config ([udp-observability.md](udp-observability.md) S0-S6 landed) are all done, details in the individual todo items. Exit-criteria errata: hy2 egress UDP carriage was re-judged after P0-3 review -- hysteria2 0.1.6 has no UDP egress in its public API, so it moved to P0-4; the re-judgment stands at P0-4 completion (final state V2, the quinn carrier is undecided).
 
-- **Reuse**: the `FlowTarget::Udp` enum and `FlowSession` in `seep-core`; `seep-routing` is transport-agnostic, rules apply as-is; the existing handshake/cipher stack of the Hysteria2/WireGuard/Shadowsocks egress paths.
+- **Reuse**: the `FlowTarget` struct (`host`/`port`/`proto`, protocol as the `TargetProto` enum with a `Udp` variant) and `FlowSession` in `seep-core`; `seep-routing` is transport-agnostic, rules apply as-is; the existing handshake/cipher stack of the Hysteria2/WireGuard/Shadowsocks egress paths.
 - **New**:
   1. `seep-core`: UDP session semantics (NAT-style mapping table, timeout reclamation, session stickiness key = process/5-tuple);
   2. `seep-protocols`: SOCKS5 UDP ASSOCIATE ingress; UDP payload framing for direct/ss/hy2/wg egress;
@@ -86,7 +86,7 @@ No new development; this phase's output is the contract layer for S1-S4 (the `In
   2. Scheduling strategy upgrade: score and select by an SLO target (e.g. p95 RTT), enabled by default in the game profile (selection/watcher **complete as of 2026-10, P2-2** -- lowest score inside the group policy `slo:` gate + `slo_watch` degradation switching in chain, see [slo-scoring.md](slo-scoring.md); game profile wiring deferred to P2-3);
   3. Scenario profiles: three config presets `proxy`/`game`/`web` (routing templates + obfuscation switches + scheduling objectives), see positioning.md section 2.5 (**complete as of 2026-10, P2-3** -- `profile:` default-fill expansion + pick one of `examples/profile-*.yaml`, see [scenario-profiles.md](scenario-profiles.md));
   3b. Obfuscation middleware extension: timing/shaping perturbation (**complete as of 2026-10, P2-4** -- `TimingMiddleware` startup jitter + `ShapingMiddleware` write-grid normalization, see [obfuscation-timing-shaping.md](obfuscation-timing-shaping.md));
-  4. Advanced security closeout: CRL/OCSP, mesh end-to-end MAC / anti-replay (leftover in mesh.md "Security Notes");
+  4. Advanced security closeout: UDP-plane anti-replay + revocation visibility (**landed, 2026-10-04, P2-7**); CRL/OCSP queries and mesh end-to-end MAC are **deferred to V2** (todo P2-7 ruling, see [mesh-advanced-security.md](mesh-advanced-security.md));
   5. Platform packaging: systemd/launchd/Windows Service/OpenWrt; mobile FFI skeleton.
 - **Exit criteria**: under the game profile, link switching is driven by SLO scoring and there are switch-reason metrics; binary artifacts for three platforms (Linux/macOS/Windows); a musl package for OpenWrt.
 

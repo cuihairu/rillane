@@ -69,9 +69,10 @@
   执行，padding/timing/shaping 任意组合——timing 先于 shaping 时
   shaping 的首个网格点从 shaping 开始起算，语义自洽）。
 - **D-7 指标**：不新族；可观测性面 = 写入注解（§0-1）+ 既有
-  `MiddlewareChain` 调用计数 + `seep_obfs_padding_*` 先例留给 M1
-  在执行侧（io 包装层）追加 `seep_obfs_shaping_writes_total` 仅当
-  shaping 实际生效——M0 不定指标名，M1 落。
+  `MiddlewareChain` 调用计数（控制面注册的 `seep_obfs_*` 族仅
+  `padding_frames_total` / `padding_bytes_total` / `padding_skipped_total` /
+  `middleware_invocations_total`，代码中不存在 `seep_obfs_shaping_writes_total`——
+  `PacedIo` 无写计数，timing/shaping 经 `MIDDLEWARE_INVOCATIONS` 观测）。
 
 ## 3. 数据结构
 

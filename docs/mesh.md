@@ -91,6 +91,10 @@ When `mesh` + `chain` are enabled, each node also listens on `MeshConfig.listen_
   - `SEEP_MESH_MTLS_CERT=/path/to/<node>.cert.pem`
   - `SEEP_MESH_MTLS_KEY=/path/to/<node>.key.pem`
   - Optional: `SEEP_MESH_MTLS_SERVER_NAME=seep`
+- Client-certificate enforcement and peer-check controls (defaults; the full env-var table is in [config.md](config.md) "Environment variables"):
+  - `SEEP_MESH_MTLS_REQUIRE_CLIENT_AUTH=true` -- enforces client certificate validation (keep it on in production; bypassing needs `SEEP_MESH_ALLOW_NO_CLIENT_AUTH=1`)
+  - `SEEP_MESH_MTLS_VERIFY_PEER_NODE_ID=true` -- checks the peer certificate CN against the node ID
+  - `SEEP_MESH_MTLS_ALLOW_UNKNOWN_PEERS=false` -- allow unknown node certificates
 - When `chain` is enabled, seepd requires mTLS by default. For dev-only plaintext you can set:
   - `SEEP_MESH_ALLOW_PLAINTEXT=1`
 

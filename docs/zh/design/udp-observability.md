@@ -115,6 +115,8 @@ UDP 承载能力由出站类型静态决定（direct/shadowsocks/wireguard ✓�
 | `seep_udp_mesh_malformed_total` | counter | malformed | envelope 解码失败 |
 | `seep_udp_mesh_evicted_total` | counter | 驱逐计数 | 上界驱逐（R10） |
 | `seep_udp_mesh_client_dropped_total` | counter | **新增 `UdpClientMetrics.dropped`**（P0-4 `MeshUdpRelay.dropped` 的进程级收编） | client 出站侧下行丢弃（dir=Up / FULL / flow_id 不符 / 解码失败——`recv_from` 过滤点） |
+| `seep_udp_mesh_replay_dropped_total` | counter | **新增 `UdpFaceMetrics.replay_dropped`**（P2-7 带内 V2 重放窗口） | 面（relay/exit）per-(flow,dir) 滑动窗口拒绝的数据报 |
+| `seep_udp_mesh_client_replay_dropped_total` | counter | **新增 `UdpClientMetrics.replay_dropped`**（P2-7） | client 出站侧 `recv_from` 窗口重放拒绝 |
 
 **client 侧 `dropped` 的收编裁决（落地核对后新增）**：P0-4 将该计数落在 per-relay 的 `AtomicU64`（`udp_chain.rs`，标注「读取点 = P0-5」），per-flow 实例无法聚合。收编为进程级：`MeshUdpBridge::new` 构造 `Arc<UdpClientMetrics>{dropped: AtomicU64}`，`associate` 把**同一 Arc** 传入各 `MeshUdpRelay`（字段从 `AtomicU64` 换 `Arc<UdpClientMetrics>`，fetch_add 点不变）；`RuntimeBuilder::build()` 在包装 `UdpChainRouter` 前抽出该 Arc 存 Runtime 字段（观测 getter）。面（服务端视角）与 client（发起端视角）两个序列分立，client 侧不混入 `seep_udp_mesh_*` 面族——命名/语义与 §0.2「分族不混算」一致。
 

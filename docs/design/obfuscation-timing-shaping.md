@@ -77,9 +77,10 @@ latency cost must be quantifiable (p95 increase <= the configured cap).
   shaping's first grid point is counted from the start of shaping, which is semantically
   consistent).
 - **D-7 metrics**: no new family; the observability surface = writing annotations (§0-1) + the
-  existing `MiddlewareChain` invocation counts + the `seep_obfs_padding_*` precedent left for M1
-  to add `seep_obfs_shaping_writes_total` on the execution side (the io wrapping layer), only when
-  shaping is actually in effect -- M0 fixes no metric name; M1 lands it.
+  existing `MiddlewareChain` invocation counts (the `seep_obfs_*` families registered in the
+  control plane are `padding_frames_total` / `padding_bytes_total` / `padding_skipped_total` /
+  `middleware_invocations_total` only; no `seep_obfs_shaping_writes_total` exists in the code --
+  `PacedIo` has no write counter, so timing/shaping are observed via `MIDDLEWARE_INVOCATIONS`).
 
 ## 3. Data structures
 

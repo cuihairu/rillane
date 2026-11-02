@@ -154,7 +154,7 @@ IPv4: [20B IP 头（src=WG address 配置, dst=target, proto=17, 校验和）| 8
 
 ## 6. 实施注记（P0-2 落地裁决，2026-09）
 
-代码：`seep-core/src/udp/associate.rs`（服务与准入）、`seep-protocols/src/inbound/socks5.rs`（命令分派）、`seep-runtime/src/runtime_builder.rs`（接线）、`seep-config`（`udp:` 块）。测试：`seep-core/tests/udp_associate.rs`（11 项）+ `udp_session_table.rs` §3.6 分级 teardown 4 项。
+代码：`seep-core/src/udp/associate.rs`（服务与准入）、`seep-protocols/src/inbound/socks5.rs`（命令分派）、`seep-runtime/src/runtime_builder.rs`（接线）、`seep-config`（`udp:` 块）。测试：`seep-core/tests/udp_associate.rs`（13 项）+ `udp_session_table.rs` §3.6 分级 teardown 4 项。
 
 | # | 草案 | 实施 | 裁决理由 |
 |---|------|------|---------|

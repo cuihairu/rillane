@@ -46,7 +46,7 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 | Flow 会话 | 统一会话模型：目标、路由历史、用量、失败统计 | `seep-core` `Flow/FlowSession/ChainContext` 已就绪 |
 | 路由引擎 | 规则匹配（domain/geoip/ipcidr/port/process）+ 组策略选路 | `seep-routing` 已就绪（latency/bandwidth/weighted/consistent-hash 等策略） |
 | 多跳链路 | mesh 组网、chain 构建/预检/故障回退 | `seep-mesh` + `seep-runtime::chain` 已就绪（TCP） |
-| 出站协议栈 | direct/ss/trojan/hy2/vless/wg/socks/http | `seep-protocols` 出站已就绪（TCP） |
+| 出站协议栈 | direct/ss/trojan/hy2/vless/vmess/wg/socks/http + ws/grpc/h2 传输 | `seep-protocols` 出站已就绪（TCP） |
 | 订阅 | Clash 导入 + 自有 DSL + 热更新 | `seep-subscription` 已就绪 |
 | 控制面 | REST API + seepctl + mTLS 工具 | `apps/seepd`、`apps/seepctl` 已就绪 |
 | 观测 | per-flow/per-link 指标、诊断采集 | `seep-telemetry` 基础就绪，细化中 |
@@ -88,7 +88,7 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 
 这三者作为 `FlowMiddleware` 实现挂在 egress 之前/之后，**对三种场景统一生效**：代理用它过 DPI，游戏加速用它过 QoS，网页加速用它维持 TLS 正常形态。
 
-> **现状（2026-10，P1-4/P2-4/P2-5 落地）**：三者均已以 `FlowMiddleware` 落地——`padding`（P1-4 M0–M4，策略/执行分离：`PaddingSpec` 策略引擎纯函数 + 帧载体执行侧，MVP 帧载体 = mesh chain 的 `MeshEnvelope` 帧，fixed/bucket/range 三形态、overhead 比例闸门、`seep_obfs_*` 指标族恒渲染 + `scripts/obfs_padding_dist.py` 分布检查脚本）；`timing`/`shaping`（P2-4：`TimingMiddleware` 启动抖动 + `ShapingMiddleware` 写网格归一）。单跳 TCP 无自有帧 no-op；UDP 数据报填充载体（`UdpEnvelope`）已就绪而执行钩子未接（裁决见 udp-mesh-dataplane.md D-15）。TLS 指纹模拟已随 P2-5 落地（chrome/ios/safari 预设，见 [tls-fingerprint.md](tls-fingerprint.md)）；simple-obfs/salamander 生态插件兼容未做。详见 [obfuscation-middleware.md](obfuscation-middleware.md)。
+> **现状（2026-10，P1-4/P2-4/P2-5 落地）**：三者均已以 `FlowMiddleware` 落地——`padding`（P1-4 M0–M4，策略/执行分离：`PaddingSpec` 策略引擎纯函数 + 帧载体执行侧，MVP 帧载体 = mesh chain 的 `MeshEnvelope` 帧，fixed/bucket/range 三形态、overhead 比例闸门、`seep_obfs_*` 指标族恒渲染 + `scripts/obfs_padding_dist.py` 分布检查脚本）；`timing`/`shaping`（P2-4：`TimingMiddleware` 启动抖动 + `ShapingMiddleware` 写网格归一）。单跳 TCP 无自有帧 no-op；UDP 数据报填充载体（`UdpEnvelope`）已就绪而执行钩子未接（裁决见 udp-mesh-dataplane.md D-15）。TLS 指纹模拟已随 P2-5 落地（chrome/ios/safari 预设，见 [tls-fingerprint.md](tls-fingerprint.md)）；SS SIP003 插件桥已覆盖 simple-obfs 生态（`plugin`/`plugin_opts` + obfs-local，见 [PROTOCOLS.md](../PROTOCOLS.md) 与 todo「SS 出站 SIP003 插件桥」）；salamander（hy2）兼容未做。详见 [obfuscation-middleware.md](obfuscation-middleware.md)。
 
 ### 2.5 数据通路视角的结论
 

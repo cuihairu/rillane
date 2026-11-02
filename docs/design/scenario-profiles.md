@@ -38,7 +38,7 @@
   "explicit false" cannot be distinguished from a "default false"**, so the profile mechanism cannot
   safely rewrite it (see the §9 deviation);
 - the single config loading entry: `load_from_path` -> `from_str` (the only production call at
-  seepd main.rs:29; the subscription conversion constructs a `SeepConfig` literal programmatically, without going through from_str);
+  seepd main.rs:47; the subscription conversion constructs a `SeepConfig` literal programmatically, without going through from_str);
 - obfuscation-middleware.md §3.5 already designs `obfuscation.profiles` as "the landing-point container
   of the P2-3 three-scenario presets" -- this draft lands **scenario-level** presets (one top-level
   field), while `obfuscation.profiles` keeps its original meaning (a named padding policy set); the two are orthogonal;

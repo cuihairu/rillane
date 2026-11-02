@@ -154,7 +154,7 @@ All errors are invisible through the §2.4 downlink channel -- the client only o
 
 ## 6. Implementation notes (P0-2 landing rulings, 2026-09)
 
-Code: `seep-core/src/udp/associate.rs` (service and admission), `seep-protocols/src/inbound/socks5.rs` (command dispatch), `seep-runtime/src/runtime_builder.rs` (wiring), `seep-config` (the `udp:` block). Tests: `seep-core/tests/udp_associate.rs` (11 items) + `udp_session_table.rs` §3.6 staged teardown 4 items.
+Code: `seep-core/src/udp/associate.rs` (service and admission), `seep-protocols/src/inbound/socks5.rs` (command dispatch), `seep-runtime/src/runtime_builder.rs` (wiring), `seep-config` (the `udp:` block). Tests: `seep-core/tests/udp_associate.rs` (13 items) + `udp_session_table.rs` §3.6 staged teardown 4 items.
 
 | # | Draft | Implementation | Ruling rationale |
 |---|------|------|---------|

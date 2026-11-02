@@ -77,7 +77,7 @@ pub struct RevokedFileState {
 - TCP 面 mTLS 序号已构成每跳防重放；「重放整条 TCP 连接」需先通过 mTLS 且被会话状态管理拒绝——**不作 envelope 级端到端重放**（重放失真的注入面只在包级无状态面）；
 - 故防重放落 **UDP 面**，流级（flow_id 键），端到端语义（seq 由发送端生成、每一接收跳独立校验）。
 
-### 3.2 帧格式：`UDP_ENVELOPE_VERSION = 2`（v1 兼容）
+### 3.2 帧格式：`UDP_ENVELOPE_VERSION_V2 = 2`（v1 兼容）
 
 ```
 magic "SU" | version=2 | flags: bit0=dir, bit1=HAS_SEQ(=1) | flow_id(16)
@@ -125,7 +125,7 @@ struct ReplayWindow { last: u32, bits: u64 }  // bit i = last - 1 - i 是否已�
 - `UdpFaceMetrics` 增 `replay_dropped: AtomicU64`（快照/渲染不变式：拒绝即计数，不混入 malformed/unknown_flow——新语义新计数）；
 - `UdpFaceSnapshot` 增 `replay_dropped`；
 - client 桥 `recv_from` 窗口拒 → `UdpClientMetrics` 增 `replay_dropped`（现 `dropped` 是广义丢弃、含解码错——重放单独可观测）；
-- 观测渲染：`/udp/stats` mesh 段 `replay_dropped` + `mesh_client` 段 `replay_dropped`；`/metrics` `seep_udp_mesh_replay_dropped`（P0-5 §2.4 族追加）；
+- 观测渲染：`/udp/stats` mesh 段 `replay_dropped` + `mesh_client` 段 `replay_dropped`；`/metrics` `seep_udp_mesh_replay_dropped_total` + `seep_udp_mesh_client_replay_dropped_total`（P0-5 §2.4 族追加）；
 - seepctl `UdpMeshDto`/`UdpMeshClientDto` 增字段 `#[serde(default)]`（旧 seepd 对拷容错）。
 
 ### 3.7 错误路径

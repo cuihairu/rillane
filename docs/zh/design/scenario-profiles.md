@@ -34,7 +34,7 @@
   （P1-4 M0）、`egress_pool`（P1-5）均已成型；`udp` 是非 Option 的
   `UdpConfig`（缺省 `enabled: false`）——**无法区分「显式 false」与
   「缺省 false」**，profile 机制不能安全改写（见 §9 偏差）；
-- 配置加载单入口：`load_from_path` → `from_str`（seepd main.rs:29 唯一
+- 配置加载单入口：`load_from_path` → `from_str`（seepd main.rs:47 唯一
   生产调用；订阅转换是程序化构造 `SeepConfig` 字面量，不经 from_str）；
 - obfuscation-middleware.md §3.5 已把 `obfuscation.profiles` 设计为
   「P2-3 三场景预设的落点容器」——本稿落**场景级**预设（顶层单字段），

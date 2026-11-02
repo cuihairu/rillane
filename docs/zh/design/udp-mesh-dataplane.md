@@ -56,8 +56,8 @@ client (MeshUdpRelay)          relay (MeshDataPlane UDP)        exit (MeshDataPl
 ```
 偏移  字段
 0     magic(2) = 'S''U'
-2     ver(1)   = 1
-3     flags(1) : bit0 = dir（0=uplink, 1=downlink）；bit1..7 保留必须为 0
+2     ver(1)   = 1   (v1；带内 V2 帧用 `ver = 2`，P2-7 注记见 mesh-advanced-security.md §3.2)
+3     flags(1) : bit0 = dir（0=uplink, 1=downlink）；bit1 = has_seq（V2, P2-7）；bit2..7 保留必须为 0
 4     flow_id(16)  UUID 原始字节（uuid::Uuid::as_bytes，非字符串）
 20    atyp(1)  : 1=IPv4, 4=IPv6, 3=domain
 21    addr     : 4 / 16 / len(1)+bytes（domain ≤255）
@@ -72,7 +72,7 @@ client (MeshUdpRelay)          relay (MeshDataPlane UDP)        exit (MeshDataPl
 pub enum UdpDir { Up, Down }
 pub enum UdpPathMode { Full, Cached }
 pub struct UdpEnvelope {
-    pub version: u8,                    // 恒 1，其他值解码拒绝
+    pub version: u8,                    // 1 (v1) 或 2（带内 V2, P2-7: HAS_SEQ + seq + replay window）；其他值解码拒绝
     pub dir: UdpDir,
     pub flow_id: [u8; 16],
     pub target_host: String,            // domain/v4/v6 字符串化（exit 使用）
@@ -264,7 +264,7 @@ S2 UdpFlowCache 跳缓存 ─┘   S4 UdpChainRouter/MeshUdpRelay ─┴─► S
 
 - 落点：`mesh_transport.rs`：`UdpDir` / `UdpPathMode` / `UdpEnvelope` + `encode_udp_envelope` / `decode_udp_envelope` 纯函数。
 - 依赖：无。
-- 实施要点：字段序与字节布局严格按 §2；`version != 1` / 保留位非 0 / domain 长度 >255 / CACHED 携带 path / 截断 → 一律解码错误。
+- 实施要点：字段序与字节布局严格按 §2；`version` 不在 {1,2}（v2 = P2-7 带内 V2 帧，见 [mesh-advanced-security.md](mesh-advanced-security.md) §3.2）/ 保留位非 0 / domain 长度 >255 / CACHED 携带 path / 截断 → 一律解码错误。
 - 验收：§10 T1 全绿（roundtrip × FULL/CACHED × v4/v6/domain × dir 两位，5 类拒绝各有断言）。
 
 **S2 UdpFlowCache 跳缓存**（§3）
@@ -414,7 +414,7 @@ allow_plaintext = cfg.mesh.udp_allow_plaintext_data_plane /* bool, serde default
 - **不做载荷级去重**：UDP 语义本身允许重复递交（best-effort），QUIC/DNS/游戏协议在应用层自会处理；mesh 面引入 per-flow 序号/哈希窗口的代价（每跳状态、乱序误杀、跨跳不一致）大于收益——MVP 明确不做，此为裁决而非遗漏；
 - **FULL 周期重发是"重复包"的唯一正常形态**：命中已有缓存 = 刷新条目（§3 已定），幂等无副作用，无需去重；
 - **陈旧/错位包**：flow 已过期/驱逐 → CACHED 未命中 → `unknown_flow` 丢弃（既有）；flow_id 不匹配缓存键同理；
-- **重放（恶意复制/延迟注入）**：MVP 明文门下无法认证来源，与 O3（relay 回源校验后置）同批归 V2——QUIC 载具连接自带 connection ID + packet number 抗重放，明文门 dev 场景不做；
+- **重放（恶意复制/延迟注入）**：**流级防重放已带内落地（2026-10, P2-7）**——V2 帧携带流序列号，每个接收跳运行 per-(flow,dir) 64 位滑动窗口（`ReplayWindow`），带 `replay_dropped` 计数；明文门 dev 场景仍无来源认证（V2 帧未加 MAC），与 O3（relay 回源校验后置）同批归 V2 QUIC 载具——QUIC 连接自带 connection ID + packet number 抗重放是另一层，互不替代；
 - **环**：不靠去重挡——FULL 靠 path 校验（14-1），CACHED 靠 TTL 熔断（14-1）。
 
 ## 15. 核心裁决索引（D-x，第四轮规格对齐 2026-09-30）
@@ -436,7 +436,7 @@ allow_plaintext = cfg.mesh.udp_allow_plaintext_data_plane /* bool, serde default
 | D-11 | serve 单循环顺序处理、不 per-packet spawn；exit 下行 task 独立并发 | §13-5 |
 | D-12 | envelope 上界 65507（encode 拒绝）；>1400 字节业务报可靠性不承诺（文档明示不加配置） | §13-3 |
 | D-13 | hop_index = 已穿越跳数、每跳 +1 上下行对称；`MAX_UDP_HOPS=16` 实义面是 CACHED 环熔断（FULL 靠 path 严格递减天然防环） | §14-1 |
-| D-14 | 不做载荷级去重（UDP 语义允许重复；FULL 重发幂等）；重放防护归 V2 QUIC 载具 | §14-2 |
+| D-14 | 不做载荷级去重（UDP 语义允许重复；FULL 重发幂等）；重放防护 = 流级防重放已带内落地（P2-7 v2 帧 + 滑动窗口，`replay_dropped`）；端到端来源认证归 V2 QUIC 载具 | §14-2 |
 | D-15 | **UDP padding spec 生产点 = associate 会话级求值**（复用 `PaddingSpec` 与策略纯函数 + obfuscation 选择器），不经 `FlowMiddleware::handle`——UDP 会话路径无 Flow，流签名不适配（P1-4 §2.1 同因） | §17-P1-4（本轮新增） |
 | D-16 | **padding 执行点 = envelope 封装侧**（client FULL 首发 / exit 下行封装，编码后 send_to 前）；中继重编码（剥自身、hop_index+1）保持 `pad_len` 不追加；CACHED 转发段无新增填充 | §17-P1-4（本轮新增） |
 

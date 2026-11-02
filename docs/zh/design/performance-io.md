@@ -23,7 +23,7 @@
 1. **relay 缓冲可配**：TCP relay 双向缓冲大小可经 `performance.relay_buffer`
    配置（进程级，启动期设定）；缺省 None = 8192×2 维持现行为，存量零差异；
 2. **帧写合一**：mesh `[len][payload]` 帧写由两次 `write_all` 改为
-   `write_all_vectored` 一次提交——明文 TcpStream 段一次 syscall；TLS 段
+   `write_vectored` 两段一次提交 + 短写推进循环——明文 TcpStream 段一次 syscall；TLS 段
    rustls 无 vectored 实现，自动回落逐段（行为不劣于现状）；
 3. **基准佐证**：criterion benches——回环 TCP relay 在 8K/32K/64K/256K
    缓冲下的吞吐对照（模拟 BDP 场景），与帧写两段/vectored 对照；结果
@@ -45,8 +45,8 @@
   逐帧预拼接整体 buf 的方案会引入最高 64 KiB 的额外 memcpy，不取
   （两段 vectored 零拷贝提交，见 D-2）；
 - **TLS 段无真 vectored**：rustls 0.23 `TlsStream` 未实现
-  `poll_write_vectored`（`is_write_vectored()=false`），tokio
-  `write_all_vectored` 对此类自动回落逐段 `write_all`——行为等价现状；
+  `poll_write_vectored`（`is_write_vectored()=false`）；落地实现为
+  `write_vectored` + 短写推进循环，对 false 流自动回落逐段 `write_all`——行为等价现状；
 - 生产 mesh 数据面强制 mTLS（dev 才可 `SEEP_MESH_ALLOW_PLAINTEXT=1`），
   出站 TLS 系协议占比高——**明文直连段（socks5/http 入 → direct/socks5
   出）是 vectored 与大缓冲的主要收益面**。
@@ -62,8 +62,8 @@
   缓冲无逐出口差异化需求（BDP 由路径决定，非出口类型）；先例同 P1-5
   池/工厂进程级单例（egress-connection-pool.md D-10）。
 - **D-2 帧写 vectored 化**：`write_frame` 改
-  `stream.write_all_vectored(&mut [IoSlice::new(&len_be),
-  IoSlice::new(payload)])`——`is_write_vectored()` 为真的流（TcpStream）
+  `stream.write_vectored(&mut [IoSlice::new(&len_be),
+  IoSlice::new(payload)])` + 短写推进——`is_write_vectored()` 为真的流（TcpStream）
   一次 syscall；为假（rustls）回落逐段，零回退损失。`write_u32` 的
   4 字节头部以栈数组 `len_be` 承载，无堆分配。
 - **D-3 splice 出界**：内核态零拷贝（splice/tee）仅适用于
@@ -94,7 +94,7 @@ pub fn relay_buffer() -> usize;                    // 全部 relay 点读取
 
 ```rust
 // seep-config：顶层新块（deny_unknown_fields，Option 缺省）
-pub struct PerformanceConfig {
+pub struct PerformanceBlock {
     pub relay_buffer: Option<u32>,   // 字节；8192..=1 MiB 校验
 }
 ```
@@ -104,7 +104,7 @@ pub struct PerformanceConfig {
 | 1 | seep-protocols 出站 12 处 + mesh_transport 3 处 | `copy_bidirectional` → `copy_bidirectional_with_sizes(n, n)`（D-1） |
 | 2 | `mesh_transport::write_frame` | vectored 两段合一（D-2） |
 | 3 | `runtime_builder` | `performance:` 块读取 → `set_relay_buffer`（构建期一次） |
-| 4 | seepd config schema 透传 | `PerformanceConfig` 进 `SeepConfig` 顶层 |
+| 4 | seepd config schema 透传 | `PerformanceBlock` 进 `SeepConfig` 顶层 |
 
 ## 4. 错误与边界
 

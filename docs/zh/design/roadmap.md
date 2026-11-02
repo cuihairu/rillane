@@ -40,7 +40,7 @@
 
 > **进度（2026-10-02 收口）**：5/5 完成——P0-1 会话表 / P0-2 UDP ASSOCIATE / P0-3 出站载荷（direct/ss/wg）/ P0-4 mesh UDP 面（[udp-mesh-dataplane.md](udp-mesh-dataplane.md) S0–S6 全部落地，27 项测试全绿）/ P0-5 观测与配置（[udp-observability.md](udp-observability.md) S0–S6 落地）均已完成，细节见 todo.md 各条。退出标准勘误：hy2 出站 UDP 承载经 P0-3 核查改判——hysteria2 0.1.6 公开 API 无 UDP 出口，移 P0-4；P0-4 完成时维持改判（终态 V2，载具 quinn 未决）。
 
-- **复用**：`seep-core` 的 `FlowTarget::Udp` 枚举与 `FlowSession`；`seep-routing` 不感知传输层，规则原样生效；Hysteria2/WireGuard/Shadowsocks 出站的既有握手/加密栈。
+- **复用**：`seep-core` 的 `FlowTarget` 结构（`host`/`port`/`proto`，协议为 `TargetProto` 枚举含 `Udp` 变体）与 `FlowSession`；`seep-routing` 不感知传输层，规则原样生效；Hysteria2/WireGuard/Shadowsocks 出站的既有握手/加密栈。
 - **新增**：
   1. `seep-core`：UDP 会话语义（NAT 式映射表、超时回收、会话粘滞键 = 进程/五元组）；
   2. `seep-protocols`：SOCKS5 UDP ASSOCIATE 入站；direct/ss/hy2/wg 出站的 UDP 载荷封装；
@@ -86,7 +86,7 @@
   2. 调度策略升级：以 SLO（如 p95 RTT）为目标打分选路，游戏 profile 默认启用（选路/watcher **已完成 2026-10，P2-2**——组策略 `slo:` 门内最低分 + chain `slo_watch` 劣化切换，见 [slo-scoring.md](slo-scoring.md)；游戏 profile 接线归 P2-3）；
   3. 场景 profile：`proxy`/`game`/`web` 三套配置预设（路由模板 + 混淆开关 + 调度目标），见 positioning.md §2.5（**已完成 2026-10，P2-3**——`profile:` 缺省填充展开 + `examples/profile-*.yaml` 三选一，见 [scenario-profiles.md](scenario-profiles.md)）；
   3b. 混淆中间件扩展：timing/shaping 扰动（**已完成 2026-10，P2-4**——`TimingMiddleware` 启动抖动 + `ShapingMiddleware` 写网格归一，见 [obfuscation-timing-shaping.md](obfuscation-timing-shaping.md)）；
-  4. 高级安全收尾：CRL/OCSP、mesh 端到端 MAC/防重放（mesh.md「Security Notes」遗留）；
+  4. 高级安全收尾：UDP 面防重放 + 撤销生效面可查（**已落地，2026-10-04，P2-7**）；CRL/OCSP 查询与 mesh 端到端 MAC **归 V2**（todo P2-7 裁决，见 [mesh-advanced-security.md](mesh-advanced-security.md)）；
   5. 平台打包：systemd/launchd/Windows Service/OpenWrt；移动端 FFI 骨架。
 - **退出标准**：游戏 profile 下链路切换由 SLO 打分驱动且有切换原因指标；三平台（Linux/macOS/Windows）出二进制产物；OpenWrt 出 musl 包。
 

@@ -166,7 +166,7 @@ pub trait UdpRelay: Send {
 
 ### 3.0 通用机制
 
-`seep-protocols::outbound` 新增 `udp.rs` 汇集四个 `EgressUdpConnector` 实现；构建期（`RuntimeBuilder`/seepd 启动）扫描 `routing` 可达出站类型：UDP 流量被路由到 **trojan/vless/socks5/http** 等无 UDP 能力类型时，**启动即报错并列出冲突节点名**（对齐 todo 验收"不支持的出站类型在构建期明确报错"）——不采用运行期静默丢包。现有 hy2/wg 出站已有 `TargetProto` 分派骨架（`Tcp => {}` + 兜底报错），UDP 分支直接落入同一 match。
+`seep-protocols::outbound` 增 UDP-capable 连接器（`DirectUdpConnector` 在 `seep_core::udp::relay`，`ShadowsocksUdpConnector` 在 `outbound/shadowsocks.rs`，`WireguardUdpConnector` 在 `outbound/wireguard.rs`；hy2 归 V2）；构建期（`RuntimeBuilder`/seepd 启动）扫描 `routing` 可达出站类型：UDP 流量被路由到 **trojan/vless/socks5/http** 等无 UDP 能力类型时，**启动即报错并列出冲突节点名**（对齐 todo 验收"不支持的出站类型在构建期明确报错"）——不采用运行期静默丢包。现有 hy2/wg 出站已有 `TargetProto` 分派骨架（`Tcp => {}` + 兜底报错），UDP 分支直接落入同一 match。
 
 ### 3.1 direct（`outbound/direct.rs`）
 
@@ -319,7 +319,7 @@ seep_udp_relay_handshake_errors_total   # mesh UDP 面（预留）
 
 > 落地指标名以 [udp-observability.md](udp-observability.md) §2.4（落地定稿）与 `apps/seepd/src/control_plane.rs` 渲染为准。
 
-`/flows` 控制面接口同步区分 TCP/UDP 方向计数（现有累计流量结构加 proto 维度）。
+`/flows` 控制面接口保留 TCP 方向计数；**UDP 面不并入 `/flows`**（UDP 从不进 `FlowOutputRouter`，故无 proto 维度——UDP 经 `/udp/stats` 与 `seep_udp_*` 指标族观测，见 [udp-observability.md](udp-observability.md) §2.6；`seepctl stats` 尾部携带 UDP 段）。
 
 ### 5.4 与 TCP 面共存
 
