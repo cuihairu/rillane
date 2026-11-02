@@ -576,16 +576,23 @@ impl TransportPool {
         if self.policy.low_watermark == 0 {
             return;
         }
-        let should = {
+        // inflight_refill 是防连接风暴的并发门：判断与登记须在同一锁下原子
+        // 完成，否则并发 release 各自见满余量都补拨，击穿每键上限（此前只
+        // 递减未递增，门失效）。spawn_fill 收尾处对称递减归还名额。
+        let should_spawn = {
             let mut keys = self.keys.lock().expect("pool keys lock");
             let st = keys.entry(key.clone()).or_default();
             let headroom = self
                 .policy
                 .max_idle_per_key
                 .saturating_sub(st.idle.len() + st.inflight_refill);
-            st.idle.len() < self.policy.low_watermark && headroom > 0
+            let should = st.idle.len() < self.policy.low_watermark && headroom > 0;
+            if should {
+                st.inflight_refill += 1;
+            }
+            should
         };
-        if should {
+        if should_spawn {
             self.spawn_fill(key.clone(), DialOrigin::Refill);
         }
     }
