@@ -964,19 +964,30 @@ pub async fn spawn_health_checker(registry: Arc<MeshRegistry>, ttl: Duration) {
         };
 
         if !stale_ids.is_empty() {
-            warn!(target: "seep::mesh", stale = ?stale_ids, "节点超时，标记为离线");
-
-            // 标记为离线并重建拓扑
+            // 标记为离线（写锁下复检：快照释放读锁后可能有心跳刷新
+            // last_seen，无条件标记会误杀刚续期的节点，致拓扑/路由抖动）
+            let mut marked = 0;
             {
                 let mut nodes = registry.nodes.write().expect("mesh registry poisoned");
                 for id in &stale_ids {
                     if let Some(record) = nodes.get_mut(id) {
-                        record.online = false;
+                        if record.online && record.last_seen.elapsed() >= ttl {
+                            record.online = false;
+                            marked += 1;
+                        }
                     }
                 }
             }
 
-            registry.rebuild_topology();
+            if marked > 0 {
+                warn!(
+                    target: "seep::mesh",
+                    stale = ?stale_ids,
+                    marked = marked,
+                    "节点超时，标记为离线"
+                );
+                registry.rebuild_topology();
+            }
         }
     }
 }
