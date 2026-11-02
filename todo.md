@@ -210,3 +210,40 @@ P3（收尾）：
 | P3 | 5+1 | S4 收尾 | 6/6（P3-1 文档对齐、VMess 出站 2026-10-02、P3-2 插件、P3-3 平台打包、P3-4 移动端 FFI、P3-5 零拷贝（范围）） |
 
 已完成底座（S0）条目见上文归档清单；原 19 条清单中 10 项核实为真实完成、3 项勘误重开、其余并入 P0–P3 对应条目。
+
+---
+
+## 审核发现（16c7c13a5de5037c7dfae22026b68fbc478afb4a..HEAD；#1-#6 已随本批修复，#7 部分覆盖）
+
+- [x] 审核发现：`load_from_disk` 将磁盘条目插回内存缓存（`cache.insert`）未更新 `current_size`——`get()` 修复后该路径由自锁死锁变为可达，但 `current_size` 漏计使 `set_with_ttl` 的容量上限（`*current_size + content_size > max_size_bytes`，cache.rs:198）被削弱，热盘加载后实际占用可超上限（cache.rs:558）。
+- [x] 审核发现：flow miss（并发 `forget_flow` 拆除）时本包被静默丢弃（mesh_transport.rs:1905-1906），但 `forwarded_up` 仍无条件 +1（mesh_transport.rs:1909），转发成功计数被抬高，且与 send 失败返回 Err 不计数的路径不一致。
+- [x] 审核发现：`host_has_injection_chars` 仅拦截 CR/LF/控制字符/DEL（b<0x20 或 b==0x7F），允许空格(0x20)与 authority 元字符 `@`/`/`/`?`/`#`——空格产生畸形 CONNECT 请求行，`@` 可被上游按 `userinfo@host` 解析致目标混淆（请求走私/SSRF 变体），作为出口"最后防线"不完整（seep-protocols/src/lib.rs:44）。
+- [x] 审核发现：ReplayWindow 段首注释仍述旧语义"1..=64 前进接受（越 64 位窗历史全丢）"，与新实现（1..=63 滑窗、≥64 跳变重置 bits=0）不符，属文档漂移易误导后续维护（mesh_transport.rs:757）。
+- [x] 审核发现：订阅内容超限经 `bail!`（fetcher.rs:267/277）抛出后被 `fetch()`（fetcher.rs:144）视为可重试错误，对持续返回超大/分块超限端点会重复下载（chunked 路径每次至多 50MiB）`max_retries` 次；宜将终态错误与瞬时错误分类。
+- [x] 审核发现：`merge_subscription_config` 仅语句级持 `current_config` 写锁克隆（hot_reload.rs:565-566）、末段重取写锁写回（hot_reload.rs:616），中途 `fs::write` await 让锁——若与 `apply_config`（hot_reload.rs:461）并发会丢失其更新（lost-update）；现调用方串行，属潜在竞态。
+- [ ] 审核发现：测试缺口——本区间多项 P1/正确性修复无回归测试：pool.rs `maybe_refill` inflight 并发门（pool.rs:579-597，pool.rs 全文件 0 测试）；seep-mesh 健康检查写锁复检（seep-mesh/src/lib.rs:982-990）；chain.rs `handle_chain_failure` 分片守卫释放（chain.rs:860-890）；http.rs 出口注入守卫（http.rs:119/164，仅 socks5 入口被覆盖）；fetcher.rs 分块超限与非 UTF-8 拒绝（fetcher.rs:277/279）；mesh_transport.rs flow miss 丢弃路径（mesh_transport.rs:1905-1906）。
+
+---
+
+## 功能差距分析（2026-11-02，对照 sing-box/mihomo/xray-core）
+
+> 完整报告：[docs/gap-analysis-2026-11-02.md](docs/gap-analysis-2026-11-02.md)。只审不改；未触碰工作树既有未提交改动。
+
+**核心结论**：底座完成度高，差距集中在四块——① 路由规则引擎（无目的 IP-CIDR、无 GeoIP/GeoSite 数据库、无 rule-set、无 OR/NOT、无嗅探）；② QUIC 生态（tuic/REALITY/XTLS-Vision/hy2 UDP 全缺）；③ 服务端入站协议为零；④ 透明代理仅 TUN(Linux)（缺 redir/tproxy、macOS/Windows TUN）。seep 独有优势：mesh mTLS 多跳+SLO 打分、场景 profile、WASM 插件、移动端 FFI。
+
+建议优先级（新条目，未编号入现有 P 序列）：
+- [ ] **G0-1 目的 IP-CIDR 匹配器**——现 `MatchCondition::Network` 绑定 `client.cidr` 源注解（seep-routing/src/lib.rs:706），目标网段分流表达不了；三大项目最基本匹配器。
+- [ ] **G0-2 GeoIP/GeoSite 数据库接入 + domain full/regex + OR/NOT 逻辑规则**——替换 `geoip.country` 注解等价物（无数据库）。
+- [ ] **G0-3 协议嗅探层（sniff）**——TLS SNI/HTTP Host/QUIC SNI 覆写路由域名；TUN 场景 IP 直连流量无它即无法按域名分流。
+- [ ] **G0-4 UDP over vmess/vless/trojan**——主流加密通道均不载 UDP（构建期报错），游戏加速场景非 direct/ss/wg 出口即退化。
+- [ ] **G0-5 reject/block 目标**——极小成本，断连/广告拦截基本表达。
+- [ ] **G1-6 REALITY + XTLS-Vision 出站**——主流机场节点形态，现订阅含 reality-opts/flow 即构建失败；可复用 VMess xray 向量互操作经验。
+- [ ] **G1-7 hysteria2 UDP 面（quinn 载具）+ salamander/端口跳跃**——现归 V2，游戏定位下建议提前。
+- [ ] **G1-8 DNS 加密上游 DoH/DoT**——现仅裸 UDP 53；cross_check 在深水区才可靠。
+- [ ] **G1-9 rule-set 远程规则提供者 + 订阅级 url-test 常驻测速**。
+- [ ] **G1-10 fake-ip + DNS 回填路由**（配合 G0-3）。
+- [ ] **G2-11 redir/tproxy 透明代理入站**（Linux）。
+- [ ] **G2-12 服务端入站协议**（trojan/vless/ss 至少一种）——若坚持纯客户端内核定位则显式决策不做并登记。
+- [ ] **G2-13 tuic/anytls/shadowtls 出站**。
+- [ ] **G2-14 Clash API 兼容层（只读子集 + 面板直连）**——现控制面不兼容 /proxies /connections /traffic，metacubexd/yacd 无法直连。
+- [ ] **G2-15 httpupgrade/xhttp 传输；G3-16 macOS/Windows TUN + auto_route 全局接管；ICMP 代理、UoT、hosts 映射**。
