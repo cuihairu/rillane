@@ -139,8 +139,9 @@
 ## 2026-11-01 代码深审发现（P2/P3，源自 docs/review/2026-11-01-code-review.md）
 
 P2（下一步修）：
-- [ ] **订阅缓存 get/cleanup 持 memory_cache 写锁跨同步磁盘 IO**——`cache.rs:150-176`（get→load_from_disk 读盘）、`:360/:411/:470`（cleanup→fs::remove_file）。异步上下文阻塞执行线程并串行化全部缓存操作。
+- [ ] **订阅缓存 cleanup 持 memory_cache 写锁跨同步磁盘 IO**——`:360/:411/:470`（cleanup→fs::remove_file）。异步上下文阻塞执行线程并串行化全部缓存操作。
   evidence：`cache.rs:150` `memory_cache.write()` 持锁调 `load_from_disk`（fs::read_to_string）。
+  已修一半（2026-11-02 `bec9785`）：get() 持锁跨 load_from_disk 实为**自锁死锁**（:557 重取同锁，RwLock 不可重入；重启带热盘缓存/条目过期两路径必触），非仅阻塞——守卫先行释放再交 load_from_disk，2 回归测试；本条剩余面仅 cleanup 同步 IO 一项。
 - [ ] **配置热交换非原子（check-then-act）**——`runtime_builder.rs:1120-1146` / `update_config:1384-1408`：读 config → 长 await（egress 构建拨号）→ 四次独立写（config/router/flow_outputs/egress_connectors）。窗口内丢失更新 + 路由表引用未就绪 egress 名。
   evidence：`runtime_builder.rs:1120` `config.read().clone()` → `build_egress_outputs` await → `*config.write()=merged` + `router.reload` + 两个独立 write。
 - [ ] **mesh TLS 重载在 write 锁下做同步文件 IO**——`mesh_transport.rs:2136-2153` `maybe_reload`：`inner.write().await` 下 `MeshTlsInner::load` 读 CA/私钥/吊销列表；慢盘阻塞所有 mesh 握手快路径。generation 双检正确，仅 IO-under-lock 问题。
@@ -174,6 +175,28 @@ P3（收尾）：
 - [ ] **不变式 expect（结构上恒真，重构漂移即启动 panic）**——`tun_ingress.rs:214`（flow_router 未注入）/`runtime_builder.rs:479`（tun_enabled 蕴含 network_config）。
 - [ ] **插件/FFI mutex poison 级联**——`plugins/plugin.rs:133`（std Mutex 跨 wasm 调用，宿主 panic 即毒化后续全插件流）/`ffi/lib.rs:302,328`（tun_thread lock）。
 - [ ] **unmaintained 依赖**——`serde_yaml`/`unsafe-libyaml`（RUSTSEC-2024-0449）、`basic-toml`（RUSTSEC-2026-0374）：cargo audit 信息级；升级候选。
+
+## 2026-11-02 代码深审补充（P2/P3，源自 docs/review/2026-11-01-code-review.md 第二轮补充节）
+
+P2（下一步修）：
+- [ ] **TUN UDP 下行只续 last_active 不续 expiry**——`tun_ingress.rs:812-813`：上行（:432-434）续两者、下行续一者，清扫（:714）按 `expiry<=now` 驱逐。纯下行推送流（客户端 udp_idle_secs 内无上行）被中途逐出。
+  evidence：`tun_ingress.rs:812` `e.last_active = now`（无 `e.expiry` 续期）；`:714` `.filter(|e| e.expiry <= now)`。
+- [ ] **scan_udp_capability BFS 无 visited 集（组环挂起 build）**——`runtime_builder.rs:2266-2280`：组环（g1→g2→g1）队列永不空，`udp.enabled` 时 build() 无限挂起；`RoutingConfig::validate`（seep-config:1489）仅查 SLO 无环守卫。
+  evidence：`runtime_builder.rs:2266` `while let Some((name, source)) = queue.pop()` 无 visited；`continue` 在 `reachable.entry` 前。
+- [ ] **chain 故障转移复用已消费 flow.io（协议流损坏）**——`runtime_builder.rs:1919/2025`：首 `dial_and_tunnel`（mesh_transport.rs:1569 copy_bidirectional 读 io）中途失败即部分消费；重试拼接尾流+新信封。正确恢复=中止应用连接（RST）非重接。
+  evidence：`runtime_builder.rs:2025` `&mut *flow.io` 与 :1919 同一流复用。
+- [ ] **串行 UDP serve 循环内联 lookup_host（头阻塞整面）**——`mesh_transport.rs:1852`：单任务无 per-packet spawn（§13-5），一个不可解析 `target_host`（线上可控）阻塞所有流。
+  evidence：`mesh_transport.rs:1852` `lookup_host(...).await?` 在 serve 循环内。
+- [ ] **瞬时 recv_from 错误终止 UDP serve 任务**——`mesh_transport.rs:1946`：`Ok(Err(e))=>return Err`（ENOBUFS/EINTR 瞬时亦毙）；应 continue 或按瞬时/致命分类。
+- [ ] **瞬时 accept 错误终止 TCP mesh 监听任务**——`mesh_transport.rs:1330`：`listener.accept().await?`（ECONNABORTED/EMFILE/EINTR 瞬时亦毙）。
+
+P3（收尾）：
+- [ ] **active_chains.len()-1 下溢**——`chain.rs:907`：`drop(chain)`（:901）后读 len；并发 `terminate_chain`（:924 remove）移除 → 0-1 下溢（release 裹 usize::MAX 指标污染）；宜 `saturating_sub(1)` 或由 terminate 自减。
+- [ ] **mesh UDP 下行序号归零瞬态丢包**——`mesh_transport.rs:1877`：exit 建流归零下行序号而客户端窗口仍在（last>63）→ 序号 0..36 判回退拒、≥37 自愈；瞬态 ~37 包突发丢包（非永久拒收）。
+- [ ] **缓存满插入 O(n) 驱逐扫描**——`mesh_transport.rs:868-876`：满（65536）时每次插入全 `min_by_key` 扫描；文档化权衡（"O(n) 无新依赖"），需认证 peer + 6.5 万流触发。
+- [ ] **订阅转换配置硬编码 admin_token="seep"**——`clash.rs:768-771`/`seep_dsl.rs:413-418`：回环绑定约束暴露面；建议省略或随机生成。
+- [ ] **shaping 抖动 jitter_ms+1 裹 0（% 0 panic）**——`shaping.rs:45`：jitter_ms=interval_ms=u64::MAX 时裹 0；validate（seep-config:908-918）无上界；`wrapping_add(1).max(1)` 或上界校验。
+- [ ] **save_to_disk 固定 {hash}.tmp 路径（并发交错写）**——`cache.rs:588-601`：并发 `set()` 同键交错写临时文件 → 损坏缓存条目（重取可恢复）；唯一临时名或锁下写。
 
 ---
 

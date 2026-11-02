@@ -19,6 +19,8 @@
 
 **发现 36 · 已修 8 · 剩余 29（todo.md「2026-11-01 代码深审发现」节）。**
 
+> 第二轮补充（2026-11-02）再增 15 项（P1×3 已修 / P2×6 / P3×6），累计 **51 · 已修 11 · 剩余 40**——见文末「第二轮补充」节。
+
 ## P0/P1 修复清单（一问题一 commit，测试绿）
 
 | # | 严重度 | 问题 | file:line 证据 | commit |
@@ -91,3 +93,56 @@
 - `362bb75` fix(runtime): write back merged subscription config and dedup rules
 
 （另：docs 审计任务 `f0db1b6`/`9b564bf`/`a130556` 属前段文档面，不重复计入。）
+
+---
+
+## 第二轮补充（2026-11-02，独立会话语料补齐）
+
+首轮报告（36 项）由并行会话语料产出；本段由另一会话语料补充其漏检面，逐条经复核（先验证后报告）。
+**新增 15 项：P1×3（已修）/ P2×6（记 todo）/ P3×6（记 todo）。累计 51 项 · 已修 11 · 剩余 40。**
+
+### 新增 P1（本轮已修，一问题一 commit）
+
+| # | 问题 | file:line 证据 | 严重度定级 | commit |
+|---|---|---|---|---|
+| 9 | UDP mesh 出口 `exit_uplink` 两次 `flows.get` 间被下行 task 并发 `forget_flow`（独立 worker 真并行），`.expect("need_create=false 即 flow 必在表")` panic 杀掉整条 `serve_udp`——全节点 UDP 面停摆。客户端 ≤30s/64 包重发 FULL（udp_chain.rs:26-29）可重建，改为 miss 丢弃本包 | `mesh_transport.rs:1898-1906`（旧 :1904 expect） | P1（远程可触、面级停摆） | `b8b7636` |
+| 10 | 订阅缓存 `get()` 持 `memory_cache` 写锁跨 `load_from_disk`（:557 重取同锁，std::sync::RwLock 不可重入）→ 重启带热盘缓存 / 内存条目过期两路径**必自锁死锁**。首轮 P2#1 判为「持锁跨同步磁盘 IO（阻塞）」属实但低估——实为死锁；`set_with_ttl`（7e57710）已修但漏 `get()` 路径。修复：守卫先行释放再交 `load_from_disk`，2 个回归测试 | `cache.rs:149-176`（load_from_disk :557） | P1（正常重启路径必触） | `bec9785` |
+| 11 | SOCKS5 域名字符串未校验（CR/LF/控制字符直入 `FlowTarget.host`）；HTTP CONNECT 出口把 host 内插进请求行与 `Host` 头 → 客户端可向上游代理注入任意头（请求走私/头伪造）。修复：crate 辅助 `host_has_injection_chars`（空/控制字符），SOCKS5 入口（第一道闸）+ HTTP CONNECT 出口（最后防线）双闸，2 个回归测试 | `socks5.rs:291` + `http.rs:81`（出口 :122/:166） | P1（远程可利用安全漏洞） | `fefa6d5` |
+
+（注：`bec9785` 同时使首轮 P2#1 的 get() 死锁半落地——该条目剩余面仅 cleanup→`fs::remove_file` 持锁同步 IO 一项，仍记 todo。）
+
+### 新增 P2（记 todo，本轮未改）
+
+| 问题 | file:line 证据 |
+|---|---|
+| TUN UDP 下行只续 `last_active` 不续 `expiry`——上行（:432-434）续两者、下行（:812-813）续一者，清扫（:714）按 `expiry<=now` 驱逐。纯下行推送流（客户端 udp_idle_secs 内无上行）被中途逐出 | `tun_ingress.rs:812-813` |
+| `scan_udp_capability` BFS 无 visited 集，组环（g1→g2→g1）队列永不空 → `build()` 无限挂起（udp.enabled 时）；`RoutingConfig::validate`（:1489）仅查 SLO 无环守卫 | `runtime_builder.rs:2266-2280` |
+| chain 故障转移复用已消费 `flow.io`：首 `dial_and_tunnel`（mesh_transport.rs:1569 `copy_bidirectional` 读 io）中途失败即部分消费；重试（:2025）拼接尾流+新信封 → 协议流损坏。正确恢复=中止应用连接 | `runtime_builder.rs:1919/2025` |
+| 串行 UDP serve 循环内联 `lookup_host`（单任务无 per-packet spawn，§13-5）——一个不可解析 `target_host`（线上可控）阻塞整面所有流 | `mesh_transport.rs:1852` |
+| 任意 `recv_from` 错误（ENOBUFS/EINTR 瞬时）经 `Ok(Err(e))=>return Err` 终止 UDP serve 任务 | `mesh_transport.rs:1946` |
+| 瞬时 `accept` 错误（ECONNABORTED/EMFILE/EINTR）经 `?` 终止 TCP mesh 监听任务 | `mesh_transport.rs:1330` |
+
+### 新增 P3（记 todo，本轮未改）
+
+| 问题 | file:line 证据 |
+|---|---|
+| `stats.active_chains = active_chains.len() - 1` 在 `drop(chain)` 后；并发 `terminate_chain` 移除 → 0-1 下溢（release 裹成 usize::MAX 指标污染） | `chain.rs:907` |
+| exit 建流归零下行序号而客户端窗口仍在（last>63）→ 序号 0..36 判回退拒、≥37 自愈。**瞬态 ~37 包突发丢包，非「永久静默拒收」**（首轮转述修正） | `mesh_transport.rs:1877` |
+| 缓存满（65536）时每次插入全 O(n) `min_by_key` 驱逐扫描；文档化权衡（"O(n) 无新依赖"），需认证 peer + 6.5 万流触发 | `mesh_transport.rs:868-876` |
+| 订阅转换配置硬编码 `admin_token: "seep"`（回环绑定约束暴露面） | `clash.rs:768-771` / `seep_dsl.rs:413-418` |
+| shaping 抖动 `jitter_ms + 1` 在 jitter_ms=interval_ms=u64::MAX 时裹 0 → `% 0` panic；validate 无上界 | `shaping.rs:45` / `seep-config:908-918` |
+| `save_to_disk` 固定 `{hash}.tmp` 路径，并发 `set()` 同键交错写 → 损坏缓存条目（重取可恢复） | `cache.rs:588-601` |
+
+（首轮 P3 已含 `trojan.rs:99` `as u8` 截断、padding range span 下溢、loop 任务无 stop、lock-poison 级联、非常量时间比对、FFI 裸指针——本会话复核一致，不重复列。）
+
+### 复核修正 / 排除项
+
+- `interval(ttl/4)` 零周期 panic：ttl/4==0 仅 ttl<4ns，YAML Duration ≥1ms → 不可达，**排除**。
+- mesh UDP 下行序号重启「永久拒收」：经 `ReplayWindow::check_and_advance` 逐档推演为**瞬态**（回退>63 拒、63 内按历史位收、追平后前进），降级 P3 并修正转述。
+- `seep-routing` 一致哈希 `% len` 与空表守卫、`seep-telemetry/plugins/config` 生产路径（unwrap 均测试面）、`seepd/main.rs` `?` 传播、`udp_associate.rs`（tests 面）——**净**。
+
+### 本会话复核净检面（首轮未覆盖或补强）
+
+- `seep-protocols` outbound/inbound 全量、`seep-core/udp`、`seep-subscription`（fetcher 50MiB 上限+重定向 10 界、clash `parse_ports` 4096 上限、converter/seep_dsl 无界分配）——净。
+- `shadowsocks` SIP003：`Command::new(plugin)` + `args(opts.split_whitespace())` 为 argv 直传，**无 shell 注入**（复核确认）。
+- `inbound/http.rs` httparse 按 CRLF 切分，authority 结构上不能携带 CRLF——净（与 SOCKS5 域名字符串不同源）。
