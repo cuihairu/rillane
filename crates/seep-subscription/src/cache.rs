@@ -186,29 +186,47 @@ impl SubscriptionCache {
         let content_size = content.len() as u64;
         let entry = CacheEntry::new(content.to_string(), ttl);
 
-        // 检查缓存容量限制
-        {
+        // 容量检查：current_size 读锁在调用 cleanup_* 前必须释放。若持锁跨
+        // cleanup（其内部锁序 memory_cache→current_size），与下方插入路径的
+        // memory_cache→current_size 顺序成环，构成 ABBA 死锁。统一锁序为
+        // memory_cache→current_size，任何 cleanup 调用都不在持锁下进行。
+        let over_capacity = {
             let current_size = self
                 .current_size
-                .write()
+                .read()
                 .expect("current_size lock poisoned");
-            if *current_size + content_size > self.config.max_size_bytes {
-                // 清理过期条目
-                self.cleanup_expired()?;
+            *current_size + content_size > self.config.max_size_bytes
+        };
+        if over_capacity {
+            // 清理过期条目
+            self.cleanup_expired()?;
 
-                // 如果仍然超限，按 LRU 清理
-                if *current_size + content_size > self.config.max_size_bytes {
-                    self.cleanup_lru(content_size)?;
-                }
+            // 如果仍然超限，按 LRU 清理
+            let still_over = {
+                let current_size = self
+                    .current_size
+                    .read()
+                    .expect("current_size lock poisoned");
+                *current_size + content_size > self.config.max_size_bytes
+            };
+            if still_over {
+                self.cleanup_lru(content_size)?;
             }
         }
 
-        // 检查条目数量限制
+        // 条目数量检查：cleanup_lru_by_count 自取 memory_cache 锁，不可在已
+        // 持锁下调用（std::sync::RwLock 不可重入，会自锁），故先判后清再插。
+        let at_count_limit = {
+            let cache = self.memory_cache.read().expect("cache lock poisoned");
+            cache.len() >= self.config.max_entries
+        };
+        if at_count_limit {
+            self.cleanup_lru_by_count(1)?;
+        }
+
+        // 原子插入 + 大小更新（锁序 memory_cache → current_size，与 cleanup_* 一致）
         {
             let mut cache = self.memory_cache.write().expect("cache lock poisoned");
-            if cache.len() >= self.config.max_entries {
-                self.cleanup_lru_by_count(1)?;
-            }
 
             // 更新大小计算
             if let Some(old_entry) = cache.get(key) {
@@ -648,5 +666,80 @@ impl CacheStats {
 impl Default for SubscriptionCache {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn temp_cache_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "seep-cache-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 在独立线程跑闭包并限时回收，防锁死 bug 让测试无限挂起。
+    fn run_with_timeout<T: Send + 'static>(
+        f: impl FnOnce() -> T + Send + 'static,
+        ms: u64,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_millis(ms))
+            .unwrap_or_else(|_| panic!("缓存操作超时（疑似锁死）"))
+    }
+
+    /// 数量上限路径：曾因 memory_cache 写锁自锁（cleanup_lru_by_count 在已持
+    /// 锁下再取同锁，std::sync::RwLock 不可重入）而死锁，插入一条即触发。
+    #[test]
+    fn set_at_count_limit_does_not_deadlock() {
+        let dir = temp_cache_dir("count-limit");
+        let cache = Arc::new(SubscriptionCache::with_config(CacheConfig {
+            cache_dir: dir.clone(),
+            max_entries: 2,
+            max_size_bytes: 10 * 1024 * 1024,
+            ..Default::default()
+        }));
+        cache.set("a", "11111").unwrap();
+        cache.set("b", "22222").unwrap();
+        let c = cache.clone();
+        run_with_timeout(move || c.set("c", "33333").unwrap(), 5000);
+        let stats = cache.get_stats();
+        assert!(stats.total_entries <= 3, "条目数异常: {}", stats.total_entries);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 容量上限路径：曾因持 current_size 写锁跨 cleanup（其内部取
+    /// memory_cache 锁）与插入路径锁序成环（ABBA）而死锁，多次超限插入触发。
+    #[test]
+    fn set_over_capacity_does_not_deadlock() {
+        let dir = temp_cache_dir("capacity");
+        let cache = Arc::new(SubscriptionCache::with_config(CacheConfig {
+            cache_dir: dir.clone(),
+            max_entries: 100,
+            max_size_bytes: 5,
+            ..Default::default()
+        }));
+        let c = cache.clone();
+        run_with_timeout(
+            move || {
+                c.set("a", "12345").unwrap();
+                c.set("b", "67890").unwrap();
+                c.set("c", "abcde").unwrap();
+                c.set("d", "fghij").unwrap();
+            },
+            5000,
+        );
+        let stats = cache.get_stats();
+        assert!(stats.total_entries <= 4, "条目数异常: {}", stats.total_entries);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
