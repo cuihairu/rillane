@@ -587,9 +587,17 @@ impl HotReloadManager {
             }
         }
 
-        // 合并路由规则
+        // 合并路由规则（与 egress 同语义按名去重：订阅刷新重复合并同一
+        // 订阅时不得累积重复规则；未去重 + 未写回叠加会无界增长）
         for rule in &subscription_config.routing.rules {
-            current_config.routing.rules.push(rule.clone());
+            if !current_config
+                .routing
+                .rules
+                .iter()
+                .any(|r| r.name == rule.name)
+            {
+                current_config.routing.rules.push(rule.clone());
+            }
         }
 
         // 更新路由引擎
@@ -601,6 +609,11 @@ impl HotReloadManager {
         fs::write(&self.config_path, config_content)
             .await
             .with_context(|| format!("无法写入配置文件: {}", self.config_path.display()))?;
+
+        // 写回内存当前配置：此前遗漏，router/磁盘已用合并结果而 current_config
+        // 仍旧。后续 merge 基于陈旧副本——egress 去重判不中、routing.rules 又
+        // 无条件追加，每次订阅刷新都会重复累积节点与规则，配置无界增长。
+        *self.current_config.write().expect("config lock poisoned") = current_config;
 
         Ok(())
     }
@@ -621,5 +634,135 @@ impl Default for HotReloadManager {
     fn default() -> Self {
         // 这里提供一个简单的默认实现，实际使用中需要提供必需的参数
         panic!("HotReloadManager::default() 不可用，请使用 new() 方法")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn base_config() -> SeepConfig {
+        SeepConfig::from_str(
+            r#"
+control:
+  api_bind: 127.0.0.1:0
+  uds_path: null
+  admin_token: null
+telemetry:
+  log_level: info
+  enable_metrics: false
+  enable_tracing: false
+ingress: []
+egress:
+  - name: direct-main
+    type: direct
+routing:
+  default_node: direct-main
+  groups: []
+  rules: []
+"#,
+            Some("yaml"),
+        )
+        .expect("base config parse")
+    }
+
+    fn subscription_config() -> SeepConfig {
+        SeepConfig::from_str(
+            r#"
+control:
+  api_bind: 127.0.0.1:0
+  uds_path: null
+  admin_token: null
+telemetry:
+  log_level: info
+  enable_metrics: false
+  enable_tracing: false
+ingress: []
+egress:
+  - name: sub-node-1
+    type: direct
+routing:
+  default_node: direct-main
+  groups: []
+  rules:
+    - name: sub-rule-1
+      matches: []
+      target: direct-main
+"#,
+            Some("yaml"),
+        )
+        .expect("subscription config parse")
+    }
+
+    fn temp_config_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "seep-hot-reload-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("seep.yaml")
+    }
+
+    /// merge_subscription_config 写回与规则去重回归：此前不写回 current_config
+    /// （router/磁盘已合并而内存仍旧），陈旧副本叠加 rules 无条件追加，每次
+    /// 订阅刷新重复累积节点与规则，配置无界增长。连续两次合并同一订阅后
+    /// 应各恰一份。
+    #[tokio::test]
+    async fn merge_subscription_config_is_idempotent() {
+        let path = temp_config_path("writeback");
+        let router = Arc::new(RoutingEngine::new(base_config().routing.clone()));
+        let mgr = HotReloadManager::new(path.clone(), base_config(), router).unwrap();
+
+        let sub = subscription_config();
+        mgr.merge_subscription_config(&sub).await.unwrap();
+        mgr.merge_subscription_config(&sub).await.unwrap();
+
+        let merged = mgr
+            .current_config
+            .read()
+            .expect("config lock poisoned")
+            .clone();
+        let sub_egress = merged
+            .egress
+            .iter()
+            .filter(|e| e.name == "sub-node-1")
+            .count();
+        let sub_rules = merged
+            .routing
+            .rules
+            .iter()
+            .filter(|r| r.name == "sub-rule-1")
+            .count();
+        assert_eq!(sub_egress, 1, "订阅出口节点不应重复累积");
+        assert_eq!(sub_rules, 1, "订阅路由规则不应重复累积");
+
+        // 磁盘文件应与内存一致（同样不重复）
+        let on_disk = SeepConfig::load_from_path(&path).unwrap();
+        assert_eq!(
+            on_disk.egress.iter().filter(|e| e.name == "sub-node-1").count(),
+            1,
+            "磁盘出口节点不应重复累积"
+        );
+        assert_eq!(
+            on_disk
+                .routing
+                .rules
+                .iter()
+                .filter(|r| r.name == "sub-rule-1")
+                .count(),
+            1,
+            "磁盘路由规则不应重复累积"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 配置监听间隔等字段可正常读（冒烟）
+    #[test]
+    fn hot_reload_config_defaults_sane() {
+        let cfg = HotReloadConfig::default();
+        assert_eq!(cfg.subscription_refresh_interval, Duration::from_secs(3600));
     }
 }
