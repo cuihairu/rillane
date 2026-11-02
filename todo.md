@@ -142,8 +142,8 @@ P2（下一步修）：
 - [ ] **订阅缓存 cleanup 持 memory_cache 写锁跨同步磁盘 IO**——`:360/:411/:470`（cleanup→fs::remove_file）。异步上下文阻塞执行线程并串行化全部缓存操作。
   evidence：`cache.rs:150` `memory_cache.write()` 持锁调 `load_from_disk`（fs::read_to_string）。
   已修一半（2026-11-02 `bec9785`）：get() 持锁跨 load_from_disk 实为**自锁死锁**（:557 重取同锁，RwLock 不可重入；重启带热盘缓存/条目过期两路径必触），非仅阻塞——守卫先行释放再交 load_from_disk，2 回归测试；本条剩余面仅 cleanup 同步 IO 一项。
-- [ ] **配置热交换非原子（check-then-act）**——`runtime_builder.rs:1120-1146` / `update_config:1384-1408`：读 config → 长 await（egress 构建拨号）→ 四次独立写（config/router/flow_outputs/egress_connectors）。窗口内丢失更新 + 路由表引用未就绪 egress 名。
-  evidence：`runtime_builder.rs:1120` `config.read().clone()` → `build_egress_outputs` await → `*config.write()=merged` + `router.reload` + 两个独立 write。
+- [x] **配置热交换非原子（check-then-act）**——`runtime_builder.rs:1120-1146` / `update_config:1384-1408`：读 config → 长 await（egress 构建拨号）→ 四次独立写（config/router/flow_outputs/egress_connectors）。窗口内丢失更新 + 路由表引用未就绪 egress 名。
+  evidence：2026-11-03 修复——新增 `Runtime.config_apply_lock`（tokio Mutex，三方共用：update_config / merge_config_delta / 订阅刷新循环），覆盖「读 config→构建 egress→落四态」全程；写序改为 flow_outputs→egress_connectors→router.reload→config（先装 egress 面再 reload 路由，消除「规则引用未就绪名」窗口）。回归：`update_config_waits_for_config_apply_lock` + `concurrent_merge_config_delta_keeps_both_deltas`。
 - [ ] **mesh TLS 重载在 write 锁下做同步文件 IO**——`mesh_transport.rs:2136-2153` `maybe_reload`：`inner.write().await` 下 `MeshTlsInner::load` 读 CA/私钥/吊销列表；慢盘阻塞所有 mesh 握手快路径。generation 双检正确，仅 IO-under-lock 问题。
   evidence：`mesh_transport.rs` `let mut guard = self.inner.write().await;` 后同步 fs 读。
 - [ ] **DNS 解析缓存未命中 stampede**——`dns_engine.rs:695-738`：N 并发冷名全部 miss 全部上游 `query_group`/`cross_check` 再各自插入，无 singleflight；突发时击穿上游解析器。

@@ -570,6 +570,7 @@ impl RuntimeBuilder {
             event_tx,
             stats: Arc::new(RwLock::new(RuntimeStats::new())),
             running: Arc::new(RwLock::new(false)),
+            config_apply_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -866,6 +867,10 @@ pub struct Runtime {
     event_tx: broadcast::Sender<RuntimeEvent>,
     stats: Arc<RwLock<RuntimeStats>>,
     running: Arc<RwLock<bool>>,
+    /// P2（2026-11-03）：配置热交换串行锁。update_config / merge_config_delta /
+    /// 订阅刷新循环三方共用，覆盖「读 config → 构建 egress → 落四态」全程。
+    /// 曾为 check-then-act——并发 apply 交错即丢失更新（见 update_config 注释）。
+    config_apply_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Runtime {
@@ -1032,6 +1037,9 @@ impl Runtime {
                 // D-10：池/工厂单例句柄（订阅热更新重连装配用）
                 let transport_pool = self.transport_pool.clone();
                 let tls_factory = self.tls_factory.clone();
+                // P2（2026-11-03）：与 update_config / merge_config_delta 共用
+                // 同一把热交换串行锁（config_apply_lock）。
+                let config_apply_lock = self.config_apply_lock.clone();
                 let tx = self.event_tx.clone();
                 let running = self.running.clone();
                 let check_interval = self
@@ -1117,6 +1125,11 @@ impl Runtime {
                             };
 
                             // Merge and apply.
+                            // P2（2026-11-03）：与 update_config / merge_config_delta
+                            // 共用 config_apply_lock——曾读在锁外（config.read 在
+                            // 下方），并发 apply 交错丢失更新。锁覆盖
+                            // 读→合并→构建→落四态 全程（continue 分支随作用域放锁）。
+                            let _apply_guard = config_apply_lock.lock().await;
                             let mut merged = config.read().expect("config lock poisoned").clone();
                             let merge_stats =
                                 merge_config_delta_in_place(&mut merged, &converted.config);
@@ -1140,12 +1153,14 @@ impl Runtime {
                                 }
                             };
 
-                            *config.write().expect("config lock poisoned") = merged.clone();
-                            router.reload(merged.routing.clone());
+                            // 写序同 apply_config_inner：先装 egress 面、再 reload
+                            // 路由、最后落 config 快照（避免规则引用未就绪名）。
                             *flow_outputs.write().expect("flow_outputs lock poisoned") = outputs;
                             *egress_connectors
                                 .write()
                                 .expect("egress_connectors lock poisoned") = connectors;
+                            router.reload(merged.routing.clone());
+                            *config.write().expect("config lock poisoned") = merged.clone();
                             let _ = tx.send(RuntimeEvent::ConfigUpdated {
                                 config: Box::new(merged),
                             });
@@ -1382,6 +1397,22 @@ impl Runtime {
     }
 
     pub async fn update_config(&self, new_config: SeepConfig) -> Result<()> {
+        // P2（2026-11-03）：热交换串行化。曾为 check-then-act——读 config →
+        // 长构建 → 四次独立写；并发 apply（控制面 PUT /runtime/config 与订阅
+        // 刷新循环）交错即丢失更新，且 router.reload 先行引用尚未就绪的
+        // egress 名。全程持 config_apply_lock（三方共用），写序见
+        // apply_config_inner。
+        let _apply_guard = self.config_apply_lock.lock().await;
+        self.apply_config_inner(new_config).await
+    }
+
+    /// 应用新配置的私有实现。调用方必须已持 `config_apply_lock`。
+    ///
+    /// 写序：先装 egress 面（新 egress 名即刻可解析）→ reload 路由（新规则
+    /// 不再引用未就绪名）→ 最后落 config 快照（纯读模型，供控制面诊断）。
+    /// 原序 config→router→outputs→connectors 在 router.reload 与 outputs
+    /// 落盘之间留「规则引用未就绪 egress 名」窗口。
+    async fn apply_config_inner(&self, new_config: SeepConfig) -> Result<()> {
         // Build egress outputs/connectors before mutating runtime state.
         // D-10/§4.3：传同一池/工厂句柄重连装配（新块的池参数不热生效——
         // 烧在构造期，变更需重启；键作用域自失效覆盖 egress 集变更）。
@@ -1391,8 +1422,6 @@ impl Runtime {
             self.tls_factory.clone(),
         )?;
 
-        *self.config.write().expect("config lock poisoned") = new_config.clone();
-        self.router.reload(new_config.routing.clone());
         *self
             .flow_outputs
             .write()
@@ -1401,6 +1430,8 @@ impl Runtime {
             .egress_connectors
             .write()
             .expect("egress_connectors lock poisoned") = connectors;
+        self.router.reload(new_config.routing.clone());
+        *self.config.write().expect("config lock poisoned") = new_config.clone();
         let _ = self.event_tx.send(RuntimeEvent::ConfigUpdated {
             config: Box::new(new_config),
         });
@@ -1411,11 +1442,15 @@ impl Runtime {
     ///
     /// 当前策略为“只追加不删除”：新增 egress / group，rules 直接追加（不去重）。
     pub async fn merge_config_delta(&self, delta: &SeepConfig) -> Result<ConfigMergeStats> {
+        // P2（2026-11-03）：持 apply 锁覆盖「读当前 → 合并 → 应用」全程。
+        // 曾读在锁外——并发 merge 各读同一基态再各自 update，后者覆写前者
+        // 增量（lost update）。
+        let _apply_guard = self.config_apply_lock.lock().await;
         let mut merged = self.get_config();
 
         let stats = merge_config_delta_in_place(&mut merged, delta);
 
-        self.update_config(merged).await?;
+        self.apply_config_inner(merged).await?;
 
         Ok(stats)
     }
@@ -3597,6 +3632,177 @@ mod tests {
 
         let connectors = runtime.get_egress_connectors();
         assert_eq!(connectors.get("p1").expect("p1 connector").name(), "socks5");
+    }
+
+    /// P2（2026-11-03）回归：持 config_apply_lock 期间 update_config 必须
+    /// 等待（互斥串行化）。曾为 check-then-act，并发 apply 交错丢失更新。
+    #[tokio::test]
+    async fn update_config_waits_for_config_apply_lock() {
+        let cfg = SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![IngressDescriptor {
+                name: "in1".to_string(),
+                spec: IngressConfig::Socks5 {
+                    bind: "127.0.0.1:0".to_string(),
+                    auth: None,
+                    udp_enabled: None,
+                },
+            }],
+            egress: vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            routing: seep_config::RoutingConfig {
+                default_node: "direct".to_string(),
+                groups: vec![],
+                rules: vec![],
+            },
+            udp: seep_config::UdpConfig::default(),
+            network: None,
+            obfuscation: None,
+            profile: None,
+            performance: None,
+            egress_pool: None,
+        };
+        let runtime = Arc::new(
+            RuntimeBuilder::new(cfg.clone())
+                .with_runtime_config(RuntimeConfig {
+                    enable_hot_reload: false,
+                    ..RuntimeConfig::default()
+                })
+                .build()
+                .expect("build runtime"),
+        );
+
+        // 测试同模块可触私有字段：持锁模拟并发的另一个 apply 在临界区内。
+        let guard = runtime.config_apply_lock.lock().await;
+        let rt = runtime.clone();
+        let mut handle = tokio::spawn(async move { rt.update_config(cfg).await });
+        // 锁未放前 update_config 不得推进。
+        let still_pending = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            &mut handle,
+        )
+        .await;
+        assert!(
+            still_pending.is_err(),
+            "持 config_apply_lock 期间 update_config 必须等待"
+        );
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("释放锁后 update_config 应完成")
+            .expect("task 不应失败")
+            .expect("join 不应失败");
+    }
+
+    /// P2（2026-11-03）回归：并发 merge_config_delta 两路不相交增量都须保留。
+    /// 曾读 config 在锁外——两路并发各读同一基态，后写者覆写前者增量。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_merge_config_delta_keeps_both_deltas() {
+        let cfg = SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![IngressDescriptor {
+                name: "in1".to_string(),
+                spec: IngressConfig::Socks5 {
+                    bind: "127.0.0.1:0".to_string(),
+                    auth: None,
+                    udp_enabled: None,
+                },
+            }],
+            egress: vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            routing: seep_config::RoutingConfig {
+                default_node: "direct".to_string(),
+                groups: vec![],
+                rules: vec![],
+            },
+            udp: seep_config::UdpConfig::default(),
+            network: None,
+            obfuscation: None,
+            profile: None,
+            performance: None,
+            egress_pool: None,
+        };
+        let runtime = Arc::new(
+            RuntimeBuilder::new(cfg)
+                .with_runtime_config(RuntimeConfig {
+                    enable_hot_reload: false,
+                    ..RuntimeConfig::default()
+                })
+                .build()
+                .expect("build runtime"),
+        );
+
+        let mk_delta = |name: &str| SeepConfig {
+            control: seep_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: seep_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![],
+            egress: vec![EgressDescriptor {
+                name: name.to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            routing: seep_config::RoutingConfig {
+                default_node: "direct".to_string(),
+                groups: vec![],
+                rules: vec![],
+            },
+            udp: seep_config::UdpConfig::default(),
+            network: None,
+            obfuscation: None,
+            profile: None,
+            performance: None,
+            egress_pool: None,
+        };
+
+        let d1 = mk_delta("n1");
+        let d2 = mk_delta("n2");
+        let r1 = runtime.clone();
+        let r2 = runtime.clone();
+        let (res1, res2) = tokio::join!(
+            tokio::spawn(async move { r1.merge_config_delta(&d1).await }),
+            tokio::spawn(async move { r2.merge_config_delta(&d2).await }),
+        );
+        res1.expect("task1 不 panic").expect("merge1 成功");
+        res2.expect("task2 不 panic").expect("merge2 成功");
+
+        let connectors = runtime.get_egress_connectors();
+        assert!(
+            connectors.contains_key("n1"),
+            "并发 merge 不得丢失增量 n1"
+        );
+        assert!(
+            connectors.contains_key("n2"),
+            "并发 merge 不得丢失增量 n2"
+        );
     }
 
     #[test]
