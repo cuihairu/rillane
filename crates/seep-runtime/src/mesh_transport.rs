@@ -785,18 +785,25 @@ impl ReplayWindow {
         let diff = seq.wrapping_sub(last) as u64;
         match diff {
             0 => false,
-            // 前进：last+1 ..= last+64（含 64 = 越窗：历史全丢）；旧 last 入历史
-            d @ 1..=64 => {
-                if d < 64 {
-                    self.bits = (self.bits << d) | (1u64 << (d - 1));
-                } else {
-                    self.bits = 1u64 << (d - 1);
-                }
+            // 前进窗口内（last+1 ..= last+63）：旧 last 入历史，窗口前移
+            d @ 1..=63 => {
+                self.bits = (self.bits << d) | (1u64 << (d - 1));
                 self.last = Some(seq);
                 true
             }
-            // 回退（diff ≥ 65 即 wrapping 差大于半空间者的镜像面）：
-            // last-63 ..= last-1 内查历史位；更旧/跳变拒
+            // 前进超窗（d ≥ 64，半空间内即视为前进）：接受并滑动窗口。
+            // 标准防重放语义（DTLS/IPsec）：前向跳变不可能是重放，须接受且
+            // 窗口整体前移；旧历史全部滑出 63 位窗口，重置为仅新 last。
+            // 反例：旧实现把 d ≥ 65 一律当「回退/跳变」拒掉且 last 不动——
+            // seq 单调递增下窗口永不前进，一次丢 65+ 连续包即让该 flow 下行
+            // 全拒直到 flow 消亡（TTL 回收）恢复，属真实可用性缺陷。
+            d if d < (1u64 << 31) => {
+                self.bits = 0;
+                self.last = Some(seq);
+                true
+            }
+            // 回退（wrapping 差落入后 2^31 半空间者）：last-63 ..= last-1
+            // 内查历史位；更旧/跳变拒
             _ => {
                 let back = last.wrapping_sub(seq) as u64;
                 if (1..=63).contains(&back) {
@@ -3112,7 +3119,17 @@ mod tests {
             (&[50, 60, 59], &[true, true, true], "回退 1 未收接受"),
             (&[50, 100, 35], &[true, true, false], "回退 65 超窗拒"),
             (&[50, 100, 110], &[true, true, true], "前进 10 接受滑窗"),
-            (&[10, 100], &[true, false], "前进超窗（diff=90）拒"),
+            (&[10, 100], &[true, true], "前进超窗（diff=90）接受滑窗"),
+            (
+                &[10, 100, 101, 102],
+                &[true, true, true, true],
+                "前进超窗后连续前进不卡死（旧实现窗口停滞缺陷回归）",
+            ),
+            (
+                &[10, 100, 20],
+                &[true, true, false],
+                "超窗滑到 100 后回退 80 仍拒（过旧）",
+            ),
             (
                 &[10, 12, 12, 11],
                 &[true, true, false, true],
