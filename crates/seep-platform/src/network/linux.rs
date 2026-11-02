@@ -370,7 +370,14 @@ impl TunProvider for LinuxTunProvider {
 
         // File → OwnedFd 所有权交接（随即由 AsyncFd 持有，无泄漏）
         let owned: OwnedFd = file.into();
-        self.fd = Some(AsyncFd::new(owned).context("注册 AsyncFd 失败")?);
+        // SAFETY: `owned` 是刚由 `file` 独占转换的 TUN fd，未被任何其他
+        // AsyncFd 注册、无别名（I/O safety 契约成立）；`AsyncFd::new` 因缺
+        // 乏该保证被弃用（tokio#8587），此处以 `register` + 显式契约注释迁移。
+        self.fd = Some(
+            unsafe { AsyncFd::register(owned) }
+                .map_err(io::Error::from)
+                .context("注册 AsyncFd 失败")?,
+        );
         debug!(target: "seep::tun", name = %self.name, mtu = self.config.mtu, "Linux TUN 设备已创建");
         Ok(())
     }
