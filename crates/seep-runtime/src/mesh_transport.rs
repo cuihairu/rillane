@@ -754,10 +754,12 @@ pub fn decode_udp_envelope(buf: &[u8]) -> Result<UdpEnvelope> {
 // ── P2-7 M1 §3.4：RFC 4303 风格 64 位滑窗（防重放判定纯函数）──
 //
 // 键 = (flow_id, dir)——流 + 方向各自窗口。wrapping 差语义：diff = seq - last
-// (wrapping) 为“前进量”；diff==0 重放、1..=64 前进接受（越 64 位窗历史全丢）、
-// 其余视作“回退”（回退 ≤63 位内查历史位，超窗拒）。2^32 空间半空间单调
-// 假设见 §6 偏差 4。初始态（首包）无条件接受——窗口条目惰性创建（§7
-// R-replay2：仅校验通过的流才入表）。
+// (wrapping) 为“前进量”；diff==0 重放、1..=63 前进接受（旧 last 入历史，
+// 窗口前移）、d ≥ 64 且 < 2^31 视作前进跳变（接受并滑窗——标准防重放
+// 语义，旧历史全部滑出 63 位窗口，重置 bits=0），其余视作“回退”（回退
+// ≤63 位内查历史位，超窗拒）。2^32 空间半空间单调假设见 §6 偏差 4。
+// 初始态（首包）无条件接受——窗口条目惰性创建（§7 R-replay2：仅校验
+// 通过的流才入表）。
 
 /// P2-7 M1 §3.4：单 (flow_id, dir) 窗口。bits bit i = 已收 seq == last-1-i；last
 /// 本身不入 bits（相等即重放）；前进 d 时旧 last 落位 `bits |= 1 << (d-1)`——
@@ -1142,6 +1144,17 @@ impl UdpFace {
         self.replay.remove(&(*flow_id, 0));
         self.replay.remove(&(*flow_id, 1));
         self.sync_gauge();
+    }
+
+    /// need_create=false 时按表内 per-flow socket 直发。并发 forget_flow 拆除
+    /// → miss 静默丢弃且不计转发成功（UDP 容忍丢包，客户端重发 FULL 重建）。
+    async fn send_existing_flow(&self, flow_id: &[u8; 16], payload: &[u8]) -> Result<bool> {
+        let Some(flow_sock) = self.flows.get(flow_id).map(|e| Arc::clone(&e.sock)) else {
+            return Ok(false);
+        };
+        flow_sock.send(payload).await?;
+        self.metrics.forwarded_up.fetch_add(1, Ordering::Relaxed);
+        Ok(true)
     }
 
     /// serve 循环懒清扫（§3 每秒；§13-1 触发点①）：过期条目出缓存后，exit flow 表
@@ -1902,9 +1915,8 @@ impl MeshDataPlane {
             // .expect 在此 panic 会杀掉整条 serve_udp 任务——全节点 UDP 面停摆。
             // 命中即直发；miss = 条目被并发拆除 → 丢弃本包（客户端 ≤30s/64 包
             // 重发 FULL 自动重建，§5；UDP 语义容忍丢包），绝不 panic。
-            if let Some(flow_sock) = face.flows.get(&env.flow_id).map(|e| Arc::clone(&e.sock)) {
-                flow_sock.send(&env.payload).await?;
-            }
+            face.send_existing_flow(&env.flow_id, &env.payload).await?;
+            return Ok(());
         }
         face.metrics.forwarded_up.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -3734,6 +3746,22 @@ mod tests {
         assert_eq!(face.flows.len(), 0, "retire_flow 拆 flows");
         assert!(!face.contains(&flow), "retire_flow 拆 cache");
         assert_eq!(face.metrics.flows_active.load(Ordering::Relaxed), 0);
+    }
+
+    /// 并发 forget_flow 拆除后本包被静默丢弃（P1 修复）：flow miss 时
+    /// `forwarded_up` 不得无条件 +1——转发成功计数只应计入真实转发的包。
+    #[tokio::test]
+    async fn send_existing_flow_miss_does_not_count_forwarded_up() {
+        let face = UdpFace::with_limits(Duration::from_secs(60), 64);
+        let flow = [0x9au8; 16];
+        let before = face.metrics.forwarded_up.load(Ordering::Relaxed);
+        let sent = face.send_existing_flow(&flow, &[1, 2, 3]).await.unwrap();
+        assert!(!sent, "flow miss 应返回 false（静默丢弃）");
+        assert_eq!(
+            face.metrics.forwarded_up.load(Ordering::Relaxed),
+            before,
+            "flow miss 不得计入 forwarded_up"
+        );
     }
 
     /// T2：client `MeshUdpRelay` → relay plane → exit plane → 环回 echo。上行 FULL

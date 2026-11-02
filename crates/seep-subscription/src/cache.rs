@@ -554,8 +554,22 @@ impl SubscriptionCache {
                 // 重新加载到内存缓存
                 let entry = CacheEntry::new(content.clone(), Some(self.config.default_ttl));
                 if !entry.is_expired() {
+                    let content_size = content.len() as u64;
+                    // 回填内存必须同步回填容量统计，否则热盘加载后的 set_with_ttl
+                    // 以偏小的 current_size 判限，实际内存占用可突破 max_size_bytes。
+                    // 锁序 memory_cache → current_size，与插入/清理路径一致。
                     let mut cache = self.memory_cache.write().expect("cache lock poisoned");
-                    cache.insert(key.to_string(), entry);
+                    let old_size = cache
+                        .insert(key.to_string(), entry)
+                        .map(|old| old.content.len() as u64)
+                        .unwrap_or(0);
+                    let mut current_size = self
+                        .current_size
+                        .write()
+                        .expect("current_size lock poisoned");
+                    *current_size = current_size
+                        .saturating_sub(old_size)
+                        .saturating_add(content_size);
                     return Some(content);
                 } else {
                     // 磁盘文件也已过期，删除它
@@ -675,20 +689,15 @@ mod tests {
     use std::sync::Arc;
 
     fn temp_cache_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "seep-cache-test-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("seep-cache-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     /// 在独立线程跑闭包并限时回收，防锁死 bug 让测试无限挂起。
-    fn run_with_timeout<T: Send + 'static>(
-        f: impl FnOnce() -> T + Send + 'static,
-        ms: u64,
-    ) -> T {
+    fn run_with_timeout<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static, ms: u64) -> T {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(f());
@@ -713,7 +722,11 @@ mod tests {
         let c = cache.clone();
         run_with_timeout(move || c.set("c", "33333").unwrap(), 5000);
         let stats = cache.get_stats();
-        assert!(stats.total_entries <= 3, "条目数异常: {}", stats.total_entries);
+        assert!(
+            stats.total_entries <= 3,
+            "条目数异常: {}",
+            stats.total_entries
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -739,7 +752,11 @@ mod tests {
             5000,
         );
         let stats = cache.get_stats();
-        assert!(stats.total_entries <= 4, "条目数异常: {}", stats.total_entries);
+        assert!(
+            stats.total_entries <= 4,
+            "条目数异常: {}",
+            stats.total_entries
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -763,6 +780,36 @@ mod tests {
         let reader = SubscriptionCache::with_config(config.clone());
         let got = run_with_timeout(move || reader.get("warm"), 2_000);
         assert_eq!(got.as_deref(), Some("cached-content"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 热盘回填容量统计回归：load_from_disk 把磁盘条目插回内存时必须同步
+    /// current_size，否则 get 修复后该路径可达而 set_with_ttl 容量上限被漏计
+    /// 削弱，实际占用可超 max_size_bytes。
+    #[test]
+    fn load_from_disk_updates_current_size() {
+        let dir = temp_cache_dir("warm-disk-size");
+        let config = CacheConfig {
+            cache_dir: dir.clone(),
+            max_entries: 16,
+            max_size_bytes: 10 * 1024 * 1024,
+            ..Default::default()
+        };
+        let writer = SubscriptionCache::with_config(config.clone());
+        writer.set("warm", "cached-content").unwrap();
+        drop(writer);
+
+        let reader = SubscriptionCache::with_config(config);
+        reader.get("warm").expect("热盘回读");
+        let expected = "cached-content".len() as u64;
+        assert_eq!(
+            *reader
+                .current_size
+                .read()
+                .expect("current_size lock poisoned"),
+            expected,
+            "热盘回填必须计入容量统计"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

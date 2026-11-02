@@ -21,6 +21,10 @@ pub struct HotReloadManager {
     config_path: PathBuf,
     /// 当前配置
     current_config: Arc<RwLock<SeepConfig>>,
+    /// 配置变更串行化锁：`merge_subscription_config` 的 read-modify-write 与
+    /// `load_config_file`（apply_config）若并发交错会丢失更新（lost-update）。
+    /// 两路径均先取本锁再读写 current_config + 磁盘，保证原子性。
+    config_mutex: tokio::sync::Mutex<()>,
     /// 路由引擎
     router: Arc<RoutingEngine>,
     /// 订阅管理器
@@ -134,6 +138,7 @@ impl HotReloadManager {
         Ok(Self {
             config_path,
             current_config: Arc::new(RwLock::new(initial_config)),
+            config_mutex: tokio::sync::Mutex::new(()),
             router,
             subscription_manager,
             subscription_converter,
@@ -444,6 +449,8 @@ impl HotReloadManager {
 
     /// 加载配置文件
     async fn load_config_file(&self) -> Result<()> {
+        // 与 merge_subscription_config 串行化，防 read-modify-write 交错丢失更新。
+        let _guard = self.config_mutex.lock().await;
         let config_content = fs::read_to_string(&self.config_path)
             .await
             .with_context(|| format!("无法读取配置文件: {}", self.config_path.display()))?;
@@ -562,6 +569,10 @@ impl HotReloadManager {
 
     /// 合并订阅配置到当前配置
     async fn merge_subscription_config(&self, subscription_config: &SeepConfig) -> Result<()> {
+        // 串行化配置变更：读-改-写全程持锁，防与 load_config_file（apply_config）
+        // 并发交错丢更新。此前仅语句级持 current_config 写锁克隆、末段重取写锁
+        // 写回，中途 fs::write await 让锁，并发 apply_config 会丢失其更新。
+        let _guard = self.config_mutex.lock().await;
         let mut current_config = self
             .current_config
             .write()
@@ -741,7 +752,11 @@ routing:
         // 磁盘文件应与内存一致（同样不重复）
         let on_disk = SeepConfig::load_from_path(&path).unwrap();
         assert_eq!(
-            on_disk.egress.iter().filter(|e| e.name == "sub-node-1").count(),
+            on_disk
+                .egress
+                .iter()
+                .filter(|e| e.name == "sub-node-1")
+                .count(),
             1,
             "磁盘出口节点不应重复累积"
         );
@@ -754,6 +769,55 @@ routing:
                 .count(),
             1,
             "磁盘路由规则不应重复累积"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 并发 load_config_file 与 merge_subscription_config 不丢更新回归：
+    /// merge 是读-改-写，与 apply_config（load_config_file）并发交错时，
+    /// merge 末段写回会覆盖 apply 的新配置（lost-update）。config_mutex
+    /// 必须序列化两路径，最终磁盘/内存都同时保留新 base 与订阅合并。
+    #[tokio::test]
+    async fn concurrent_merge_and_load_config_do_not_lose_updates() {
+        let path = temp_config_path("concurrent-merge-load");
+        let router = Arc::new(RoutingEngine::new(base_config().routing.clone()));
+        let mgr = Arc::new(HotReloadManager::new(path.clone(), base_config(), router).unwrap());
+
+        // 先落一份合法 base，供 load_config_file 并发读。
+        std::fs::write(&path, serde_yaml::to_string(&base_config()).unwrap()).unwrap();
+
+        let merge_mgr = Arc::clone(&mgr);
+        let merge_task = tokio::spawn(async move {
+            merge_mgr
+                .merge_subscription_config(&subscription_config())
+                .await
+        });
+        let load_task = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.load_config_file().await }
+        });
+
+        merge_task.await.unwrap().unwrap();
+        load_task.await.unwrap().unwrap();
+
+        let final_config = mgr.get_current_config();
+        assert!(
+            final_config.egress.iter().any(|e| e.name == "direct-main"),
+            "并发加载的 base 配置不得被 merge 覆盖丢失"
+        );
+        assert!(
+            final_config.egress.iter().any(|e| e.name == "sub-node-1"),
+            "订阅合并结果不得被并发加载覆盖丢失"
+        );
+        let on_disk = SeepConfig::load_from_path(&path).unwrap();
+        assert!(
+            on_disk.egress.iter().any(|e| e.name == "direct-main"),
+            "磁盘配置不得丢 base"
+        );
+        assert!(
+            on_disk.egress.iter().any(|e| e.name == "sub-node-1"),
+            "磁盘配置不得丢订阅"
         );
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

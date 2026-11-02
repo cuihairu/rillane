@@ -385,4 +385,26 @@ mod tests {
         assert_eq!(host, "example.com");
         assert_eq!(port, 80);
     }
+
+    /// P1 安全回归：SOCKS5 域名字符串含空格/authority 元字符（`@`/`/`/`?`/`#`）
+    /// 亦应被拒绝——host 内插进 CONNECT 请求行与 `Host` 头时这些字符可被上游
+    /// 按 `userinfo@host`/`host/path`/`host?query`/`host#fragment` 解析致目标混淆
+    /// （请求走私/SSRF 变体）。
+    #[tokio::test]
+    async fn rejects_authority_metachars_and_space_in_domain() {
+        for bad in [
+            "evil.com @x",
+            "evil.com@x",
+            "evil.com/x",
+            "evil.com?x",
+            "evil.com#x",
+        ] {
+            let mut payload = vec![0x05, 0x01, 0x00, 0x03, bad.len() as u8];
+            payload.extend_from_slice(bad.as_bytes());
+            let (mut client, mut server) = tokio::io::duplex(256);
+            client.write_all(&payload).await.unwrap();
+            let res = parse_request_cmd(&mut server).await;
+            assert!(res.is_err(), "含 {bad:?} 的域名字符串应被拒绝");
+        }
+    }
 }

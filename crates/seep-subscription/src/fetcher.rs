@@ -2,10 +2,23 @@
 
 use std::{collections::HashMap, time::Duration};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use reqwest::{header, Client, Proxy, Response};
 use tracing::{debug, warn};
+
+/// 订阅获取终态错误：重试不会改变结果（内容超限 / 非 UTF-8 / HTTP 状态错）。
+/// 与瞬时错误（网络中断、超时、5xx）区分——`fetch()` 对终态错误立即返回，
+/// 避免对持续超大/分块超限端点重复下载 `max_retries` 次。
+#[derive(Debug, thiserror::Error)]
+pub enum FetcherError {
+    #[error("订阅内容过大: {0} 字节（上限 {1}）")]
+    Oversized(u64, u64),
+    #[error("订阅内容超过 {0} 字节上限")]
+    ChunkOverLimit(u64),
+    #[error("订阅内容非 UTF-8")]
+    NotUtf8,
+}
 
 /// 订阅获取器配置
 #[derive(Debug, Clone)]
@@ -155,6 +168,16 @@ impl SubscriptionFetcher {
                     return Ok(result);
                 }
                 Err(err) => {
+                    // 终态错误：重试不会改变结果，立即返回（不空耗重试/间隔）。
+                    if let Some(ferr) = err.downcast_ref::<FetcherError>() {
+                        warn!(
+                            target: "seep::subscription::fetcher",
+                            url = %url,
+                            error = %ferr,
+                            "订阅内容终态错误，不重试"
+                        );
+                        return Err(err);
+                    }
                     warn!(
                         target: "seep::subscription::fetcher",
                         url = %url,
@@ -264,21 +287,23 @@ impl SubscriptionFetcher {
         let max_bytes: u64 = 50 * 1024 * 1024;
         if let Some(len) = response.content_length() {
             if len > max_bytes {
-                bail!("订阅内容过大: {} 字节（上限 {max_bytes}）", len);
+                return Err(FetcherError::Oversized(len, max_bytes).into());
             }
         }
-        let mut body = Vec::with_capacity(
-            response.content_length().unwrap_or(0).min(max_bytes) as usize,
-        );
+        let mut body =
+            Vec::with_capacity(response.content_length().unwrap_or(0).min(max_bytes) as usize);
         loop {
             let chunk = response.chunk().await.context("读取响应内容失败")?;
             let Some(chunk) = chunk else { break };
             if body.len() + chunk.len() > max_bytes as usize {
-                bail!("订阅内容超过 {max_bytes} 字节上限");
+                return Err(FetcherError::ChunkOverLimit(max_bytes).into());
             }
             body.extend_from_slice(&chunk);
         }
-        let content = String::from_utf8(body).context("订阅内容非 UTF-8")?;
+        let content = match String::from_utf8(body) {
+            Ok(s) => s,
+            Err(_) => return Err(FetcherError::NotUtf8.into()),
+        };
 
         Ok(FetchResult {
             content,
@@ -568,9 +593,13 @@ trojan://password@server.com:443#test
                 let mut seen = Vec::new();
                 loop {
                     let n = s.read(&mut buf).await.unwrap_or(0);
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     seen.extend_from_slice(&buf[..n]);
-                    if seen.windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                    if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
                 }
                 let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {big}\r\n\r\n");
                 let _ = s.write_all(resp.as_bytes()).await;
@@ -579,17 +608,26 @@ trojan://password@server.com:443#test
             }
         });
 
-        // max_retries=1：拒收错误本身即终态，不因 fetch() 的重试把单发
-        // 假服务耗尽而把终态错误掩盖成 Connection refused
+        // max_retries=3：终态错误应即时返回，不因 fetch() 重试把单发假服务
+        // 耗尽而掩盖成 Connection refused（曾对终态错误也重试 max_retries 次）。
         let fetcher = SubscriptionFetcher::with_config(FetcherConfig {
-            max_retries: 1,
+            max_retries: 3,
             ..Default::default()
         });
-        let err = fetcher.fetch(&format!("http://{addr}/sub")).await.unwrap_err();
+        let err = fetcher
+            .fetch(&format!("http://{addr}/sub"))
+            .await
+            .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("订阅内容过大"),
             "应命中 Content-Length 上限快速拒绝，得到: {msg}"
+        );
+
+        // 终态错误应带 FetcherError 标记（fetch 靠它判不重试）。
+        assert!(
+            err.downcast_ref::<FetcherError>().is_some(),
+            "内容过大应为 FetcherError 终态错误"
         );
     }
 }

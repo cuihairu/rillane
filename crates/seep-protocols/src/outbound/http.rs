@@ -269,3 +269,78 @@ where
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seep_core::{FlowId, FlowTarget, TargetProto};
+
+    fn malicious_flow(host: &str) -> Flow {
+        Flow {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: host.to_string(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            io: Box::new(tokio::io::duplex(64).0),
+            metadata: Default::default(),
+        }
+    }
+
+    fn connector(pool: Option<Arc<TransportPool>>) -> HttpConnector {
+        HttpConnector::new(
+            "127.0.0.1".into(),
+            1,
+            None,
+            None,
+            false,
+            false,
+            None,
+            TlsFingerprint::None,
+            pool,
+            None,
+        )
+    }
+
+    /// 出口层最后防线：host 含空格/authority 元字符（`@`/`/`/`?`/`#`）须在
+    /// 打开任何上游连接前被拒绝（曾仅拦 CR/LF/控制字符，空格致畸形 CONNECT
+    /// 请求行、`@` 可被上游按 userinfo@host 解析致目标混淆）。
+    #[tokio::test]
+    async fn forward_inline_rejects_authority_metachar_hosts() {
+        let connector = connector(None);
+        for host in ["example.com x", "user@example.com", "example.com/path"] {
+            let err = connector.forward(malicious_flow(host)).await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("非法"),
+                "host={host:?} 应被出口守卫拒绝: {err:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_pooled_rejects_authority_metachar_hosts_before_connect() {
+        let pool = TransportPool::new(
+            crate::pool::PoolPolicy {
+                enabled: true,
+                max_idle_per_key: 1,
+                max_idle_global: 1,
+                low_watermark: 0,
+                tls_resumption: false,
+                idle_timeout: std::time::Duration::from_secs(30),
+                dial_timeout: std::time::Duration::from_secs(2),
+                session_cache_size: 256,
+                pre_dial_direct: false,
+            },
+            None,
+        );
+        let connector = connector(Some(pool));
+        for host in ["example.com?x", "example.com#x"] {
+            let err = connector.forward(malicious_flow(host)).await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("非法"),
+                "host={host:?} 应被出口守卫拒绝: {err:#}"
+            );
+        }
+    }
+}
