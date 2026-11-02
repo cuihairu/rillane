@@ -42,7 +42,7 @@
 - [x] **P0-1 `seep-core` UDP 会话语义**：NAT 式 UDP 会话表（映射、超时回收、会话粘滞键=进程/五元组），与 `FlowSession` 打通。
   evidence：`crates/seep-core/src/udp/`（table/ledger/reclaim/config/…）· 测试 `udp_session_table.rs` 22 项 · 设计稿 `udp-session-table.md` / `udp-session-table-api.md` §9。
 - [x] **P0-2 SOCKS5 UDP ASSOCIATE 入站**：按 RFC 1928 实现 UDP 中继，接入 FlowRouter。
-  evidence：`udp/associate.rs` + `inbound/socks5.rs`（0x01/0x03/其他分派）+ `seep-config` `udp:` 块 + runtime 接线 · 测试 `udp_associate.rs` 11 项 · 设计稿 `udp-relay-path.md` §2。
+  evidence：`udp/associate.rs` + `inbound/socks5.rs`（0x01/0x03/其他分派）+ `seep-config` `udp:` 块 + runtime 接线 · 测试 `udp_associate.rs` 13 项 · 设计稿 `udp-relay-path.md` §2。
 - [x] **P0-3 出站 UDP 载荷**：direct / shadowsocks / wireguard 出站承载 UDP；hy2 按设计 §3.4 移 P0-4。
   evidence：`udp/relay.rs` + `ShadowsocksUdpConnector`/`WireguardUdpConnector` · 测试 `udp_egress_selection.rs` 3 项 + `udp_egress.rs` 7 项 + runtime 能力扫描 4 项，全仓 118 通过 · 设计稿 `udp-relay-path.md` §3。
 - [x] **P0-4 mesh data-plane UDP 转发**：多跳 UDP（envelope over UDP/QUIC 数据报），与现有 TCP 面共存。
@@ -108,7 +108,7 @@
 - [x] **修 CI Docker 镜像构建**。
   evidence：Dockerfile 重写（11 成员枚举 + 虚拟源桩）+ `.dockerignore` + `seepd --version` 参数面 · 本地 `docker build`（seep:test 190MB）+ `docker run --rm --version` 冒烟通过。
 - [x] **修 CI 四 job 连红**（MSRV / audit / docker / coverage）。
-  evidence：MSRV 基线随锁上调 1.96.0 + Dockerfile 预热层补 seep-plugins + nightly `continue-on-error` + 双步 `--locked` · 定案：新 run 十四 job 仍红系**私有仓 Actions 配额耗尽/付款阻断**（`6c74dd1` run 37196348814，job 14 秒/runner 空/日志未上传），非代码红，配额恢复后生效。
+  evidence：MSRV 基线随锁上调 1.96.0 + Dockerfile 预热层补 seep-plugins + nightly `continue-on-error` + 双步 `--locked` · 新 run 十四 job 仍红系**私有仓 Actions 配额耗尽/付款阻断**（`6c74dd1` run 37196348814，job 14 秒/runner 空/日志未上传），非代码红，配额恢复后生效。
 - [x] **Trojan over WS 出站传输**（trojan-go 惯例）。
   evidence：`trojan.rs` 双路 ws（恒叠 TLS）+ `WsWriter::write_close`（Close 帧半关传播）· 验收 459 通过 0 失败。
 - [x] **direct 出口 Happy Eyeballs**（RFC 8305，统一拨号面）。
