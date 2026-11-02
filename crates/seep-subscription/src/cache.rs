@@ -147,32 +147,32 @@ impl SubscriptionCache {
 
     /// 获取缓存内容
     pub fn get(&self, key: &str) -> Option<String> {
-        let mut cache = self.memory_cache.write().expect("cache lock poisoned");
-
-        // 首先检查内存缓存
-        if let Some(entry) = cache.get_mut(key) {
-            if entry.is_expired() {
+        // 内存判读仅持锁到本块结束——`load_from_disk` 内部需重取同一把
+        // `memory_cache` 写锁（std::sync::RwLock 不可重入），持锁跨调用即
+        // 自锁死锁（重启带热盘缓存 / 内存条目过期两条路径必触）。P1 修复：
+        // 先释放守卫，再交 `load_from_disk` 自行取锁。
+        {
+            let mut cache = self.memory_cache.write().expect("cache lock poisoned");
+            if let Some(entry) = cache.get_mut(key) {
+                if !entry.is_expired() {
+                    entry.access();
+                    debug!(
+                        target: "seep::subscription::cache",
+                        key = %key,
+                        count = entry.access_count,
+                        "从内存缓存命中"
+                    );
+                    return Some(entry.content.clone());
+                }
                 debug!(
                     target: "seep::subscription::cache",
                     key = %key,
                     "内存缓存已过期"
                 );
                 cache.remove(key);
-                // 尝试从磁盘加载
-                return self.load_from_disk(key);
-            } else {
-                entry.access();
-                debug!(
-                    target: "seep::subscription::cache",
-                    key = %key,
-                    count = entry.access_count,
-                    "从内存缓存命中"
-                );
-                return Some(entry.content.clone());
             }
         }
-
-        // 尝试从磁盘加载
+        // 内存 miss / 已过期：守卫已释放，磁盘加载（load_from_disk 自行取锁）
         self.load_from_disk(key)
     }
 
@@ -740,6 +740,50 @@ mod tests {
         );
         let stats = cache.get_stats();
         assert!(stats.total_entries <= 4, "条目数异常: {}", stats.total_entries);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// get() 持锁跨 load_from_disk 自锁回归（P1）：重启形态——新实例内存空、
+    /// 磁盘有热缓存 → get 走尾部 load_from_disk（曾持 memory_cache 写锁跨调用
+    /// 重取同锁，std::sync::RwLock 不可重入，必自锁死锁）。
+    #[test]
+    fn get_with_warm_disk_cache_does_not_deadlock() {
+        let dir = temp_cache_dir("get-warm-disk");
+        let config = CacheConfig {
+            cache_dir: dir.clone(),
+            max_entries: 16,
+            max_size_bytes: 10 * 1024 * 1024,
+            ..Default::default()
+        };
+        // 会话一：set 落盘
+        let writer = SubscriptionCache::with_config(config.clone());
+        writer.set("warm", "cached-content").unwrap();
+        drop(writer);
+        // 会话二（重启形态）：内存空 → get 尾部 load_from_disk
+        let reader = SubscriptionCache::with_config(config.clone());
+        let got = run_with_timeout(move || reader.get("warm"), 2_000);
+        assert_eq!(got.as_deref(), Some("cached-content"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// get() 过期内存条目分支回归（P1）：内存条目已过期 → 移除后调
+    /// load_from_disk（曾持锁跨调用自锁）。磁盘文件以 default_ttl 判新，
+    /// 应回读成功。
+    #[test]
+    fn get_with_expired_memory_entry_does_not_deadlock() {
+        let dir = temp_cache_dir("get-expired");
+        let config = CacheConfig {
+            cache_dir: dir.clone(),
+            default_ttl: Duration::from_secs(3600),
+            max_entries: 16,
+            max_size_bytes: 10 * 1024 * 1024,
+            ..Default::default()
+        };
+        let cache = SubscriptionCache::with_config(config.clone());
+        // 内存 TTL=0（立即过期）；磁盘以 default_ttl 落盘（save_to_disk 只写内容）
+        cache.set_with_ttl("k", "v", Some(Duration::ZERO)).unwrap();
+        let got = run_with_timeout(move || cache.get("k"), 2_000);
+        assert_eq!(got.as_deref(), Some("v"));
         let _ = fs::remove_dir_all(&dir);
     }
 }
