@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, time::Duration};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use reqwest::{header, Client, Proxy, Response};
 use tracing::{debug, warn};
@@ -191,7 +191,7 @@ impl SubscriptionFetcher {
         }
 
         // 发送请求
-        let response = request
+        let mut response = request
             .send()
             .await
             .with_context(|| format!("发送请求到 {} 失败", url))?;
@@ -257,8 +257,28 @@ impl SubscriptionFetcher {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        // 读取内容
-        let content = response.text().await.with_context(|| "读取响应内容失败")?;
+        // 读取内容（有界）：订阅端点为第三方不可信面，无界 text() 读取是内存
+        // DoS 面（50MiB 上限与 validate_content 同口径；validate_content 现
+        // 仅测试调用，须在此处落地）。先查 Content-Length 快速拒绝，再流式
+        // 累积并设硬上限，防分块/谎报长度。
+        let max_bytes: u64 = 50 * 1024 * 1024;
+        if let Some(len) = response.content_length() {
+            if len > max_bytes {
+                bail!("订阅内容过大: {} 字节（上限 {max_bytes}）", len);
+            }
+        }
+        let mut body = Vec::with_capacity(
+            response.content_length().unwrap_or(0).min(max_bytes) as usize,
+        );
+        loop {
+            let chunk = response.chunk().await.context("读取响应内容失败")?;
+            let Some(chunk) = chunk else { break };
+            if body.len() + chunk.len() > max_bytes as usize {
+                bail!("订阅内容超过 {max_bytes} 字节上限");
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let content = String::from_utf8(body).context("订阅内容非 UTF-8")?;
 
         Ok(FetchResult {
             content,
@@ -530,5 +550,46 @@ trojan://password@server.com:443#test
 
         assert!(!fetcher.is_valid_content_start('!'));
         assert!(!fetcher.is_valid_content_start('@'));
+    }
+
+    /// 有界读取回归：Content-Length 超过 50MiB 上限即快速拒绝（不读体）。
+    #[tokio::test]
+    async fn fetch_rejects_oversized_content_length() {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let big: u64 = 50 * 1024 * 1024 + 1;
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = listener.accept().await {
+                use tokio::io::AsyncReadExt as _;
+                // 先读请求头（读到空行），再回响应：hyper 在发送请求头期间
+                // 收到响应字节会报 "unexpected message"，须按真实服务器顺序。
+                let mut buf = [0u8; 1024];
+                let mut seen = Vec::new();
+                loop {
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 { break; }
+                    seen.extend_from_slice(&buf[..n]);
+                    if seen.windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                }
+                let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {big}\r\n\r\n");
+                let _ = s.write_all(resp.as_bytes()).await;
+                // 保持连接短暂存活，让客户端读完头并命中 content-length 检查
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        });
+
+        // max_retries=1：拒收错误本身即终态，不因 fetch() 的重试把单发
+        // 假服务耗尽而把终态错误掩盖成 Connection refused
+        let fetcher = SubscriptionFetcher::with_config(FetcherConfig {
+            max_retries: 1,
+            ..Default::default()
+        });
+        let err = fetcher.fetch(&format!("http://{addr}/sub")).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("订阅内容过大"),
+            "应命中 Content-Length 上限快速拒绝，得到: {msg}"
+        );
     }
 }
