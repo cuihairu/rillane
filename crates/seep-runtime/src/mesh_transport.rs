@@ -1897,14 +1897,14 @@ impl MeshDataPlane {
         }
         if !need_create {
             // 拿出 Arc 再 await——避免持 DashMap Ref 跨 await（下行 task 可能并发 remove）
-            let flow_sock = {
-                let entry = face
-                    .flows
-                    .get(&env.flow_id)
-                    .expect("need_create=false 即 flow 必在表");
-                Arc::clone(&entry.sock)
-            };
-            flow_sock.send(&env.payload).await?;
+            // P1 修复：need_create=false 只保证读取瞬间条目存在；独立 worker 上的
+            // 下行 task 可能在两次 get 间并发 forget_flow（§13-1 触发点②）。此前
+            // .expect 在此 panic 会杀掉整条 serve_udp 任务——全节点 UDP 面停摆。
+            // 命中即直发；miss = 条目被并发拆除 → 丢弃本包（客户端 ≤30s/64 包
+            // 重发 FULL 自动重建，§5；UDP 语义容忍丢包），绝不 panic。
+            if let Some(flow_sock) = face.flows.get(&env.flow_id).map(|e| Arc::clone(&e.sock)) {
+                flow_sock.send(&env.payload).await?;
+            }
         }
         face.metrics.forwarded_up.fetch_add(1, Ordering::Relaxed);
         Ok(())
