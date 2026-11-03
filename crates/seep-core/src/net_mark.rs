@@ -9,11 +9,17 @@
 //! mark ≠ 0 但 `SO_MARK` 设置失败（缺 CAP_NET_ADMIN/非 Linux）→ 降级直连
 //! （warn 一次，行为同缺省——不因逃逸功能自爆启动）。
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use tokio::net::TcpStream;
 
 static EGRESS_FWMARK: AtomicU32 = AtomicU32::new(0);
+#[cfg(test)]
+static ACTIVE_CONNECTS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static CONNECT_GATES: std::sync::Mutex<
+    Vec<(std::net::SocketAddr, std::sync::Arc<tokio::sync::Notify>)>,
+> = std::sync::Mutex::new(Vec::new());
 #[cfg(target_os = "linux")]
 static MARK_DOWNGRADE_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -172,11 +178,63 @@ async fn connect_racing(candidates: Vec<std::net::SocketAddr>) -> std::io::Resul
 /// 单地址连接：mark 非零走 SO_MARK 面，否则/非 Linux 走普通连接。
 #[cfg(target_os = "linux")]
 async fn connect_one(addr: std::net::SocketAddr) -> std::io::Result<TcpStream> {
+    #[cfg(test)]
+    let _active = ActiveConnectGuard::new();
+    #[cfg(test)]
+    gate_wait(addr).await;
     let mark = egress_fwmark();
     if mark != 0 {
         connect_addr_marked(addr, mark).await
     } else {
         TcpStream::connect(addr).await
+    }
+}
+
+#[cfg(test)]
+async fn gate_wait(addr: std::net::SocketAddr) {
+    let notify = {
+        let gates = CONNECT_GATES.lock().unwrap_or_else(|e| e.into_inner());
+        gates
+            .iter()
+            .find(|(a, _)| *a == addr)
+            .map(|(_, n)| n.clone())
+    };
+    if let Some(notify) = notify {
+        notify.notified().await;
+    }
+}
+
+#[cfg(test)]
+fn gate_set(addr: std::net::SocketAddr, notify: std::sync::Arc<tokio::sync::Notify>) {
+    CONNECT_GATES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((addr, notify));
+}
+
+#[cfg(test)]
+fn gate_clear() {
+    CONNECT_GATES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+#[cfg(test)]
+struct ActiveConnectGuard;
+
+#[cfg(test)]
+impl ActiveConnectGuard {
+    fn new() -> Self {
+        ACTIVE_CONNECTS.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ActiveConnectGuard {
+    fn drop(&mut self) {
+        ACTIVE_CONNECTS.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -416,33 +474,53 @@ mod tests {
 
     #[allow(clippy::await_holding_lock)] // 测试有意持锁跨 await 串行化 mark 全局态
     /// P3（2026-11-03）：胜出后落选在途候选应被 abort（不再持握手/socket）。
-    /// 次选指向不可达地址（Tailscale 100.64.0.0/10 保留段，无路由即挂），
-    /// 首选回环 echo 快速胜出——若未 abort，`connect_racing` 返回后仍需等
-    /// 次选超时才能收敛 send；胜出即时返回即证明 abort 生效。
+    /// 两候选均经 gate 挂起：先放行 echo（胜出），此时次选确已在途（非因
+    /// 250ms 错峰尚未启动）。胜出返回后、放行次选前断言在途计数归零——
+    /// 若未 abort，次选仍挂起（计数 1），断言即红，可区分 abort 与否。
     #[tokio::test]
     async fn racing_winner_aborts_in_flight_losers() {
         let _lk = mark_lock();
         set_egress_fwmark(0);
+        gate_clear();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let echo_addr = listener.local_addr().unwrap();
-        // Tailscale 100.64.0.1:1（RFC 7333 保留段，本环境无路由 → 拨号挂起）
-        let hang: std::net::SocketAddr = "100.64.0.1:1".parse().unwrap();
+        // 次选回环地址（未监听 → connect 立即 ECONNREFUSED），经 gate 挂起
+        // 直至胜出后断言，确保胜出瞬间其确在途。
+        let hang: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let echo_gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        let hang_gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        gate_set(echo_addr, echo_gate.clone());
+        gate_set(hang, hang_gate.clone());
         let server = tokio::spawn(async move {
             let (mut s, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 3];
             let _ = s.read_exact(&mut buf).await;
         });
-        let c = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            connect_racing(vec![echo_addr, hang]),
-        )
-        .await
-        .expect("首选胜出应在 5s 内返回（落选候选已 abort，不等挂起候选超时）")
-        .expect("首选应胜出");
+        let racing = tokio::spawn(connect_racing(vec![echo_addr, hang]));
+        // 等次选也启动（250ms 错峰后已在途），两候选均 gate 挂起。
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        assert_eq!(
+            ACTIVE_CONNECTS.load(Ordering::SeqCst),
+            2,
+            "两候选应均已启动并挂起于 gate"
+        );
+        // 放行首选 → 胜出 → abort 落选。
+        echo_gate.notify_waiters();
+        let c = tokio::time::timeout(std::time::Duration::from_secs(5), racing)
+            .await
+            .expect("首选胜出应在 5s 内返回")
+            .expect("首选应胜出")
+            .expect("首选应胜出");
         drop(c);
-        // 首选胜出后 abort 已发；若挂起候选未被取消，其 send 阻塞不释放
-        // ——下面额外 sleep 后断言测试进程不因未收弃的 in-flight 而挂死。
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // 关键断言：放行次选前，在途计数须归零——未 abort 则次选仍挂起。
+        assert_eq!(
+            ACTIVE_CONNECTS.load(Ordering::SeqCst),
+            0,
+            "落选在途候选应被 abort，连接计数归零"
+        );
+        hang_gate.notify_waiters();
         server.abort();
+        gate_clear();
     }
 }
