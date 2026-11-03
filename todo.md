@@ -270,7 +270,8 @@ P3（收尾）：
 **核心结论**：底座完成度高，差距集中在四块——① 路由规则引擎（无目的 IP-CIDR、无 GeoIP/GeoSite 数据库、无 rule-set、无 OR/NOT、无嗅探）；② QUIC 生态（tuic/REALITY/XTLS-Vision/hy2 UDP 全缺）；③ 服务端入站协议为零；④ 透明代理仅 TUN(Linux)（缺 redir/tproxy、macOS/Windows TUN）。seep 独有优势：mesh mTLS 多跳+SLO 打分、场景 profile、WASM 插件、移动端 FFI。
 
 建议优先级（新条目，未编号入现有 P 序列）：
-- [ ] **G0-1 目的 IP-CIDR 匹配器**——现 `MatchCondition::Network` 绑定 `client.cidr` 源注解（seep-routing/src/lib.rs:706），目标网段分流表达不了；三大项目最基本匹配器。
+- [x] **G0-1 目的 IP-CIDR 匹配器**——现 `MatchCondition::Network` 绑定 `client.cidr` 源注解（seep-routing/src/lib.rs:706），目标网段分流表达不了；三大项目最基本匹配器。
+  **已实现（2026-11-04 `a262735`）**：`MatchCondition` 增 `IpCidr { cidrs }` 变体（seep-config/src/lib.rs:1785），路由匹配器 `ip_in_cidr`（seep-routing/src/lib.rs:24）对目标 host 为 IP 字面量按 IPv4/IPv6 前缀匹配（主机形式按精确地址；域名不命中，路由面不做 DNS）；`SeepRule::IpCidr`/`ClashRule::IpCidr`/rule_source 的 `IpCidr` 规则改走新变体（seep_dsl.rs:1126、clash.rs:1147、rule_source.rs:60），`Network`（源注解）保留；`clash_export` 导出 IP-CIDR 兼容。回归 `tests::ip_cidr_matches_target_ip_prefix`（IPv4/IPv6 前缀、主机精确、域名不命中；旧逻辑恒 false 红）。`cargo test --workspace` 全绿（44 二进制）。
 - [ ] **G0-2 GeoIP/GeoSite 数据库接入 + domain full/regex + OR/NOT 逻辑规则**——替换 `geoip.country` 注解等价物（无数据库）。
 - [ ] **G0-3 协议嗅探层（sniff）**——TLS SNI/HTTP Host/QUIC SNI 覆写路由域名；TUN 场景 IP 直连流量无它即无法按域名分流。
 - [ ] **G0-4 UDP over vmess/vless/trojan**——主流加密通道均不载 UDP（构建期报错），游戏加速场景非 direct/ss/wg 出口即退化。
