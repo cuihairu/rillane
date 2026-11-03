@@ -353,9 +353,20 @@ impl HotReloadManager {
 
     /// 处理重载事件
     async fn handle_reload_events(&self) {
-        let mut reload_rx = {
+        let mut reload_rx = match {
             let mut rx_guard = self.reload_rx.write().expect("reload_rx lock poisoned");
-            rx_guard.take().expect("reload_rx already taken")
+            rx_guard.take()
+        } {
+            Some(rx) => rx,
+            // 二次 start() 或外部 take_reload_rx 已取走——该任务无事可做，
+            // 静默返回（原 expect 在双启动时 panic；事件处理单属首启动）。
+            None => {
+                warn!(
+                    target: "seep::runtime::hot_reload",
+                    "reload_rx 已被取走，跳过事件处理任务"
+                );
+                return;
+            }
         };
 
         let running = self.running.clone();
@@ -828,5 +839,23 @@ routing:
     fn hot_reload_config_defaults_sane() {
         let cfg = HotReloadConfig::default();
         assert_eq!(cfg.subscription_refresh_interval, Duration::from_secs(3600));
+    }
+
+    /// 回归：reload_rx 已被取走（首次 start 消费 / 外部 take_reload_rx）时，
+    /// 再次 handle_reload_events 不得 panic（原 `take().expect` 二次启动即崩）。
+    #[tokio::test]
+    async fn handle_reload_events_after_rx_taken_returns_quietly() {
+        let path = temp_config_path("rx-taken");
+        let router = Arc::new(RoutingEngine::new(base_config().routing.clone()));
+        let mgr = HotReloadManager::new(path.clone(), base_config(), router).unwrap();
+
+        // 模拟首次 start 已 take（事件处理任务持 rx），或外部取走。
+        assert!(mgr.take_reload_rx().is_some(), "取走前置 receiver");
+
+        // 二次调用不得 panic（修复后 None 分支静默 return）。
+        let mgr = Arc::new(mgr);
+        mgr.handle_reload_events().await;
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
