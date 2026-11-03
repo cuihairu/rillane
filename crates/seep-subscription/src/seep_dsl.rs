@@ -1123,7 +1123,7 @@ impl SeepDslConverter {
                 (matches, target.clone())
             }
             SeepRule::IpCidr { cidrs, target } => {
-                let matches = vec![MatchCondition::Network {
+                let matches = vec![MatchCondition::IpCidr {
                     cidrs: cidrs.clone(),
                 }];
                 (matches, target.clone())

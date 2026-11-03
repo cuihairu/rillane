@@ -57,7 +57,7 @@ pub fn to_routing_rules(src: &RuleSourceImport, name: &str, target: &str) -> Vec
     if !src.cidrs.is_empty() {
         rules.push(RouteRule {
             name: format!("{name}-cidr"),
-            matches: vec![MatchCondition::Network {
+            matches: vec![MatchCondition::IpCidr {
                 cidrs: src.cidrs.clone(),
             }],
             target: target.to_string(),
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(rules[2].name, "cn-cidr");
         assert!(matches!(
             &rules[2].matches[0],
-            MatchCondition::Network { .. }
+            MatchCondition::IpCidr { .. }
         ));
 
         // 纯域源只出一条规则；full 并入 suffix 联合（路由面无完全域匹配）

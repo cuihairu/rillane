@@ -17,6 +17,46 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::time::{interval, sleep};
 
+/// 判断 IP 是否落在 CIDR 内（G0-1 目的 IP-CIDR 匹配）。仅支持 IP 字面量
+/// CIDR（`a.b.c.d/nn` 或 `::/nn`）；host 形式（无 `/`）按主机 /32 或 /128 处理；
+/// 无法解析返回 false（路由面不解析 DNS）。
+fn ip_in_cidr(ip: std::net::IpAddr, cidr: &str) -> bool {
+    let Some((addr_str, prefix_str)) = cidr.split_once('/') else {
+        return ip.to_string() == cidr;
+    };
+    let Ok(net_addr) = addr_str.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    let Ok(prefix) = prefix_str.parse::<u8>() else {
+        return false;
+    };
+    match (ip, net_addr) {
+        (std::net::IpAddr::V4(ip), std::net::IpAddr::V4(net)) => {
+            if prefix > 32 {
+                return false;
+            }
+            let mask = if prefix == 0 {
+                0u32
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            u32::from(ip) & mask == u32::from(net) & mask
+        }
+        (std::net::IpAddr::V6(ip), std::net::IpAddr::V6(net)) => {
+            if prefix > 128 {
+                return false;
+            }
+            let mask = if prefix == 0 {
+                0u128
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            u128::from(ip) & mask == u128::from(net) & mask
+        }
+        _ => false,
+    }
+}
+
 /// 单成员实时质量（O-slo1 观测面：控制面 `/routing/stats` 与 `seepctl group`
 /// 取数；取数/门/评分口径与 [`RoutingEngine::select_latency_member`] 同源）
 #[derive(Debug, Clone, Serialize)]
@@ -711,6 +751,12 @@ fn matches_rule(rule: &RouteRule, ctx: &FlowContext) -> bool {
             .get("client.cidr")
             .map(|cidr| cidrs.iter().any(|rule_cidr| rule_cidr == cidr))
             .unwrap_or(false),
+        MatchCondition::IpCidr { cidrs } => {
+            let Ok(ip) = ctx.target.host.parse::<std::net::IpAddr>() else {
+                return false;
+            };
+            cidrs.iter().any(|cidr| ip_in_cidr(ip, cidr))
+        }
         MatchCondition::Port { values } => values.contains(&ctx.target.port),
         // tun-dataplane.md §2.5：TUN 首包归因注入的 process.name 注解
         // （= /proc/<pid>/comm，内核截断 15 字节）精确匹配；注解缺席恒不命中
@@ -1152,5 +1198,49 @@ mod tests {
         assert_eq!(x.source, "real");
         assert_eq!(x.score, None);
         assert_eq!(x.gate_pass, None);
+    }
+
+    /// G0-1 目的 IP-CIDR 匹配回归：IP 字面量按前缀命中/不命中；主机形式
+    /// 按精确地址；域名目标不命中（路由面不做 DNS）。
+    #[tokio::test]
+    async fn ip_cidr_matches_target_ip_prefix() {
+        use seep_core::{FlowId, FlowTarget, TargetProto};
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![RouteRule {
+                name: "private-net".into(),
+                matches: vec![MatchCondition::IpCidr {
+                    cidrs: vec![
+                        "10.0.0.0/8".into(),
+                        "192.168.1.0/24".into(),
+                        "2001:db8::/32".into(),
+                        "203.0.113.9".into(),
+                    ],
+                }],
+                target: "proxy".into(),
+            }],
+        });
+
+        async fn hit(engine: &RoutingEngine, host: &str) -> String {
+            let ctx = FlowContext {
+                id: FlowId::new(),
+                target: FlowTarget {
+                    host: host.to_string(),
+                    port: 443,
+                    proto: TargetProto::Tcp,
+                },
+                metadata: Default::default(),
+            };
+            engine.route(ctx).await.unwrap().final_node().to_string()
+        }
+
+        assert_eq!(hit(&engine, "10.1.2.3").await, "proxy", "IPv4 前缀命中");
+        assert_eq!(hit(&engine, "192.168.1.254").await, "proxy", "IPv4 边界内命中");
+        assert_eq!(hit(&engine, "2001:db8:1::9").await, "proxy", "IPv6 前缀命中");
+        assert_eq!(hit(&engine, "203.0.113.9").await, "proxy", "主机形式精确命中");
+        assert_eq!(hit(&engine, "11.0.0.1").await, "direct", "CIDR 外不命中");
+        assert_eq!(hit(&engine, "203.0.113.10").await, "direct", "主机形式不匹配");
+        assert_eq!(hit(&engine, "example.com").await, "direct", "域名目标不命中");
     }
 }

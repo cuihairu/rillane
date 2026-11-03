@@ -564,6 +564,15 @@ fn condition_to_rules(cond: &MatchCondition, target: &str, rules: &mut Vec<Strin
                 }
             }
         }
+        MatchCondition::IpCidr { cidrs } => {
+            for c in cidrs {
+                if c.contains(':') {
+                    rules.push(format!("IP-CIDR6,{c},{target}"));
+                } else {
+                    rules.push(format!("IP-CIDR,{c},{target}"));
+                }
+            }
+        }
         MatchCondition::Port { values } => {
             for p in values {
                 rules.push(format!("DST-PORT,{p},{target}"));

@@ -1789,6 +1789,13 @@ pub enum MatchCondition {
     Network {
         cidrs: Vec<String>,
     },
+    /// 目的 IP-CIDR 匹配（G0-1）：目标主机为 IP 字面量时按 CIDR 前缀匹配。
+    /// 与 `Network`（绑定 `client.cidr` 源注解）不同，本条件直接匹配流的
+    /// 目标地址，供「目标网段走指定出口」分流；host 为域名时不命中（域名
+    /// 解析由 sniff/回填层负责，路由面不做 DNS）。
+    IpCidr {
+        cidrs: Vec<String>,
+    },
     Port {
         values: Vec<u16>,
     },

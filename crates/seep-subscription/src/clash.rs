@@ -1144,7 +1144,7 @@ impl ClashConverter {
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
             ClashRule::IpCidr { cidrs, target } => {
-                let matches = vec![MatchCondition::Network {
+                let matches = vec![MatchCondition::IpCidr {
                     cidrs: cidrs.clone(),
                 }];
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
