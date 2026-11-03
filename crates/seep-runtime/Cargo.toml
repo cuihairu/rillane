@@ -31,6 +31,7 @@ whoami.workspace = true
 num_cpus.workspace = true
 regex.workspace = true
 chrono.workspace = true
+libc = "0.2"
 rustls.workspace = true
 tokio-rustls.workspace = true
 x509-parser.workspace = true

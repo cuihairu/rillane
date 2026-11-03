@@ -217,7 +217,8 @@ P2（下一步修）：
 - [x] **串行 UDP serve 循环内联 lookup_host（头阻塞整面）**——`mesh_transport.rs:1852`：单任务无 per-packet spawn（§13-5），一个不可解析 `target_host`（线上可控）阻塞所有流。
   **已修（2026-11-04）**：保留 §13-5 单任务顺序处理设计（不 per-packet spawn），为 exit 首包 `lookup_host` 加 3s 上界（`EXIT_LOOKUP_TIMEOUT`，测试可经 `with_dns_lookup_timeout` 调小）；超时/解析失败按单包错误丢弃并继续 serve，错误带 target host 便于定位。回归 `exit_uplink_dns_lookup_is_bounded`（有界性 + 错误上下文）与 `serve_udp_survives_bad_host_packet`（bad-host FULL 后 serve 存活且继续处理 good-host 建流）。evidence：`crates/seep-runtime/src/mesh_transport.rs:33-38` / `:1274-1280` / `:1287-1294` / `:1877-1906` / `:3820-3967`；seep-runtime 146 测 + `cargo test --workspace` 全绿。
   evidence：`mesh_transport.rs:1852` `lookup_host(...).await?` 在 serve 循环内。
-- [ ] **瞬时 recv_from 错误终止 UDP serve 任务**——`mesh_transport.rs:1946`：`Ok(Err(e))=>return Err`（ENOBUFS/EINTR 瞬时亦毙）；应 continue 或按瞬时/致命分类。
+- [x] **瞬时 recv_from 错误终止 UDP serve 任务**——`mesh_transport.rs:1946`：`Ok(Err(e))=>return Err`（ENOBUFS/EINTR 瞬时亦毙）；应 continue 或按瞬时/致命分类。
+  **已修（2026-11-04）**：`serve_udp` 的 `recv_from` 错误按瞬时/致命分类——`is_transient_recv_error`（EINTR/EAGAIN/ENOBUFS）记 debug 并 `continue` 保留 serve 任务；其余仍 `return Err` 终止。seep-runtime 增 `libc = "0.2"` 依赖取 ENOBUFS 常量。回归 `udp_recv_transient_error_classification`（三瞬时 true、ConnectionRefused false）。evidence：`crates/seep-runtime/src/mesh_transport.rs:40-52` / `:1997-2011` / `:4000-4018`；`crates/seep-runtime/Cargo.toml`；seep-runtime 147 测 + `cargo test --workspace` 全绿。
 - [ ] **瞬时 accept 错误终止 TCP mesh 监听任务**——`mesh_transport.rs:1330`：`listener.accept().await?`（ECONNABORTED/EMFILE/EINTR 瞬时亦毙）。
 
 P3（收尾）：

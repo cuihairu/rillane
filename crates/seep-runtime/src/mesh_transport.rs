@@ -33,6 +33,15 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 /// 无限阻塞收为有界丢弃（UDP 语义容忍丢包，FULL 重传自动重建）。
 const EXIT_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// UDP serve 循环 `recv_from` 瞬时错误分类：EINTR（信号打断）/ EAGAIN
+/// （暂缓，ShouldNotHappen）/ ENOBUFS（内核缓冲耗尽）都是瞬时故障——
+/// 不应终止整面 serve 任务（否则一个瞬时故障即停摆全节点 UDP）。
+fn is_transient_recv_error(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::Interrupted
+        || e.kind() == std::io::ErrorKind::WouldBlock
+        || e.raw_os_error() == Some(libc::ENOBUFS)
+}
+
 trait MeshStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T> MeshStream for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 
@@ -1990,7 +1999,19 @@ impl MeshDataPlane {
                         last_sweep = Instant::now();
                     }
                 }
-                Ok(Err(e)) => return Err(e.into()),
+                Ok(Err(e)) => {
+                    // 瞬时错误（EINTR 信号打断 / ENOBUFS 缓冲耗尽 / EAGAIN 暂缓）
+                    // 不终止 serve 任务——否则一个瞬时故障就停摆整面 UDP。
+                    if is_transient_recv_error(&e) {
+                        tracing::debug!(
+                            target: "seep::mesh::transport",
+                            error = %e,
+                            "mesh UDP recv_from 瞬时错误，跳过该包"
+                        );
+                        continue;
+                    }
+                    return Err(e.into());
+                }
                 Err(_) => {
                     face.sweep();
                     last_sweep = Instant::now();
@@ -3975,6 +3996,26 @@ mod tests {
             "serve 循环不得因 bad-host 解析错误终止"
         );
         serve.abort();
+    }
+
+    /// UDP serve `recv_from` 瞬时错误分类回归：EINTR/EAGAIN/ENOBUFS 不应
+    /// 终止整面 serve 任务（旧代码任意错误直接 return Err → 全面停摆）。
+    #[test]
+    fn udp_recv_transient_error_classification() {
+        let interrupted = std::io::Error::from(std::io::ErrorKind::Interrupted);
+        assert!(is_transient_recv_error(&interrupted), "EINTR 应视为瞬时");
+
+        let would_block = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(is_transient_recv_error(&would_block), "EAGAIN 应视为瞬时");
+
+        let enobufs = std::io::Error::from_raw_os_error(libc::ENOBUFS);
+        assert!(is_transient_recv_error(&enobufs), "ENOBUFS 应视为瞬时");
+
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(
+            !is_transient_recv_error(&refused),
+            "非瞬时错误应继续返回 Err 终止任务"
+        );
     }
 
     // ── P0-4 §10 T2（S6 收口）：两跳真 socket 往返 ──
