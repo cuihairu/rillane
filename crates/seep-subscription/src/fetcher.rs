@@ -18,8 +18,10 @@ pub enum FetcherError {
     ChunkOverLimit(u64),
     #[error("订阅内容非 UTF-8")]
     NotUtf8,
-    /// HTTP 客户端错误（4xx）：端点/资源不存在、鉴权失败、限流等——重试
-    /// 不会改变结果，属终态。5xx 不在此列（服务端瞬时错误，可重试）。
+    /// HTTP 客户端错误（4xx，408/429 除外）：端点/资源不存在、鉴权失败等——
+    /// 重试不会改变结果，属终态。408（Request Timeout）与 429（Too Many
+    /// Requests）语义可重试（429 带 Retry-After 背压、408 瞬时超时），不在此列；
+    /// 5xx 亦不在此列（服务端瞬时错误，可重试）。
     #[error("HTTP 状态错: {0}")]
     HttpStatus(u16),
 }
@@ -254,11 +256,12 @@ impl SubscriptionFetcher {
             });
         }
 
-        // 检查响应状态。4xx（客户端错误：404/403/429 等）语义上属终态——
-        // 重试不改变结果，包装成 FetcherError 让 fetch() 短路；5xx 保持
-        // anyhow（瞬时，可重试），与文档「与瞬时错误（…5xx）区分」一致。
+        // 检查响应状态。4xx（客户端错误）中 404/403 等属终态——重试不改变
+        // 结果，包装成 FetcherError 让 fetch() 短路；408（Request Timeout）
+        // 与 429（Too Many Requests）语义可重试（429 带 Retry-After 背压、
+        // 408 瞬时超时），与 5xx 一样保持瞬时 anyhow（可重试）。
         if !response.status().is_success() {
-            if (400..500).contains(&status_code) {
+            if (400..500).contains(&status_code) && !matches!(status_code, 408 | 429) {
                 return Err(FetcherError::HttpStatus(status_code).into());
             }
             return Err(anyhow!(
@@ -642,57 +645,89 @@ trojan://password@server.com:443#test
 
     /// P3 深审回归（2026-11-03）：非 2xx 状态分类。
     /// 4xx（404）应包装成 FetcherError::HttpStatus（终态，fetch 不重试）；
+    /// 408/429 语义可重试（背压/瞬时超时）应保持瞬时 anyhow（可重试）；
     /// 5xx（500）保持瞬时 anyhow（可重试）。
     #[tokio::test]
     async fn fetch_classifies_4xx_terminal_5xx_transient() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        async fn serve_one_response(status: &str) -> String {
+        async fn serve_one_response(status: &str, requests: &'static AtomicUsize) -> String {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let status = status.to_string();
             tokio::spawn(async move {
-                if let Ok((mut s, _)) = listener.accept().await {
-                    let mut buf = [0u8; 1024];
-                    let mut seen = Vec::new();
-                    loop {
-                        let n = s.read(&mut buf).await.unwrap_or(0);
-                        if n == 0 {
-                            break;
+                // 服务持续接受 max_retries 次（4xx 终态只到一次；可重试态到上限）。
+                for _ in 0..4 {
+                    if let Ok((mut s, _)) = listener.accept().await {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        let mut buf = [0u8; 1024];
+                        let mut seen = Vec::new();
+                        loop {
+                            let n = s.read(&mut buf).await.unwrap_or(0);
+                            if n == 0 {
+                                break;
+                            }
+                            seen.extend_from_slice(&buf[..n]);
+                            if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
                         }
-                        seen.extend_from_slice(&buf[..n]);
-                        if seen.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
+                        let resp = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+                        let _ = s.write_all(resp.as_bytes()).await;
                     }
-                    let resp = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
-                    let _ = s.write_all(resp.as_bytes()).await;
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
             });
             format!("http://{addr}/sub")
         }
 
-        let fetcher = SubscriptionFetcher::with_config(FetcherConfig {
-            max_retries: 3,
-            ..Default::default()
-        });
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         // 4xx → 终态 FetcherError::HttpStatus
-        let url = serve_one_response("404 Not Found").await;
+        let reqs = Box::leak(Box::new(AtomicUsize::new(0)));
+        let fetcher = SubscriptionFetcher::with_config(FetcherConfig {
+            max_retries: 3,
+            retry_interval: Duration::from_millis(1),
+            ..Default::default()
+        });
+        let url = serve_one_response("404 Not Found", reqs).await;
         let err = fetcher.fetch(&url).await.unwrap_err();
         match err.downcast_ref::<FetcherError>() {
             Some(FetcherError::HttpStatus(code)) => assert_eq!(*code, 404),
             other => panic!("404 应为 HttpStatus 终态，得到: {other:?}"),
         }
+        assert_eq!(reqs.load(Ordering::SeqCst), 1, "404 终态不应重试");
+
+        // 408/429 → 瞬时 anyhow（非 FetcherError），重试至上限。
+        for (status, label) in [("408 Request Timeout", "408"), ("429 Too Many Requests", "429")] {
+            let reqs = Box::leak(Box::new(AtomicUsize::new(0)));
+            let fetcher = SubscriptionFetcher::with_config(FetcherConfig {
+                max_retries: 3,
+                retry_interval: Duration::from_millis(1),
+                ..Default::default()
+            });
+            let url = serve_one_response(status, reqs).await;
+            let err = fetcher.fetch(&url).await.unwrap_err();
+            assert!(
+                err.downcast_ref::<FetcherError>().is_none(),
+                "{label} 应为瞬时错误（可重试），不应是 FetcherError"
+            );
+            assert_eq!(reqs.load(Ordering::SeqCst), 3, "{label} 应重试 max_retries 次");
+        }
 
         // 5xx → 瞬时 anyhow（非 FetcherError）
-        let url = serve_one_response("500 Internal Server Error").await;
+        let reqs = Box::leak(Box::new(AtomicUsize::new(0)));
+        let fetcher = SubscriptionFetcher::with_config(FetcherConfig {
+            max_retries: 3,
+            retry_interval: Duration::from_millis(1),
+            ..Default::default()
+        });
+        let url = serve_one_response("500 Internal Server Error", reqs).await;
         let err = fetcher.fetch(&url).await.unwrap_err();
         assert!(
             err.downcast_ref::<FetcherError>().is_none(),
             "5xx 应为瞬时错误（可重试），不应是 FetcherError"
         );
+        assert_eq!(reqs.load(Ordering::SeqCst), 3, "5xx 应重试 max_retries 次");
     }
 
     /// P3 深审回归（2026-11-03）：chunked 分块超限与非 UTF-8 两终态分支
