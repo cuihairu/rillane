@@ -42,9 +42,16 @@ pub fn decide_shaping_offset(spec: &ShapingSpec, flow_id: &FlowId, k: u64) -> u6
     let jitter = if spec.jitter_ms == 0 {
         0
     } else {
-        range_hash(flow_id, k) % (spec.jitter_ms + 1)
+        // jitter_ms=u64::MAX 时 +1 裹 0 → % 0 panic（validate 允许
+        // jitter_ms=interval_ms=u64::MAX）；checked_add 满值截断为
+        // % u64::MAX，域 [0, u64::MAX-1]，语义不变且无 panic。
+        range_hash(flow_id, k) % spec.jitter_ms.checked_add(1).unwrap_or(u64::MAX)
     };
-    (k.saturating_mul(spec.interval_ms) + jitter).min(u64::MAX / 2)
+    // k×interval + jitter 可能溢（interval/jitter 允许 u64::MAX）；饱和加再
+    // 截断，域有界且不 panic。
+    (k.saturating_mul(spec.interval_ms))
+        .saturating_add(jitter)
+        .min(u64::MAX / 2)
 }
 
 /// 确定性随机源（同 padding §2.2 同族 FNV-1a + splitmix64）。
@@ -231,6 +238,25 @@ mod tests {
             assert_eq!(a, b, "同 flow_id 同 k 恒同值");
             assert!(a >= k * 20, "offset ≥ k×interval：k={k} a={a}");
             assert!(a <= k * 20 + 5, "offset ≤ k×interval+jitter：k={k} a={a}");
+        }
+    }
+
+    /// jitter_ms=interval_ms=u64::MAX 时旧代码 `jitter_ms + 1` 裹 0 →
+    /// `% 0` panic（config validate 允许该组合，无上界校验）；修复后
+    /// `checked_add(1).unwrap_or(u64::MAX)` 域 [0, u64::MAX-1] 无 panic。
+    #[test]
+    fn shaping_offset_max_jitter_does_not_panic() {
+        let id = FlowId::new();
+        let s = ShapingSpec {
+            interval_ms: u64::MAX,
+            jitter_ms: u64::MAX,
+            max_delay_ms: u64::MAX,
+            ..spec()
+        };
+        for k in [0u64, 1, 1000, u64::MAX / 2] {
+            let off = decide_shaping_offset(&s, &id, k);
+            // k*interval 可能裹（saturating_mul），但不得 panic；域有界。
+            assert!(off <= u64::MAX / 2, "offset 应截断，k={k} got {off}");
         }
     }
 
