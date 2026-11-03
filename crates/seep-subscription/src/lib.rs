@@ -9,7 +9,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, RwLock,
+    },
     time::Duration,
 };
 
@@ -253,6 +256,9 @@ pub struct SubscriptionManager {
     config_path: Option<PathBuf>,
     /// 刷新间隔（全局）
     global_refresh_interval: Duration,
+    /// 订阅集合变更代（删除/重载递增）。refresh_subscription 在 fetch 前
+    /// 快照此代，写回时若代已变（订阅被删除）则不复活旧状态。
+    subscription_epoch: Arc<AtomicU64>,
 }
 
 impl SubscriptionManager {
@@ -263,6 +269,7 @@ impl SubscriptionManager {
             cache: Arc::new(SubscriptionCache::new()),
             config_path: None,
             global_refresh_interval: Duration::from_secs(300), // 5分钟
+            subscription_epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -339,6 +346,9 @@ impl SubscriptionManager {
         if subs.remove(name).is_none() {
             return Err(anyhow!("订阅 {} 不存在", name));
         }
+        // 持写锁内递增：与 refresh_subscription 在克隆块内读 map+epoch 串行，
+        // 消除「map 已删但 epoch 未变」的复活窗口。
+        self.subscription_epoch.fetch_add(1, Ordering::AcqRel);
 
         info!(
             target: "seep::subscription",
@@ -373,14 +383,16 @@ impl SubscriptionManager {
 
     /// 刷新单个订阅
     pub async fn refresh_subscription(&self, name: &str) -> Result<String> {
-        let mut subscription = {
+        let (mut subscription, snapshot_epoch) = {
             let subs = self
                 .subscriptions
                 .read()
                 .expect("subscriptions lock poisoned");
-            subs.get(name)
+            let subscription = subs.get(name)
                 .ok_or_else(|| anyhow!("订阅 {} 不存在", name))?
-                .clone()
+                .clone();
+            let snapshot_epoch = self.subscription_epoch.load(Ordering::Acquire);
+            (subscription, snapshot_epoch)
         };
 
         if !subscription.enabled {
@@ -432,7 +444,7 @@ impl SubscriptionManager {
                 "订阅内容未更改，跳过更新"
             );
             subscription.update_status(true, None);
-            self.update_subscription_in_map(subscription)?;
+            self.update_subscription_in_map_checked(subscription, snapshot_epoch)?;
             return Ok(content);
         }
 
@@ -446,7 +458,7 @@ impl SubscriptionManager {
         self.cache.set(name, &content)?;
 
         // 更新订阅信息
-        self.update_subscription_in_map(subscription)?;
+        self.update_subscription_in_map_checked(subscription, snapshot_epoch)?;
 
         info!(
             target: "seep::subscription",
@@ -583,12 +595,21 @@ impl SubscriptionManager {
         })
     }
 
-    /// 更新订阅信息到映射中
-    fn update_subscription_in_map(&self, subscription: Subscription) -> Result<()> {
+    /// 条件写回：仅当快照代仍为当前代（期间订阅未被删除/重载）才插入。
+    /// 修复 read-modify-write 复活——refresh_subscription 长 fetch 期间热更
+    /// 删除的订阅不得被旧状态回写复活。
+    fn update_subscription_in_map_checked(
+        &self,
+        subscription: Subscription,
+        snapshot_epoch: u64,
+    ) -> Result<()> {
         let mut subs = self
             .subscriptions
             .write()
             .expect("subscriptions lock poisoned");
+        if self.subscription_epoch.load(Ordering::Acquire) != snapshot_epoch {
+            return Ok(());
+        }
         subs.insert(subscription.name.clone(), subscription);
         Ok(())
     }
@@ -642,6 +663,7 @@ impl Default for SubscriptionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn test_subscription_creation() {
@@ -706,5 +728,55 @@ rulesets:
 
         assert_eq!(sub.detect_type(clash_content), SubscriptionType::Clash);
         assert_eq!(sub.detect_type(seep_content), SubscriptionType::Seep);
+    }
+
+    /// 回归：refresh_subscription 在长 fetch 期间订阅被热更删除时，不得用
+    /// 旧快照回写复活该订阅（read-modify-write 复活 bug）。
+    #[tokio::test]
+    async fn refresh_does_not_revive_subscription_removed_during_fetch() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // 慢端点：收到请求后延迟 150ms 再回 200 + 内容，确保 refresh 仍在
+        // fetch 中（订阅快照已克隆、写回未发生）。
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let body = "proxies:\n  - name: p1\n    type: ss\n    server: 1.2.3.4\n    port: 8388\n    cipher: aes-128-gcm\n    password: test\nproxy-groups:\n  - name: g1\n    type: select\n    proxies:\n      - p1\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/yaml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+
+        let manager = Arc::new(SubscriptionManager::default());
+        let url = format!("http://{addr}/sub.yaml");
+        manager.add_subscription(Subscription::new("hot".to_string(), url))?;
+
+        // 并发：refresh 进入 fetch（克隆快照）后删除订阅。
+        let refresh_handle = tokio::spawn({
+            let manager = manager.clone();
+            async move { manager.refresh_subscription("hot").await }
+        });
+        // 确保 refresh 已越过克隆并进入 fetch（server 已 accept 请求）。
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        manager.remove_subscription("hot")?;
+
+        let refresh_result = refresh_handle.await.unwrap();
+        assert!(
+            refresh_result.is_ok(),
+            "fetch 本身应成功（内容已拉取），复活与否取决于写回"
+        );
+        assert!(
+            manager.get_subscription("hot").is_none(),
+            "fetch 完成后订阅不得被旧快照复活"
+        );
+        server.await.unwrap();
+        Ok(())
     }
 }
