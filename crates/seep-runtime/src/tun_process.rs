@@ -14,7 +14,7 @@ use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -127,12 +127,26 @@ fn lookup_sync(root: &Path, src: SocketAddr, proto: SockProto) -> Option<Process
 
 /// 归因缓存（键含 proto：同地址的 tcp/udp 行在不同 /proc 表，结果独立）
 type AttrCache = HashMap<(SocketAddr, SockProto), (Option<ProcessInfo>, Instant)>;
+/// 单flight 状态：cell 存最终结果（`get()==Some` 表示已 set，含负结果）；
+/// notify 供等待者唤醒。
+struct InflightState {
+    cell: tokio::sync::OnceCell<Option<ProcessInfo>>,
+    notify: tokio::sync::Notify,
+}
+type InflightCell = Arc<InflightState>;
 
 /// 进程归因器（缓存 TTL 30s，含负缓存；§2.5「每流首包归因一次」的支撑面）
 pub struct ProcessAttributor {
     root: PathBuf,
     ttl: Duration,
-    cache: Mutex<AttrCache>,
+    cache: Arc<Mutex<AttrCache>>,
+    /// 并发同 key miss 单flight：合并重复 /proc 扫描（fd 遍历贵，见模块头）。
+    /// `tokio::sync::Mutex<HashMap<key, Weak<OnceCell>>>`——弱引用防已结束
+    /// 任务占位泄漏；TTL 过期后的下一次 miss 自会新建 cell。
+    inflight: Arc<Mutex<HashMap<(SocketAddr, SockProto), InflightCell>>>,
+    /// 测试观测：lookup_sync 实际调用次数（并发合并断言用）。
+    #[cfg(test)]
+    scan_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Default for ProcessAttributor {
@@ -151,7 +165,10 @@ impl ProcessAttributor {
         Self {
             root: root.into(),
             ttl: Duration::from_secs(30),
-            cache: Mutex::new(HashMap::new()),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            scan_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -168,15 +185,52 @@ impl ProcessAttributor {
                 return cached.clone();
             }
         }
-        let root = self.root.clone();
-        let found = tokio::task::spawn_blocking(move || lookup_sync(&root, src, proto))
-            .await
-            .ok()?;
-        self.cache
-            .lock()
-            .unwrap()
-            .insert((src, proto), (found.clone(), Instant::now()));
-        found
+
+        let key = (src, proto);
+        let cell = {
+            let mut inflight = self.inflight.lock().unwrap();
+            if let Some(existing) = inflight.get(&key) {
+                existing.clone()
+            } else {
+                let cell = Arc::new(InflightState {
+                    cell: tokio::sync::OnceCell::new(),
+                    notify: tokio::sync::Notify::new(),
+                });
+                let root = self.root.clone();
+                let cache = self.cache.clone();
+                let inflight_map = self.inflight.clone();
+                let cell2 = cell.clone();
+                #[cfg(test)]
+                let scan_count = self.scan_count.clone();
+                tokio::spawn(async move {
+                    #[cfg(test)]
+                    scan_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let found =
+                        tokio::task::spawn_blocking(move || lookup_sync(&root, src, proto))
+                            .await
+                            .ok()
+                            .flatten();
+                    cache
+                        .lock()
+                        .unwrap()
+                        .insert(key, (found.clone(), Instant::now()));
+                    let _ = cell2.cell.set(found);
+                    cell2.notify.notify_waiters();
+                    // 先 set 再移除：set 后新来者经 cell.get() 直接命中；移除
+                    // 使 TTL 过期后的下一次 miss 新建 cell 重扫（不复用旧 cell）。
+                    let mut infl = inflight_map.lock().unwrap();
+                    if infl.get(&key).is_some_and(|c| Arc::ptr_eq(c, &cell2)) {
+                        infl.remove(&key);
+                    }
+                });
+                inflight.insert(key, cell.clone());
+                cell
+            }
+        };
+        if cell.cell.get().is_none() {
+            cell.notify.notified().await;
+        }
+        cell.cell.get().and_then(|v| v.clone())
     }
 }
 
@@ -326,5 +380,47 @@ mod tests {
             "负缓存 TTL 内不重扫"
         );
         let _ = std::fs::remove_dir_all(&root3);
+    }
+
+    /// 回归：并发同 key miss 只做一次 /proc 扫描（单flight 合并），
+    /// 其余等待者复用结果；TTL 过期后的下一次 miss 重扫（cell 已移除）。
+    #[tokio::test]
+    async fn concurrent_miss_singleflights_one_scan() {
+        let root = fixture();
+        let attr = Arc::new(ProcessAttributor::with_root(&root));
+        let src: SocketAddr = "192.168.0.192:4660".parse().unwrap();
+
+        // 并发 8 个同 key miss（首次扫描前都未命中缓存）。
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let attr = attr.clone();
+            handles.push(tokio::spawn(async move {
+                attr.attribute(src, SockProto::Udp).await
+            }));
+        }
+        for h in handles {
+            let r = h.await.unwrap();
+            assert_eq!(
+                r,
+                Some(ProcessInfo { pid: 4242, comm: "gameproc".into() })
+            );
+        }
+
+        // 单flight 合并：8 个并发 miss 只触发 1 次 lookup_sync。
+        assert_eq!(attr.scan_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // cell 已完成并移除：TTL 过期后的下一次 miss 新建 cell 重扫。
+        let attr_expired = Arc::new(
+            ProcessAttributor::with_root(&root).with_ttl(Duration::from_millis(50)),
+        );
+        let attr_expired2 = attr_expired.clone();
+        let first = attr_expired.attribute(src, SockProto::Udp).await;
+        assert!(first.is_some());
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let second = attr_expired2.attribute(src, SockProto::Udp).await;
+        assert!(second.is_some());
+        assert_eq!(attr_expired2.scan_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
