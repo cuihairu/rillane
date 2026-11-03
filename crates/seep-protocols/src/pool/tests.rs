@@ -230,6 +230,43 @@ async fn global_capacity_evicts_oldest() {
     assert_eq!(pool.snapshot().evicted_capacity, 1);
 }
 
+/// §5.2 maybe_refill inflight 并发门回归：32 次模拟并发触发只允许登记
+/// 一个补充拨号；门失效（headroom 不计 inflight）会同时 spawn 32 条。
+#[tokio::test]
+async fn maybe_refill_no_spawn_when_key_at_capacity() {
+    let addr = spawn_idle_server().await;
+    let key = TransportKey::plain(addr.ip().to_string(), addr.port());
+    // idle=1 低于 low_watermark=3：首触发应占用唯一 inflight 名额。
+    let pool = TransportPool::new(test_policy(3, 3, 16), None);
+    pool.prewarm(&key, 1);
+    // 等 prewarm 收尾（inflight 归零）且 idle=1，保证下面测量从净态开始。
+    wait_until(|| {
+        let keys = pool.keys.lock().unwrap();
+        keys.get(&key)
+            .map(|st| st.inflight_refill == 0 && st.idle.len() == 1)
+            .unwrap_or(false)
+    })
+    .await;
+
+    // 同一 runtime 上连续调用 32 次（无 yield），模拟 release 并发风暴。
+    for _ in 0..32 {
+        pool.maybe_refill(&key);
+    }
+
+    let (inflight, idle_len) = {
+        let keys = pool.keys.lock().unwrap();
+        let st = keys.get(&key).expect("键应存在");
+        (st.inflight_refill, st.idle.len())
+    };
+    assert!(
+        inflight + idle_len <= 3,
+        "并发触发必须受 per-key 上界约束（inflight={inflight}, idle={idle_len}）；门失效会击穿上限"
+    );
+    assert_eq!(idle_len, 1, "后台填充完成前 idle 不变");
+    wait_until(|| pool.idle_count_of(&key) == 3).await;
+    assert!(pool.snapshot().dials_refill_ok <= 2, "补充拨号受 per-key 上界约束");
+}
+
 #[tokio::test]
 async fn background_backoff_on_dead_egress() {
     assert_eq!(next_backoff_millis(0), 1_000, "1s 起");
