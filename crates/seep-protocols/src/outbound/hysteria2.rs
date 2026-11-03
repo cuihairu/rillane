@@ -5,6 +5,12 @@ use async_trait::async_trait;
 use seep_core::{EgressConnector, Flow, FlowReport, TargetProto};
 use tokio::sync::Mutex;
 
+/// 连接建立（DNS 解析 + QUIC 握手 + HTTP/3 认证）超时上限（P2 深审
+/// 2026-11-03）。`get_or_connect_client` 有意 single-flight（防连接风暴），
+/// 但无超时则挂起拨号会永久钉住全部该出站流；此上限令挂起握手在超时后
+/// 失败释放互斥，后续调用可重试。
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Hysteria2 出口连接器
 pub struct Hysteria2Connector {
     server: String,
@@ -121,7 +127,11 @@ impl Hysteria2Connector {
             return Ok(client.clone());
         }
 
-        let client = self.connect_client().await?;
+        // 持锁跨握手（single-flight 语义），但加显式超时：超时则释放互斥、
+        // 不缓存半成品（fail-closed），后续调用可重新尝试。
+        let client = tokio::time::timeout(CONNECT_TIMEOUT, self.connect_client())
+            .await
+            .map_err(|_| anyhow!("Hysteria2 连接建立超时（{}s）", CONNECT_TIMEOUT.as_secs()))??;
         *guard = Some(client.clone());
         Ok(client)
     }

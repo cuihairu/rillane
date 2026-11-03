@@ -156,8 +156,9 @@ P2（下一步修）：
   **已修（2026-11-03）**：`seepd` 启动路径（`main.rs`）fail-closed——`api_bind` 非回环且 `admin_token=None` 时拒启（bail，错误含绑定地址与处置建议）；回环绑定保留无 token 能力（本机开发/诊断）。seepd 27+2 测全绿。
 
 P3（收尾）：
-- [ ] **hysteria2 连接器持 client mutex 跨 QUIC/HTTP3 握手**——`hysteria2.rs:119-124`：cache-miss 持锁跨 `connect_client()`（秒级或挂起拨号）；有意的 single-flight（防连接风暴），但握手无显式超时则永久钉住全部该出站流。建议 connect 超时。
+- [x] **hysteria2 连接器持 client mutex 跨 QUIC/HTTP3 握手**——`hysteria2.rs:119-124`：cache-miss 持锁跨 `connect_client()`（秒级或挂起拨号）；有意的 single-flight（防连接风暴），但握手无显式超时则永久钉住全部该出站流。建议 connect 超时。
   evidence：`hysteria2.rs:119` `client.lock().await` 持至 `:124` `connect_client().await?` 完成。
+  **已修（2026-11-03）**：`get_or_connect_client` 的 `connect_client()` 包 `tokio::time::timeout(CONNECT_TIMEOUT=15s)`——挂起握手超时后失败释放互斥、不缓存半成品（fail-closed），后续调用可重试；single-flight 语义保留。seep-runtime `build_egress_outputs_supports_hysteria2` 测绿，seep-protocols clippy 零警告。
 - [ ] **无界 pong/keepalive 通道**——`vless.rs:630` / `trojan.rs:473` / `vmess.rs:1349` `mpsc::unbounded_channel`：对端洪泛 PONG 时队列无界内存增长（流量生命周期有界）。
 - [ ] **mesh 信封 `as u8` 长度截断**——`mesh_transport.rs:379-386/616-631`（flow_id/target_host/path 长度）+ `trojan.rs:99` / `udp/associate.rs:96`（域名长度）：无 `>255` 守卫，超长静默截断长度字节产畸形帧；对照 `vless.rs:165` 有守卫。
 - [ ] **padding.rs range span 下溢**——`middleware/padding.rs:71` `spec.max - spec.min + 1`：仅 config validate 保证 min≤max；绕过校验（或未来路径）即 usize wrap。
