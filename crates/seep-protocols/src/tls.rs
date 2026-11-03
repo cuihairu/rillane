@@ -51,11 +51,14 @@ fn filter_alpn(alpn: &[String]) -> Vec<Vec<u8>> {
 pub(crate) fn tls_crypto_provider() -> Arc<CryptoProvider> {
     static INSTALL: OnceLock<()> = OnceLock::new();
     INSTALL.get_or_init(|| {
+        // install_default Err = 已有默认 provider（本仓其他线程/他库已装），
+        // 尊重既有安装，不视为失败（忽略返回值）。install Ok 后 get_default
+        // 必 Some——本函数不再对 None 取 expect，改为下方回退。
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
     CryptoProvider::get_default()
-        .expect("tls_crypto_provider 已完成安装")
-        .clone()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()))
 }
 
 /// 按形态构造 ClientConfig（P2-5 §4-1 单漏斗）：none = 缺省路径逐字节
