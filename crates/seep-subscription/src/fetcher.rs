@@ -18,6 +18,10 @@ pub enum FetcherError {
     ChunkOverLimit(u64),
     #[error("订阅内容非 UTF-8")]
     NotUtf8,
+    /// HTTP 客户端错误（4xx）：端点/资源不存在、鉴权失败、限流等——重试
+    /// 不会改变结果，属终态。5xx 不在此列（服务端瞬时错误，可重试）。
+    #[error("HTTP 状态错: {0}")]
+    HttpStatus(u16),
 }
 
 /// 订阅获取器配置
@@ -250,8 +254,13 @@ impl SubscriptionFetcher {
             });
         }
 
-        // 检查响应状态
+        // 检查响应状态。4xx（客户端错误：404/403/429 等）语义上属终态——
+        // 重试不改变结果，包装成 FetcherError 让 fetch() 短路；5xx 保持
+        // anyhow（瞬时，可重试），与文档「与瞬时错误（…5xx）区分」一致。
         if !response.status().is_success() {
+            if (400..500).contains(&status_code) {
+                return Err(FetcherError::HttpStatus(status_code).into());
+            }
             return Err(anyhow!(
                 "HTTP请求失败: {} {}",
                 status_code,
@@ -629,5 +638,132 @@ trojan://password@server.com:443#test
             err.downcast_ref::<FetcherError>().is_some(),
             "内容过大应为 FetcherError 终态错误"
         );
+    }
+
+    /// P3 深审回归（2026-11-03）：非 2xx 状态分类。
+    /// 4xx（404）应包装成 FetcherError::HttpStatus（终态，fetch 不重试）；
+    /// 5xx（500）保持瞬时 anyhow（可重试）。
+    #[tokio::test]
+    async fn fetch_classifies_4xx_terminal_5xx_transient() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        async fn serve_one_response(status: &str) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let status = status.to_string();
+            tokio::spawn(async move {
+                if let Ok((mut s, _)) = listener.accept().await {
+                    let mut buf = [0u8; 1024];
+                    let mut seen = Vec::new();
+                    loop {
+                        let n = s.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        seen.extend_from_slice(&buf[..n]);
+                        if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let resp = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+                    let _ = s.write_all(resp.as_bytes()).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            });
+            format!("http://{addr}/sub")
+        }
+
+        let fetcher = SubscriptionFetcher::with_config(FetcherConfig {
+            max_retries: 3,
+            ..Default::default()
+        });
+
+        // 4xx → 终态 FetcherError::HttpStatus
+        let url = serve_one_response("404 Not Found").await;
+        let err = fetcher.fetch(&url).await.unwrap_err();
+        match err.downcast_ref::<FetcherError>() {
+            Some(FetcherError::HttpStatus(code)) => assert_eq!(*code, 404),
+            other => panic!("404 应为 HttpStatus 终态，得到: {other:?}"),
+        }
+
+        // 5xx → 瞬时 anyhow（非 FetcherError）
+        let url = serve_one_response("500 Internal Server Error").await;
+        let err = fetcher.fetch(&url).await.unwrap_err();
+        assert!(
+            err.downcast_ref::<FetcherError>().is_none(),
+            "5xx 应为瞬时错误（可重试），不应是 FetcherError"
+        );
+    }
+
+    /// P3 深审回归（2026-11-03）：chunked 分块超限与非 UTF-8 两终态分支
+    /// 亦应带 FetcherError 标记（此前仅 Content-Length 超限被回归）。
+    #[tokio::test]
+    async fn fetch_terminal_chunk_overlimit_and_not_utf8() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        // chunked=true → Transfer-Encoding: chunked（触发 ChunkOverLimit 分支）；
+        // chunked=false → Content-Length（非 UTF-8 分支）。
+        async fn serve_body(body: &[u8], chunked: bool) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let body = body.to_vec();
+            let chunked = chunked;
+            tokio::spawn(async move {
+                if let Ok((mut s, _)) = listener.accept().await {
+                    let mut buf = [0u8; 1024];
+                    let mut seen = Vec::new();
+                    loop {
+                        let n = s.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        seen.extend_from_slice(&buf[..n]);
+                        if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    if chunked {
+                        // 单大块（超过 50MiB）→ 流式读体触发 ChunkOverLimit。
+                        let resp = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+                        let _ = s.write_all(resp.as_bytes()).await;
+                        let _ = s
+                            .write_all(format!("{:X}\r\n", body.len()).as_bytes())
+                            .await;
+                        let _ = s.write_all(&body).await;
+                        let _ = s.write_all(b"\r\n0\r\n\r\n").await;
+                    } else {
+                        let resp =
+                            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                        let _ = s.write_all(resp.as_bytes()).await;
+                        let _ = s.write_all(&body).await;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            });
+            format!("http://{addr}/sub")
+        }
+
+        let fetcher = SubscriptionFetcher::with_config(FetcherConfig {
+            max_retries: 3,
+            ..Default::default()
+        });
+
+        // 分块超限：体超 50MiB → ChunkOverLimit（终态）。
+        let big = vec![0u8; 50 * 1024 * 1024 + 1];
+        let url = serve_body(&big, true).await;
+        let err = fetcher.fetch(&url).await.unwrap_err();
+        match err.downcast_ref::<FetcherError>() {
+            Some(FetcherError::ChunkOverLimit(_)) => {}
+            other => panic!("超限体应为 ChunkOverLimit 终态，得到: {other:?}"),
+        }
+
+        // 非 UTF-8：合法小体含非法字节 → NotUtf8（终态）。
+        let bad = vec![0xFF, 0xFE, 0x00];
+        let url = serve_body(&bad, false).await;
+        let err = fetcher.fetch(&url).await.unwrap_err();
+        match err.downcast_ref::<FetcherError>() {
+            Some(FetcherError::NotUtf8) => {}
+            other => panic!("非 UTF-8 体应为 NotUtf8 终态，得到: {other:?}"),
+        }
     }
 }
