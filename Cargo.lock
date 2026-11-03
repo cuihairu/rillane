@@ -3616,6 +3616,7 @@ dependencies = [
  "notify",
  "num_cpus",
  "petgraph",
+ "rcgen",
  "regex",
  "rustls",
  "seep-config",

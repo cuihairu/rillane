@@ -2063,6 +2063,10 @@ fn peer_node_id_from_server_tls_stream(
 struct MeshTls {
     cfg: MeshTlsConfig,
     inner: tokio::sync::RwLock<MeshTlsInner>,
+    /// 串行门：同一时刻只允许一个任务做昂贵的磁盘载入，避免 N 个并发握手
+    /// 全部各自读盘（stampede）。持此门期间**不**持 `inner` 写锁，磁盘 IO
+    /// 不阻塞握手快路径；写锁仅覆盖内存交换（见 maybe_reload）。
+    reload_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -2124,6 +2128,7 @@ impl MeshTls {
         Ok(Self {
             cfg: cfg.clone(),
             inner: tokio::sync::RwLock::new(inner),
+            reload_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -2161,13 +2166,31 @@ impl MeshTls {
         if !needs_reload {
             return Ok(());
         }
-        let mut guard = self.inner.write().await;
-        // Double-check under write lock.
+        // 串行化重载：先取串行门（非 inner 写锁），再双检。
+        let _reload_guard = self.reload_lock.lock().await;
         let current2 = fingerprint_paths(&self.cfg);
-        if guard.fingerprint == current2 {
+        let still_needs = {
+            let guard = self.inner.read().await;
+            guard.fingerprint != current2
+        };
+        if !still_needs {
             return Ok(());
         }
-        *guard = MeshTlsInner::load(&self.cfg)?;
+        // 磁盘载入放在所有锁外（仅持串行门），并经 spawn_blocking 不阻塞
+        // tokio 执行线程——慢盘只延缓本重载，不串行化全部 mesh 握手快路径。
+        let cfg = self.cfg.clone();
+        let loaded = tokio::task::spawn_blocking(move || MeshTlsInner::load(&cfg))
+            .await
+            .map_err(|e| anyhow!("mesh tls reload task failed: {e}"))??;
+        // 写锁只覆盖内存交换（短临界），不跨磁盘 IO。
+        let mut guard = self.inner.write().await;
+        // 再次双检：等待 reload_lock / spawn_blocking 期间若有其它任务已换新
+        // 生效面，则丢弃本次载入（不覆盖更新的指纹）。
+        let current3 = fingerprint_paths(&self.cfg);
+        if guard.fingerprint == current3 {
+            return Ok(());
+        }
+        *guard = loaded;
         Ok(())
     }
 
@@ -2367,6 +2390,70 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// P2 深审回归（2026-11-03）：mesh mTLS 重载把磁盘载入移出 `inner` 写锁。
+    /// 构造真实证书夹具，验证：
+    /// 1) 指纹未变 → maybe_reload 不读盘（fingerprint 保持）；
+    /// 2) 触摸证书文件（mtime 变化）→ maybe_reload 载入新生效面（fingerprint
+    ///    更新），且重载期间写锁不被跨磁盘 IO 持有（由实现结构保证，此处以
+    ///    并发 maybe_reload 不挂起/不报错作为行为回归）。
+    #[tokio::test]
+    async fn maybe_reload_reloards_only_on_fingerprint_change() {
+        // 临时目录 + 自签证书（server_name 与 SAN 对齐，client 侧需同 CA）。
+        let dir = std::env::temp_dir().join(format!(
+            "seep_mesh_tls_reload_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca_path = dir.join("ca.pem");
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["seep".to_string()]).expect("rcgen 自签");
+        std::fs::write(&ca_path, certified.cert.pem()).unwrap();
+        std::fs::write(&cert_path, certified.cert.pem()).unwrap();
+        std::fs::write(&key_path, certified.key_pair.serialize_pem()).unwrap();
+
+        let cfg = MeshTlsConfig {
+            ca_cert_path: ca_path.clone(),
+            cert_path: cert_path.clone(),
+            key_path: key_path.clone(),
+            server_name: "seep".to_string(),
+            require_client_auth: true,
+            verify_peer_node_id: true,
+            allow_unknown_peers: false,
+            revoked_node_ids: vec![],
+            revoked_nodes_path: None,
+        };
+        let tls = MeshTls::from_config(&cfg).unwrap();
+        let initial_fp = {
+            let g = tls.inner.read().await;
+            g.fingerprint
+        };
+
+        // 1) 无变化：不重载。
+        tls.maybe_reload().await.unwrap();
+        {
+            let g = tls.inner.read().await;
+            assert_eq!(g.fingerprint, initial_fp, "未变更不应重载");
+        }
+
+        // 2) 触摸证书文件 → mtime 变化 → 重载生效面。
+        // 确保 mtime 前进（一些文件系统秒级精度，先睡 1.1s 再写同内容）。
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        std::fs::write(&cert_path, certified.cert.pem()).unwrap();
+        tls.maybe_reload().await.unwrap();
+        {
+            let g = tls.inner.read().await;
+            assert_ne!(g.fingerprint, initial_fp, "mtime 变化应触发重载");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

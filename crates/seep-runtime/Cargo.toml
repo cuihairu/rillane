@@ -39,3 +39,5 @@ x509-parser.workspace = true
 # P3-2（plugin-loader.md §4.3）：链装配测试以最小 wat 内联模块产出 .wasm 落盘；
 # 版本随 wasmtime 所引（Cargo.lock wat 1.261.0），复用同份缓存
 wat = "1.261"
+# mesh mTLS 重载路径回归测试以 rcgen 自签证书为夹具。
+rcgen.workspace = true

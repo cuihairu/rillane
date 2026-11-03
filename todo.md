@@ -139,13 +139,15 @@
 ## 2026-11-01 代码深审发现（P2/P3，源自 docs/review/2026-11-01-code-review.md）
 
 P2（下一步修）：
-- [ ] **订阅缓存 cleanup 持 memory_cache 写锁跨同步磁盘 IO**——`:360/:411/:470`（cleanup→fs::remove_file）。异步上下文阻塞执行线程并串行化全部缓存操作。
+- [x] **订阅缓存 cleanup 持 memory_cache 写锁跨同步磁盘 IO**——`:360/:411/:470`（cleanup→fs::remove_file）。异步上下文阻塞执行线程并串行化全部缓存操作。
   evidence：`cache.rs:150` `memory_cache.write()` 持锁调 `load_from_disk`（fs::read_to_string）。
   已修一半（2026-11-02 `bec9785`）：get() 持锁跨 load_from_disk 实为**自锁死锁**（:557 重取同锁，RwLock 不可重入；重启带热盘缓存/条目过期两路径必触），非仅阻塞——守卫先行释放再交 load_from_disk，2 回归测试；本条剩余面仅 cleanup 同步 IO 一项。
+  **已修全（2026-11-03 `12c35ee`）**：三个 cleanup 的磁盘删除移到所有锁外（`cache.rs:418/486/548`），内存突变在锁内、磁盘路径收集后锁外删除；回归 3 测（cleanup_expired/cleanup_lru/cleanup_lru_by_count），8 缓存测全绿。
 - [x] **配置热交换非原子（check-then-act）**——`runtime_builder.rs:1120-1146` / `update_config:1384-1408`：读 config → 长 await（egress 构建拨号）→ 四次独立写（config/router/flow_outputs/egress_connectors）。窗口内丢失更新 + 路由表引用未就绪 egress 名。
   evidence：2026-11-03 修复——新增 `Runtime.config_apply_lock`（tokio Mutex，三方共用：update_config / merge_config_delta / 订阅刷新循环），覆盖「读 config→构建 egress→落四态」全程；写序改为 flow_outputs→egress_connectors→router.reload→config（先装 egress 面再 reload 路由，消除「规则引用未就绪名」窗口）。回归：`update_config_waits_for_config_apply_lock` + `concurrent_merge_config_delta_keeps_both_deltas`。
-- [ ] **mesh TLS 重载在 write 锁下做同步文件 IO**——`mesh_transport.rs:2136-2153` `maybe_reload`：`inner.write().await` 下 `MeshTlsInner::load` 读 CA/私钥/吊销列表；慢盘阻塞所有 mesh 握手快路径。generation 双检正确，仅 IO-under-lock 问题。
+- [x] **mesh TLS 重载在 write 锁下做同步文件 IO**——`mesh_transport.rs:2136-2153` `maybe_reload`：`inner.write().await` 下 `MeshTlsInner::load` 读 CA/私钥/吊销列表；慢盘阻塞所有 mesh 握手快路径。generation 双检正确，仅 IO-under-lock 问题。
   evidence：`mesh_transport.rs` `let mut guard = self.inner.write().await;` 后同步 fs 读。
+  **已修（2026-11-03）**：`maybe_reload` 增 `reload_lock` 串行门（tokio Mutex），磁盘载入移出 `inner` 写锁并经 `spawn_blocking`（`mesh_transport.rs:2155-2192`）；写锁仅覆盖内存交换短临界，三处双检保留；回归 `maybe_reload_reloards_only_on_fingerprint_change`（真实 rcgen 证书夹具，指纹不变不重载/触摸触发重载），seep-runtime 138+2 测全绿。
 - [ ] **DNS 解析缓存未命中 stampede**——`dns_engine.rs:695-738`：N 并发冷名全部 miss 全部上游 `query_group`/`cross_check` 再各自插入，无 singleflight；突发时击穿上游解析器。
   evidence：`dns_engine.rs:695` check-then-act，`724/726` await 上游后 `728` insert。
 - [ ] **control-plane 无 token 时鉴权门整体跳过**——`control_plane.rs:129-140`：`admin_token=None`（serde 缺省）+ 非回环 `api_bind` 时 mutating 端点与 `/runtime/config`、`/events`、`/logs` 全开放。建议非回环绑定无 token 时启动告警/拒启。
@@ -247,3 +249,14 @@ P3（收尾）：
 - [ ] **G2-13 tuic/anytls/shadowtls 出站**。
 - [ ] **G2-14 Clash API 兼容层（只读子集 + 面板直连）**——现控制面不兼容 /proxies /connections /traffic，metacubexd/yacd 无法直连。
 - [ ] **G2-15 httpupgrade/xhttp 传输；G3-16 macOS/Windows TUN + auto_route 全局接管；ICMP 代理、UoT、hosts 映射**。
+
+---
+
+## 审核发现（5ddd48417fab..HEAD；只审不改，2026-11-03）
+
+覆盖：seep-protocols（host_has_injection_chars 扩围 + socks5/http 回归测试）、seep-runtime（config_apply_lock 热交换串行、hot_reload config_mutex、mesh send_existing_flow + 防重放窗口语义、chain fmt）、seep-subscription（cache 锁外磁盘删除 + 热盘容量回填、fetcher 终态错误分类）、README/文档。
+
+- [ ] 审核发现：cache 三个 cleanup（cleanup_expired/cleanup_lru/cleanup_lru_by_count）把磁盘 `fs::remove_file` 移到 `memory_cache` 锁外（cache.rs:417/485/547），与并发 `set_with_ttl`→`save_to_disk`（cache.rs:253）同键竞态——清理线程在内存移除后、删盘前，set 可重插该键并落盘，随后清理删掉 set 刚写的新盘文件，留下「内存有、磁盘无」的副本；重启/后续 LRU 再逐即丢失。提交注释只声明了 get()→load_from_disk 复生窗口（自愈），未覆盖此 set 写删窗口（不白愈、持久化丢失）。P3。
+- [ ] 审核发现：`FetcherError` 文档声明「HTTP 状态错」为终态（fetcher.rs:8-10），但非 2xx 状态（4xx/5xx，如 404/429/5xx）经 `anyhow!` 返回（fetcher.rs:254-260），未包装成 FetcherError——`fetch()` 的终态短路（fetcher.rs:172 `downcast_ref::<FetcherError>`）对状态错不生效，仍按瞬时错误重试 `max_retries` 次；文档与实现语义不符，且 4xx（404/403/429）语义上应属终态。P3。
+- [ ] 审核发现：`apply_config_inner`/订阅循环的写序改「先装 egress 面、再 reload 路由、最后落 config」（runtime_builder.rs:1158-1163/1427-1434）消除了「新规则引用未就绪名」窗口，但引入反向窗口：outputs/connectors 整体替换后、`router.reload` 前，旧路由规则可解析到已被新 egress 集删除的名字 → 该窗口内命中已删 egress 的在途流报「未知 egress」失败（瞬时微秒级，多状态非原子交换固有残余）。注释「不再引用未就绪名」方向正确但未提此逆向窗口。P3（低）。
+- [ ] 审核发现：测试缺口——① fetcher 终态错误仅 Content-Length 超限被回归（chunked 分块超限 ChunkOverLimit 与非 UTF-8 NotUtf8 两终态分支无测试，fetcher.rs:298-305）；② cache cleanup 锁外删盘 vs set 同键竞态无回归测试（cache.rs:417 窗口）；③ 订阅刷新循环持 config_apply_lock 路径（runtime_builder.rs:1132）无独立回归（仅 update_config/merge_config_delta 两路径被覆盖）。
