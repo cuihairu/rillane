@@ -223,7 +223,8 @@ P2（下一步修）：
   **已修（2026-11-04）**：`serve` 的 `accept` 错误按瞬时/致命分类——`is_transient_accept_error`（ECONNABORTED/EINTR/EMFILE/ENFILE/ENOBUFS）记 debug + 10ms 退避后 `continue` 保留监听任务；其余仍 `return Err` 终止。回归 `tcp_accept_transient_error_classification`（五瞬时 true、ConnectionRefused false）。evidence：`crates/seep-runtime/src/mesh_transport.rs:54-63` / `:1390-1403` / `:4049-4071`；seep-runtime 148 测 + `cargo test --workspace` 全绿。
 
 P3（收尾）：
-- [ ] **active_chains.len()-1 下溢**——`chain.rs:907`：`drop(chain)`（:901）后读 len；并发 `terminate_chain`（:924 remove）移除 → 0-1 下溢（release 裹 usize::MAX 指标污染）；宜 `saturating_sub(1)` 或由 terminate 自减。
+- [x] **active_chains.len()-1 下溢**——`chain.rs:907`：`drop(chain)`（:901）后读 len；并发 `terminate_chain`（:924 remove）移除 → 0-1 下溢（release 裹 usize::MAX 指标污染）；宜 `saturating_sub(1)` 或由 terminate 自减。
+  **已修（2026-11-04）**：`handle_chain_failure` 备用耗尽分支 `active_chains.len() - 1` 改 `saturating_sub(1)`——并发 `terminate_chain` 在 drop 分片守卫后窗口内移除本链时不再下溢裹 usize::MAX（若已移除则 len 本身已正确，不再二次自减）。回归 `concurrent_terminate_and_failure_no_active_chains_underflow`（64 轮并发 failure×terminate，断言 active_chains 不裹 MAX 且终态 0）。evidence：`crates/seep-runtime/src/chain.rs:900-904` / `:1308-1360`；seep-runtime 149 测 + `cargo test --workspace` 全绿。
 - [ ] **mesh UDP 下行序号归零瞬态丢包**——`mesh_transport.rs:1877`：exit 建流归零下行序号而客户端窗口仍在（last>63）→ 序号 0..36 判回退拒、≥37 自愈；瞬态 ~37 包突发丢包（非永久拒收）。
 - [ ] **缓存满插入 O(n) 驱逐扫描**——`mesh_transport.rs:868-876`：满（65536）时每次插入全 `min_by_key` 扫描；文档化权衡（"O(n) 无新依赖"），需认证 peer + 6.5 万流触发。
 - [ ] **订阅转换配置硬编码 admin_token="seep"**——`clash.rs:768-771`/`seep_dsl.rs:413-418`：回环绑定约束暴露面；建议省略或随机生成。

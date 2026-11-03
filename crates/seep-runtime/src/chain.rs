@@ -898,7 +898,10 @@ impl ChainManager {
             {
                 let mut stats = self.stats.write().await;
                 stats.failed_chains += 1;
-                stats.active_chains = self.active_chains.len() - 1;
+                // 并发 terminate_chain 可能已在此窗口移除本链（len 已自减），
+                // `len() - 1` 在 len==0 时下溢裹成 usize::MAX 污染指标；
+                // saturating_sub 防裹（若已移除则 len 本身已正确，不再二次自减）。
+                stats.active_chains = self.active_chains.len().saturating_sub(1);
             }
 
             Ok(None)
@@ -1301,6 +1304,54 @@ mod tests {
         assert_eq!(ledger.last().unwrap().chain_id, "ch-109", "最新在尾");
         assert_eq!(ledger.first().unwrap().chain_id, "ch-10", "最旧被逐出");
         assert_eq!(mgr.get_recent_switches(3).len(), 3);
+    }
+
+    /// 并发故障上报 × 终止链路竞态下 active_chains 指标不得下溢裹 MAX。
+    /// 旧代码 `handle_chain_failure` 备用耗尽分支在 drop 分片守卫后执行
+    /// `len() - 1`：terminate_chain 在窗口内移除即 0-1 → usize::MAX。
+    #[tokio::test]
+    async fn concurrent_terminate_and_failure_no_active_chains_underflow() {
+        let mgr = Arc::new(ledger_manager());
+        for i in 0..64 {
+            let id = format!("race-{i}");
+            {
+                let mut ctx = ChainContext::new(id.clone(), "c1".into(), "exit1".into());
+                ctx.update_path(vec!["c1".into(), "exit1".into()]);
+                mgr.active_chains.insert(id.clone(), ctx);
+            }
+            // 双臂同时开跑：一方走 FallbackExhausted（会 drop 分片后 len()-1），
+            // 另一方走 terminate_chain（drop 后 remove）。旧代码长尾命中
+            // 窗口时 active_chains 裹 usize::MAX。
+            let a = tokio::spawn({
+                let mgr = Arc::clone(&mgr);
+                let id = id.clone();
+                async move {
+                    let _ = mgr
+                        .handle_chain_failure(&id, "e", SwitchReason::FailureReported)
+                        .await;
+                }
+            });
+            let b = tokio::spawn({
+                let mgr = Arc::clone(&mgr);
+                let id = id.clone();
+                async move {
+                    let _ = mgr.terminate_chain(&id).await;
+                }
+            });
+            let _ = tokio::join!(a, b);
+
+            let stats = mgr.get_stats().await;
+            assert!(
+                stats.active_chains < 1000,
+                "active_chains 不得下溢裹 usize::MAX，第 {i} 轮 got {}",
+                stats.active_chains
+            );
+            // 清残余（若 failure 先入分片、terminate 晚到时表内可能留 Terminated 链）
+            mgr.terminate_chain(&id).await.unwrap();
+        }
+
+        let stats = mgr.get_stats().await;
+        assert_eq!(stats.active_chains, 0, "测试结束应为零");
     }
 
     /// P2-1 §7-3：健康巡检终止按因留痕——TTL 归零全量过期 =
