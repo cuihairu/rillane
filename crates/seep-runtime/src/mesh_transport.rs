@@ -28,6 +28,10 @@ use seep_core::IoStream;
 use seep_mesh::{MeshRegistry, NodeId, NodeRole};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
+/// exit 首包 target DNS 解析上界：serve 单任务循环无 per-packet spawn（§13-5），
+/// 一个线上可控的不可解析 host 若无限阻塞会头阻塞整面所有流。加超时把
+/// 无限阻塞收为有界丢弃（UDP 语义容忍丢包，FULL 重传自动重建）。
+const EXIT_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 trait MeshStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T> MeshStream for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
@@ -1270,6 +1274,8 @@ pub struct MeshDataPlane {
     tls: Option<Arc<MeshTls>>,
     /// P0-4 §4 UDP 面（S3 挂载；None = 纯 TCP 面）。Arc 供下行 task `'static` 共享。
     udp: Option<Arc<UdpFace>>,
+    /// exit 首包 target DNS 解析上界（§13-5 单任务循环防头阻塞；测试可调小）。
+    dns_lookup_timeout: Duration,
 }
 
 impl MeshDataPlane {
@@ -1284,7 +1290,14 @@ impl MeshDataPlane {
             registry,
             tls: None,
             udp: None,
+            dns_lookup_timeout: EXIT_LOOKUP_TIMEOUT,
         }
+    }
+
+    /// 覆写 exit 首包 DNS 解析上界（测试用；生产走默认 `EXIT_LOOKUP_TIMEOUT`）。
+    pub fn with_dns_lookup_timeout(mut self, timeout: Duration) -> Self {
+        self.dns_lookup_timeout = timeout;
+        self
     }
 
     pub async fn handle(&self, inbound: TcpStream) -> Result<()> {
@@ -1347,6 +1360,7 @@ impl MeshDataPlane {
                 registry: self.registry.clone(),
                 tls: tls.clone(),
                 udp: self.udp.clone(),
+                dns_lookup_timeout: self.dns_lookup_timeout,
             };
             tokio::spawn(async move {
                 if let Err(e) = this.handle_tcp(stream).await {
@@ -1861,15 +1875,35 @@ impl MeshDataPlane {
             // 计数字段 §13-2 未列，P0-5 观测轮再定，不混入 malformed。
             self.registry
                 .check_quota(&self.local_node_id, env.payload.len() as u64)?;
-            let addr = {
-                let mut addrs = lookup_host((env.target_host.as_str(), env.target_port)).await?;
-                addrs.next().ok_or_else(|| {
+            // §13-5 单任务循环：lookup_host 加有界超时（见 EXIT_LOOKUP_TIMEOUT），
+            // 不可解析 host 不再无限头阻塞整面，超时/无址按丢包收口（FULL 重传重建）。
+            let addr = match tokio::time::timeout(
+                self.dns_lookup_timeout,
+                lookup_host((env.target_host.as_str(), env.target_port)),
+            )
+            .await
+            {
+                Ok(Ok(mut addrs)) => addrs.next().ok_or_else(|| {
                     anyhow!(
                         "no resolved address for {}:{}",
                         env.target_host,
                         env.target_port
                     )
-                })?
+                })?,
+                Ok(Err(e)) => {
+                    return Err(anyhow!(
+                        "dns lookup failed for {}:{}: {e}",
+                        env.target_host,
+                        env.target_port
+                    ));
+                }
+                Err(_) => {
+                    return Err(anyhow!(
+                        "dns lookup timed out for {}:{}",
+                        env.target_host,
+                        env.target_port
+                    ));
+                }
             };
             let bind_addr = if addr.is_ipv4() {
                 "0.0.0.0:0"
@@ -3780,6 +3814,166 @@ mod tests {
         assert_eq!(face.flows.len(), 1, "单 flow 一把 per-flow socket");
         assert_eq!(face.metrics.forwarded_down.load(Ordering::Relaxed), 2);
 
+        serve.abort();
+    }
+
+    /// §13-5 单任务循环头阻塞修复：exit 首包 target DNS 解析必须是有界的。
+    /// 不可解析 host（.invalid RFC 保证 NXDOMAIN 或解析失败）配 10ms 超时 →
+    /// exit_uplink 在超时量级返回 Err（解析失败或 timeout 两分支都收口），
+    /// 旧代码无超时时若解析挂起则整面 serve 循环被无限头阻塞。
+    #[tokio::test]
+    async fn exit_uplink_dns_lookup_is_bounded() {
+        let registry = Arc::new(MeshRegistry::new());
+        registry
+            .register_node(NodeRecord::new(
+                "exit1".into(),
+                NodeRole::Exit,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        // 10ms 上界：解析失败（NXDOMAIN）或超时两分支都应快速返回 Err。
+        let plane = MeshDataPlane::new("exit1".into(), registry)
+            .with_udp(MeshUdpGate::new(true))
+            .unwrap()
+            .with_dns_lookup_timeout(Duration::from_millis(10));
+        let face = plane.udp.as_ref().unwrap().clone();
+        let face_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let from: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let env = UdpEnvelope {
+            version: UDP_ENVELOPE_VERSION,
+            dir: UdpDir::Up,
+            flow_id: [0x55; 16],
+            target_host: "seep-invalid-host.invalid".to_string(),
+            target_port: 4433,
+            path_mode: UdpPathMode::Full,
+            hop_index: 0,
+            seq: 0,
+            seq_present: false,
+            path: vec!["exit1".into()],
+            payload: vec![1, 2, 3],
+        };
+
+        let started = Instant::now();
+        let result = plane.exit_uplink(&face, &face_sock, from, env, true).await;
+        let elapsed = started.elapsed();
+        // .invalid RFC 保证不解析；个别环境（通配 DNS）可能返回地址 → 跳过断言。
+        if let Err(e) = result {
+            let err = format!("{e:#}");
+            assert!(
+                err.contains("seep-invalid-host.invalid") || err.contains("timed out"),
+                "错误应含目标 host 或指明超时: {err}"
+            );
+        }
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "解析上界应为有界（10ms 超时 + 解析开销），实际 {elapsed:?}"
+        );
+    }
+
+    /// §13-5 头阻塞修复（serve 级）：bad-host FULL 包触发 DNS 解析错误后，
+    /// serve 循环必须继续处理后续 good-host 包（错误不终止 serve、不头阻塞）。
+    /// 旧代码在无界 lookup_host 下若解析挂起会阻塞整面——本测试钉住
+    /// 「错误被丢弃 + 循环存活」性质。
+    #[tokio::test]
+    async fn serve_udp_survives_bad_host_packet() {
+        let registry = Arc::new(MeshRegistry::new());
+        registry
+            .register_node(NodeRecord::new(
+                "exit1".into(),
+                NodeRole::Exit,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        let plane = Arc::new(
+            MeshDataPlane::new("exit1".into(), registry)
+                .with_udp(MeshUdpGate::new(true))
+                .unwrap()
+                .with_dns_lookup_timeout(Duration::from_millis(50)),
+        );
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let face_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let serve = plane.spawn_udp(face_addr);
+
+        // good-host target：本机可发送 UDP 地址，保证 send 成功后建流。
+        let good_target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let good_target_addr = good_target.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let from = client.local_addr().unwrap();
+        // bad-host FULL：DNS 解析失败/超时 → handle_udp_datagram 返回 Err → serve 丢弃。
+        let bad = UdpEnvelope {
+            version: UDP_ENVELOPE_VERSION,
+            dir: UdpDir::Up,
+            flow_id: [0x01; 16],
+            target_host: "seep-invalid-host.invalid".to_string(),
+            target_port: 4433,
+            path_mode: UdpPathMode::Full,
+            hop_index: 0,
+            seq: 0,
+            seq_present: false,
+            path: vec!["exit1".into()],
+            payload: vec![1],
+        };
+        client
+            .send_to(&encode_udp_envelope(&bad).unwrap(), face_addr)
+            .await
+            .unwrap();
+
+        // good-host FULL：若 serve 循环因 bad-host 错误终止/头阻塞，本包不会回包。
+        let good = UdpEnvelope {
+            version: UDP_ENVELOPE_VERSION,
+            dir: UdpDir::Up,
+            flow_id: [0x02; 16],
+            target_host: "127.0.0.1".to_string(),
+            target_port: good_target_addr.port(),
+            path_mode: UdpPathMode::Full,
+            hop_index: 0,
+            seq: 0,
+            seq_present: false,
+            path: vec!["exit1".into()],
+            payload: vec![2],
+        };
+        client
+            .send_to(&encode_udp_envelope(&good).unwrap(), face_addr)
+            .await
+            .unwrap();
+
+        // 轮询面状态：bad-host 错误被丢弃后，good-host 包应成功建流（serve 存活）。
+        let face = plane.udp.as_ref().unwrap().clone();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if face.flows.contains_key(&good.flow_id) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "serve 循环应在 bad-host 错误后继续处理 good-host 包"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // 再发一个 bad-host 确认 serve 不因二次错误退出（仍存活）。
+        let bad2 = UdpEnvelope {
+            version: UDP_ENVELOPE_VERSION,
+            dir: UdpDir::Up,
+            flow_id: [0x03; 16],
+            target_host: "another-bad.invalid".to_string(),
+            target_port: 4433,
+            path_mode: UdpPathMode::Full,
+            hop_index: 0,
+            seq: 0,
+            seq_present: false,
+            path: vec!["exit1".into()],
+            payload: vec![3],
+        };
+        client
+            .send_to(&encode_udp_envelope(&bad2).unwrap(), face_addr)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !serve.is_finished(),
+            "serve 循环不得因 bad-host 解析错误终止"
+        );
         serve.abort();
     }
 

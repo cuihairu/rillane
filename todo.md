@@ -214,7 +214,8 @@ P2（下一步修）：
 - [x] **chain 故障转移复用已消费 flow.io（协议流损坏）**——`runtime_builder.rs:1919/2025`：首 `dial_and_tunnel`（mesh_transport.rs:1569 copy_bidirectional 读 io）中途失败即部分消费；重试拼接尾流+新信封。正确恢复=中止应用连接（RST）非重接。
   **已修（2026-11-04）**：`forward_chain` mesh `dial_and_tunnel` 失败不再重放尾流到新链/回退出口（`flow.io` 已被部分消费会拼出损坏协议流）；链路/事件面簿记照常（`chain_failure_tx`、`PathUpdated`、注解），随后无条件 `return Err(e)` 让上游 TUN `retire` 中止应用连接（RST/FIN）。回归 `forward_chain_mesh_failure_aborts_without_fallback_forward`（mesh 首跳连接失败断言 `Err` 且回退出口未调用；旧重试逻辑时该测试红）。evidence：`crates/seep-runtime/src/runtime_builder.rs:2070-2075` / `:3149-3233`；seep-runtime 144+1 测 + `cargo test --workspace` 全绿。
   evidence：`runtime_builder.rs:2025` `&mut *flow.io` 与 :1919 同一流复用。
-- [ ] **串行 UDP serve 循环内联 lookup_host（头阻塞整面）**——`mesh_transport.rs:1852`：单任务无 per-packet spawn（§13-5），一个不可解析 `target_host`（线上可控）阻塞所有流。
+- [x] **串行 UDP serve 循环内联 lookup_host（头阻塞整面）**——`mesh_transport.rs:1852`：单任务无 per-packet spawn（§13-5），一个不可解析 `target_host`（线上可控）阻塞所有流。
+  **已修（2026-11-04）**：保留 §13-5 单任务顺序处理设计（不 per-packet spawn），为 exit 首包 `lookup_host` 加 3s 上界（`EXIT_LOOKUP_TIMEOUT`，测试可经 `with_dns_lookup_timeout` 调小）；超时/解析失败按单包错误丢弃并继续 serve，错误带 target host 便于定位。回归 `exit_uplink_dns_lookup_is_bounded`（有界性 + 错误上下文）与 `serve_udp_survives_bad_host_packet`（bad-host FULL 后 serve 存活且继续处理 good-host 建流）。evidence：`crates/seep-runtime/src/mesh_transport.rs:33-38` / `:1274-1280` / `:1287-1294` / `:1877-1906` / `:3820-3967`；seep-runtime 146 测 + `cargo test --workspace` 全绿。
   evidence：`mesh_transport.rs:1852` `lookup_host(...).await?` 在 serve 循环内。
 - [ ] **瞬时 recv_from 错误终止 UDP serve 任务**——`mesh_transport.rs:1946`：`Ok(Err(e))=>return Err`（ENOBUFS/EINTR 瞬时亦毙）；应 continue 或按瞬时/致命分类。
 - [ ] **瞬时 accept 错误终止 TCP mesh 监听任务**——`mesh_transport.rs:1330`：`listener.accept().await?`（ECONNABORTED/EMFILE/EINTR 瞬时亦毙）。
