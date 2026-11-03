@@ -72,6 +72,14 @@ async fn main() -> Result<()> {
     );
 
     let bind: SocketAddr = config.control.api_bind.parse()?;
+    // P2 深审（2026-11-03）：非回环绑定 + 无 admin_token 时鉴权门整体跳过，
+    // mutating 端点与敏感读全开放（control_plane.rs:135-137）。fail-closed：
+    // 拒启（回环绑定保留无 token 能力，供本机开发/诊断）。
+    if !bind.ip().is_loopback() && config.control.admin_token.is_none() {
+        anyhow::bail!(
+            "控制面绑定 {bind} 为非回环且未配置 admin_token——鉴权门被整体跳过，拒启；请设置 admin_token 或改用回环绑定"
+        );
+    }
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let cp = control_plane::ControlPlane::new(
         runtime.clone(),
