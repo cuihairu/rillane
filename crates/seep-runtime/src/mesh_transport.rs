@@ -894,19 +894,31 @@ impl UdpFlowCache {
     /// FULL 首包插入 / 重关联刷新。满时先扫过期，仍满逐最早 expiry（§11-6）。
     fn insert(&self, flow_id: [u8; 16], entry: FlowCacheEntry) {
         if !self.map.contains_key(&flow_id) && self.map.len() >= self.max {
-            self.sweep_expired(Instant::now());
-            while self.map.len() >= self.max {
-                let victim = self
-                    .map
-                    .iter()
-                    .min_by_key(|r| r.value().expiry)
-                    .map(|r| *r.key());
-                match victim {
-                    Some(k) => {
-                        self.map.remove(&k);
-                        self.evicted.fetch_add(1, Ordering::Relaxed);
-                    }
-                    None => break,
+            // 单遍驱逐：找最早 expiry（= 同 TTL 下最久未触，LRU §11-6）；
+            // 顺带清扫已过期（过期条目不计驱逐，§13-2）。旧实现先全表扫
+            // 过期、再全表 min_by_key，满时每插两次 O(n) 扫——合并为一遍。
+            let now = Instant::now();
+            let mut victim: Option<[u8; 16]> = None;
+            let mut victim_expiry = None;
+            let mut expired: Vec<[u8; 16]> = Vec::new();
+            for r in self.map.iter() {
+                if r.value().expiry <= now {
+                    expired.push(*r.key());
+                } else if victim_expiry
+                    .map(|ve: Instant| r.value().expiry < ve)
+                    .unwrap_or(true)
+                {
+                    victim = Some(*r.key());
+                    victim_expiry = Some(r.value().expiry);
+                }
+            }
+            for k in expired {
+                self.map.remove(&k);
+            }
+            if self.map.len() >= self.max {
+                if let Some(k) = victim {
+                    self.map.remove(&k);
+                    self.evicted.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -3521,6 +3533,45 @@ mod tests {
         cache.insert(udp_flow_id(3), udp_cache_entry(3333));
         assert_eq!(cache.len(), 1, "过期两条已被扫除，仅剩新插入");
         assert_eq!(cache.evicted_count(), 0, "过期清扫不计驱逐（§13-2）");
+    }
+
+    /// 满时插入混有过期+未过期：过期条目清扫（不计驱逐）+ 最早未过期被逐
+    /// （计入驱逐）——旧实现两次全表扫（sweep + min_by_key），单遍驱逐
+    /// 合并为一遍，语义不变。
+    #[test]
+    fn udp_flow_cache_full_insert_mixed_expired_and_live_evicts_earliest_live() {
+        // 先以 max=3 建满 3 条，再把 max 收到 2（同文件测试直改私有字段）：
+        // 扫除 1 条过期后仍满（2>=2），须再逐最早未过期。
+        let mut cache = UdpFlowCache::new(Duration::from_secs(60), 2);
+        cache.max = 3;
+        cache.insert(udp_flow_id(1), udp_cache_entry(1111));
+        cache.insert(udp_flow_id(2), udp_cache_entry(2222));
+        cache.insert(udp_flow_id(3), udp_cache_entry(3333));
+        // flow1 已过期；flow2 未过期但最早；flow3 未过期且最晚。
+        if let Some(mut e) = cache.map.get_mut(&udp_flow_id(1)) {
+            e.expiry = Instant::now() - Duration::from_secs(1);
+        }
+        if let Some(mut e) = cache.map.get_mut(&udp_flow_id(2)) {
+            e.expiry = Instant::now() + Duration::from_secs(1);
+        }
+        if let Some(mut e) = cache.map.get_mut(&udp_flow_id(3)) {
+            e.expiry = Instant::now() + Duration::from_secs(3600);
+        }
+        cache.max = 2;
+        cache.insert(udp_flow_id(4), udp_cache_entry(4444));
+        assert!(!cache.map.contains_key(&udp_flow_id(1)), "过期条目应被清扫");
+        assert!(
+            !cache.map.contains_key(&udp_flow_id(2)),
+            "最早未过期条目应被逐"
+        );
+        assert!(cache.map.contains_key(&udp_flow_id(3)), "最晚条目应保留");
+        assert!(cache.map.contains_key(&udp_flow_id(4)), "新条目应插入");
+        assert_eq!(cache.len(), 2, "容量守恒");
+        assert_eq!(
+            cache.evicted_count(),
+            1,
+            "仅未过期驱逐计入（过期清扫不计，§13-2）"
+        );
     }
 
     /// T8：过期清扫后 len == 0；未过期不清。
