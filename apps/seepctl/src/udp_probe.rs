@@ -218,7 +218,8 @@ pub async fn run(
     let udp = UdpSocket::bind(bind)
         .await
         .map_err(|e| ProbeError::Connect(format!("本地 UDP bind 失败: {e}")))?;
-    let mut frame = encode_udp_header(&target, payload.len());
+    let mut frame = encode_udp_header(&target, payload.len())
+        .map_err(|e| ProbeError::Connect(format!("UDP 头编码失败: {e}")))?;
     frame.extend_from_slice(payload);
     let started = Instant::now();
     udp.send_to(&frame, relay)
@@ -279,7 +280,9 @@ mod tests {
             let mut buf = [0u8; 2048];
             while let Ok((n, from)) = s.recv_from(&mut buf).await {
                 if let Ok((t, hlen)) = parse_udp_header(&buf[..n]) {
-                    let mut frame = encode_udp_header(&t, n - hlen);
+                    let Ok(mut frame) = encode_udp_header(&t, n - hlen) else {
+                        continue;
+                    };
                     frame.extend_from_slice(&buf[hlen..n]);
                     let _ = s.send_to(&frame, from).await;
                 }
