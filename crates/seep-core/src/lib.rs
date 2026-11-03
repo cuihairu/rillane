@@ -728,7 +728,10 @@ impl ChainContext {
 
     /// 计算链路质量评分
     pub fn calculate_quality_score(&self) -> f32 {
-        if self.hop_latencies.is_empty() {
+        if self.hop_latencies.is_empty() || self.hop_bandwidths.is_empty() {
+            // P2 深审（2026-11-03）：hop_bandwidths 空而 hop_latencies 非空
+            // 时 `0.0/0.0 = NaN` 传播进评分。两 pub 向量常规同长（update_path），
+            // 但外部独立变更即可触发；任一为空视为「无有效样本」，回退可靠性。
             return self.reliability_score;
         }
 
@@ -829,5 +832,24 @@ mod tests {
             Some(vec!["c1".into(), "exit1".into()])
         );
         assert!(!ctx.switch_fallback_path());
+    }
+
+    /// P2 深审回归（2026-11-03）：hop_bandwidths 空而 hop_latencies 非空时
+    /// `0.0/0.0 = NaN` 传播进评分。任一为空视为无有效样本，回退可靠性（非
+    /// NaN）。
+    #[test]
+    fn quality_score_no_nan_when_bandwidths_empty() {
+        let mut ctx = ChainContext::new("ch".into(), "c1".into(), "exit1".into());
+        ctx.update_path(vec!["c1".into(), "exit1".into()]);
+        // 构造 latencies 非空、bandwidths 空（update_path 恒同长，此处手工改）。
+        ctx.hop_latencies = vec![10, 20];
+        ctx.hop_bandwidths = Vec::new();
+        ctx.reliability_score = 0.7;
+        let score = ctx.calculate_quality_score();
+        assert!(!score.is_nan(), "带宽空不得 NaN：{score}");
+        assert!(
+            (score - 0.7).abs() < f64::EPSILON as f32,
+            "应回退可靠性：{score}"
+        );
     }
 }

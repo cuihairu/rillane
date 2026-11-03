@@ -165,7 +165,8 @@ P3（收尾）：
   **已修（2026-11-03）**：`trojan::build_request` 与 `encode_udp_header`（SOCKS5 UDP）加 `>255` 守卫（拒发畸形帧，返回 Result/错误）。`encode_mesh_envelope_binary` 已含 flow_id/target_host/path 守卫（mesh_transport.rs:366-375/580-589），无需改动。seep-core 26+13+3+4+10 测、seep-protocols 71+5+6+7 测全绿，clippy 零警告。
 - [x] **padding.rs range span 下溢**——`middleware/padding.rs:71` `spec.max - spec.min + 1`：仅 config validate 保证 min≤max；绕过校验（或未来路径）即 usize wrap。
   **已修（2026-11-03）**：`decide_padding` range 分支健壮化——`max < min` 时回退为固定 min（`(hi-lo+1).max(1)` 保证 span≥1，防 `% 0` panic）；掷点确定性保留。回归 `range_mode_max_below_min_does_not_panic`，seep-protocols 72+5+6+7 测全绿，clippy 零警告。
-- [ ] **seep-core 链路质量 NaN**——`seep-core/lib.rs:744-745`：`hop_bandwidths` 空而 `hop_latencies` 非空时 `0.0/0.0=NaN` 传播进 `calculate_quality_score`；两 pub 向量常规同长（update_path），需外部独立变更。
+- [x] **seep-core 链路质量 NaN**——`seep-core/lib.rs:744-745`：`hop_bandwidths` 空而 `hop_latencies` 非空时 `0.0/0.0=NaN` 传播进 `calculate_quality_score`；两 pub 向量常规同长（update_path），需外部独立变更。
+  **已修（2026-11-03）**：`calculate_quality_score` 判 `hop_bandwidths.is_empty()`（与 latencies 同判）——任一为空视为无有效样本，回退 `reliability_score`（非 NaN）。回归 `quality_score_no_nan_when_bandwidths_empty`，seep-core 11+4+13+3+26 测全绿，clippy 零警告。
 - [ ] **非常量时间认证比对**——`inbound/http.rs:262/276` + `socks5.rs:253` + `control_plane.rs:266`：`String ==` 短路径；网络时序攻击对本地代理密码实际难利用，防御纵深。
 - [ ] **runtime 无限循环任务无 stop 标志、JoinHandle 丢弃**——`runtime_builder.rs:1007-1225/2924-2954`（mesh stats/chain health/mesh quality/health checker/topology updater）+ `pool.rs:714-725`（sweeper）：重载路径每轮泄漏一组 loopers（各持 Arc）；单进程守护进程生命周期内良性，seepd 以进程退出掩盖。
 - [ ] **DNS start() shutdown_tx mutex 跨 await**——`dns_engine.rs:1072-1086`：持 `shutdown_tx` tokio mutex 跨取 `task` 与 spawn；生命周期串行化，有界。
