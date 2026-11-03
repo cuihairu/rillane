@@ -273,6 +273,7 @@ P3（收尾）：
 - [x] **G0-1 目的 IP-CIDR 匹配器**——现 `MatchCondition::Network` 绑定 `client.cidr` 源注解（seep-routing/src/lib.rs:706），目标网段分流表达不了；三大项目最基本匹配器。
   **已实现（2026-11-04 `a262735`）**：`MatchCondition` 增 `IpCidr { cidrs }` 变体（seep-config/src/lib.rs:1785），路由匹配器 `ip_in_cidr`（seep-routing/src/lib.rs:24）对目标 host 为 IP 字面量按 IPv4/IPv6 前缀匹配（主机形式按精确地址；域名不命中，路由面不做 DNS）；`SeepRule::IpCidr`/`ClashRule::IpCidr`/rule_source 的 `IpCidr` 规则改走新变体（seep_dsl.rs:1126、clash.rs:1147、rule_source.rs:60），`Network`（源注解）保留；`clash_export` 导出 IP-CIDR 兼容。回归 `tests::ip_cidr_matches_target_ip_prefix`（IPv4/IPv6 前缀、主机精确、域名不命中；旧逻辑恒 false 红）。`cargo test --workspace` 全绿（44 二进制）。
 - [ ] **G0-2 GeoIP/GeoSite 数据库接入 + domain full/regex + OR/NOT 逻辑规则**——替换 `geoip.country` 注解等价物（无数据库）。
+  **部分完成（2026-11-04 `33ba5e4`）**：OR/NOT 逻辑规则已实现——`MatchCondition::Any{conditions}`/`Not{condition}`（seep-config/src/lib.rs:1779），路由 `matches_condition` 递归（seep-routing/src/lib.rs:750），回归 `logical_any_not_condition_semantics`（顶层仍 AND，Any 任一命中，Not 反选）；`clash_export` 对 Any/Not 跳过并登记。domain `full:` 在 rule_source 路由面并入 suffix 联合（既有），`regexp:` 仍逐条 skipped。**GeoIP/GeoSite 数据库部分 BLOCKED**：需 v2fly `.dat`/mmdb 外部数据库文件 + maxminddb 类依赖与惰性加载路径（仓库无任何 .dat/mmdb），缺真实数据源与下载/更新机制——该项待提供数据库或用户决策后继续。
 - [ ] **G0-3 协议嗅探层（sniff）**——TLS SNI/HTTP Host/QUIC SNI 覆写路由域名；TUN 场景 IP 直连流量无它即无法按域名分流。
 - [ ] **G0-4 UDP over vmess/vless/trojan**——主流加密通道均不载 UDP（构建期报错），游戏加速场景非 direct/ss/wg 出口即退化。
 - [ ] **G0-5 reject/block 目标**——极小成本，断连/广告拦截基本表达。
