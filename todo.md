@@ -225,7 +225,8 @@ P2（下一步修）：
 P3（收尾）：
 - [x] **active_chains.len()-1 下溢**——`chain.rs:907`：`drop(chain)`（:901）后读 len；并发 `terminate_chain`（:924 remove）移除 → 0-1 下溢（release 裹 usize::MAX 指标污染）；宜 `saturating_sub(1)` 或由 terminate 自减。
   **已修（2026-11-04）**：`handle_chain_failure` 备用耗尽分支 `active_chains.len() - 1` 改 `saturating_sub(1)`——并发 `terminate_chain` 在 drop 分片守卫后窗口内移除本链时不再下溢裹 usize::MAX（若已移除则 len 本身已正确，不再二次自减）。回归 `concurrent_terminate_and_failure_no_active_chains_underflow`（64 轮并发 failure×terminate，断言 active_chains 不裹 MAX 且终态 0）。evidence：`crates/seep-runtime/src/chain.rs:900-904` / `:1308-1360`；seep-runtime 149 测 + `cargo test --workspace` 全绿。
-- [ ] **mesh UDP 下行序号归零瞬态丢包**——`mesh_transport.rs:1877`：exit 建流归零下行序号而客户端窗口仍在（last>63）→ 序号 0..36 判回退拒、≥37 自愈；瞬态 ~37 包突发丢包（非永久拒收）。
+- [x] **mesh UDP 下行序号归零瞬态丢包**——`mesh_transport.rs:1877`：exit 建流归零下行序号而客户端窗口仍在（last>63）→ 序号 0..36 判回退拒、≥37 自愈；瞬态 ~37 包突发丢包（非永久拒收）。
+  **已修（2026-11-04）**：`ExitFlow` 增加 `down_seq: Arc<AtomicU32>`，FULL 重关联到新 target 时在 `retire_flow` 前捕获旧序号源，新 ExitFlow 继续复用同一 Arc——下行序号跨重关联单调续接，不再归零触发客户端回退窗口拒绝（瞬态丢包）。回归 `exit_full_reassociation_preserves_downlink_sequence`（旧流 down_seq=100，重关联后仍 100；旧归零逻辑红）。evidence：`crates/seep-runtime/src/mesh_transport.rs:1064-1073` / `:1910-1918` / `:1967-1998` / `:4051-4110`；seep-runtime 150 测 + `cargo test --workspace` 全绿。
 - [ ] **缓存满插入 O(n) 驱逐扫描**——`mesh_transport.rs:868-876`：满（65536）时每次插入全 `min_by_key` 扫描；文档化权衡（"O(n) 无新依赖"），需认证 peer + 6.5 万流触发。
 - [ ] **订阅转换配置硬编码 admin_token="seep"**——`clash.rs:768-771`/`seep_dsl.rs:413-418`：回环绑定约束暴露面；建议省略或随机生成。
 - [ ] **shaping 抖动 jitter_ms+1 裹 0（% 0 panic）**——`shaping.rs:45`：jitter_ms=interval_ms=u64::MAX 时裹 0；validate（seep-config:908-918）无上界；`wrapping_add(1).max(1)` 或上界校验。

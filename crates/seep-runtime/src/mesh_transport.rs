@@ -1066,6 +1066,10 @@ struct ExitFlow {
     task: JoinHandle<()>,
     /// (host, port)——§13-4 FULL 重关联的 target 变化判据；下行封装回填该 target
     target: (String, u16),
+    /// P2-7 M1 §3.3：exit 下行单调序号源（fetch_add 即单调）。§13-4 重关联
+    /// 重建时保留旧值续接——客户端防重放窗口仍在（last>63），归零会触发
+    /// 序号 0..36 判回退拒、≥37 才自愈的瞬态丢包；续接则无断层。
+    down_seq: Arc<AtomicU32>,
 }
 
 /// P0-4 UDP 面状态：跳缓存（§3）+ exit flow 表（§13-1）+ 计数（§13-2）。
@@ -1905,6 +1909,12 @@ impl MeshDataPlane {
         let need_create = existing_target.as_ref() != Some(&target);
         if need_create {
             // §13-4：FULL 重关联到新 target → 先回收旧 socket/task 再按新 target 建流
+            // 重关联保留旧 down_seq 续接（防重放窗口不归零；见 ExitFlow.down_seq）
+            let resumed_down_seq = existing_target
+                .as_ref()
+                .and_then(|_| face.flows.get(&env.flow_id))
+                .map(|f| Arc::clone(&f.down_seq))
+                .unwrap_or_else(|| Arc::new(AtomicU32::new(0)));
             if existing_target.is_some() {
                 face.retire_flow(&env.flow_id);
             }
@@ -1956,16 +1966,16 @@ impl MeshDataPlane {
             if is_full {
                 face.associate(env.flow_id, None, from);
             }
-            // P2-7 M1 §3.3：下行序号源随建流新建（旧 task 已 retire abort，
-            // 序号归零与接收侧窗口移除同刻——重关联无序号断层混淆）
-            let down_seq = Arc::new(AtomicU32::new(0));
+            // P2-7 M1 §3.3：下行序号源随建流新建；重关联保留旧值续接——
+            // 客户端窗口未移除时归零会判回退拒（瞬态丢包），续接无断层。
+            let down_seq = resumed_down_seq;
             let task = tokio::spawn(exit_downlink_loop(
                 Arc::clone(face),
                 Arc::clone(&flow_sock),
                 Arc::clone(face_sock),
                 env.flow_id,
                 target.clone(),
-                down_seq,
+                down_seq.clone(),
             ));
             face.flows.insert(
                 env.flow_id,
@@ -1973,6 +1983,7 @@ impl MeshDataPlane {
                     sock: flow_sock,
                     task,
                     target,
+                    down_seq,
                 },
             );
         } else if is_full {
@@ -4026,6 +4037,77 @@ mod tests {
         serve.abort();
     }
 
+    /// P2-7 M1 §3.3 / §13-4：FULL 重关联保留 down_seq 续接（不归零）。
+    /// 旧代码新建 down_seq=0，客户端防重放窗口仍在（last>63）→ 新流下行
+    /// seq 0..36 判回退拒、≥37 自愈（瞬态丢包）。修复后重关联续接旧值，
+    /// 无断层即无瞬态窗口丢包。
+    #[tokio::test]
+    async fn exit_full_reassociation_preserves_downlink_sequence() {
+        let registry = Arc::new(MeshRegistry::new());
+        registry
+            .register_node(NodeRecord::new(
+                "exit1".into(),
+                NodeRole::Exit,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+        let plane = MeshDataPlane::new("exit1".into(), registry)
+            .with_udp(MeshUdpGate::new(true))
+            .unwrap();
+        let face = Arc::clone(plane.udp.as_ref().unwrap());
+        let face_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let from: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let flow_id = [0x77; 16];
+
+        // 模拟已在运行的旧流：down_seq 已推进到 100（客户端窗口 last=100）。
+        let down_seq = Arc::new(AtomicU32::new(100));
+        let old_task = tokio::spawn(std::future::pending::<()>());
+        face.flows.insert(
+            flow_id,
+            ExitFlow {
+                sock: Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
+                task: old_task,
+                target: ("127.0.0.1".into(), 1),
+                down_seq: Arc::clone(&down_seq),
+            },
+        );
+
+        // FULL 重关联到新 target（不同于旧 target 127.0.0.1:1）。
+        let new_target_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let new_target_addr = new_target_sock.local_addr().unwrap();
+        let env = UdpEnvelope {
+            version: UDP_ENVELOPE_VERSION,
+            dir: UdpDir::Up,
+            flow_id,
+            target_host: "127.0.0.1".to_string(),
+            target_port: new_target_addr.port(),
+            path_mode: UdpPathMode::Full,
+            hop_index: 0,
+            seq: 0,
+            seq_present: false,
+            path: vec!["exit1".into()],
+            payload: vec![9, 9, 9],
+        };
+
+        plane
+            .exit_uplink(&face, &face_sock, from, env, true)
+            .await
+            .unwrap();
+
+        // 断言重关联后 down_seq 续接（非归零），且任务仍在表内。
+        assert_eq!(
+            face.flows
+                .get(&flow_id)
+                .expect("重关联后 ExitFlow 应在表内")
+                .down_seq
+                .load(Ordering::SeqCst),
+            100,
+            "FULL 重关联后 down_seq 应续接（100），不得归零"
+        );
+        // 清理
+        face.retire_flow(&flow_id);
+    }
+
     /// UDP serve `recv_from` 瞬时错误分类回归：EINTR/EAGAIN/ENOBUFS 不应
     /// 终止整面 serve 任务（旧代码任意错误直接 return Err → 全面停摆）。
     #[test]
@@ -4094,6 +4176,7 @@ mod tests {
                 sock,
                 task,
                 target: ("127.0.0.1".into(), 53),
+                down_seq: Arc::new(AtomicU32::new(0)),
             },
         );
         face.associate(flow, None, prev);
@@ -4116,6 +4199,7 @@ mod tests {
                 sock,
                 task,
                 target: ("127.0.0.1".into(), 53),
+                down_seq: Arc::new(AtomicU32::new(0)),
             },
         );
         face.associate(flow, None, prev);
