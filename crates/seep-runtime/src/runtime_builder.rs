@@ -2315,6 +2315,9 @@ fn scan_udp_capability(
         .iter()
         .map(|g| (g.name.as_str(), g))
         .collect();
+    // 组展开 visited 集：防组环（g1→g2→g1）队列永不空而 build 无限挂起。
+    // 同组二次遇及直接跳过——组成员已入队一次，展开结果一致。
+    let mut visited_groups: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut reachable: HashMap<String, String> = HashMap::new();
     let mut queue: Vec<(String, String)> =
         vec![(routing.default_node.clone(), "default_node".to_string())];
@@ -2323,6 +2326,9 @@ fn scan_udp_capability(
     }
     while let Some((name, source)) = queue.pop() {
         if let Some(g) = groups.get(name.as_str()) {
+            if !visited_groups.insert(g.name.as_str()) {
+                continue; // 环/重复：该组已展开，跳过
+            }
             for m in &g.members {
                 let member = match m {
                     GroupMember::Node { name }
@@ -4564,6 +4570,40 @@ mod tests {
             rules: vec![rule("r1", "mesh.exit1")],
         };
         assert!(scan_udp_capability(&routing, &egress, &connectors).is_ok());
+    }
+
+    /// 回归：组环（g1→g2→g1）时 BFS 队列永不空，原实现 build 无限挂起。
+    /// visited 集使同组二次遇及跳过，scan 必须终止。
+    #[test]
+    fn udp_capability_scan_terminates_on_group_cycle() {
+        let egress = vec![node("direct-out", EgressConfig::Direct)];
+        let connectors = build_udp_connectors(&egress).unwrap();
+        let g1 = PolicyGroup {
+            name: "g1".into(),
+            strategy: Strategy::Weighted,
+            members: vec![GroupMember::Group { name: "g2".into() }],
+            slo: None,
+        };
+        let g2 = PolicyGroup {
+            name: "g2".into(),
+            strategy: Strategy::Weighted,
+            members: vec![GroupMember::Group { name: "g1".into() }],
+            slo: None,
+        };
+        let routing = RoutingConfig {
+            default_node: "g1".into(),
+            groups: vec![g1, g2],
+            rules: vec![],
+        };
+        // 同步函数若无限循环会挂起测试——线程 + 限时回收判定终止。
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = scan_udp_capability(&routing, &egress, &connectors);
+            let _ = tx.send(r);
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("组环时 scan_udp_capability 必须终止而非无限挂起")
+            .expect("组环应正常扫描（direct-out 有 UDP 能力）");
     }
 
     #[test]
