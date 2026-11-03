@@ -1113,6 +1113,9 @@ impl DnsHandler for EngineDnsHandler {
     }
 
     async fn start(&self) -> Result<()> {
+        // task 闸先行（start/stop 同序，避免死锁）；shutdown_tx 获取后
+        // 仅同步赋值，不再跨 await（P3：曾持 shutdown_tx 锁跨 task 锁 await）。
+        let mut task_guard = self.task.lock().await;
         let mut tx = self.shutdown_tx.lock().await;
         ensure!(tx.is_none(), "DNS 监听已启动（重复 start）");
         let (stx, srx) = oneshot::channel();
@@ -1123,16 +1126,21 @@ impl DnsHandler for EngineDnsHandler {
                 error!("DNS 监听异常退出：{e:#}");
             }
         });
-        *self.task.lock().await = Some(handle);
+        *task_guard = Some(handle);
         *tx = Some(stx);
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        if let Some(stx) = self.shutdown_tx.lock().await.take() {
+        let mut task_guard = self.task.lock().await;
+        let mut tx = self.shutdown_tx.lock().await;
+        if let Some(stx) = tx.take() {
             let _ = stx.send(());
         }
-        if let Some(handle) = self.task.lock().await.take() {
+        let handle = task_guard.take();
+        drop(task_guard);
+        drop(tx);
+        if let Some(handle) = handle {
             let _ = handle.await;
         }
         Ok(())

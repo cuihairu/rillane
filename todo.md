@@ -171,7 +171,8 @@ P3（收尾）：
   **已修（2026-11-03）**：`seep_core::constant_time_eq`（字节切片恒时 XOR 累积，异长亦完整遍历长侧防长度侧信）替换三处明文 `==`（http.rs Basic+Bearer / socks5.rs 用户名密码 / control_plane.rs admin_token Bearer+X-Admin-Token）。回归 `constant_time_eq_matches_and_rejects`，seep-core 12+4+13+3+26、seep-protocols 72+5+6+7、seepd 27 测全绿，clippy 零警告。
 - [x] **runtime 无限循环任务无 stop 标志、JoinHandle 丢弃**——`runtime_builder.rs:1007-1225/2924-2954`（mesh stats/chain health/mesh quality/health checker/topology updater）+ `pool.rs:714-725`（sweeper）：重载路径每轮泄漏一组 loopers（各持 Arc）；单进程守护进程生命周期内良性，seepd 以进程退出掩盖。
   **已修（2026-11-03 `e9612ff`）**：runtime 三条周期 loop（mesh stats :1017 / chain stats :1210 / mesh quality :1236）改 `while *running.read()` 受 `stop()`（:1368 置 false）控制；pool sweeper 增 `sweeper_running` AtomicBool（pool.rs:346）+ `stop_sweeper()`（pool.rs:738），`Runtime::stop` 接线（runtime_builder.rs:1373）；mesh registry 内嵌 health/topology updater 生命周期与 registry 同属（单进程 daemon 退出即回收，重载不重建 registry）。回归 `sweeper_stops_after_stop_flag`，seep-protocols 16 测 + seep-runtime 138 测全绿，clippy 零警告。
-- [ ] **DNS start() shutdown_tx mutex 跨 await**——`dns_engine.rs:1072-1086`：持 `shutdown_tx` tokio mutex 跨取 `task` 与 spawn；生命周期串行化，有界。
+- [x] **DNS start() shutdown_tx mutex 跨 await**——`dns_engine.rs:1072-1086`：持 `shutdown_tx` tokio mutex 跨取 `task` 与 spawn；生命周期串行化，有界。
+  **已修（2026-11-03）**：`start()`/`stop()` 统一锁序 task→shutdown_tx；`shutdown_tx` 获取后仅同步赋值/发送，不再跨 `task.lock().await`（dns_engine.rs:1116-1128/1132-1140）。seep-platform 49 测全绿，clippy 零警告。
 - [ ] **FFI raw-pointer 别名（UB 风险）**——`seep-ffi/lib.rs`：`seep_ffi_tun_start/stop` 取 `&mut *handle` 而 `is_running/stats_json` 取 `&*handle`；内嵌方并发调用即数据竞争 UB，无内部同步。
 - [ ] **connect_racing 落选候选不中止**——`net_mark.rs:111-145`：胜出后落选拨号任务不自中止（channel drop 时自终止），慢候选短暂持套接字/TLS 握手。
 - [ ] **订阅刷新 read-modify-write 复活已删订阅**——`subscription/lib.rs:380-455`：`refresh_subscription` 克隆后长 fetch，`update_subscription_in_map` 回写；fetch 期间热更删除的订阅被复活。
