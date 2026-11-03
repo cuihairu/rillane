@@ -1155,6 +1155,9 @@ impl Runtime {
 
                             // 写序同 apply_config_inner：先装 egress 面、再 reload
                             // 路由、最后落 config 快照（避免规则引用未就绪名）。
+                            // 反向残余同 apply_config_inner 注：outputs/connectors
+                            // 替换后、router.reload 前旧规则可解析到已删 egress 名
+                            // （瞬时微秒级，多状态非原子交换固有残余，已登记）。
                             *flow_outputs.write().expect("flow_outputs lock poisoned") = outputs;
                             *egress_connectors
                                 .write()
@@ -1412,6 +1415,13 @@ impl Runtime {
     /// 不再引用未就绪名）→ 最后落 config 快照（纯读模型，供控制面诊断）。
     /// 原序 config→router→outputs→connectors 在 router.reload 与 outputs
     /// 落盘之间留「规则引用未就绪 egress 名」窗口。
+    ///
+    /// 反向残余（2026-11-03 P3 低，已登记）：outputs/connectors 整体替换后、
+    /// `router.reload` 前，旧路由规则仍可解析到已被新 egress 集删除的名字，
+    /// 该窗口内命中已删 egress 的在途流报「未知 egress」（瞬时微秒级）。此为
+    /// 多状态非原子交换的固有残余——彻底消除需单状态原子交换或先 reload
+    /// 再换 egress（会重新引入「新规则引用未就绪名」窗口）。在途流本已按旧
+    /// 路由解析，窗口仅影响并发新流；接受并文档化。
     async fn apply_config_inner(&self, new_config: SeepConfig) -> Result<()> {
         // Build egress outputs/connectors before mutating runtime state.
         // D-10/§4.3：传同一池/工厂句柄重连装配（新块的池参数不热生效——
