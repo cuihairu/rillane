@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -343,6 +343,7 @@ pub struct TransportPool {
     metrics: Arc<PoolMetrics>,
     clock: Arc<dyn PoolClock>,
     tls_factory: Option<Arc<TlsConnectorFactory>>,
+    sweeper_running: AtomicBool,
 }
 
 impl fmt::Debug for TransportPool {
@@ -380,6 +381,7 @@ impl TransportPool {
             metrics: Arc::new(PoolMetrics::default()),
             clock,
             tls_factory,
+            sweeper_running: AtomicBool::new(false),
         })
     }
 
@@ -721,14 +723,20 @@ impl TransportPool {
     pub fn spawn_sweeper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let pool = Arc::clone(self);
         let interval = (self.policy.idle_timeout / 2).max(Duration::from_secs(1));
+        pool.sweeper_running.store(true, Ordering::Release);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(interval);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
+            while pool.sweeper_running.load(Ordering::Acquire) {
                 tick.tick().await;
                 pool.sweep_once();
             }
         })
+    }
+
+    /// 停止周期 sweeper（stop 装配调用；已在途单轮扫尾完成后退出）。
+    pub fn stop_sweeper(&self) {
+        self.sweeper_running.store(false, Ordering::Release);
     }
 
     pub fn idle_count_of(&self, key: &TransportKey) -> usize {

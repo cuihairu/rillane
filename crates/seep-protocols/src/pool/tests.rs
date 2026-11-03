@@ -425,3 +425,18 @@ async fn dial_plain_key_boxes_tcp_stream() {
     assert_eq!(pool.snapshot().dials_foreground_ok, 1);
     assert!(TcpStream::connect(addr).await.is_ok(), "listener 仍活");
 }
+
+/// P3（2026-11-03）：周期 sweeper 无 stop 标志——重载/停止路径泄漏 loopers。
+/// `stop_sweeper` 置标志后已在途单轮扫尾完成即退出。
+#[tokio::test]
+async fn sweeper_stops_after_stop_flag() {
+    let clock = crate::pool::MockPoolClock::new();
+    let pool = TransportPool::with_clock(test_policy(1, 0, 4), None, clock.clone());
+    let handle = pool.spawn_sweeper();
+    assert!(!handle.is_finished(), "sweeper 启动后应在运行");
+    pool.stop_sweeper();
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("sweeper 应在 stop 后 5s 内退出")
+        .expect("sweeper 任务不 panic");
+}

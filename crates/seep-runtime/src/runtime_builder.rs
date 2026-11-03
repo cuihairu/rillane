@@ -1012,9 +1012,10 @@ impl Runtime {
         if let Some(mesh) = &self.mesh_registry {
             let registry = mesh.clone();
             let tx = self.event_tx.clone();
+            let running = self.running.clone();
             tasks.push(tokio::spawn(async move {
                 let mut ticker = time::interval(Duration::from_secs(10));
-                loop {
+                while *running.read().expect("running lock poisoned") {
                     ticker.tick().await;
                     let stats = registry.get_stats();
                     let _ = tx.send(RuntimeEvent::TelemetryEvent {
@@ -1023,6 +1024,7 @@ impl Runtime {
                         tags: HashMap::new(),
                     });
                 }
+                Ok::<(), anyhow::Error>(())
             }));
         }
 
@@ -1192,6 +1194,7 @@ impl Runtime {
         if let Some(chain_mgr) = &self.chain_manager {
             let mgr = chain_mgr.clone();
             let tx = self.event_tx.clone();
+            let running = self.running.clone();
             tasks.push(tokio::spawn(async move {
                 let mgr_clone = mgr.clone();
                 tokio::spawn(async move {
@@ -1207,7 +1210,7 @@ impl Runtime {
 
                 // 定期报告链路统计
                 let mut ticker = time::interval(Duration::from_secs(30));
-                loop {
+                while *running.read().expect("running lock poisoned") {
                     ticker.tick().await;
                     let stats = mgr.get_stats().await;
                     let _ = tx.send(RuntimeEvent::TelemetryEvent {
@@ -1221,6 +1224,7 @@ impl Runtime {
                         tags: HashMap::new(),
                     });
                 }
+                Ok::<(), anyhow::Error>(())
             }));
         }
 
@@ -1231,14 +1235,16 @@ impl Runtime {
         if let Some(registry) = &self.mesh_registry {
             let registry = registry.clone();
             let router = self.router.clone();
+            let running = self.running.clone();
             tasks.push(tokio::spawn(async move {
                 let mut ticker = time::interval(Duration::from_secs(10));
-                loop {
+                while *running.read().expect("running lock poisoned") {
                     ticker.tick().await;
                     for (node, p95, loss) in aggregate_link_quality(&registry) {
                         router.update_link_quality(&node, p95, loss);
                     }
                 }
+                Ok::<(), anyhow::Error>(())
             }));
         }
 
@@ -1363,6 +1369,9 @@ impl Runtime {
     /// 停止运行时
     pub async fn stop(&self) -> Result<()> {
         *self.running.write().expect("running lock poisoned") = false;
+        if let Some(pool) = &self.transport_pool {
+            pool.stop_sweeper();
+        }
         // TUN 优雅关停：通知 run 循环 → teardown（路由回滚/设备销毁在
         // ingress 任务内完成，tun-dataplane.md §2.6）
         #[cfg(target_os = "linux")]
