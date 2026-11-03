@@ -624,15 +624,20 @@ pub struct DnsResolver {
     stats: DnsStatsCounters,
     query_ids: AtomicU16,
     /// singleflight（2026-11-03 P2）：并发冷名 miss 各自查上游的 stampede
-    /// 去重。键 =（规范域名, qtype）；值 = 首查任务的 watch 发送端。首查
+    /// 去重。键 =（规范域名, qtype）；值 = 首查任务的 watch 接收端。首查
     /// 结果（含负缓存）经 watch 广播给所有等待者；等待者不重复查上游。
     /// tokio Mutex（守卫可跨 await，锁不跨上游查询——仅保护 map 访问）。
     inflight: tokio::sync::Mutex<InflightMap>,
 }
 
 /// singleflight 映射（见 DnsResolver::inflight 注）。
-type InflightMap =
-    HashMap<(String, u16), watch::Sender<Option<Result<Vec<DnsAnswer>, ResolveError>>>>;
+#[derive(Clone)]
+struct InflightSlot {
+    receiver: watch::Receiver<Option<Result<Vec<DnsAnswer>, ResolveError>>>,
+    token: Arc<()>,
+}
+
+type InflightMap = HashMap<(String, u16), InflightSlot>;
 
 impl fmt::Debug for DnsResolver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -733,26 +738,34 @@ impl DnsResolver {
         // 结果（watch 广播），不重复查上游（§5-E 突发 stampede 防御）。
         // 锁只保护 map 访问（短临界），不跨上游查询。循环：先看槽位——
         // 占用则等待；空则抢占成为首查者（退出循环执行查询）。
-        let (tx, _rx) = watch::channel(None);
-        let mut saw_dead_leader = false;
+        let (tx, rx) = watch::channel(None);
+        let token = Arc::new(());
         loop {
             let mut inflight = self.inflight.lock().await;
-            if let Some(existing) = inflight.get(&key) {
-                let mut rx = existing.subscribe();
+            if let Some(slot) = inflight.get(&key) {
+                let mut rx = slot.receiver.clone();
+                let token = slot.token.clone();
                 drop(inflight);
                 if rx.changed().await.is_ok() {
                     if let Some(res) = rx.borrow_and_update().clone() {
                         return res;
                     }
                 }
-                // 首查失败/发送端 drop：继续循环，重试抢占（防活锁）。
-                if saw_dead_leader {
-                    break;
+                let mut inflight = self.inflight.lock().await;
+                if let Some(current) = inflight.get(&key) {
+                    if Arc::ptr_eq(&current.token, &token) {
+                        inflight.remove(&key);
+                    }
                 }
-                saw_dead_leader = true;
                 continue;
             } else {
-                inflight.insert(key.clone(), tx.clone());
+                inflight.insert(
+                    key.clone(),
+                    InflightSlot {
+                        receiver: rx.clone(),
+                        token: token.clone(),
+                    },
+                );
                 break;
             }
         }
@@ -776,7 +789,12 @@ impl DnsResolver {
 
         // 广播给等待者，随后移除 inflight 槽位（仅首查者移除）。
         let _ = tx.send(Some(result.clone()));
-        self.inflight.lock().await.remove(&key);
+        let mut inflight = self.inflight.lock().await;
+        if let Some(current) = inflight.get(&key) {
+            if Arc::ptr_eq(&current.token, &token) {
+                inflight.remove(&key);
+            }
+        }
         result
     }
 
@@ -1564,6 +1582,73 @@ mod tests {
         assert!(
             r.inflight.lock().await.is_empty(),
             "查询完成后 inflight 应清理"
+        );
+    }
+
+    /// 审核回归（2026-11-03）：首查任务被取消时，singleflight 槽位必须
+    /// 随 sender drop 自愈；等待者不能永久挂在已死首查者上。
+    #[tokio::test]
+    async fn resolver_recovers_when_singleflight_leader_is_cancelled() {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        let (query_tx, query_rx) = oneshot::channel();
+        let (response_tx, response_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let mut query_tx = Some(query_tx);
+            let mut response_rx = Some(response_rx);
+            let mut buf = vec![0u8; 512];
+            let mut first = true;
+            while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
+                let Ok(q) = decode_query(&buf[..n]) else {
+                    continue;
+                };
+                if first {
+                    first = false;
+                    if let Some(tx) = query_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    if let Some(rx) = response_rx.take() {
+                        let _ = rx.await;
+                    }
+                }
+                let answers = vec![v4(&q.domain, [9, 9, 9, 9], 300)];
+                let reply = encode_response(q.id, &q.domain, q.qtype, 0, &answers);
+                let _ = sock.send_to(&reply, peer).await;
+            }
+        });
+        let cfg = ResolverConfig {
+            trusted: vec![addr],
+            ..base_cfg()
+        };
+        let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
+
+        let leader_resolver = resolver.clone();
+        let leader = tokio::spawn(async move {
+            leader_resolver
+                .resolve("cancelled-leader.test", DnsRecordType::A)
+                .await
+        });
+        query_rx.await.unwrap();
+        let follower_resolver = resolver.clone();
+        let follower = tokio::spawn(async move {
+            follower_resolver
+                .resolve("cancelled-leader.test", DnsRecordType::A)
+                .await
+        });
+        tokio::task::yield_now().await;
+        leader.abort();
+        response_tx.send(()).unwrap();
+
+        let answers = tokio::time::timeout(Duration::from_secs(2), follower)
+            .await
+            .expect("等待者应从被取消的首查者自愈")
+            .unwrap()
+            .unwrap();
+        assert_eq!(answers[0].data, DnsAnswerData::A(Ipv4Addr::new(9, 9, 9, 9)));
+        server.abort();
+        assert!(
+            resolver.inflight.lock().await.is_empty(),
+            "自愈后 inflight 应清理"
         );
     }
 
