@@ -94,7 +94,7 @@ const HEAD_START: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Happy Eyeballs 竞速连接（≥2 候选）：首选候选立即发起；后续候选按
 /// `HEAD_START` 错峰补位，或任一在途失败即刻补位（不等错峰）；首个成功者
-/// 胜出返回，其余在途任务随 channel 关闭自行收弃（socket 落盘即 drop）。
+/// 胜出返回，其余在途任务经 `abort` 取消（socket 随取消 drop，不再持握手）。
 async fn connect_racing(candidates: Vec<std::net::SocketAddr>) -> std::io::Result<TcpStream> {
     let total = candidates.len();
     debug_assert!(total >= 2);
@@ -102,15 +102,17 @@ async fn connect_racing(candidates: Vec<std::net::SocketAddr>) -> std::io::Resul
     let mut pending = candidates.into_iter();
     let mut started = 0usize;
     let mut finished = 0usize;
+    let mut in_flight: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(total);
     // 错峰时点（首选启动后即排程；候选耗尽后不再更新）
     let mut next_at;
 
     // 首选候选立即发起
     let first = pending.next().expect("竞速候选非空");
     let tx_first = tx.clone();
-    tokio::spawn(async move {
+    let h = tokio::spawn(async move {
         let _ = tx_first.send(connect_one(first).await).await;
     });
+    in_flight.push(h);
     started += 1;
     next_at = tokio::time::Instant::now() + HEAD_START;
 
@@ -120,9 +122,10 @@ async fn connect_racing(candidates: Vec<std::net::SocketAddr>) -> std::io::Resul
             _ = tokio::time::sleep_until(next_at), if started < total => {
                 if let Some(a) = pending.next() {
                     let tx = tx.clone();
-                    tokio::spawn(async move {
+                    let h = tokio::spawn(async move {
                         let _ = tx.send(connect_one(a).await).await;
                     });
+                    in_flight.push(h);
                     started += 1;
                     if started < total {
                         next_at = tokio::time::Instant::now() + HEAD_START;
@@ -134,14 +137,22 @@ async fn connect_racing(candidates: Vec<std::net::SocketAddr>) -> std::io::Resul
             Some(res) = rx.recv() => {
                 finished += 1;
                 match res {
-                    Ok(s) => return Ok(s),
+                    Ok(s) => {
+                        // 胜出：中止仍在途的落选候选（取消其拨号/握手，
+                        // 资源随任务取消释放）。
+                        for h in in_flight {
+                            h.abort();
+                        }
+                        return Ok(s);
+                    }
                     Err(e) => {
                         if started < total {
                             if let Some(a) = pending.next() {
                                 let tx = tx.clone();
-                                tokio::spawn(async move {
+                                let h = tokio::spawn(async move {
                                     let _ = tx.send(connect_one(a).await).await;
                                 });
+                                in_flight.push(h);
                                 started += 1;
                                 if started < total {
                                     next_at = tokio::time::Instant::now() + HEAD_START;
@@ -401,5 +412,37 @@ mod tests {
             .await
             .expect_err("全败应返回 Err");
         assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
+    }
+
+    #[allow(clippy::await_holding_lock)] // 测试有意持锁跨 await 串行化 mark 全局态
+    /// P3（2026-11-03）：胜出后落选在途候选应被 abort（不再持握手/socket）。
+    /// 次选指向不可达地址（Tailscale 100.64.0.0/10 保留段，无路由即挂），
+    /// 首选回环 echo 快速胜出——若未 abort，`connect_racing` 返回后仍需等
+    /// 次选超时才能收敛 send；胜出即时返回即证明 abort 生效。
+    #[tokio::test]
+    async fn racing_winner_aborts_in_flight_losers() {
+        let _lk = mark_lock();
+        set_egress_fwmark(0);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = listener.local_addr().unwrap();
+        // Tailscale 100.64.0.1:1（RFC 7333 保留段，本环境无路由 → 拨号挂起）
+        let hang: std::net::SocketAddr = "100.64.0.1:1".parse().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 3];
+            let _ = s.read_exact(&mut buf).await;
+        });
+        let c = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connect_racing(vec![echo_addr, hang]),
+        )
+        .await
+        .expect("首选胜出应在 5s 内返回（落选候选已 abort，不等挂起候选超时）")
+        .expect("首选应胜出");
+        drop(c);
+        // 首选胜出后 abort 已发；若挂起候选未被取消，其 send 阻塞不释放
+        // ——下面额外 sleep 后断言测试进程不因未收弃的 in-flight 而挂死。
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        server.abort();
     }
 }

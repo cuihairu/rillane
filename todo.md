@@ -175,7 +175,8 @@ P3（收尾）：
   **已修（2026-11-03 `b880ad4`）**：`start()`/`stop()` 统一锁序 task→shutdown_tx；`shutdown_tx` 获取后仅同步赋值/发送，不再跨 `task.lock().await`（dns_engine.rs:1116-1128/1132-1140）。seep-platform 49 测全绿，clippy 零警告。
 - [x] **FFI raw-pointer 别名（UB 风险）**——`seep-ffi/lib.rs`：`seep_ffi_tun_start/stop` 取 `&mut *handle` 而 `is_running/stats_json` 取 `&*handle`；内嵌方并发调用即数据竞争 UB，无内部同步。
   **已修（2026-11-03 `e9741a7`）**：`seep_ffi_tun_start`/`seep_ffi_tun_stop`/`stop_inner`/`tun_start_inner`/`tun_stop_inner` 改取 `&FfiHandle`——`FfiHandle` 内全部可变面已走内部可变性（`tun_stop` AtomicBool / `tun_thread` Mutex / `tun_fd` AtomicI32），共享引用即可完成；消除 `&mut *handle` 与 `&*handle` 跨线程别名（lib.rs:221/238/271/316/326）。seep-ffi 10 测全绿，clippy 零警告。
-- [ ] **connect_racing 落选候选不中止**——`net_mark.rs:111-145`：胜出后落选拨号任务不自中止（channel drop 时自终止），慢候选短暂持套接字/TLS 握手。
+- [x] **connect_racing 落选候选不中止**——`net_mark.rs:111-145`：胜出后落选拨号任务不自中止（channel drop 时自终止），慢候选短暂持套接字/TLS 握手。
+  **已修（2026-11-03）**：`connect_racing` 收集在途 `JoinHandle`，胜出时 `abort()` 全部落选候选（net_mark.rs:98-170）——取消在途拨号/握手，资源随取消释放，不再持 socket 等待超时。回归 `racing_winner_aborts_in_flight_losers`（次选指向不可达段，首选胜出即时返回即证 abort），seep-core 13 测全绿，clippy 零警告。
 - [ ] **订阅刷新 read-modify-write 复活已删订阅**——`subscription/lib.rs:380-455`：`refresh_subscription` 克隆后长 fetch，`update_subscription_in_map` 回写；fetch 期间热更删除的订阅被复活。
 - [ ] **process 归因缓存重复工作**——`tun_process.rs:165-178`：并发 miss 重复扫 /proc 并插入等价值；幂等仅性能。
 - [ ] **事件广播 fire-and-forget**——`runtime_builder.rs:538`：`broadcast::channel(1024)` 首 receiver 丢弃；生产 `ControlPlane::new` 立即订阅且 Lagged 已处理，订阅前事件静默丢失。
