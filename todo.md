@@ -277,6 +277,7 @@ P3（收尾）：
 - [ ] **G0-3 协议嗅探层（sniff）**——TLS SNI/HTTP Host/QUIC SNI 覆写路由域名；TUN 场景 IP 直连流量无它即无法按域名分流。
   **部分完成（2026-11-04 `db7f997`）**：`crates/seep-runtime/src/sniff.rs` 增 `sniff_tls_sni`（ClientHello server_name 扩展解析）与 `sniff_http_host`（HTTP/1.x Host 头，大小写不敏感），纯函数无 I/O，回归 4 测（TLS SNI 提取/非 ClientHello None、HTTP Host/非 HTTP None）。**集成到 TUN 首包缓冲与路由覆写 BLOCKED**：需在 `spawn_tcp_forward`（tun_ingress.rs:662）对 Established 流读首包、解析后按域名重路由并透传首包（SmolTcpStream 首读会消费流数据，需缓冲回放/栈内 peek），且 QUIC SNI 需 UDP 载荷解析——此项需真实 TUN+TLS/HTTP 流量验证与用户对「首包重路由语义」决策。
 - [ ] **G0-4 UDP over vmess/vless/trojan**——主流加密通道均不载 UDP（构建期报错），游戏加速场景非 direct/ss/wg 出口即退化。
+  **BLOCKED**：需为 vmess/vless/trojan 各实现 UDP 数据面变体（vmess 现 `build_udp_connectors` 仅 direct/ss/wg 有能力，runtime_builder.rs:2230；vless.rs/trojan.rs 无任何 UDP 代码），并需真实 vmess/vless/trojan UDP 节点验证帧格式与复用（UDP 关联/连接复用、目标地址编码、分片/长度）。现缺这些协议的真实 UDP 端点与互通测试环境。
 - [ ] **G0-5 reject/block 目标**——极小成本，断连/广告拦截基本表达。
 - [ ] **G1-6 REALITY + XTLS-Vision 出站**——主流机场节点形态，现订阅含 reality-opts/flow 即构建失败；可复用 VMess xray 向量互操作经验。
 - [ ] **G1-7 hysteria2 UDP 面（quinn 载具）+ salamander/端口跳跃**——现归 V2，游戏定位下建议提前。
