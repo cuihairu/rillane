@@ -163,7 +163,8 @@ P3（收尾）：
   **已修（2026-11-03）**：`WsReader::pong_tx` 改有界 `mpsc::Sender<Vec<u8>>(64)`；PONG 帧经 `try_send`（满则丢弃控制帧，不阻塞读帧、不积压）。三调用点（vless/trojan/vmess）统一改 `mpsc::channel(64)`。seep-protocols 71+5+6+7 测全绿，clippy 零警告。
 - [x] **mesh 信封 `as u8` 长度截断**——`mesh_transport.rs:379-386/616-631`（flow_id/target_host/path 长度）+ `trojan.rs:99` / `udp/associate.rs:96`（域名长度）：无 `>255` 守卫，超长静默截断长度字节产畸形帧；对照 `vless.rs:165` 有守卫。
   **已修（2026-11-03）**：`trojan::build_request` 与 `encode_udp_header`（SOCKS5 UDP）加 `>255` 守卫（拒发畸形帧，返回 Result/错误）。`encode_mesh_envelope_binary` 已含 flow_id/target_host/path 守卫（mesh_transport.rs:366-375/580-589），无需改动。seep-core 26+13+3+4+10 测、seep-protocols 71+5+6+7 测全绿，clippy 零警告。
-- [ ] **padding.rs range span 下溢**——`middleware/padding.rs:71` `spec.max - spec.min + 1`：仅 config validate 保证 min≤max；绕过校验（或未来路径）即 usize wrap。
+- [x] **padding.rs range span 下溢**——`middleware/padding.rs:71` `spec.max - spec.min + 1`：仅 config validate 保证 min≤max；绕过校验（或未来路径）即 usize wrap。
+  **已修（2026-11-03）**：`decide_padding` range 分支健壮化——`max < min` 时回退为固定 min（`(hi-lo+1).max(1)` 保证 span≥1，防 `% 0` panic）；掷点确定性保留。回归 `range_mode_max_below_min_does_not_panic`，seep-protocols 72+5+6+7 测全绿，clippy 零警告。
 - [ ] **seep-core 链路质量 NaN**——`seep-core/lib.rs:744-745`：`hop_bandwidths` 空而 `hop_latencies` 非空时 `0.0/0.0=NaN` 传播进 `calculate_quality_score`；两 pub 向量常规同长（update_path），需外部独立变更。
 - [ ] **非常量时间认证比对**——`inbound/http.rs:262/276` + `socks5.rs:253` + `control_plane.rs:266`：`String ==` 短路径；网络时序攻击对本地代理密码实际难利用，防御纵深。
 - [ ] **runtime 无限循环任务无 stop 标志、JoinHandle 丢弃**——`runtime_builder.rs:1007-1225/2924-2954`（mesh stats/chain health/mesh quality/health checker/topology updater）+ `pool.rs:714-725`（sweeper）：重载路径每轮泄漏一组 loopers（各持 Arc）；单进程守护进程生命周期内良性，seepd 以进程退出掩盖。

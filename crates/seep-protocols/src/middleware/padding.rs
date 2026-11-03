@@ -67,9 +67,16 @@ pub fn decide_padding(
             Some(&b) => b,
         },
         PaddingMode::Range => {
-            // min ≤ max 由 config validate 保证；掷点确定性（§2.2）
-            let span = (spec.max - spec.min + 1) as u64;
-            let roll = spec.min + (range_hash(flow_id, frame_seq) % span) as usize;
+            // min ≤ max 由 config validate 保证；但为防绕过校验/未来路径
+            // 的 `max < min`（下溢 + `% 0` panic），先做健壮化：span 至少 1，
+            // 掷点确定性（§2.2）。若 max < min，回退为固定 min（不填充超限）。
+            let (lo, hi) = if spec.max >= spec.min {
+                (spec.min, spec.max)
+            } else {
+                (spec.min, spec.min)
+            };
+            let span = (hi - lo + 1).max(1) as u64;
+            let roll = lo + (range_hash(flow_id, frame_seq) % span) as usize;
             roll.max(len)
         }
     };
@@ -274,6 +281,33 @@ mod tests {
             outcomes,
             std::collections::HashSet::from([PadDecision::InPlace]),
             "len > max 时掷点恒 < len → InPlace"
+        );
+    }
+
+    /// P2 深审回归（2026-11-03）：range 模式 `max < min`（绕过 config validate
+    /// 或未来路径）不得下溢 span（`% 0` panic）。健壮化后回退为固定 min，
+    /// 掷点确定性不 panic。
+    #[test]
+    fn range_mode_max_below_min_does_not_panic() {
+        let s = spec(PaddingMode::Range, |s| {
+            s.min = 1400;
+            s.max = 512; // max < min（非法输入）
+            s.max_overhead_ratio = 100.0;
+        });
+        let id = FlowId::new();
+        for seq in 0..20u64 {
+            // 不 panic；回退固定 min → 掷点 ≥ min=1400。
+            match decide_padding(&s, 60, &id, seq) {
+                PadDecision::Pad { padded_len, .. } => {
+                    assert!(padded_len >= 1400, "回退应 ≥ min：{padded_len}");
+                }
+                other => panic!("r=100 不应放弃：seq={seq} → {other:?}"),
+            }
+        }
+        // 确定性保留
+        assert_eq!(
+            decide_padding(&s, 60, &id, 5),
+            decide_padding(&s, 60, &id, 5)
         );
     }
 
