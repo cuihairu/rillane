@@ -523,6 +523,7 @@ impl TunIngress {
             Arc::clone(&self.stats),
             Arc::clone(&self.ipv4_id),
             mtu,
+            self.config.udp_idle_secs,
         ));
 
         // ⑥ 首包载荷上行
@@ -781,6 +782,7 @@ async fn downlink_task(
     stats: Arc<Mutex<TunIngressStats>>,
     ipv4_id: Arc<AtomicU16>,
     mtu: usize,
+    udp_idle_secs: u64,
 ) {
     let mut buf = vec![0u8; mtu];
     loop {
@@ -815,7 +817,11 @@ async fn downlink_task(
                     }
                 }
                 if let Some(mut e) = table.get_mut(&key) {
-                    e.last_active = Instant::now();
+                    // 下行亦续 expiry：纯下行推送流（客户端 udp_idle_secs 内
+                    // 无上行）不得被中途逐出——续期口径与上行一致。
+                    let now = Instant::now();
+                    e.last_active = now;
+                    e.expiry = now + Duration::from_secs(udp_idle_secs);
                 }
             }
         }
@@ -1029,6 +1035,61 @@ mod tests {
             res.as_ref().is_err_and(|e| e.to_string().contains("未注入")),
             "未注入 endpoints 必须 fail-fast（含未注入错误），got: {res:?}"
         );
+    }
+
+    /// 回归：纯下行推送流也须续 expiry（原只续 last_active，sweep 按
+    /// expiry 驱逐，下行推送流在 udp_idle_secs 内无上行会被中途逐出）。
+    #[tokio::test]
+    async fn downlink_packet_renews_expiry() {
+        use seep_core::udp::relay::MockUdpRelay;
+
+        let key = TunFlowKey {
+            proto: Proto::Udp,
+            src: "10.66.0.1:40000".parse().unwrap(),
+            dst: "8.8.8.8:53".parse().unwrap(),
+        };
+        let target = udp_target(key.dst);
+        let (relay, feed) = MockUdpRelay::new(target);
+        let cancel = Arc::new(Notify::new());
+        let table = Arc::new(DashMap::new());
+        let now = Instant::now();
+        let old_expiry = now + Duration::from_millis(50);
+        table.insert(
+            key,
+            TunFlowEntry {
+                decision: RouteDecision::direct("game-node".to_string()),
+                relay: Some(relay.clone()),
+                process: None,
+                last_active: now,
+                expiry: old_expiry,
+                cancel: cancel.clone(),
+            },
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+        let task = tokio::spawn(downlink_task(
+            key,
+            relay,
+            cancel,
+            table.clone(),
+            tx,
+            Arc::new(StdMutex::new(TunIngressStats::default())),
+            Arc::new(AtomicU16::new(0)),
+            1500,
+            300,
+        ));
+
+        feed.send(b"push".to_vec()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("下行包应在超时前返回")
+            .expect("downlink_task 持 tx");
+
+        let new_expiry = table.get(&key).expect("下行后流仍在").expiry;
+        assert!(
+            new_expiry > old_expiry,
+            "下行须续 expiry：old={old_expiry:?} new={new_expiry:?}"
+        );
+        task.abort();
     }
 
     /// §4.1 UDP 全链路（无设备）：应用包 → 归因旁路（无 Process 规则）→ 路由
