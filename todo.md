@@ -174,7 +174,7 @@ P3（收尾）：
 - [x] **DNS start() shutdown_tx mutex 跨 await**——`dns_engine.rs:1072-1086`：持 `shutdown_tx` tokio mutex 跨取 `task` 与 spawn；生命周期串行化，有界。
   **已修（2026-11-03 `b880ad4`）**：`start()`/`stop()` 统一锁序 task→shutdown_tx；`shutdown_tx` 获取后仅同步赋值/发送，不再跨 `task.lock().await`（dns_engine.rs:1116-1128/1132-1140）。seep-platform 49 测全绿，clippy 零警告。
 - [x] **FFI raw-pointer 别名（UB 风险）**——`seep-ffi/lib.rs`：`seep_ffi_tun_start/stop` 取 `&mut *handle` 而 `is_running/stats_json` 取 `&*handle`；内嵌方并发调用即数据竞争 UB，无内部同步。
-  **已修（2026-11-03）**：`seep_ffi_tun_start`/`seep_ffi_tun_stop`/`stop_inner`/`tun_start_inner`/`tun_stop_inner` 改取 `&FfiHandle`——`FfiHandle` 内全部可变面已走内部可变性（`tun_stop` AtomicBool / `tun_thread` Mutex / `tun_fd` AtomicI32），共享引用即可完成；消除 `&mut *handle` 与 `&*handle` 跨线程别名（lib.rs:221/238/271/316/326）。seep-ffi 10 测全绿，clippy 零警告。
+  **已修（2026-11-03 `e9741a7`）**：`seep_ffi_tun_start`/`seep_ffi_tun_stop`/`stop_inner`/`tun_start_inner`/`tun_stop_inner` 改取 `&FfiHandle`——`FfiHandle` 内全部可变面已走内部可变性（`tun_stop` AtomicBool / `tun_thread` Mutex / `tun_fd` AtomicI32），共享引用即可完成；消除 `&mut *handle` 与 `&*handle` 跨线程别名（lib.rs:221/238/271/316/326）。seep-ffi 10 测全绿，clippy 零警告。
 - [ ] **connect_racing 落选候选不中止**——`net_mark.rs:111-145`：胜出后落选拨号任务不自中止（channel drop 时自终止），慢候选短暂持套接字/TLS 握手。
 - [ ] **订阅刷新 read-modify-write 复活已删订阅**——`subscription/lib.rs:380-455`：`refresh_subscription` 克隆后长 fetch，`update_subscription_in_map` 回写；fetch 期间热更删除的订阅被复活。
 - [ ] **process 归因缓存重复工作**——`tun_process.rs:165-178`：并发 miss 重复扫 /proc 并插入等价值；幂等仅性能。
