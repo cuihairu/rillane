@@ -42,6 +42,18 @@ fn is_transient_recv_error(e: &std::io::Error) -> bool {
         || e.raw_os_error() == Some(libc::ENOBUFS)
 }
 
+/// TCP mesh `accept` 瞬时错误分类：ECONNABORTED（客户端握手后立即断开）/
+/// EINTR（信号打断）/ EMFILE/ENFILE/ENOBUFS（内核资源耗尽）不应终止
+/// 整面监听任务——配短暂 sleep 避免 EMFILE 热循环。
+fn is_transient_accept_error(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::Interrupted
+        || e.kind() == std::io::ErrorKind::WouldBlock
+        || e.kind() == std::io::ErrorKind::ConnectionAborted
+        || e.raw_os_error() == Some(libc::EMFILE)
+        || e.raw_os_error() == Some(libc::ENFILE)
+        || e.raw_os_error() == Some(libc::ENOBUFS)
+}
+
 trait MeshStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T> MeshStream for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 
@@ -1362,7 +1374,23 @@ impl MeshDataPlane {
         let listener = TcpListener::bind(bind).await?;
         let tls = self.tls.clone();
         loop {
-            let (stream, _peer) = listener.accept().await?;
+            let (stream, _peer) = match listener.accept().await {
+                Ok(v) => v,
+                Err(e) => {
+                    // 瞬时 accept 错误（客户端握手后断开/信号打断/资源耗尽）
+                    // 不终止监听任务；短暂退避防 EMFILE 热循环。
+                    if is_transient_accept_error(&e) {
+                        tracing::debug!(
+                            target: "seep::mesh::transport",
+                            error = %e,
+                            "mesh TCP accept 瞬时错误，短暂退避后继续"
+                        );
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            };
             let this = Self {
                 local_node_id: self.local_node_id.clone(),
                 local_role: self.local_role,
@@ -4015,6 +4043,33 @@ mod tests {
         assert!(
             !is_transient_recv_error(&refused),
             "非瞬时错误应继续返回 Err 终止任务"
+        );
+    }
+
+    /// TCP mesh `accept` 瞬时错误分类回归：ECONNABORTED/EINTR/EMFILE/ENFILE/
+    /// ENOBUFS 不应终止监听任务（旧代码 `accept().await?` 任意错误即全面停摆）。
+    #[test]
+    fn tcp_accept_transient_error_classification() {
+        let interrupted = std::io::Error::from(std::io::ErrorKind::Interrupted);
+        assert!(is_transient_accept_error(&interrupted), "EINTR 应视为瞬时");
+
+        let aborted = std::io::Error::from(std::io::ErrorKind::ConnectionAborted);
+        assert!(
+            is_transient_accept_error(&aborted),
+            "ECONNABORTED 应视为瞬时"
+        );
+
+        let emfile = std::io::Error::from_raw_os_error(libc::EMFILE);
+        assert!(is_transient_accept_error(&emfile), "EMFILE 应视为瞬时");
+        let enfile = std::io::Error::from_raw_os_error(libc::ENFILE);
+        assert!(is_transient_accept_error(&enfile), "ENFILE 应视为瞬时");
+        let enobufs = std::io::Error::from_raw_os_error(libc::ENOBUFS);
+        assert!(is_transient_accept_error(&enobufs), "ENOBUFS 应视为瞬时");
+
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(
+            !is_transient_accept_error(&refused),
+            "非瞬时错误应继续返回 Err 终止监听"
         );
     }
 

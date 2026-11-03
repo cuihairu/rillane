@@ -219,7 +219,8 @@ P2（下一步修）：
   evidence：`mesh_transport.rs:1852` `lookup_host(...).await?` 在 serve 循环内。
 - [x] **瞬时 recv_from 错误终止 UDP serve 任务**——`mesh_transport.rs:1946`：`Ok(Err(e))=>return Err`（ENOBUFS/EINTR 瞬时亦毙）；应 continue 或按瞬时/致命分类。
   **已修（2026-11-04）**：`serve_udp` 的 `recv_from` 错误按瞬时/致命分类——`is_transient_recv_error`（EINTR/EAGAIN/ENOBUFS）记 debug 并 `continue` 保留 serve 任务；其余仍 `return Err` 终止。seep-runtime 增 `libc = "0.2"` 依赖取 ENOBUFS 常量。回归 `udp_recv_transient_error_classification`（三瞬时 true、ConnectionRefused false）。evidence：`crates/seep-runtime/src/mesh_transport.rs:40-52` / `:1997-2011` / `:4000-4018`；`crates/seep-runtime/Cargo.toml`；seep-runtime 147 测 + `cargo test --workspace` 全绿。
-- [ ] **瞬时 accept 错误终止 TCP mesh 监听任务**——`mesh_transport.rs:1330`：`listener.accept().await?`（ECONNABORTED/EMFILE/EINTR 瞬时亦毙）。
+- [x] **瞬时 accept 错误终止 TCP mesh 监听任务**——`mesh_transport.rs:1330`：`listener.accept().await?`（ECONNABORTED/EMFILE/EINTR 瞬时亦毙）。
+  **已修（2026-11-04）**：`serve` 的 `accept` 错误按瞬时/致命分类——`is_transient_accept_error`（ECONNABORTED/EINTR/EMFILE/ENFILE/ENOBUFS）记 debug + 10ms 退避后 `continue` 保留监听任务；其余仍 `return Err` 终止。回归 `tcp_accept_transient_error_classification`（五瞬时 true、ConnectionRefused false）。evidence：`crates/seep-runtime/src/mesh_transport.rs:54-63` / `:1390-1403` / `:4049-4071`；seep-runtime 148 测 + `cargo test --workspace` 全绿。
 
 P3（收尾）：
 - [ ] **active_chains.len()-1 下溢**——`chain.rs:907`：`drop(chain)`（:901）后读 len；并发 `terminate_chain`（:924 remove）移除 → 0-1 下溢（release 裹 usize::MAX 指标污染）；宜 `saturating_sub(1)` 或由 terminate 自减。
