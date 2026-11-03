@@ -198,7 +198,8 @@ P3（收尾）：
 - [ ] **缓存满插入 O(n) 驱逐扫描**——`mesh_transport.rs:868-876`：满（65536）时每次插入全 `min_by_key` 扫描；文档化权衡（"O(n) 无新依赖"），需认证 peer + 6.5 万流触发。
 - [ ] **订阅转换配置硬编码 admin_token="seep"**——`clash.rs:768-771`/`seep_dsl.rs:413-418`：回环绑定约束暴露面；建议省略或随机生成。
 - [ ] **shaping 抖动 jitter_ms+1 裹 0（% 0 panic）**——`shaping.rs:45`：jitter_ms=interval_ms=u64::MAX 时裹 0；validate（seep-config:908-918）无上界；`wrapping_add(1).max(1)` 或上界校验。
-- [ ] **save_to_disk 固定 {hash}.tmp 路径（并发交错写）**——`cache.rs:588-601`：并发 `set()` 同键交错写临时文件 → 损坏缓存条目（重取可恢复）；唯一临时名或锁下写。
+- [x] **save_to_disk 固定 {hash}.tmp 路径（并发交错写）**——`cache.rs:588-601`：并发 `set()` 同键交错写临时文件 → 损坏缓存条目（重取可恢复）；唯一临时名或锁下写。
+  **已修（2026-11-03）**：`SubscriptionCache` 增 `disk_io_lock`（std Mutex），`save_to_disk` 持锁落盘（`cache.rs`），与 cleanup 删盘串行；同键并发 set 落盘不再交错。
 
 ---
 
@@ -256,7 +257,8 @@ P3（收尾）：
 
 覆盖：seep-protocols（host_has_injection_chars 扩围 + socks5/http 回归测试）、seep-runtime（config_apply_lock 热交换串行、hot_reload config_mutex、mesh send_existing_flow + 防重放窗口语义、chain fmt）、seep-subscription（cache 锁外磁盘删除 + 热盘容量回填、fetcher 终态错误分类）、README/文档。
 
-- [ ] 审核发现：cache 三个 cleanup（cleanup_expired/cleanup_lru/cleanup_lru_by_count）把磁盘 `fs::remove_file` 移到 `memory_cache` 锁外（cache.rs:417/485/547），与并发 `set_with_ttl`→`save_to_disk`（cache.rs:253）同键竞态——清理线程在内存移除后、删盘前，set 可重插该键并落盘，随后清理删掉 set 刚写的新盘文件，留下「内存有、磁盘无」的副本；重启/后续 LRU 再逐即丢失。提交注释只声明了 get()→load_from_disk 复生窗口（自愈），未覆盖此 set 写删窗口（不白愈、持久化丢失）。P3。
+- [x] 审核发现：cache 三个 cleanup（cleanup_expired/cleanup_lru/cleanup_lru_by_count）把磁盘 `fs::remove_file` 移到 `memory_cache` 锁外（cache.rs:417/485/547），与并发 `set_with_ttl`→`save_to_disk`（cache.rs:253）同键竞态——清理线程在内存移除后、删盘前，set 可重插该键并落盘，随后清理删掉 set 刚写的新盘文件，留下「内存有、磁盘无」的副本；重启/后续 LRU 再逐即丢失。提交注释只声明了 get()→load_from_disk 复生窗口（自愈），未覆盖此 set 写删窗口（不白愈、持久化丢失）。P3。
+  **已修（2026-11-03）**：`SubscriptionCache` 增 `disk_io_lock`（std Mutex），cleanup 删盘与 set 落盘串行；删盘前复查 `memory_cache` 已无该键（`cache.rs`），有活跃副本则跳过删盘。回归 `cleanup_expired_skips_delete_when_key_reinserted`（模拟 set 重插后 cleanup 不误删），seep-subscription 54 测全绿。
 - [ ] 审核发现：`FetcherError` 文档声明「HTTP 状态错」为终态（fetcher.rs:8-10），但非 2xx 状态（4xx/5xx，如 404/429/5xx）经 `anyhow!` 返回（fetcher.rs:254-260），未包装成 FetcherError——`fetch()` 的终态短路（fetcher.rs:172 `downcast_ref::<FetcherError>`）对状态错不生效，仍按瞬时错误重试 `max_retries` 次；文档与实现语义不符，且 4xx（404/403/429）语义上应属终态。P3。
 - [ ] 审核发现：`apply_config_inner`/订阅循环的写序改「先装 egress 面、再 reload 路由、最后落 config」（runtime_builder.rs:1158-1163/1427-1434）消除了「新规则引用未就绪名」窗口，但引入反向窗口：outputs/connectors 整体替换后、`router.reload` 前，旧路由规则可解析到已被新 egress 集删除的名字 → 该窗口内命中已删 egress 的在途流报「未知 egress」失败（瞬时微秒级，多状态非原子交换固有残余）。注释「不再引用未就绪名」方向正确但未提此逆向窗口。P3（低）。
 - [ ] 审核发现：测试缺口——① fetcher 终态错误仅 Content-Length 超限被回归（chunked 分块超限 ChunkOverLimit 与非 UTF-8 NotUtf8 两终态分支无测试，fetcher.rs:298-305）；② cache cleanup 锁外删盘 vs set 同键竞态无回归测试（cache.rs:417 窗口）；③ 订阅刷新循环持 config_apply_lock 路径（runtime_builder.rs:1132）无独立回归（仅 update_config/merge_config_delta 两路径被覆盖）。

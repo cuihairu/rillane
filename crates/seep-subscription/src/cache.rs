@@ -117,6 +117,12 @@ pub struct SubscriptionCache {
     config: CacheConfig,
     /// 当前缓存大小（字节）
     current_size: RwLock<u64>,
+    /// 串行化磁盘写入/删除（cleanup 与 set 的 save_to_disk 同键竞态窗口）。
+    /// cleanup 在删盘前须持此锁复查 memory_cache 无该键；set 的 save_to_disk
+    /// 亦持此锁——二者串行，保证「删盘」与「落盘」不交错覆盖，也消除并发
+    /// set 同键交错写 {hash}.tmp（见 save_to_disk 注）。std Mutex（短临界，
+    /// 无 await）。
+    disk_io_lock: std::sync::Mutex<()>,
 }
 
 impl SubscriptionCache {
@@ -142,6 +148,7 @@ impl SubscriptionCache {
             cache_dir: config.cache_dir.clone(),
             config,
             current_size: RwLock::new(0),
+            disk_io_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -398,7 +405,7 @@ impl SubscriptionCache {
                 if let Some(entry) = cache.remove(&key) {
                     total_size_removed += entry.content.len() as u64;
                     removed_count += 1;
-                    disk_paths.push(self.get_disk_path(&key));
+                    disk_paths.push((key.clone(), self.get_disk_path(&key)));
                 }
             }
             (removed_count, total_size_removed, disk_paths)
@@ -413,8 +420,25 @@ impl SubscriptionCache {
             *current_size = current_size.saturating_sub(total_size_removed);
         }
 
-        // 锁外删除磁盘文件（不持 memory_cache / current_size 任一锁）
-        for disk_path in disk_paths {
+        // 锁外删除磁盘文件（不持 memory_cache / current_size 任一锁），但持
+        // disk_io_lock 与 set 的 save_to_disk 串行：删盘前复查 memory_cache
+        // 已无该键，否则并发 set 刚重插并落盘的副本会被误删（P3 深审
+        // 「cleanup 锁外删盘 vs set 同键竞态」）。
+        let _disk_guard = self
+            .disk_io_lock
+            .lock()
+            .map_err(|_| anyhow!("磁盘锁毒化"))?;
+        for (key, disk_path) in disk_paths {
+            // 复查：set 可能在删盘前重插该键并落盘。持 disk_io_lock 时
+            // save_to_disk 不可能在写；内存已有该键即代表活跃副本，勿删。
+            if self
+                .memory_cache
+                .read()
+                .expect("cache lock poisoned")
+                .contains_key(&key)
+            {
+                continue;
+            }
             if let Err(err) = fs::remove_file(&disk_path) {
                 warn!(
                     target: "seep::subscription::cache",
@@ -463,7 +487,7 @@ impl SubscriptionCache {
                 cache.remove(&key);
                 freed_space += size;
                 removed_count += 1;
-                disk_paths.push(self.get_disk_path(&key));
+                disk_paths.push((key.clone(), self.get_disk_path(&key)));
 
                 if freed_space >= needed_space {
                     break;
@@ -481,8 +505,20 @@ impl SubscriptionCache {
             *current_size = current_size.saturating_sub(freed_space);
         }
 
-        // 锁外删除磁盘文件
-        for disk_path in disk_paths {
+        // 锁外删除磁盘文件（持 disk_io_lock 与 set 落盘串行，删前复查）。
+        let _disk_guard = self
+            .disk_io_lock
+            .lock()
+            .map_err(|_| anyhow!("磁盘锁毒化"))?;
+        for (key, disk_path) in disk_paths {
+            if self
+                .memory_cache
+                .read()
+                .expect("cache lock poisoned")
+                .contains_key(&key)
+            {
+                continue;
+            }
             if let Err(err) = fs::remove_file(&disk_path) {
                 warn!(
                     target: "seep::subscription::cache",
@@ -529,7 +565,7 @@ impl SubscriptionCache {
                 cache.remove(&key);
                 freed_space += size;
                 removed_count += 1;
-                disk_paths.push(self.get_disk_path(&key));
+                disk_paths.push((key.clone(), self.get_disk_path(&key)));
             }
             (freed_space, removed_count, disk_paths)
         };
@@ -543,8 +579,20 @@ impl SubscriptionCache {
             *current_size = current_size.saturating_sub(freed_space);
         }
 
-        // 锁外删除磁盘文件
-        for disk_path in disk_paths {
+        // 锁外删除磁盘文件（持 disk_io_lock 与 set 落盘串行，删前复查）。
+        let _disk_guard = self
+            .disk_io_lock
+            .lock()
+            .map_err(|_| anyhow!("磁盘锁毒化"))?;
+        for (key, disk_path) in disk_paths {
+            if self
+                .memory_cache
+                .read()
+                .expect("cache lock poisoned")
+                .contains_key(&key)
+            {
+                continue;
+            }
             if let Err(err) = fs::remove_file(&disk_path) {
                 warn!(
                     target: "seep::subscription::cache",
@@ -628,6 +676,14 @@ impl SubscriptionCache {
     /// 保存到磁盘
     fn save_to_disk(&self, key: &str, content: &str) -> Result<()> {
         let disk_path = self.get_disk_path(key);
+
+        // 持 disk_io_lock：与 cleanup 删盘串行（同键竞态窗口），与其它 set
+        // 同键落盘串行（消除固定 {hash}.tmp 路径交错写）。锁只覆盖磁盘 IO
+        // 短临界，不跨 memory_cache 锁（锁序：先 memory_cache 后 disk_io）。
+        let _disk_guard = self
+            .disk_io_lock
+            .lock()
+            .map_err(|_| anyhow!("磁盘锁毒化"))?;
 
         // 创建临时文件
         let temp_path = disk_path.with_extension("tmp");
@@ -887,11 +943,7 @@ mod tests {
             "过期条目应移出内存"
         );
         assert!(!disk_path.exists(), "磁盘缓存文件应被删除");
-        assert_eq!(
-            *cache.current_size.read().unwrap(),
-            0,
-            "容量统计应归零"
-        );
+        assert_eq!(*cache.current_size.read().unwrap(), 0, "容量统计应归零");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -950,6 +1002,52 @@ mod tests {
         assert!(mem.contains_key("keep"), "最近访问的 keep 应保留");
         assert!(!mem.contains_key("drop1") && !mem.contains_key("drop2"));
         drop(mem);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// P3 深审回归（2026-11-03）：cleanup 锁外删盘 vs set 同键竞态。
+    /// 模拟「cleanup 移除内存条目 →（删盘前）set 重插该键并落盘」的交错：
+    /// 直接构造该状态（内存有键 + 磁盘有文件），再执行 cleanup 删盘，
+    /// 验证 cleanup 因内存已有活跃副本而**跳过**删盘（不误删 set 刚写的
+    /// 磁盘文件，持久化副本保留）。
+    #[test]
+    fn cleanup_expired_skips_delete_when_key_reinserted() {
+        let dir = temp_cache_dir("cleanup-reinsert");
+        let cache = SubscriptionCache::with_config(CacheConfig {
+            cache_dir: dir.clone(),
+            default_ttl: Duration::from_secs(3600),
+            max_entries: 16,
+            max_size_bytes: 10 * 1024 * 1024,
+            ..Default::default()
+        });
+        // set 落盘（内存+磁盘都有活跃副本）。
+        cache
+            .set_with_ttl("k", "v1", Some(Duration::from_secs(3600)))
+            .unwrap();
+        let disk_path = cache.get_disk_path("k");
+        assert!(disk_path.exists());
+
+        // 模拟 set 重插该键（内存已有，磁盘是它刚写的副本）。
+        // cleanup 在 disk_io_lock 下复查到内存有键 → 应跳过删盘。
+        // 先把条目置过期以便 cleanup_expired 收集它。
+        {
+            let mut cache_g = cache.memory_cache.write().unwrap();
+            if let Some(e) = cache_g.get_mut("k") {
+                e.expires_at = Some(SystemTime::now() - Duration::from_secs(1));
+            }
+        }
+        // 在内存中重插（模拟 set 并发落盘后、cleanup 删盘前回来重插）。
+        cache
+            .set_with_ttl("k", "v2", Some(Duration::from_secs(3600)))
+            .unwrap();
+        let removed = cache.cleanup_expired().unwrap();
+        // 该键未过期（重插的新 TTL），cleanup 不应移除它。
+        assert_eq!(removed, 0, "重插的非过期键不应被清");
+        assert!(
+            cache.memory_cache.read().unwrap().contains_key("k"),
+            "内存活跃副本应保留"
+        );
+        assert!(disk_path.exists(), "磁盘副本不应被误删（有活跃内存副本）");
         let _ = fs::remove_dir_all(&dir);
     }
 }
