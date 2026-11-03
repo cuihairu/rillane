@@ -204,8 +204,8 @@ pub unsafe extern "C" fn seep_ffi_stop(handle: *mut FfiHandle) -> i32 {
     }
 }
 
-fn stop_inner(mut h: Box<FfiHandle>) {
-    tun_stop_inner(&mut h);
+fn stop_inner(h: Box<FfiHandle>) {
+    tun_stop_inner(&h);
     let _ = h.tokio_rt.block_on(h.seep.stop());
     // 收尾 shutdown：上限 2s，防个别收尾任务拖住调用线程（普通 async 任务
     // 在 await 点被取消，无阻塞线程滞留面）；Box 部分移出 tokio_rt 合法
@@ -273,7 +273,7 @@ pub unsafe extern "C" fn seep_ffi_tun_start(handle: *mut FfiHandle, fd: i32) -> 
         set_last_error("seep_ffi_tun_start：句柄或 fd 无效".into());
         return -1;
     }
-    let h = unsafe { &mut *handle };
+    let h = unsafe { &*handle };
     match catch_unwind(AssertUnwindSafe(|| tun_start_inner(h, fd))) {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
@@ -288,7 +288,7 @@ pub unsafe extern "C" fn seep_ffi_tun_start(handle: *mut FfiHandle, fd: i32) -> 
 }
 
 #[cfg(unix)]
-fn tun_start_inner(h: &mut FfiHandle, fd: i32) -> anyhow::Result<()> {
+fn tun_start_inner(h: &FfiHandle, fd: i32) -> anyhow::Result<()> {
     tun_stop_inner(h);
     // 所有权转移：OwnedFd 接管 fd（Android 侧 pfd.detachFd() 后传入；线程
     // 结束时随 File drop 关闭）
@@ -304,7 +304,7 @@ fn tun_start_inner(h: &mut FfiHandle, fd: i32) -> anyhow::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn tun_start_inner(_h: &mut FfiHandle, _fd: i32) -> anyhow::Result<()> {
+fn tun_start_inner(_h: &FfiHandle, _fd: i32) -> anyhow::Result<()> {
     anyhow::bail!("TUN 接管仅 unix 平台（Android/iOS/Linux）")
 }
 
@@ -318,12 +318,12 @@ pub unsafe extern "C" fn seep_ffi_tun_stop(handle: *mut FfiHandle) -> i32 {
         set_last_error("seep_ffi_tun_stop：句柄为空".into());
         return -1;
     }
-    let h = unsafe { &mut *handle };
+    let h = unsafe { &*handle };
     tun_stop_inner(h);
     0
 }
 
-fn tun_stop_inner(h: &mut FfiHandle) {
+fn tun_stop_inner(h: &FfiHandle) {
     h.tun_stop.store(true, Ordering::Relaxed);
     let join = h.tun_thread.lock().expect("tun thread lock").take();
     if let Some(j) = join {
