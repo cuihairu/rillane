@@ -767,7 +767,7 @@ impl ClashConverter {
             control: seep_config::ControlConfig {
                 api_bind: "127.0.0.1:9090".to_string(),
                 uds_path: None,
-                admin_token: Some("seep".to_string()),
+                admin_token: None,
             },
             telemetry: seep_config::TelemetryConfig {
                 log_level: clash_config.log_level.clone(),
@@ -1585,6 +1585,10 @@ rules: []
         let converter = ClashConverter::new();
         let clash_config = converter.parse(yaml_content).unwrap();
         let seep_config = converter.convert_to_seep(&clash_config).unwrap();
+        assert!(
+            seep_config.control.admin_token.is_none(),
+            "订阅转换不得生成硬编码 admin_token"
+        );
 
         let hy2 = seep_config
             .egress
