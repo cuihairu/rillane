@@ -46,7 +46,7 @@ pub struct ControlPlane {
 
 impl ControlPlane {
     pub fn new(runtime: Arc<Runtime>, admin_token: Option<String>, metrics_enabled: bool) -> Self {
-        Self {
+        let cp = Self {
             runtime,
             admin_token,
             metrics_enabled,
@@ -55,7 +55,12 @@ impl ControlPlane {
             max_event_log_lines: 1000,
             telemetry_export: Arc::new(tokio::sync::RwLock::new(TelemetryExport::new(2000))),
             event_counters: Arc::new(tokio::sync::RwLock::new(CounterExport::new(2000))),
-        }
+        };
+        // 立即订阅事件：ControlPlane::new 在 runtime.start() 之前构造（main.rs），
+        // 提前 subscribe 避免启动初段事件（ConfigUpdated/链路建链等）在 serve 才
+        // 订阅而被广播通道静默丢弃（P2：事件广播 fire-and-forget）。
+        cp.spawn_event_log_task();
+        cp
     }
 
     pub async fn serve(
@@ -63,8 +68,6 @@ impl ControlPlane {
         bind: SocketAddr,
         shutdown: tokio::sync::oneshot::Receiver<()>,
     ) -> anyhow::Result<()> {
-        self.spawn_event_log_task();
-
         // hyper 1.x：`hyper::Server` 已移除，监听/连接循环显式化——hyper-util
         // auto Builder + 每连接 `serve_connection_with_shutdown`；oneshot 关桥
         // 转 watch 广播（Receiver 不可克隆）给在途连接，停止 accept 后存量
@@ -3293,6 +3296,40 @@ mod tests {
             .unwrap();
         let resp = cp.handle(remove).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// 事件广播在订阅前丢弃的回归：ControlPlane::new 必须立即订阅事件，
+    /// 否则 runtime.start() 前发生的事件在 serve() 才订阅时已丢失。
+    #[tokio::test]
+    async fn events_before_serve_are_captured() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime.clone(), None, true);
+
+        // 模拟生产时序：new() 构造后、serve() 订阅前，runtime 已可产生事件。
+        let config = runtime.get_config();
+        runtime.update_config(config).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let get = Request::builder()
+            .method(Method::GET)
+            .uri("/events")
+            .body(RespBody::new(Bytes::new()))
+            .unwrap();
+        let resp = cp.handle(get).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            body.contains("ConfigUpdated"),
+            "事件应在 serve 前被订阅并记录，body: {body}"
+        );
     }
 
     // ---------- P0-5 §10-S4 控制面渲染 ----------
