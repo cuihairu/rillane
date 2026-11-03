@@ -130,7 +130,16 @@ impl WasmPluginMiddleware {
     /// 单次裁决（全同步）：fuel 重置 → ctx 写入 → on_flow → 决策解析。
     fn invoke(&self, ctx_json: &str) -> Result<PluginDecision> {
         self.stats.calls.fetch_add(1, Ordering::Relaxed);
-        let mut guard = self.vm.lock().expect("plugin vm mutex poisoned");
+        // 宿主 panic（如序列化）毒化锁时恢复底层值继续——wasm 调用本身经
+        // classify_call_err 转为 Err 不 panic，poison 仅示宿主侧异常；恢复
+        // 后 store/memory 状态仍可复用（invoke 每次 set_fuel/重写 ctx）。
+        let mut guard = match self.vm.lock() {
+            Ok(g) => g,
+            Err(p) => {
+                tracing::warn!(target: "seep::plugins", name = self.name, "vm mutex 曾被毒化，恢复使用");
+                p.into_inner()
+            }
+        };
         let WasmVm {
             store,
             alloc_fn,

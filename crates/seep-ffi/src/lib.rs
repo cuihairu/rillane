@@ -299,7 +299,14 @@ fn tun_start_inner(h: &FfiHandle, fd: i32) -> anyhow::Result<()> {
     let stop = h.tun_stop.clone();
     stop.store(false, Ordering::Relaxed);
     let join = tun::spawn(file, writer, stop.clone(), h.tun_fd.clone())?;
-    *h.tun_thread.lock().expect("tun thread lock") = Some(join);
+    let mut guard = match h.tun_thread.lock() {
+        Ok(g) => g,
+        Err(p) => {
+            set_last_error("tun_thread lock 曾被毒化，恢复使用".into());
+            p.into_inner()
+        }
+    };
+    *guard = Some(join);
     Ok(())
 }
 
@@ -325,7 +332,14 @@ pub unsafe extern "C" fn seep_ffi_tun_stop(handle: *mut FfiHandle) -> i32 {
 
 fn tun_stop_inner(h: &FfiHandle) {
     h.tun_stop.store(true, Ordering::Relaxed);
-    let join = h.tun_thread.lock().expect("tun thread lock").take();
+    let mut guard = match h.tun_thread.lock() {
+        Ok(g) => g,
+        Err(p) => {
+            set_last_error("tun_thread lock 曾被毒化，恢复使用".into());
+            p.into_inner()
+        }
+    };
+    let join = guard.take();
     if let Some(j) = join {
         // poll 200ms 超时兜底，正常 <300ms 返回；join 失败仅忽略（线程自然退出）
         let _ = j.join();
