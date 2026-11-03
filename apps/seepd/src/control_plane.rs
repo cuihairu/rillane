@@ -266,7 +266,7 @@ impl ControlPlane {
             .get("x-admin-token")
             .and_then(|v| v.to_str().ok())
         {
-            return v == expected;
+            return seep_core::constant_time_eq(v.as_bytes(), expected.as_bytes());
         }
         if let Some(v) = req
             .headers()
@@ -275,7 +275,7 @@ impl ControlPlane {
         {
             return v
                 .strip_prefix("Bearer ")
-                .map(|t| t == expected)
+                .map(|t| seep_core::constant_time_eq(t.as_bytes(), expected.as_bytes()))
                 .unwrap_or(false);
         }
         false

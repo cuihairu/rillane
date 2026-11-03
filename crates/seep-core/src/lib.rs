@@ -23,6 +23,31 @@ impl<T> IoStream for T where T: AsyncRead + AsyncWrite + Send + Sync + Unpin + '
 /// Boxed bidirectional IO stream used by inbound/outbound handlers.
 pub type BoxedIo = Box<dyn IoStream>;
 
+/// Constant-time equality for byte slices (defense-in-depth).
+///
+/// Compares all bytes regardless of length mismatch, accumulating differences
+/// in a single accumulator. Returns false if lengths differ. This mitigates
+/// timing side-channel leaks in authentication code paths where an attacker
+/// might attempt to measure comparison time to recover credentials.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        // Still perform a comparison over the longer slice to reduce
+        // length-based timing signals (not perfect, but better than early return).
+        let longer = if a.len() > b.len() { a } else { b };
+        let mut acc = 0u8;
+        for &byte in longer.iter() {
+            acc |= byte;
+        }
+        std::hint::black_box(acc);
+        return false;
+    }
+    let mut acc = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FlowId(Uuid);
 
@@ -784,6 +809,17 @@ pub trait IngressEndpoint: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P3 深审回归（2026-11-03）：非常量时间认证比对防御纵深。恒时等值：
+    /// 同长同值 true；同长异值 false；异长 false；空串 true（零长度同值）。
+    #[test]
+    fn constant_time_eq_matches_and_rejects() {
+        assert!(constant_time_eq(b"token", b"token"));
+        assert!(!constant_time_eq(b"token", b"tokens"));
+        assert!(!constant_time_eq(b"token", b"tokem"));
+        assert!(!constant_time_eq(b"", b"token"));
+        assert!(constant_time_eq(b"", b""));
+    }
 
     /// P2-1 修缮钉子：路径语义单口径——current_path 恒为生效路径，切换
     /// 按 fallback 声明序逐一提升（fallback[0] 不再被首跳跳过），耗尽返回

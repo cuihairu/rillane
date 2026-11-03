@@ -257,9 +257,10 @@ fn verify_basic_auth(credentials: &[Credential], header: Option<&str>) -> bool {
     let Some((username, password)) = text.split_once(':') else {
         return false;
     };
-    credentials
-        .iter()
-        .any(|cred| cred.username == username && cred.password == password)
+    credentials.iter().any(|cred| {
+        seep_core::constant_time_eq(cred.username.as_bytes(), username.as_bytes())
+            && seep_core::constant_time_eq(cred.password.as_bytes(), password.as_bytes())
+    })
 }
 
 /// 校验 Proxy-Authorization: Bearer（RFC 6750 token 语义，明文比对）
@@ -273,7 +274,9 @@ fn verify_bearer_auth(tokens: &[String], header: Option<&str>) -> bool {
     else {
         return false;
     };
-    tokens.iter().any(|t| t == token.trim())
+    tokens
+        .iter()
+        .any(|t| seep_core::constant_time_eq(t.as_bytes(), token.trim().as_bytes()))
 }
 
 /// 解析 CONNECT 目标地址

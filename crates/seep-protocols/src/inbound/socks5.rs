@@ -248,9 +248,10 @@ where
     let username = String::from_utf8(username)?;
     let password = String::from_utf8(password)?;
 
-    let valid = users
-        .iter()
-        .any(|cred| cred.username == username && cred.password == password);
+    let valid = users.iter().any(|cred| {
+        seep_core::constant_time_eq(cred.username.as_bytes(), username.as_bytes())
+            && seep_core::constant_time_eq(cred.password.as_bytes(), password.as_bytes())
+    });
 
     if valid {
         stream.write_all(&[0x01, 0x00]).await?;
