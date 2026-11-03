@@ -217,6 +217,11 @@ impl TunIngress {
 
     /// 内部运行方法：设备生命周期 + §2.9 包循环 + teardown
     async fn run_internal(self: Arc<Self>) -> Result<()> {
+        // 前置 fail-fast：set_endpoints 未注入（重构漂移/调用方漏接）时启动
+        // 即 Err，而非运行期每包在 router()/flow_output 处 panic。
+        if self.flow_router.get().is_none() || self.flow_output.get().is_none() {
+            anyhow::bail!("flow_router/flow_output 未注入——run() 前须 set_endpoints");
+        }
         // tun guard 全程持有（单任务独占设备；§2.9 事件枚举模式的基石）
         let mut tun_guard = self.tun.lock().await;
         tun_guard
@@ -1009,6 +1014,21 @@ mod tests {
         let t = Arc::new(TunIngress::new(config, connector.clone()));
         t.set_endpoints(router.clone(), Arc::new(NullOutput));
         (t, router, connector)
+    }
+
+    /// 回归：set_endpoints 未注入时 run_internal 应返回 Err（启动 fail-fast），
+    /// 而非运行期每包在 router()/flow_output 处 panic（原不变式仅由 expect 维持）。
+    #[tokio::test]
+    async fn run_internal_fails_fast_without_endpoints() {
+        let connector = Arc::new(MockConnector {
+            feeds: StdMutex::new(Vec::new()),
+        });
+        let t = Arc::new(TunIngress::new(TunIngressConfig::default(), connector));
+        let res = t.clone().run_internal().await;
+        assert!(
+            res.as_ref().is_err_and(|e| e.to_string().contains("未注入")),
+            "未注入 endpoints 必须 fail-fast（含未注入错误），got: {res:?}"
+        );
     }
 
     /// §4.1 UDP 全链路（无设备）：应用包 → 归因旁路（无 Process 规则）→ 路由

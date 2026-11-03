@@ -476,7 +476,11 @@ impl RuntimeBuilder {
                     .runtime_config
                     .network_config
                     .as_ref()
-                    .expect("tun_enabled 蕴含 network_config");
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "tun_enabled 但 network_config 缺失（内部不变式破坏，应经 derive_runtime_config 一致构造）"
+                        )
+                    })?;
                 // §2.7 auto-bypass 字面量半边：egress 字面量地址 + mesh listen +
                 // control.api_bind。域名 server 不在构建期解析（DNS 副作用），
                 // 归 TunIngress::run() 起始处（auto_bypass_hosts）
