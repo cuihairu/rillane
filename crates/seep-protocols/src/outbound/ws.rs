@@ -134,7 +134,9 @@ where
 pub(crate) struct WsReader<R> {
     pub(crate) stream: R,
     pub(crate) stash: BytesMut,
-    pong_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    /// 有界 PONG 转发（P2 深审 2026-11-03）：对端洪泛 PONG 时队列有界，
+    /// 满则丢弃（控制帧，keepalive 应答可丢），防无界内存增长。
+    pong_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 }
 
 impl<R> WsReader<R>
@@ -149,7 +151,7 @@ where
         }
     }
 
-    pub(crate) fn set_pong_sender(&mut self, tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>) {
+    pub(crate) fn set_pong_sender(&mut self, tx: tokio::sync::mpsc::Sender<Vec<u8>>) {
         self.pong_tx = Some(tx);
     }
 
@@ -182,7 +184,8 @@ where
                 0x8 => return Ok(None),
                 0x9 => {
                     if let Some(tx) = &self.pong_tx {
-                        let _ = tx.send(frame.payload);
+                        // try_send：有界通道满则丢弃（不阻塞读帧、不积压）。
+                        let _ = tx.try_send(frame.payload);
                     }
                     continue;
                 }

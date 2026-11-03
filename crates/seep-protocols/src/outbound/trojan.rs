@@ -470,7 +470,7 @@ impl TrojanConnector {
         let (mut client_r, mut client_w) = tokio::io::split(flow.io);
         let (mut ws_r, mut ws_w) = ws.split();
 
-        let (pong_tx, mut pong_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (pong_tx, mut pong_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
         ws_r.set_pong_sender(pong_tx);
 
         let up_task = tokio::spawn(async move {

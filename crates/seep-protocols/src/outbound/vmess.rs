@@ -1346,7 +1346,7 @@ impl VmessConnector {
         let mut ws_r = reader;
         let mut ws_w = writer;
 
-        let (pong_tx, mut pong_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (pong_tx, mut pong_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
         ws_r.set_pong_sender(pong_tx);
         let expect_v = session.expect_v;
         let resp_keys = session.resp_header_keys.clone();
