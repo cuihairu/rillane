@@ -277,3 +277,16 @@ P3（收尾）：
   **已文档化（2026-11-03）**：`apply_config_inner` 与订阅循环两处注释补「反向残余」说明（`runtime_builder.rs`）——多状态非原子交换固有残余，在途流已按旧路由解析、窗口仅影响并发新流；彻底消除需单状态原子交换或先 reload 再换 egress（会重引入「新规则引用未就绪名」窗口），接受并登记。P3（低）性质判定为可接受残余，无需代码改动。
 - [x] 审核发现：测试缺口——① fetcher 终态错误仅 Content-Length 超限被回归（chunked 分块超限 ChunkOverLimit 与非 UTF-8 NotUtf8 两终态分支无测试，fetcher.rs:298-305）；② cache cleanup 锁外删盘 vs set 同键竞态无回归测试（cache.rs:417 窗口）；③ 订阅刷新循环持 config_apply_lock 路径（runtime_builder.rs:1132）无独立回归（仅 update_config/merge_config_delta 两路径被覆盖）。
   **已补（2026-11-03）**：① 增 `fetch_terminal_chunk_overlimit_and_not_utf8`（chunked 超限 ChunkOverLimit + 非 UTF-8 NotUtf8 两终态分支）；② 增 `cleanup_expired_skips_delete_when_key_reinserted`（cache.rs:417 窗口）。③ 订阅刷新循环持 config_apply_lock 路径无独立回归——**该项保留未修**（属 config_apply_lock 语义覆盖面，update_config/merge_config_delta 两路径已有回归，订阅循环复用同锁语义；如需独立回归需构造订阅热更时序，成本高）。
+
+---
+
+## 审核发现（f9cb1f3bf1066c0034f05fe87e0362dcbdd876ba..HEAD；只审不改，2026-11-03）
+
+覆盖：seep-core（constant_time_eq / 质量评分 NaN / net_mark 竞速 abort / udp 帧长守卫）、seep-platform（DNS singleflight + start/stop 锁序）、seep-protocols（认证恒时 / padding span / hysteria2 超时 / pong 有界 / trojan 帧长守卫）、seep-runtime（mesh TLS 重载出写锁 / 后台循环 stop 标志）、seep-subscription（cache disk_io_lock / fetcher 4xx 终态）、seepd（非回环无 token 拒启）、seep-ffi（共享引用消除别名）。
+
+- [x] 审核发现：`encode_udp_header` 返回类型改 `Result<Vec<u8>>`（associate.rs:82）但未传播到 seepctl——`apps/seepctl/src/udp_probe.rs:221-227` 与 `:282` 仍按 `Vec<u8>` 调用（`.extend_from_slice`/`&frame`/`.len()`），`cargo check -p seepctl` 编译失败（E0599×2、E0308，3 错）；seepctl 为 workspace 成员，构建链中断。P1。
+  **已修（2026-11-03 `513e3b1`）**：两调用点传播 `Result`——发送路径 `?` 映射 `ProbeError::Connect`，echo 桩解码失败 `continue` 跳过畸形帧；`cargo check -p seepctl` 恢复，seepctl 19 测 + `cargo test --workspace` 全绿。evidence：`apps/seepctl/src/udp_probe.rs:221` / `:282`。
+- [ ] 审核发现：DNS singleflight inflight 槽位仅在正常完成路径移除（dns_engine.rs:779）；若首查任务在 `cross_check`/`query_group`（:763-765）中被取消（resolve future 被 drop），槽位残留且 map 持 `tx.clone()` 使 watch 通道保持开放，等待者 `rx.changed()`（:743）永久挂起（无超时/清理），该键后续查询全部阻塞。当前树内调用方无显式取消，属潜在；另 `saw_dead_leader` break 路径（:749-751）未插入自身却仍执行 `remove(&key)`（:779），可能误删他首查者槽位（该路径实际难达）。P3。
+- [ ] 审核发现：`racing_winner_aborts_in_flight_losers`（net_mark.rs:423-448）未真正回归 abort——改前 `connect_racing` 胜出即 `return Ok(s)`（落选为 detached task，不等待），改后同样胜出即 return；测试断言「5s 内返回」在改前改后均通过，无法区分 abort 与否，注释「若未 abort，connect_racing 返回后仍需等次选超时」前提错误（connect_racing 从不等待落选）。回归失效。P3。
+- [ ] 审核发现：`disk_io_lock` 未覆盖 `remove()` 与 `clear()`——`cache.rs:290`（remove）与 `:336`（clear）仍持 `memory_cache` 写锁跨同步 `fs::remove_file`，且不持 `disk_io_lock`；cleanup 同类的「删盘 vs set 落盘」同键竞态仍经 `remove()` 可达（cleanup 已移出写锁并串行化，此两处未修），磁盘 IO 下写锁模式亦未消除。P3。
+- [ ] 审核发现：fetcher 将 408/429 一并判为终态——`fetcher.rs:261` `(400..500).contains(&status_code)` 把 408（Request Timeout）与 429（Too Many Requests）包装为 `FetcherError::HttpStatus` 短路重试；但 408/429 语义可重试（429 带 Retry-After 背压、408 瞬时超时），短路导致限流/瞬时超时的订阅获取永久放弃，与「5xx 瞬时可重试」的区分意图及 HTTP 重试语义不符。P3。
