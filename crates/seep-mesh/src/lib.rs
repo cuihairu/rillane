@@ -864,6 +864,58 @@ impl MeshRegistry {
         Ok(())
     }
 
+    /// 健康检查单轮（快照收集 + 写锁复检 + 拓扑重建）。
+    /// 返回被标记离线的节点数。公开供测试确定性注入「快照后心跳刷新」竞态。
+    pub fn health_check_once(&self, ttl: Duration) -> usize {
+        let stale_ids = self.stale_candidates(ttl);
+        self.mark_stale_offline(&stale_ids, ttl)
+    }
+
+    /// 快照：收集当前超时（online 且 last_seen 超过 ttl）的节点候选。
+    fn stale_candidates(&self, ttl: Duration) -> Vec<NodeId> {
+        let stale_ids: Vec<NodeId> = {
+            let nodes = self.nodes.read().expect("mesh registry poisoned");
+            nodes
+                .iter()
+                .filter(|(_, record)| record.online && record.last_seen.elapsed() >= ttl)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        stale_ids
+    }
+
+    /// 写锁复检 + 标记离线 + 拓扑重建。
+    fn mark_stale_offline(&self, stale_ids: &[NodeId], ttl: Duration) -> usize {
+        if stale_ids.is_empty() {
+            return 0;
+        }
+        // 写锁下复检：快照释放读锁后可能有心跳刷新 last_seen，
+        // 无条件标记会误杀刚续期的节点，致拓扑/路由抖动。
+        let mut marked = 0;
+        {
+            let mut nodes = self.nodes.write().expect("mesh registry poisoned");
+            for id in stale_ids {
+                if let Some(record) = nodes.get_mut(id) {
+                    if record.online && record.last_seen.elapsed() >= ttl {
+                        record.online = false;
+                        marked += 1;
+                    }
+                }
+            }
+        }
+
+        if marked > 0 {
+            warn!(
+                target: "seep::mesh",
+                stale = ?stale_ids,
+                marked = marked,
+                "节点超时，标记为离线"
+            );
+            self.rebuild_topology();
+        }
+        marked
+    }
+
     /// 检查配额限制
     pub fn check_quota(&self, node_id: &NodeId, additional_bytes: u64) -> Result<()> {
         let nodes = self.nodes.read().expect("mesh registry poisoned");
@@ -953,42 +1005,7 @@ pub async fn spawn_health_checker(registry: Arc<MeshRegistry>, ttl: Duration) {
     let mut ticker = interval(ttl / 4); // 更频繁的检查
     loop {
         ticker.tick().await;
-
-        let stale_ids: Vec<NodeId> = {
-            let nodes = registry.nodes.read().expect("mesh registry poisoned");
-            nodes
-                .iter()
-                .filter(|(_, record)| record.online && record.last_seen.elapsed() >= ttl)
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
-
-        if !stale_ids.is_empty() {
-            // 标记为离线（写锁下复检：快照释放读锁后可能有心跳刷新
-            // last_seen，无条件标记会误杀刚续期的节点，致拓扑/路由抖动）
-            let mut marked = 0;
-            {
-                let mut nodes = registry.nodes.write().expect("mesh registry poisoned");
-                for id in &stale_ids {
-                    if let Some(record) = nodes.get_mut(id) {
-                        if record.online && record.last_seen.elapsed() >= ttl {
-                            record.online = false;
-                            marked += 1;
-                        }
-                    }
-                }
-            }
-
-            if marked > 0 {
-                warn!(
-                    target: "seep::mesh",
-                    stale = ?stale_ids,
-                    marked = marked,
-                    "节点超时，标记为离线"
-                );
-                registry.rebuild_topology();
-            }
-        }
+        registry.health_check_once(ttl);
     }
 }
 
@@ -1251,5 +1268,38 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(25)).await;
         assert!(!registry.get_node(&"n1".to_string()).unwrap().online);
         handle.abort();
+    }
+
+    /// 写锁复检回归：快照收集后、写锁获取前心跳刷新 last_seen，
+    /// 无条件标记会误杀刚续期的节点（致拓扑/路由抖动）。health_check_once
+    /// 在写锁下复检 `last_seen`，刷新后的节点必须保持在线。
+    #[test]
+    fn health_check_reread_under_write_lock_keeps_refreshed_node_online() {
+        let registry = MeshRegistry::new();
+        registry
+            .register_node(NodeRecord::new("n1".into(), NodeRole::Client, addr()))
+            .unwrap();
+        let ttl = Duration::from_millis(200);
+
+        // 快照收集时已超时（last_seen 早于 ttl）。
+        {
+            let mut nodes = registry.nodes.write().unwrap();
+            let record = nodes.get_mut("n1").unwrap();
+            record.last_seen = Instant::now() - Duration::from_millis(300);
+        }
+
+        // 快照收集（候选含 n1，last_seen 已超时）。
+        let stale = registry.stale_candidates(ttl);
+        assert_eq!(stale, vec!["n1".to_string()], "快照应收集超时节点");
+
+        // 模拟快照后、写锁前的真实心跳刷新。
+        registry
+            .update_node_health(&"n1".to_string(), 0.5)
+            .unwrap();
+
+        // 写锁复检必须看到新 last_seen → 不标记。
+        let marked = registry.mark_stale_offline(&stale, ttl);
+        assert_eq!(marked, 0, "刚续期节点不得被标记离线");
+        assert!(registry.get_node(&"n1".to_string()).unwrap().online);
     }
 }
