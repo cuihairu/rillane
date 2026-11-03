@@ -259,7 +259,7 @@ P3（收尾）：
 - [x] 审核发现：ReplayWindow 段首注释仍述旧语义"1..=64 前进接受（越 64 位窗历史全丢）"，与新实现（1..=63 滑窗、≥64 跳变重置 bits=0）不符，属文档漂移易误导后续维护（mesh_transport.rs:757）。
 - [x] 审核发现：订阅内容超限经 `bail!`（fetcher.rs:267/277）抛出后被 `fetch()`（fetcher.rs:144）视为可重试错误，对持续返回超大/分块超限端点会重复下载（chunked 路径每次至多 50MiB）`max_retries` 次；宜将终态错误与瞬时错误分类。
 - [x] 审核发现：`merge_subscription_config` 仅语句级持 `current_config` 写锁克隆（hot_reload.rs:565-566）、末段重取写锁写回（hot_reload.rs:616），中途 `fs::write` await 让锁——若与 `apply_config`（hot_reload.rs:461）并发会丢失其更新（lost-update）；现调用方串行，属潜在竞态。
-- [ ] 审核发现：测试缺口——本区间多项 P1/正确性修复无回归测试：pool.rs `maybe_refill` inflight 并发门（pool.rs:579-597，pool.rs 全文件 0 测试）；seep-mesh 健康检查写锁复检（seep-mesh/src/lib.rs:982-990）；chain.rs `handle_chain_failure` 分片守卫释放（chain.rs:860-890）；http.rs 出口注入守卫（http.rs:119/164，仅 socks5 入口被覆盖）；fetcher.rs 分块超限与非 UTF-8 拒绝（fetcher.rs:277/279）；mesh_transport.rs flow miss 丢弃路径（mesh_transport.rs:1905-1906）。
+- [x] 审核发现：测试缺口——本区间多项 P1/正确性修复无回归测试：pool.rs `maybe_refill` inflight 并发门（pool.rs:579-597，pool.rs 全文件 0 测试）；seep-mesh 健康检查写锁复检（seep-mesh/src/lib.rs:982-990）；chain.rs `handle_chain_failure` 分片守卫释放（chain.rs:860-890）；http.rs 出口注入守卫（http.rs:119/164，仅 socks5 入口被覆盖）；fetcher.rs 分块超限与非 UTF-8 拒绝（fetcher.rs:277/279）；mesh_transport.rs flow miss 丢弃路径（mesh_transport.rs:1905-1906）。已完成 pool 子项：`crates/seep-protocols/src/pool/tests.rs:237` 回归 `maybe_refill_no_spawn_when_key_at_capacity`，旧门失效（headroom 不计 inflight）时 inflight=32 击穿上限 → 红；门修复后 `cargo test --workspace` 全绿（`test result: ok`）。其余子项待补。
 
 ---
 
