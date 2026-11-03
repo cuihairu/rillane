@@ -20,14 +20,20 @@ use crate::{
 
 /// 进程级 engine 单例（§1.1）：fuel 预算是隔离面（§3），engine 全局开启
 /// consume_fuel，per-call `set_fuel` 重置（plugin.rs invoke）。
-static ENGINE: LazyLock<wasmtime::Engine> = LazyLock::new(|| {
+///
+/// 存 `Result`：engine 初始化失败（平台不支持 JIT/编译器 feature 缺失等）时
+/// 不 panic（原 `LazyLock::expect` 首插件加载即进程级崩溃），而是让加载调用
+/// 返回 Err——插件为可选特性，失败应可观测可降级而非杀进程。
+static ENGINE: LazyLock<Result<wasmtime::Engine, String>> = LazyLock::new(|| {
     let mut cfg = wasmtime::Config::new();
     cfg.consume_fuel(true);
-    wasmtime::Engine::new(&cfg).expect("wasmtime engine 初始化")
+    wasmtime::Engine::new(&cfg).map_err(|e| format!("wasmtime engine 初始化失败: {e}"))
 });
 
-fn engine() -> &'static wasmtime::Engine {
-    &ENGINE
+fn engine() -> Result<&'static wasmtime::Engine> {
+    ENGINE
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!(e.clone()))
 }
 
 /// 从文件载入插件 → `FlowMiddleware` 适配器（同步调用；JIT 编译发生在本调用，
@@ -55,7 +61,7 @@ pub fn load_plugin_from_bytes(
     bytes: &[u8],
     opts: PluginLoadOptions,
 ) -> Result<Arc<WasmPluginMiddleware>> {
-    let engine = engine();
+    let engine = engine().context("获取 wasmtime 引擎失败")?;
     // wasmtime 49 自有 Error 类型：map_err 过桥 anyhow 后再挂上下文
     let module = wasmtime::Module::new(engine, bytes)
         .map_err(anyhow::Error::from)
