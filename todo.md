@@ -148,8 +148,9 @@ P2（下一步修）：
 - [x] **mesh TLS 重载在 write 锁下做同步文件 IO**——`mesh_transport.rs:2136-2153` `maybe_reload`：`inner.write().await` 下 `MeshTlsInner::load` 读 CA/私钥/吊销列表；慢盘阻塞所有 mesh 握手快路径。generation 双检正确，仅 IO-under-lock 问题。
   evidence：`mesh_transport.rs` `let mut guard = self.inner.write().await;` 后同步 fs 读。
   **已修（2026-11-03）**：`maybe_reload` 增 `reload_lock` 串行门（tokio Mutex），磁盘载入移出 `inner` 写锁并经 `spawn_blocking`（`mesh_transport.rs:2155-2192`）；写锁仅覆盖内存交换短临界，三处双检保留；回归 `maybe_reload_reloards_only_on_fingerprint_change`（真实 rcgen 证书夹具，指纹不变不重载/触摸触发重载），seep-runtime 138+2 测全绿。
-- [ ] **DNS 解析缓存未命中 stampede**——`dns_engine.rs:695-738`：N 并发冷名全部 miss 全部上游 `query_group`/`cross_check` 再各自插入，无 singleflight；突发时击穿上游解析器。
+- [x] **DNS 解析缓存未命中 stampede**——`dns_engine.rs:695-738`：N 并发冷名全部 miss 全部上游 `query_group`/`cross_check` 再各自插入，无 singleflight；突发时击穿上游解析器。
   evidence：`dns_engine.rs:695` check-then-act，`724/726` await 上游后 `728` insert。
+  **已修（2026-11-03）**：`DnsResolver` 增 `inflight`（tokio Mutex<HashMap<键, watch::Sender>>）singleflight——首个调用者查上游并经 watch 广播结果（含负缓存），其余等待者直接取结果不重复查；tokio Mutex 守卫可跨 await 且锁不跨上游查询。回归 `resolver_concurrent_cold_miss_singleflight`（8 并发同名 miss → 上游到达计数 1），seep-platform 49 测全绿。
 - [ ] **control-plane 无 token 时鉴权门整体跳过**——`control_plane.rs:129-140`：`admin_token=None`（serde 缺省）+ 非回环 `api_bind` 时 mutating 端点与 `/runtime/config`、`/events`、`/logs` 全开放。建议非回环绑定无 token 时启动告警/拒启。
   evidence：`control_plane.rs:135-137` `(is_mutating||is_sensitive_read) && admin_token.is_some() && !is_authorized`——None 即短路放行。注释 "if token configured" 示有意设计，故 P2。
 

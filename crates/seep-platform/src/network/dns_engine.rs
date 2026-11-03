@@ -20,7 +20,7 @@ use std::{
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use tokio::net::UdpSocket;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, warn};
 
@@ -623,7 +623,16 @@ pub struct DnsResolver {
     retries: u32,
     stats: DnsStatsCounters,
     query_ids: AtomicU16,
+    /// singleflight（2026-11-03 P2）：并发冷名 miss 各自查上游的 stampede
+    /// 去重。键 =（规范域名, qtype）；值 = 首查任务的 watch 发送端。首查
+    /// 结果（含负缓存）经 watch 广播给所有等待者；等待者不重复查上游。
+    /// tokio Mutex（守卫可跨 await，锁不跨上游查询——仅保护 map 访问）。
+    inflight: tokio::sync::Mutex<InflightMap>,
 }
+
+/// singleflight 映射（见 DnsResolver::inflight 注）。
+type InflightMap =
+    HashMap<(String, u16), watch::Sender<Option<Result<Vec<DnsAnswer>, ResolveError>>>>;
 
 impl fmt::Debug for DnsResolver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -676,6 +685,7 @@ impl DnsResolver {
             retries: cfg.retries,
             stats: DnsStatsCounters::default(),
             query_ids: AtomicU16::new(0x4E00),
+            inflight: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -719,6 +729,35 @@ impl DnsResolver {
             }
         }
 
+        // singleflight：并发冷名去重。首个调用者执行上游查询，其余等待其
+        // 结果（watch 广播），不重复查上游（§5-E 突发 stampede 防御）。
+        // 锁只保护 map 访问（短临界），不跨上游查询。循环：先看槽位——
+        // 占用则等待；空则抢占成为首查者（退出循环执行查询）。
+        let (tx, _rx) = watch::channel(None);
+        let mut saw_dead_leader = false;
+        loop {
+            let mut inflight = self.inflight.lock().await;
+            if let Some(existing) = inflight.get(&key) {
+                let mut rx = existing.subscribe();
+                drop(inflight);
+                if rx.changed().await.is_ok() {
+                    if let Some(res) = rx.borrow_and_update().clone() {
+                        return res;
+                    }
+                }
+                // 首查失败/发送端 drop：继续循环，重试抢占（防活锁）。
+                if saw_dead_leader {
+                    break;
+                }
+                saw_dead_leader = true;
+                continue;
+            } else {
+                inflight.insert(key.clone(), tx.clone());
+                break;
+            }
+        }
+
+        // 首查者：执行上游查询并广播结果。
         let group = self.partition.select(&d);
         let result = match (group, self.anti_poison) {
             (UpstreamGroup::Domestic, AntiPoison::CrossCheck) => self.cross_check(&d, qtype).await,
@@ -729,11 +768,15 @@ impl DnsResolver {
             let now = Instant::now();
             let mut c = cache.lock().expect("dns cache lock");
             match &result {
-                Ok(answers) => c.insert_positive(key, answers, now),
-                Err(ResolveError::NxDomain(_)) => c.insert_negative(key, now),
+                Ok(answers) => c.insert_positive(key.clone(), answers, now),
+                Err(ResolveError::NxDomain(_)) => c.insert_negative(key.clone(), now),
                 Err(_) => {}
             }
         }
+
+        // 广播给等待者，随后移除 inflight 槽位（仅首查者移除）。
+        let _ = tx.send(Some(result.clone()));
+        self.inflight.lock().await.remove(&key);
         result
     }
 
@@ -1478,6 +1521,41 @@ mod tests {
         assert_eq!(
             r.resolve("a..b", DnsRecordType::A).await,
             Err(ResolveError::InvalidDomain("a..b".into()))
+        );
+    }
+
+    /// P2 深审回归（2026-11-03）：并发冷名 miss 只查一次上游（singleflight）。
+    /// tokio::join! 同时发起 N=8 同名 A 查询，上游到达计数应为 1（此前
+    /// 全部 miss 会击穿上游）。全部结果一致且非空。
+    #[tokio::test]
+    async fn resolver_concurrent_cold_miss_singleflight() {
+        let (mock, hits) = spawn_mock(|_| (0, vec![v4("x", [9, 9, 9, 9], 300)])).await;
+        let cfg = ResolverConfig {
+            trusted: vec![mock],
+            ..base_cfg()
+        };
+        let r = Arc::new(DnsResolver::new(cfg).unwrap());
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let rr = r.clone();
+            tasks.push(tokio::spawn(async move {
+                rr.resolve("singleflight.test", DnsRecordType::A).await
+            }));
+        }
+        for task in tasks {
+            let answers = task.await.unwrap().unwrap();
+            assert!(!answers.is_empty());
+            assert_eq!(answers[0].data, DnsAnswerData::A(Ipv4Addr::new(9, 9, 9, 9)));
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "并发冷名 miss 应 singleflight，仅一次上游查询"
+        );
+        // inflight 槽位应被清理，不泄漏。
+        assert!(
+            r.inflight.lock().await.is_empty(),
+            "查询完成后 inflight 应清理"
         );
     }
 
