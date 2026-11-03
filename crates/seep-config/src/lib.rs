@@ -1777,6 +1777,15 @@ pub struct RouteRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MatchCondition {
+    /// 逻辑 OR：任一子条件命中即命中（`matches` 顶层仍是 AND）。
+    /// 嵌套 NOT 内的 Any 可表达 OR-of-NOT 等任意组合。
+    Any {
+        conditions: Vec<MatchCondition>,
+    },
+    /// 逻辑 NOT：子条件不命中即命中（用于排除/反选）。
+    Not {
+        condition: Box<MatchCondition>,
+    },
     DomainSuffix {
         values: Vec<String>,
     },

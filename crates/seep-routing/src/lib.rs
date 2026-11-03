@@ -732,7 +732,16 @@ impl RoutingEngine {
 }
 
 fn matches_rule(rule: &RouteRule, ctx: &FlowContext) -> bool {
-    rule.matches.iter().all(|matcher| match matcher {
+    rule.matches.iter().all(|matcher| matches_condition(matcher, ctx))
+}
+
+/// 单条件匹配（递归支持 Any/Not 逻辑组合）。
+fn matches_condition(cond: &MatchCondition, ctx: &FlowContext) -> bool {
+    match cond {
+        MatchCondition::Any { conditions } => conditions
+            .iter()
+            .any(|c| matches_condition(c, ctx)),
+        MatchCondition::Not { condition } => !matches_condition(condition, ctx),
         MatchCondition::DomainSuffix { values } => values
             .iter()
             .any(|suffix| ctx.target.host.ends_with(suffix)),
@@ -766,7 +775,7 @@ fn matches_rule(rule: &RouteRule, ctx: &FlowContext) -> bool {
             .get("process.name")
             .map(|name| values.iter().any(|v| v == name))
             .unwrap_or(false),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -1242,5 +1251,61 @@ mod tests {
         assert_eq!(hit(&engine, "11.0.0.1").await, "direct", "CIDR 外不命中");
         assert_eq!(hit(&engine, "203.0.113.10").await, "direct", "主机形式不匹配");
         assert_eq!(hit(&engine, "example.com").await, "direct", "域名目标不命中");
+    }
+
+    /// G0-2 逻辑规则回归：`Any`（OR）与 `Not`（NOT）语义——顶层 `matches`
+    /// 仍为 AND；Any 内任一命中即命中；Not 内不命中即命中。
+    #[tokio::test]
+    async fn logical_any_not_condition_semantics() {
+        use seep_core::{FlowId, FlowTarget, TargetProto};
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![
+                RouteRule {
+                    name: "ads-or-game".into(),
+                    matches: vec![MatchCondition::Any {
+                        conditions: vec![
+                            MatchCondition::DomainSuffix {
+                                values: vec!["ads.com".into()],
+                            },
+                            MatchCondition::DomainSuffix {
+                                values: vec!["game.net".into()],
+                            },
+                        ],
+                    }],
+                    target: "block".into(),
+                },
+                RouteRule {
+                    name: "not-private".into(),
+                    matches: vec![MatchCondition::Not {
+                        condition: Box::new(MatchCondition::IpCidr {
+                            cidrs: vec!["10.0.0.0/8".into()],
+                        }),
+                    }],
+                    target: "proxy".into(),
+                },
+            ],
+        });
+
+        async fn route_to(engine: &RoutingEngine, host: &str) -> String {
+            let ctx = FlowContext {
+                id: FlowId::new(),
+                target: FlowTarget {
+                    host: host.to_string(),
+                    port: 443,
+                    proto: TargetProto::Tcp,
+                },
+                metadata: Default::default(),
+            };
+            engine.route(ctx).await.unwrap().final_node().to_string()
+        }
+
+        assert_eq!(route_to(&engine, "x.ads.com").await, "block", "Any: 首项命中");
+        assert_eq!(route_to(&engine, "y.game.net").await, "block", "Any: 次项命中");
+        assert_eq!(route_to(&engine, "other.com").await, "proxy", "Any: 均不命中 → 下条");
+        // NOT(private): 非 10/8 命中 proxy；10/8 不命中 NOT → 落到 default
+        assert_eq!(route_to(&engine, "8.8.8.8").await, "proxy", "Not: 非私网命中");
+        assert_eq!(route_to(&engine, "10.0.0.1").await, "direct", "Not: 私网反选");
     }
 }

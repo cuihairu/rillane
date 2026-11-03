@@ -114,7 +114,14 @@ impl ClashExporter {
             let target = target_name(&rule.target, &direct_names);
             let before = rules.len();
             condition_to_rules(&rule.matches[0], &target, &mut rules);
-            report.exported_rules += rules.len() - before;
+            if rules.len() == before {
+                report.skipped.push(format!(
+                    "规则 {}：Any/Not 逻辑条件暂不导出 Clash",
+                    rule.name
+                ));
+            } else {
+                report.exported_rules += rules.len() - before;
+            }
         }
         // 默认路由 → MATCH（default_node 指向 direct 出口时映射 DIRECT）
         rules.push(format!(
@@ -541,6 +548,7 @@ fn h2_opts(m: &mut Mapping, network: &str, path: Option<&str>, host: Option<&[St
 
 fn condition_to_rules(cond: &MatchCondition, target: &str, rules: &mut Vec<String>) {
     match cond {
+        MatchCondition::Any { .. } | MatchCondition::Not { .. } => {}
         MatchCondition::DomainSuffix { values } => {
             for v in values {
                 rules.push(format!("DOMAIN-SUFFIX,{v},{target}"));
