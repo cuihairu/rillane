@@ -18,6 +18,7 @@ pub mod network_config;
 pub mod obfs_config;
 pub mod pool_config;
 pub mod runtime_builder;
+pub mod sniff;
 // TUN 入口 + /proc 进程归因 + TCP 用户态栈（tun-dataplane.md §2；Linux 数据面）。
 // 非 Linux 编译单元整体门控（windows-gnu 打包面 platform-packaging.md；
 // 破损修复：tun_ingress 的 seep_platform::network::linux import 无门控，
