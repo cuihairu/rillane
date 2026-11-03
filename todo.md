@@ -161,7 +161,8 @@ P3（收尾）：
   **已修（2026-11-03）**：`get_or_connect_client` 的 `connect_client()` 包 `tokio::time::timeout(CONNECT_TIMEOUT=15s)`——挂起握手超时后失败释放互斥、不缓存半成品（fail-closed），后续调用可重试；single-flight 语义保留。seep-runtime `build_egress_outputs_supports_hysteria2` 测绿，seep-protocols clippy 零警告。
 - [x] **无界 pong/keepalive 通道**——`vless.rs:630` / `trojan.rs:473` / `vmess.rs:1349` `mpsc::unbounded_channel`：对端洪泛 PONG 时队列无界内存增长（流量生命周期有界）。
   **已修（2026-11-03）**：`WsReader::pong_tx` 改有界 `mpsc::Sender<Vec<u8>>(64)`；PONG 帧经 `try_send`（满则丢弃控制帧，不阻塞读帧、不积压）。三调用点（vless/trojan/vmess）统一改 `mpsc::channel(64)`。seep-protocols 71+5+6+7 测全绿，clippy 零警告。
-- [ ] **mesh 信封 `as u8` 长度截断**——`mesh_transport.rs:379-386/616-631`（flow_id/target_host/path 长度）+ `trojan.rs:99` / `udp/associate.rs:96`（域名长度）：无 `>255` 守卫，超长静默截断长度字节产畸形帧；对照 `vless.rs:165` 有守卫。
+- [x] **mesh 信封 `as u8` 长度截断**——`mesh_transport.rs:379-386/616-631`（flow_id/target_host/path 长度）+ `trojan.rs:99` / `udp/associate.rs:96`（域名长度）：无 `>255` 守卫，超长静默截断长度字节产畸形帧；对照 `vless.rs:165` 有守卫。
+  **已修（2026-11-03）**：`trojan::build_request` 与 `encode_udp_header`（SOCKS5 UDP）加 `>255` 守卫（拒发畸形帧，返回 Result/错误）。`encode_mesh_envelope_binary` 已含 flow_id/target_host/path 守卫（mesh_transport.rs:366-375/580-589），无需改动。seep-core 26+13+3+4+10 测、seep-protocols 71+5+6+7 测全绿，clippy 零警告。
 - [ ] **padding.rs range span 下溢**——`middleware/padding.rs:71` `spec.max - spec.min + 1`：仅 config validate 保证 min≤max；绕过校验（或未来路径）即 usize wrap。
 - [ ] **seep-core 链路质量 NaN**——`seep-core/lib.rs:744-745`：`hop_bandwidths` 空而 `hop_latencies` 非空时 `0.0/0.0=NaN` 传播进 `calculate_quality_score`；两 pub 向量常规同长（update_path），需外部独立变更。
 - [ ] **非常量时间认证比对**——`inbound/http.rs:262/276` + `socks5.rs:253` + `control_plane.rs:266`：`String ==` 短路径；网络时序攻击对本地代理密码实际难利用，防御纵深。

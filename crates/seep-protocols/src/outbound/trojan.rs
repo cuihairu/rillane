@@ -79,7 +79,13 @@ impl TrojanConnector {
     }
 
     /// 构建 Trojan 请求头
-    fn build_request(&self, host: &str, port: u16) -> Vec<u8> {
+    fn build_request(&self, host: &str, port: u16) -> Result<Vec<u8>> {
+        // P2 深审（2026-11-03）：域名长度无守卫，`len() as u8` 会静默截断
+        // 产畸形帧（对照 vless.rs:165 有守卫）。加显式拒绝（>255 域名不可能
+        // 出现在合法目标，拒发比发畸形帧安全）。
+        if host.len() > u8::MAX as usize {
+            anyhow::bail!("trojan: 目标主机名超长（>255 字节）");
+        }
         let hash = self.password_hash();
         let mut request = Vec::with_capacity(256);
 
@@ -105,7 +111,7 @@ impl TrojanConnector {
         // CRLF
         request.extend_from_slice(b"\r\n");
 
-        request
+        Ok(request)
     }
 
     /// 传输键（§4.2：alpn 空 = trojan 路径不设 ALPN；sni 取实际值——
@@ -178,7 +184,7 @@ impl TrojanConnector {
             "tcp" => {
                 let sni_actual = self.sni.clone().unwrap_or_else(|| self.server.clone());
                 let key = self.transport_key(&sni_actual);
-                let request = self.build_request(&flow.target.host, flow.target.port);
+                let request = self.build_request(&flow.target.host, flow.target.port)?;
                 let (mut outbound, _lease) = pool
                     .acquire_bound(&key, |io| {
                         let request = request.clone();
@@ -292,7 +298,7 @@ impl TrojanConnector {
                 let mut tls_stream = connector.connect(server_name, tcp_stream).await?;
 
                 // 发送 Trojan 请求
-                let request = self.build_request(&flow.target.host, flow.target.port);
+                let request = self.build_request(&flow.target.host, flow.target.port)?;
                 tls_stream.write_all(&request).await?;
 
                 // 双向转发
@@ -401,7 +407,7 @@ impl TrojanConnector {
         flow: Flow,
         tunnel: super::grpc::GrpcTunnel,
     ) -> Result<FlowReport> {
-        let req = self.build_request(&flow.target.host, flow.target.port);
+        let req = self.build_request(&flow.target.host, flow.target.port)?;
         let (mut grpc_r, mut grpc_w) = tunnel.split();
         grpc_w.message(&req).await?;
 
@@ -463,7 +469,7 @@ impl TrojanConnector {
         use tokio::io::AsyncReadExt;
 
         // Trojan 请求作为首个 binary 消息发出
-        let req = self.build_request(&flow.target.host, flow.target.port);
+        let req = self.build_request(&flow.target.host, flow.target.port)?;
         ws.write_binary(&req).await?;
 
         // 双向泵（与 vless relay 同构，去 VLESS 应答头段——trojan 无应答头）

@@ -178,7 +178,7 @@ fn header_encode_parse_roundtrip_all_atyps() {
         },
     ];
     for t in cases {
-        let mut frame = encode_udp_header(&t, 2);
+        let mut frame = encode_udp_header(&t, 2).unwrap();
         frame.extend_from_slice(b"ab");
         let (parsed, hlen) = parse_udp_header(&frame).unwrap();
         assert_eq!(parsed.host, t.host, "host 往返");

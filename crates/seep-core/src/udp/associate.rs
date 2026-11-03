@@ -79,7 +79,7 @@ pub fn parse_udp_header(buf: &[u8]) -> Result<(FlowTarget, usize), UdpHeaderErro
 }
 
 /// 编码 SOCKS5 UDP 帧头（FRAG 恒 0，MVP 不做分片重组，上游 O2）。
-pub fn encode_udp_header(target: &FlowTarget, payload_len: usize) -> Vec<u8> {
+pub fn encode_udp_header(target: &FlowTarget, payload_len: usize) -> Result<Vec<u8>> {
     let host = target.host.trim_matches(|c| c == '[' || c == ']');
     // 预判地址类型：IPv4 字面量 / IPv6 字面量 / 域名
     let (atyp, addr_bytes): (u8, Vec<u8>) = if let Ok(v4) = host.parse::<Ipv4Addr>() {
@@ -87,7 +87,13 @@ pub fn encode_udp_header(target: &FlowTarget, payload_len: usize) -> Vec<u8> {
     } else if let Ok(v6) = host.parse::<Ipv6Addr>() {
         (0x04, v6.octets().to_vec())
     } else {
-        (0x03, host.as_bytes().to_vec())
+        let b = host.as_bytes();
+        // P2 深审（2026-11-03）：域名长度无守卫，`len() as u8` 会静默截断
+        // 产畸形 SOCKS5 帧；加显式拒绝（>255 域名不可能合法，拒发安全）。
+        if b.is_empty() || b.len() > u8::MAX as usize {
+            anyhow::bail!("socks5 udp: 目标主机名长度非法（空或 >255）");
+        }
+        (0x03, b.to_vec())
     };
     let addr_len = addr_bytes.len() + if atyp == 0x03 { 1 } else { 0 };
     let mut out = Vec::with_capacity(4 + addr_len + 2 + payload_len);
@@ -97,7 +103,7 @@ pub fn encode_udp_header(target: &FlowTarget, payload_len: usize) -> Vec<u8> {
     }
     out.extend_from_slice(&addr_bytes);
     out.extend_from_slice(&target.port.to_be_bytes());
-    out
+    Ok(out)
 }
 
 // ---------- 入站侧指标（P0-5 接 /metrics；此处供测试直读） ----------
@@ -452,7 +458,14 @@ async fn downlink_loop(
     metrics: Arc<UdpIngressMetrics>,
 ) {
     while let Some(pkt) = rx.recv().await {
-        let mut frame = encode_udp_header(&pkt.target, pkt.data.len());
+        let Ok(mut frame) = encode_udp_header(&pkt.target, pkt.data.len()) else {
+            tracing::warn!(
+                target: "seep::socks5_udp",
+                host = %pkt.target.host,
+                "下行封帧失败（目标主机名非法），丢弃"
+            );
+            continue;
+        };
         frame.extend_from_slice(&pkt.data);
         match relay.send_to(&frame, client).await {
             Ok(_) => UdpIngressMetrics::inc(&metrics.downlink_packets),
