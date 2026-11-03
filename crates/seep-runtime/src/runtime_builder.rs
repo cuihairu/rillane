@@ -2057,46 +2057,22 @@ impl FlowOutputRouter {
                                                 },
                                             });
 
-                                            if new_hops.len() >= 2 {
-                                                let new_next = new_hops[1].node.clone();
-                                                if let Some(mesh2) = self.mesh_registry.clone() {
-                                                    if mesh2.get_node_addr(&new_next).is_some() {
-                                                        let plane = MeshDataPlane::new(
-                                                            local_id.clone(),
-                                                            mesh2,
-                                                        )
-                                                        .with_tls(self.mesh_tls.clone())?;
-                                                        let mesh_path: Vec<String> = new_hops
-                                                            .iter()
-                                                            .skip(1)
-                                                            .map(|h| h.node.clone())
-                                                            .collect();
-                                                        let env = MeshEnvelope::new(
-                                                            flow.id.as_uuid().to_string(),
-                                                            flow.target.host.clone(),
-                                                            flow.target.port,
-                                                            mesh_path,
-                                                        );
-                                                        let pad_spec = crate::obfs_config::padding_spec_from_annotations(
-                                                            &flow.metadata.annotations,
-                                                        );
-                                                        plane
-                                                            .dial_and_tunnel(
-                                                                &new_next,
-                                                                &env,
-                                                                &mut *flow.io,
-                                                                pad_spec.as_ref(),
-                                                                &flow.id,
-                                                            )
-                                                            .await?;
-                                                        return Ok(FlowReport::default());
-                                                    }
-                                                }
-                                            }
+                                            tracing::debug!(
+                                                target: "seep::chain",
+                                                session = %session_id,
+                                                path = ?new_nodes,
+                                                "chain failover 切换完成，中止已消费的流"
+                                            );
                                         }
                                     }
                                 }
                             }
+                            // chain 故障转移只完成路由/事件面切换：
+                            // 首跳 tunnel 失败时 flow.io 已被部分消费，
+                            // 重放尾流到新链或回退出口都会拼出损坏协议
+                            // 流；正确恢复面在上游（TUN retire → RST/FIN），
+                            // 无条件返回原错误让调用方中止应用连接。
+                            return Err(e);
                         }
                     }
                 }
@@ -3062,6 +3038,7 @@ mod tests {
     };
     use std::{
         pin::Pin,
+        sync::atomic::{AtomicBool, Ordering},
         task::{Context, Poll},
     };
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -3166,6 +3143,89 @@ mod tests {
         assert_eq!(
             map.get("seep.route.reason").map(|s| s.as_str()),
             Some("test")
+        );
+    }
+
+    /// chain 故障转移不复用已消费 flow.io：首跳 mesh tunnel 中途失败
+    /// 会部分消费应用流，重放尾流到新链/回退出口都会拼出损坏协议流。
+    /// 正确恢复是中止应用连接（上游 TUN retire → RST/FIN），故
+    /// forward_chain 必须原样返回 Err，且不得触达回退出口转发。
+    #[tokio::test]
+    async fn forward_chain_mesh_failure_aborts_without_fallback_forward() {
+        use seep_mesh::{NodeRecord, NodeRole};
+
+        // mesh 节点指向不可达地址：dial_and_tunnel 首跳 connect 即失败。
+        let registry = Arc::new(MeshRegistry::new());
+        registry
+            .register_node(NodeRecord::new(
+                "relay1".to_string(),
+                NodeRole::Relay,
+                "127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap();
+
+        // 回退出口：旧代码故障后回退到此（复用已消费 io），新代码不得触达。
+        let fallback_called = Arc::new(AtomicBool::new(false));
+        struct NeverCalledOutput(Arc<AtomicBool>);
+        #[async_trait]
+        impl FlowOutput for NeverCalledOutput {
+            async fn forward(&self, _d: RouteDecision, _f: Flow) -> Result<FlowReport> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(FlowReport::default())
+            }
+        }
+        let mut outputs: HashMap<String, Arc<dyn FlowOutput>> = HashMap::new();
+        outputs.insert(
+            "relay1".to_string(),
+            Arc::new(NeverCalledOutput(fallback_called.clone())),
+        );
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let router = FlowOutputRouter::new(
+            Arc::new(RwLock::new(outputs)),
+            None,
+            Some(registry.clone()),
+            Some("local".to_string()),
+            None,
+            tx,
+            None,
+            MiddlewareChain::default(),
+        );
+
+        let decision = {
+            let hops = vec![
+                seep_core::RouteHop {
+                    node: "local".to_string(),
+                    hop_type: seep_core::HopType::Ingress,
+                },
+                seep_core::RouteHop {
+                    node: "relay1".to_string(),
+                    hop_type: seep_core::HopType::Relay,
+                },
+                seep_core::RouteHop {
+                    node: "exit1".to_string(),
+                    hop_type: seep_core::HopType::Egress,
+                },
+            ];
+            RouteDecision::chain(hops)
+        };
+
+        let flow = Flow {
+            id: seep_core::FlowId::new(),
+            target: seep_core::FlowTarget {
+                host: "example.com".to_string(),
+                port: 443,
+                proto: seep_core::TargetProto::Tcp,
+            },
+            io: Box::new(DummyIo),
+            metadata: seep_core::FlowMetadata::default(),
+        };
+
+        let result = router.forward(decision, flow).await;
+        assert!(result.is_err(), "mesh 首跳失败必须中止（Err），不得回退");
+        assert!(
+            !fallback_called.load(Ordering::SeqCst),
+            "回退出口不得被调用（复用已消费 flow.io 会损坏协议流）"
         );
     }
 

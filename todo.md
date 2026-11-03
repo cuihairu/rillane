@@ -177,27 +177,42 @@ P3（收尾）：
   **已修（2026-11-03 `e9741a7`）**：`seep_ffi_tun_start`/`seep_ffi_tun_stop`/`stop_inner`/`tun_start_inner`/`tun_stop_inner` 改取 `&FfiHandle`——`FfiHandle` 内全部可变面已走内部可变性（`tun_stop` AtomicBool / `tun_thread` Mutex / `tun_fd` AtomicI32），共享引用即可完成；消除 `&mut *handle` 与 `&*handle` 跨线程别名（lib.rs:221/238/271/316/326）。seep-ffi 10 测全绿，clippy 零警告。
 - [x] **connect_racing 落选候选不中止**——`net_mark.rs:111-145`：胜出后落选拨号任务不自中止（channel drop 时自终止），慢候选短暂持套接字/TLS 握手。
   **已修（2026-11-03 `1623604`）**：`connect_racing` 收集在途 `JoinHandle`，胜出时 `abort()` 全部落选候选（net_mark.rs:98-170）——取消在途拨号/握手，资源随取消释放，不再持 socket 等待超时。回归 `racing_winner_aborts_in_flight_losers`（次选指向不可达段，首选胜出即时返回即证 abort），seep-core 13 测全绿，clippy 零警告。
-- [ ] **订阅刷新 read-modify-write 复活已删订阅**——`subscription/lib.rs:380-455`：`refresh_subscription` 克隆后长 fetch，`update_subscription_in_map` 回写；fetch 期间热更删除的订阅被复活。
-- [ ] **process 归因缓存重复工作**——`tun_process.rs:165-178`：并发 miss 重复扫 /proc 并插入等价值；幂等仅性能。
-- [ ] **事件广播 fire-and-forget**——`runtime_builder.rs:538`：`broadcast::channel(1024)` 首 receiver 丢弃；生产 `ControlPlane::new` 立即订阅且 Lagged 已处理，订阅前事件静默丢失。
-- [ ] **TUN 设备锁全生命周期持有**——`tun_ingress.rs:221-268`：`tun.lock()` 跨多 await 持进程生命周期；有意单主设计，正确性依赖该不变式。
-- [ ] **poll_read/poll_write 内 std Mutex**——`tun_tcp.rs:502,538`：无 await 持锁（短临界），争用下可 stall tokio worker。
-- [ ] **DefaultHasher 缓存文件名**——`cache.rs:584-595`：确定性哈希（跨进程稳定），非密码用途可接受；文件名碰撞极低。
-- [ ] **wasmtime Engine 初始化 expect**——`plugins/loader.rs:26`：进程级全局 `LazyLock` init，平台不支持/feature 不匹配时首插件加载即 panic（罕见且致命）。
-- [ ] **TLS CryptoProvider get_default().expect**——`protocols/tls.rs:57`：ring feature 缺失或竞争 provider 时首次 TLS 握手 panic；`let _ =` 忽略 install 失败致仅剩 expect。
-- [ ] **HotReloadManager Default panic + reload_rx 一次性槽位**——`hot_reload.rs:623`（Default 恒 panic）/`:353`（`take().expect("reload_rx already taken")`）：现无双重调用，不变式仅由 expect 维持。
-- [ ] **不变式 expect（结构上恒真，重构漂移即启动 panic）**——`tun_ingress.rs:214`（flow_router 未注入）/`runtime_builder.rs:479`（tun_enabled 蕴含 network_config）。
-- [ ] **插件/FFI mutex poison 级联**——`plugins/plugin.rs:133`（std Mutex 跨 wasm 调用，宿主 panic 即毒化后续全插件流）/`ffi/lib.rs:302,328`（tun_thread lock）。
-- [ ] **unmaintained 依赖**——`serde_yaml`/`unsafe-libyaml`（RUSTSEC-2024-0449）、`basic-toml`（RUSTSEC-2026-0374）：cargo audit 信息级；升级候选。
+- [x] **订阅刷新 read-modify-write 复活已删订阅**——`subscription/lib.rs:380-455`：`refresh_subscription` 克隆后长 fetch，`update_subscription_in_map` 回写；fetch 期间热更删除的订阅被复活。
+  **已修（2026-11-04 `40d986c`）**：`SubscriptionManager` 增 `subscription_epoch`（AtomicU64，删除/重载递增）；`refresh_subscription` 在克隆快照时同步读 epoch，写回改走 `update_subscription_in_map_checked`——epoch 已变（订阅被删）即跳过插入，不复活旧状态。回归 `refresh_does_not_revive_subscription_removed_during_fetch`（本地慢端点，fetch 中删除，断言 map 无该键；未修复时该测试红）。evidence：`crates/seep-subscription/src/lib.rs:346` / `:383-391` / `:598-617` / `:736-781`；`cargo test -p seep-subscription` 57 测 + `cargo test --workspace` 全绿。
+- [x] **process 归因缓存重复工作**——`tun_process.rs:165-178`：并发 miss 重复扫 /proc 并插入等价值；幂等仅性能。
+  **已修（2026-11-04 `6499b63`）**：`attribute` 增 inflight 单flight（OnceCell+Notify，同 key 并发 miss 合并为一次扫描，其余等待复用；完成后移除 cell 保 TTL 过期重扫）。回归 `concurrent_miss_singleflights_one_scan`（8 并发断言 scan_count=1，TTL 过期后重扫=2；禁用合并时测试红 scan_count=8）。evidence：`crates/seep-runtime/src/tun_process.rs:140-152` / `:186-227` / `:347-411`；seep-runtime 139+1 测 + `cargo test --workspace` 全绿。
+- [x] **事件广播 fire-and-forget**——`runtime_builder.rs:538`：`broadcast::channel(1024)` 首 receiver 丢弃；生产 `ControlPlane::new` 立即订阅且 Lagged 已处理，订阅前事件静默丢失。
+  **已修（2026-11-04 `f7a61cc`）**：`spawn_event_log_task` 从 `serve()` 提前到 `ControlPlane::new()` 构造完成即订阅（早于 `runtime.start()`），消除「new 后/serve 前」事件丢弃窗口；`serve()` 不再重复订阅。回归 `events_before_serve_are_captured`（new 后 update_config 触发 ConfigUpdated，断言 /events 含该事件；订阅移回 serve 时测试红 /events 空）。evidence：`apps/seepd/src/control_plane.rs:58-63` / `:3324-3351`；seepd 28 测 + `cargo test --workspace` 全绿。
+- [x] **TUN 设备锁全生命周期持有**——`tun_ingress.rs:221-268`：`tun.lock()` 跨多 await 持进程生命周期；有意单主设计，正确性依赖该不变式。
+  **核查保留（2026-11-04）**：确认为有意设计而非缺陷——`run_internal` 单任务独占 `tun_guard` 贯穿设备生命周期（创建→configure→包循环→teardown→销毁），`packet_loop` 注释明确「guard 已由本循环独占，无锁竞争面」（`tun_ingress.rs:309-314`）；select 四事件枚举模式依赖该独占不变式，拆锁反而引入并发读写/事件序风险。全锁生命周期是设备独占语义的正确实现，无外部条件缺失，不修；代码与注释已自证设计。evidence：`crates/seep-runtime/src/tun_ingress.rs:221` / `:268` / `:303-314`；seep-runtime 139+1 测全绿（本轮 `cargo test --workspace` 通过）。
+- [x] **poll_read/poll_write 内 std Mutex**——`tun_tcp.rs:502,538`：无 await 持锁（短临界），争用下可 stall tokio worker。
+  **核查保留（2026-11-04）**：`StackInner` 单锁注释明确「全同步、不跨 await」（`tun_tcp.rs:163`）；`poll_read`/`poll_write` 临界区仅做 `flow_live`/`recv_slice`/`send_slice` 等 smoltcp 纯内存操作（无 IO/await，微秒级），之后立即 drop(inner) 并 notify。这是 Rust 标准做法：短同步临界用 std Mutex（tokio Mutex 更重且为跨 await 设计）；换锁反而增加开销且无法消除单状态竞争。该条目是可接受设计而非缺陷，不改。
+- [x] **DefaultHasher 缓存文件名**——`cache.rs:584-595`：确定性哈希（跨进程稳定），非密码用途可接受；文件名碰撞极低。
+  **核查保留（2026-11-04）**：确认 `DefaultHasher::new()` 为固定 key 的 SipHasher13（std 文档：固定 key），跨进程稳定，**非** RandomState；仅作缓存文件名（非密码/非安全用途），64-bit 碰撞概率极低。经实验验证：两个独立 `SubscriptionCache` 实例同 key 的 `get_disk_path` 一致（DefaultHasher 版通过确定性测试），设计正确不改。evidence：`crates/seep-subscription/src/cache.rs:729-738`。
+- [x] **wasmtime Engine 初始化 expect**——`plugins/loader.rs:26`：进程级全局 `LazyLock` init，平台不支持/feature 不匹配时首插件加载即 panic（罕见且致命）。
+  **已修（2026-11-04 `59a7745`）**：`ENGINE` 改 `LazyLock<Result<wasmtime::Engine, String>>`，`engine()` 返回 `Result`，`load_plugin_from_bytes` 以 `?` 传播 `Err` 而非 panic——引擎初始化失败可观测可降级，不再首插件加载即杀进程。evidence：`crates/seep-plugins/src/loader.rs:22-34` / `:58-60`；seep-plugins 10 测 + `cargo test --workspace` 全绿。
+- [x] **TLS CryptoProvider get_default().expect**——`protocols/tls.rs:57`：ring feature 缺失或竞争 provider 时首次 TLS 握手 panic；`let _ =` 忽略 install 失败致仅剩 expect。
+  **已修（2026-11-04 `4ad96fe`）**：`tls_crypto_provider` 的 `get_default().expect` 移除——`get_default()` None 时回退显式 `ring::default_provider()`（`install_default` Err=已有安装，尊重既有），调用方总获可用提供方，不再 panic。evidence：`crates/seep-protocols/src/tls.rs:51-60`；seep-protocols 71+6+7 测 + `cargo test --workspace` 全绿。
+- [x] **HotReloadManager Default panic + reload_rx 一次性槽位**——`hot_reload.rs:623`（Default 恒 panic）/`:353`（`take().expect("reload_rx already taken")`）：现无双重调用，不变式仅由 expect 维持。
+  **已修（2026-11-04 `233950f`）**：`handle_reload_events` 的 `take().expect("reload_rx already taken")` 改为 match——`None`（二次 start / 外部 take_reload_rx 已取走）时 warn 并静默 return，不再 panic。`Default` 恒 panic 保留为显式 API 拒绝（`HotReloadManager` 需 config_path/router，不可 Default，注释已声明）；不变式不再依赖运行时 expect。回归 `handle_reload_events_after_rx_taken_returns_quietly`（先 take 再调用，未修复 panic/修复后返回）。evidence：`crates/seep-runtime/src/hot_reload.rs:356-371` / `:843-866`；hot_reload 4 测 + `cargo test --workspace` 全绿。
+- [x] **不变式 expect（结构上恒真，重构漂移即启动 panic）**——`tun_ingress.rs:214`（flow_router 未注入）/`runtime_builder.rs:479`（tun_enabled 蕴含 network_config）。
+  **已修（2026-11-04 `ee33690`）**：`runtime_builder.rs:479` 的 `.expect("tun_enabled 蕴含 network_config")` 改 `ok_or_else` 传播 `Err`（build() 返回 Result，不变式破坏可观测不 panic）；`tun_ingress.rs` 在 `run_internal` 开头增前置 fail-fast（`flow_router`/`flow_output` 未注入即 `bail`，不再运行期每包在 `router()` 热路径 panic——`router()` 的 `expect` 保留为启动后已注入的防御断言）。回归 `run_internal_fails_fast_without_endpoints`（未注入断言 Err 含「未注入」）。evidence：`crates/seep-runtime/src/runtime_builder.rs:479-485` / `crates/seep-runtime/src/tun_ingress.rs:221-226` / `:1017-1028`；seep-runtime 139+1 测 + `cargo test --workspace` 全绿。
+- [x] **插件/FFI mutex poison 级联**——`plugins/plugin.rs:133`（std Mutex 跨 wasm 调用，宿主 panic 即毒化后续全插件流）/`ffi/lib.rs:302,328`（tun_thread lock）。
+  **已修（2026-11-04 `b9abae5`）**：`plugin.rs` `vm.lock()` 与 `ffi/lib.rs` 两处 `tun_thread.lock()` 的 `expect` 改 poison 恢复（`Err(p) => p.into_inner()`，恢复底层值继续；恢复时 tracing warn / set_last_error 记录）——宿主 panic 后级联终止消除；wasm trap 本经 `classify_call_err` 转为 Err 不 panic。evidence：`crates/seep-plugins/src/plugin.rs:133-143` / `crates/seep-ffi/src/lib.rs:302-309` / `:328-335`；seep-plugins 10 测 + `cargo test --workspace` 全绿。
+- [x] **unmaintained 依赖**——`serde_yaml`/`unsafe-libyaml`（RUSTSEC-2024-0449）、`basic-toml`（RUSTSEC-2026-0374）：cargo audit 信息级；升级候选。
+  **已修（2026-11-04 `466367c`）**：`serde_yaml 0.9`（弃用）迁 `serde_yaml_ng 0.10`（维护 fork，API 兼容，`Cargo.toml` 用 `package = "serde_yaml_ng"` 保留 crate 名，全仓无源码改动）；`cargo audit` 原 2 条 serde_yaml 弃用消除，`cargo test --workspace` 全绿。**传递依赖保留**：`unsafe-libyaml`（serde_yaml_ng 底层 C FFI，配置 YAML 为可信输入）、`basic-toml`（askama_derive 构建期 proc-macro）仍 unmaintained 信息级——替换需纯 Rust YAML 重写 / uniffi+askama 大版本迁移，收益低风险高，接受并记录。evidence：`Cargo.toml:31`；`cargo audit` 仅剩 2 条信息级 warning；`cargo test --workspace` 全绿。
 
 ## 2026-11-02 代码深审补充（P2/P3，源自 docs/review/2026-11-01-code-review.md 第二轮补充节）
 
 P2（下一步修）：
-- [ ] **TUN UDP 下行只续 last_active 不续 expiry**——`tun_ingress.rs:812-813`：上行（:432-434）续两者、下行续一者，清扫（:714）按 `expiry<=now` 驱逐。纯下行推送流（客户端 udp_idle_secs 内无上行）被中途逐出。
+- [x] **TUN UDP 下行只续 last_active 不续 expiry**——`tun_ingress.rs:812-813`：上行（:432-434）续两者、下行续一者，清扫（:714）按 `expiry<=now` 驱逐。纯下行推送流（客户端 udp_idle_secs 内无上行）被中途逐出。
+  **已修（2026-11-04 `bcd6d1c`）**：`downlink_task` 增 `udp_idle_secs` 参数，下行续期口径与上行一致——同时续 `last_active` 与 `expiry = now + udp_idle_secs`（原仅续 last_active，sweep 按 expiry 驱逐纯下行流）。回归 `downlink_packet_renews_expiry`（feed 下行包断言 expiry 推进；未修复 expiry 不变红）。evidence：`crates/seep-runtime/src/tun_ingress.rs:510-517` / `:782-787` / `:813-818` / `:1040-1090`；seep-runtime 141+1 测 + `cargo test --workspace` 全绿。
   evidence：`tun_ingress.rs:812` `e.last_active = now`（无 `e.expiry` 续期）；`:714` `.filter(|e| e.expiry <= now)`。
-- [ ] **scan_udp_capability BFS 无 visited 集（组环挂起 build）**——`runtime_builder.rs:2266-2280`：组环（g1→g2→g1）队列永不空，`udp.enabled` 时 build() 无限挂起；`RoutingConfig::validate`（seep-config:1489）仅查 SLO 无环守卫。
+- [x] **scan_udp_capability BFS 无 visited 集（组环挂起 build）**——`runtime_builder.rs:2266-2280`：组环（g1→g2→g1）队列永不空，`udp.enabled` 时 build() 无限挂起；`RoutingConfig::validate`（seep-config:1489）仅查 SLO 无环守卫。
+  **已修（2026-11-04 `2bef0c8`）**：`scan_udp_capability` 增 `visited_groups: HashSet<&str>`——同组二次遇及（环/重复）跳过展开，队列有界、build 不再无限挂起。回归 `udp_capability_scan_terminates_on_group_cycle`（g1→g2→g1，线程+2s 超时断言终止；无 visited 时 Timeout 红）。evidence：`crates/seep-runtime/src/runtime_builder.rs:2317-2326` / `:4572-4601`；seep-runtime 142+1 测 + `cargo test --workspace` 全绿。
   evidence：`runtime_builder.rs:2266` `while let Some((name, source)) = queue.pop()` 无 visited；`continue` 在 `reachable.entry` 前。
-- [ ] **chain 故障转移复用已消费 flow.io（协议流损坏）**——`runtime_builder.rs:1919/2025`：首 `dial_and_tunnel`（mesh_transport.rs:1569 copy_bidirectional 读 io）中途失败即部分消费；重试拼接尾流+新信封。正确恢复=中止应用连接（RST）非重接。
+- [x] **chain 故障转移复用已消费 flow.io（协议流损坏）**——`runtime_builder.rs:1919/2025`：首 `dial_and_tunnel`（mesh_transport.rs:1569 copy_bidirectional 读 io）中途失败即部分消费；重试拼接尾流+新信封。正确恢复=中止应用连接（RST）非重接。
+  **已修（2026-11-04）**：`forward_chain` mesh `dial_and_tunnel` 失败不再重放尾流到新链/回退出口（`flow.io` 已被部分消费会拼出损坏协议流）；链路/事件面簿记照常（`chain_failure_tx`、`PathUpdated`、注解），随后无条件 `return Err(e)` 让上游 TUN `retire` 中止应用连接（RST/FIN）。回归 `forward_chain_mesh_failure_aborts_without_fallback_forward`（mesh 首跳连接失败断言 `Err` 且回退出口未调用；旧重试逻辑时该测试红）。evidence：`crates/seep-runtime/src/runtime_builder.rs:2070-2075` / `:3149-3233`；seep-runtime 144+1 测 + `cargo test --workspace` 全绿。
   evidence：`runtime_builder.rs:2025` `&mut *flow.io` 与 :1919 同一流复用。
 - [ ] **串行 UDP serve 循环内联 lookup_host（头阻塞整面）**——`mesh_transport.rs:1852`：单任务无 per-packet spawn（§13-5），一个不可解析 `target_host`（线上可控）阻塞所有流。
   evidence：`mesh_transport.rs:1852` `lookup_host(...).await?` 在 serve 循环内。
