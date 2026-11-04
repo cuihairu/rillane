@@ -2128,6 +2128,25 @@ impl FlowOutput for ConnectorFlowOutput {
     }
 }
 
+/// reject 出口（G0-5）：命中即断流，无网络 I/O。返回错误让调用方按
+/// 转发失败处置（上层拆流/日志）；计数由外层 metrics 聚合。
+struct RejectFlowOutput {
+    name: String,
+}
+
+impl RejectFlowOutput {
+    fn new(name: String) -> Self {
+        Self { name }
+    }
+}
+
+#[async_trait]
+impl FlowOutput for RejectFlowOutput {
+    async fn forward(&self, _decision: RouteDecision, _flow: Flow) -> Result<FlowReport> {
+        Err(anyhow!("出口 {}：拒绝（reject 目标）", self.name))
+    }
+}
+
 fn build_ingress_endpoints(
     descriptors: &[IngressDescriptor],
     udp: Option<Arc<seep_core::udp::UdpAssociateService>>,
@@ -2199,6 +2218,7 @@ fn build_ingress_endpoints(
 #[cfg(target_os = "linux")]
 fn egress_server_host(e: &EgressConfig) -> Option<&str> {
     match e {
+        EgressConfig::Reject => None,
         EgressConfig::Direct => None,
         EgressConfig::Socks5 { server, .. }
         | EgressConfig::Http { server, .. }
@@ -2347,6 +2367,7 @@ fn scan_udp_capability(
 
 fn egress_kind(spec: &EgressConfig) -> &'static str {
     match spec {
+        EgressConfig::Reject => "reject",
         EgressConfig::Direct => "direct",
         EgressConfig::Socks5 { .. } => "socks5",
         EgressConfig::Http { .. } => "http",
@@ -2586,6 +2607,12 @@ fn build_egress_outputs(
 
     for desc in descriptors {
         match &desc.spec {
+            EgressConfig::Reject => {
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(RejectFlowOutput::new(
+                    desc.name.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+            }
             EgressConfig::Direct => {
                 // §2.5/D-6：direct 仅 pre_dial_direct 时带池（投机预拨默认关）
                 let connector: Arc<dyn EgressConnector> = match transport_pool
@@ -3505,6 +3532,33 @@ mod tests {
             connectors.get("hy2").expect("connector").name(),
             "hysteria2"
         );
+    }
+
+    /// G0-5 reject 出口：构建产出且 forward 即拒绝（断流）。
+    #[tokio::test]
+    async fn build_egress_outputs_reject_blocks_forward() {
+        let egress = vec![node("block-ads", EgressConfig::Reject)];
+        let (outputs, connectors) =
+            build_egress_outputs(&egress, None, None).expect("build egress outputs");
+        assert!(outputs.contains_key("block-ads"));
+        assert!(connectors.is_empty(), "reject 非 EgressConnector");
+
+        let flow = seep_core::Flow {
+            id: seep_core::FlowId::new(),
+            target: seep_core::FlowTarget {
+                host: "ads.example.com".into(),
+                port: 443,
+                proto: seep_core::TargetProto::Tcp,
+            },
+            io: Box::new(tokio::io::duplex(64).0),
+            metadata: Default::default(),
+        };
+        let out = outputs.get("block-ads").expect("reject output");
+        let err = out
+            .forward(seep_core::RouteDecision::direct("block-ads".into()), flow)
+            .await
+            .expect_err("reject 必须拒绝");
+        assert!(format!("{err:#}").contains("拒绝"), "实际：{err:#}");
     }
 
     #[test]

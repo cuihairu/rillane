@@ -1281,6 +1281,9 @@ pub struct Credential {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EgressConfig {
+    /// reject 出口（G0-5）：路由命中即断流（广告/恶意目标拦截）。
+    /// 无网络 I/O，forward 层直接返回错误。
+    Reject,
     Direct,
     Socks5 {
         server: String,

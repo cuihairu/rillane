@@ -149,6 +149,10 @@ fn proxy_mapping(
     let mut m = Mapping::new();
     ins(&mut m, "name", name);
     match spec {
+        EgressConfig::Reject => {
+            report.skipped.push(format!("出口 {name}：reject 无 Clash 对应，跳过"));
+            return None;
+        }
         EgressConfig::Direct => None,
         EgressConfig::Socks5 {
             server,
