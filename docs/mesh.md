@@ -235,7 +235,13 @@ curl -sS -X POST "$BASE/mesh/nodes/register" \
 # publish link-state (directed edge)
 curl -sS -X POST "$BASE/mesh/link-states" \
   -H "content-type: application/json" -H "x-admin-token: $TOKEN" \
-  -d '{"source":"client1","target":"exit1","latency_ms":20,"bandwidth_mbps":100,"packet_loss_rate":0.0}'
+  -d '{
+          "source": "client1",
+          "target": "exit1",
+          "latency_ms": 20,
+          "bandwidth_mbps": 100,
+          "packet_loss_rate": 0.0
+        }'
 
 # dry-run (pre-check)
 curl -sS -X POST "$BASE/chains/dry-run" \
