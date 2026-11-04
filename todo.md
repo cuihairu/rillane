@@ -281,6 +281,7 @@ P3（收尾）：
 - [x] **G0-5 reject/block 目标**——极小成本，断连/广告拦截基本表达。
   **已实现（2026-11-04 `43b731a`）**：`EgressConfig` 增 `Reject` 变体（seep-config/src/lib.rs:1286），`build_egress_outputs` 为其装配 `RejectFlowOutput`（runtime_builder.rs:2604），`FlowOutput::forward` 直接返回拒绝错误断流（无网络 I/O）；`egress_kind`/`egress_server_host` 处理 Reject；`clash_export` 跳过并登记。路由 `target: block-ads` 指向 `type: reject` 出口即拦截。回归 `build_egress_outputs_reject_blocks_forward`（构建产出 + forward 拒绝）。`cargo test --workspace` 全绿（44 二进制）。
 - [ ] **G1-6 REALITY + XTLS-Vision 出站**——主流机场节点形态，现订阅含 reality-opts/flow 即构建失败；可复用 VMess xray 向量互操作经验。
+  **BLOCKED**：需实现 REALITY 客户端（TLS 记录层伪造 ClientHello 的 auth 扩展 + 服务端公钥签名校验）与 XTLS-Vision 分帧（VLESS flow 头 + 明文段标记），配置无 `reality`/`flow` 字段（seep_dsl.rs:795、clash.rs:932 均 `flow: None`），vless.rs 无 flow 处理。需真实 REALITY/XTLS-Vision 节点（xray 服务端）互通验证与 xray 向量互操作经验；现缺此类端点与测试环境。
 - [ ] **G1-7 hysteria2 UDP 面（quinn 载具）+ salamander/端口跳跃**——现归 V2，游戏定位下建议提前。
 - [ ] **G1-8 DNS 加密上游 DoH/DoT**——现仅裸 UDP 53；cross_check 在深水区才可靠。
 - [ ] **G1-9 rule-set 远程规则提供者 + 订阅级 url-test 常驻测速**。
