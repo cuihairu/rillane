@@ -115,14 +115,19 @@ impl ClashExporter {
             let before = rules.len();
             let mut local_skipped = Vec::new();
             condition_to_rules(&rule.matches[0], &target, &mut rules, &mut local_skipped);
-            report.skipped.extend(local_skipped);
-            if rules.len() == before {
+            let produced = rules.len() - before;
+            if produced == 0 && local_skipped.is_empty() {
+                // 条件未产出规则且无具体跳过原因：Any/Not 逻辑条件无法线性化
+                // 为 Clash 首中即停列表。若 local_skipped 非空（如含逗号正则
+                // 被整条跳过），该规则已登记具体原因，不再补登记误导性
+                // 「Any/Not 逻辑条件暂不导出」。
                 report.skipped.push(format!(
                     "规则 {}：Any/Not 逻辑条件暂不导出 Clash",
                     rule.name
                 ));
             } else {
-                report.exported_rules += rules.len() - before;
+                report.skipped.extend(local_skipped);
+                report.exported_rules += produced;
             }
         }
         // 默认路由 → MATCH（default_node 指向 direct 出口时映射 DIRECT）
@@ -988,6 +993,37 @@ mod tests {
         assert!(
             !yaml.contains("DOMAIN-REGEX"),
             "不得产出会被导入侧拆字段的规则串：{yaml}"
+        );
+    }
+
+    /// 审核发现 2026-11-05：含逗号正则被整条跳过时，clash_export 仍走
+    /// `rules.len()==before` 分支再补一条误导性的「Any/Not 逻辑条件暂不
+    /// 导出 Clash」，同一规则被登记两次且第二条原因不实。回归：跳过原因
+    /// 已含具体说明时不再补登记 Any/Not 通用原因（单次登记）。
+    #[test]
+    fn comma_regex_rule_not_also_reported_as_any_not() {
+        let mut cfg = sample_config();
+        cfg.routing.rules = vec![RouteRule {
+            name: "comma-regex".into(),
+            matches: vec![MatchCondition::DomainRegex {
+                patterns: vec![r"^ad{1,3}\.com$".into()],
+            }],
+            target: "vm".into(),
+        }];
+        let (_, report) = ClashExporter.export(&cfg).unwrap();
+        let comma_notes: Vec<&String> = report
+            .skipped
+            .iter()
+            .filter(|s| s.contains("正则含逗号，Clash 规则串分字段无法往返"))
+            .collect();
+        assert_eq!(comma_notes.len(), 1, "含逗号正则应登记一次具体跳过原因");
+        assert!(
+            !report
+                .skipped
+                .iter()
+                .any(|s| s.contains("Any/Not 逻辑条件暂不导出 Clash")),
+            "不应再补登记误导性 Any/Not 通用原因：{:?}",
+            report.skipped
         );
     }
 

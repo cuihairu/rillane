@@ -355,3 +355,12 @@ P3（收尾）：
   **已修（2026-11-05）**：`attribute` 由首领安装 `InflightRemoveGuard`（Drop 守卫），正常完成与 future 被取消两路径都移除占位——不再依赖 await 后代码；等待者不安装守卫不承担移除。evidence：`crates/seep-runtime/src/tun_process.rs:196-211` / `:235-257`；回归 `cancelled_last_caller_removes_inflight_placeholder`（1 测，断言取消后 inflight 空）；`cargo test --workspace` 全绿。
 - [x] 审核发现：域名正则在每次流路由时逐条同步重新编译，较大的规则源或复杂表达式会反复占用 Tokio 工作线程并显著增加连接建立延迟（crates/seep-routing/src/lib.rs:756）。
   **已修（2026-11-05）**：新增进程级 `REGEX_CACHE`（`LazyLock<DashMap<String, Arc<regex::Regex>>>`）——同一 pattern 只编译一次，命中 O(1)；`matches_condition` 经 `cached_regex` 取用。evidence：`crates/seep-routing/src/lib.rs:21-35` / `:768-774`；回归 `domain_regex_cached_across_flows`（1 测）；`cargo test --workspace` 全绿。
+
+- [x] 审核发现：含逗号正则被整条跳过时，clash_export 仍走 `rules.len()==before` 分支再补一条误导性的「Any/Not 逻辑条件暂不导出 Clash」，同一规则被登记两次且第二条原因不实（crates/seep-subscription/src/clash_export.rs:121）。
+  **已修（2026-11-05）**：`produced==0 && local_skipped.is_empty()` 才补 Any/Not 原因——含逗号正则已有具体 skipped 说明，不再二次登记误导性文案。evidence：`crates/seep-subscription/src/clash_export.rs:118-130`；回归 `comma_regex_rule_not_also_reported_as_any_not`（`:1004`，断言单条 comma 原因且无 Any/Not 补登）；`cargo test --workspace` 全绿。
+- [x] 审核发现：`REGEX_CACHE` 进程级缓存永不淘汰，配置热更新/订阅刷新后失效 pattern 仍占内存，随历史规则集差异缓慢累积（crates/seep-routing/src/lib.rs:25）。
+  **已修（2026-11-05）**：缓存从进程级 static 下沉为引擎字段 `regex_cache`，`reload` 后 `prune_regex_cache` 递归收集新配置仍用 pattern 并 retain，失效 pattern 即删。evidence：`crates/seep-routing/src/lib.rs:165` / `:188` / `:194-201`；回归 `reload_prunes_stale_domain_regex_cache`（`:1550`，先路由入缓存再 reload 断言旧 pattern 被剔除、新 pattern 路由正常）；`cargo test --workspace` 全绿。
+- [x] 审核发现：`cached_regex` 并发 miss 时两线程同时编译并各自 insert，后者覆盖前者，返回的 Arc 可能非 map 内实例——与注释「insert 后返回值与 map 内一致」不符（功能等价，仅多余编译）（crates/seep-routing/src/lib.rs:27-33）。
+  **已修（2026-11-05）**：miss 改 `entry` API——并发 vacant 单例写入，后者阻塞拿 `Occupied`，返回恒为 map 内 Arc，不重复编译；同步修正注释为引擎级缓存 + reload prune 口径。evidence：`crates/seep-routing/src/lib.rs:26-41`；回归 `cached_regex_concurrent_miss_is_single_instance_semantics`（`:1612`，8 线程 64 并发 miss 后缓存恰一条 + 结果一致）；`cargo test --workspace` 全绿。
+- [x] 审核发现：`MatchCondition::DomainRegex` 文档注释仍称「路由面惰性编译、校验面应在构建期拦截」，与本次改为构建期校验 + 进程级缓存的实际行为不同步，易误导后续维护（crates/seep-config/src/lib.rs:1829-1830）。
+  **已修（2026-11-05）**：注释同步为构建期 `validate` 编译拦截 + 路由面引擎级缓存（reload prune）实际行为。evidence：`crates/seep-config/src/lib.rs:1829-1832`。

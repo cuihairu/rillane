@@ -1826,9 +1826,9 @@ pub enum MatchCondition {
         values: Vec<String>,
     },
     /// 域名正则匹配（G0-2）：按 Rust `regex` 语法对目标 host 做 `is_match`。
-    /// 每条 pattern 在路由面惰性编译；编译失败的 pattern 恒不命中（配置
-    /// 校验面应在构建期拦截非法 pattern——路由面不做构建期拒绝，保持
-    /// 轻量）。与 `DomainSuffix`/`DomainKeyword` 并列，供
+    /// 构建期 `RoutingConfig::validate` 逐条编译校验，非法 pattern 即 Err；
+    /// 路由面经引擎级缓存编译（`reload` 按新配置 prune 失效 pattern），非法
+    /// pattern 防御面恒不命中。与 `DomainSuffix`/`DomainKeyword` 并列，供
     /// `regexp:` 文本规则源与 `DOMAIN-REGEX` 规则导入。
     DomainRegex {
         patterns: Vec<String>,

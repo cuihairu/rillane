@@ -1,6 +1,5 @@
 use std::{
-    collections::HashMap,
-    sync::LazyLock,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -20,17 +19,47 @@ use tokio::time::{interval, sleep};
 
 /// G0-2 域名正则热路径编译缓存（审核发现 2026-11-04）：同一 pattern 反复
 /// 出现的规则源在每流逐条 `Regex::new` 会重复编译并占用 Tokio 工作线程。
-/// 全局进程级缓存只编译一次；命中 O(1)（DashMap get + clone Arc），缺失
-/// 编译一次后常驻。单例编译器保证 insert 后返回值与 map 内一致。
-static REGEX_CACHE: LazyLock<DashMap<String, Arc<regex::Regex>>> = LazyLock::new(DashMap::new);
-
-fn cached_regex(pattern: &str) -> Option<Arc<regex::Regex>> {
-    if let Some(re) = REGEX_CACHE.get(pattern) {
+/// 引擎级缓存只编译一次；命中 O(1)（DashMap get + clone Arc）。并发 miss
+/// 经 `entry` 单例编译——后者等待前者，返回的 Arc 恒为 map 内实例，不多次
+/// 编译同一 pattern（审核发现 2026-11-05）。`reload` 按新配置保留仍用
+/// pattern、剔除失效 pattern，不随历史规则集差异累积（审核发现 2026-11-05）。
+fn cached_regex(
+    cache: &DashMap<String, Arc<regex::Regex>>,
+    pattern: &str,
+) -> Option<Arc<regex::Regex>> {
+    if let Some(re) = cache.get(pattern) {
         return Some(Arc::clone(&re));
     }
-    let re = Arc::new(regex::Regex::new(pattern).ok()?);
-    REGEX_CACHE.insert(pattern.to_string(), Arc::clone(&re));
-    Some(re)
+    match cache.entry(pattern.to_string()) {
+        dashmap::mapref::entry::Entry::Occupied(occupied) => Some(Arc::clone(occupied.get())),
+        dashmap::mapref::entry::Entry::Vacant(vacant) => {
+            let re = Arc::new(regex::Regex::new(pattern).ok()?);
+            vacant.insert(Arc::clone(&re));
+            Some(re)
+        }
+    }
+}
+
+/// 递归收集条件树内全部 `DomainRegex` pattern（`prune_regex_cache` 用）。
+fn collect_regex_patterns(conds: &[MatchCondition], out: &mut HashSet<String>) {
+    for cond in conds {
+        match cond {
+            MatchCondition::Any { conditions } => {
+                for c in conditions {
+                    collect_regex_patterns(std::slice::from_ref(c), out);
+                }
+            }
+            MatchCondition::Not { condition } => {
+                collect_regex_patterns(std::slice::from_ref(condition.as_ref()), out)
+            }
+            MatchCondition::DomainRegex { patterns } => {
+                for p in patterns {
+                    out.insert(p.clone());
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// 判断 IP 是否落在 CIDR 内（G0-1 目的 IP-CIDR 匹配）。仅支持 IP 字面量
@@ -130,6 +159,10 @@ pub struct RoutingEngine {
     // ——slo-scoring.md §2 D-3：seep-runtime 桥自 MeshRegistry 聚合推进
     // （update_link_quality），seep-routing 保持零 seep-mesh 依赖（D-4）
     link_quality: DashMap<String, (u32, f64, std::time::Instant)>,
+    // 域名正则编译缓存（G0-2）：`DomainRegex` pattern → 编译后 Regex。
+    // 引擎级缓存，`reload` 时按新配置 prune 失效 pattern，避免热更新/订阅
+    // 刷新后历史 pattern 占内存累积（审核发现 2026-11-05）。
+    regex_cache: DashMap<String, Arc<regex::Regex>>,
 }
 
 impl RoutingEngine {
@@ -142,6 +175,7 @@ impl RoutingEngine {
             latency_stats: DashMap::new(),
             bandwidth_stats: DashMap::new(),
             link_quality: DashMap::new(),
+            regex_cache: DashMap::new(),
         };
         engine.build_group_cache();
         engine
@@ -151,6 +185,20 @@ impl RoutingEngine {
         *self.config.write().expect("routing poisoned") = next;
         self.build_group_cache();
         self.clear_round_robin_counters();
+        self.prune_regex_cache();
+    }
+
+    /// 按当前配置保留仍被引用的正则 pattern，剔除失效 pattern（配置热更新/
+    /// 订阅刷新后旧规则集 pattern 不再占内存）。O(patterns) 遍历取仍用集合，
+    /// O(cache) 剔除；热更新低频，不构成热路径开销。
+    fn prune_regex_cache(&self) {
+        let config = self.snapshot();
+        let mut live = HashSet::new();
+        for rule in &config.rules {
+            collect_regex_patterns(&rule.matches, &mut live);
+        }
+        self.regex_cache
+            .retain(|pattern, _| live.contains(pattern.as_str()));
     }
 
     fn snapshot(&self) -> RoutingConfig {
@@ -600,7 +648,7 @@ impl FlowRouter for RoutingEngine {
     async fn route(&self, ctx: FlowContext) -> Result<RouteDecision> {
         let config = self.snapshot();
         for rule in &config.rules {
-            if matches_rule(rule, &ctx) {
+            if matches_rule(&self.regex_cache, rule, &ctx) {
                 return self
                     .resolve_target(&rule.target, Some(rule.name.clone()), Some(&ctx))
                     .await;
@@ -747,17 +795,27 @@ impl RoutingEngine {
     }
 }
 
-fn matches_rule(rule: &RouteRule, ctx: &FlowContext) -> bool {
+fn matches_rule(
+    regex_cache: &DashMap<String, Arc<regex::Regex>>,
+    rule: &RouteRule,
+    ctx: &FlowContext,
+) -> bool {
     rule.matches
         .iter()
-        .all(|matcher| matches_condition(matcher, ctx))
+        .all(|matcher| matches_condition(regex_cache, matcher, ctx))
 }
 
 /// 单条件匹配（递归支持 Any/Not 逻辑组合）。
-fn matches_condition(cond: &MatchCondition, ctx: &FlowContext) -> bool {
+fn matches_condition(
+    regex_cache: &DashMap<String, Arc<regex::Regex>>,
+    cond: &MatchCondition,
+    ctx: &FlowContext,
+) -> bool {
     match cond {
-        MatchCondition::Any { conditions } => conditions.iter().any(|c| matches_condition(c, ctx)),
-        MatchCondition::Not { condition } => !matches_condition(condition, ctx),
+        MatchCondition::Any { conditions } => conditions
+            .iter()
+            .any(|c| matches_condition(regex_cache, c, ctx)),
+        MatchCondition::Not { condition } => !matches_condition(regex_cache, condition, ctx),
         MatchCondition::DomainSuffix { values } => values
             .iter()
             .any(|suffix| ctx.target.host.ends_with(suffix)),
@@ -768,7 +826,7 @@ fn matches_condition(cond: &MatchCondition, ctx: &FlowContext) -> bool {
             // 构建期 `RoutingConfig::validate` 已拦截非法 pattern；此处
             // `unwrap_or(false)` 仅为防御面（程序化构造绕过 validate 时
             // 不 panic）。编译结果走进程级缓存，同一 pattern 只编译一次。
-            cached_regex(pattern)
+            cached_regex(regex_cache, pattern)
                 .map(|re| re.is_match(&ctx.target.host))
                 .unwrap_or(false)
         }),
@@ -1483,5 +1541,110 @@ mod tests {
             "次流经缓存命中"
         );
         assert_eq!(route_once("other.example.com").await, "direct", "不命中");
+    }
+
+    /// 审核发现 2026-11-05：进程级缓存永不剔除，热更新后旧规则集的
+    /// pattern 永久残留并随差异缓慢累积。回归：`reload` 换新规则集后，
+    /// 失效 pattern 被剔除，仍用 pattern 保留，且新旧路由语义正常。
+    #[tokio::test]
+    async fn reload_prunes_stale_domain_regex_cache() {
+        use seep_core::{FlowId, FlowTarget, TargetProto};
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![RouteRule {
+                name: "old".into(),
+                matches: vec![MatchCondition::DomainRegex {
+                    patterns: vec![r"^old\.example\.com$".into()],
+                }],
+                target: "proxy".into(),
+            }],
+        });
+        // 先经旧规则集路由，把旧 pattern 编入缓存。
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "old.example.com".into(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            metadata: Default::default(),
+        };
+        assert_eq!(engine.route(ctx).await.unwrap().final_node(), "proxy");
+        assert!(
+            engine.regex_cache.contains_key(r"^old\.example\.com$"),
+            "旧 pattern 应先入缓存"
+        );
+        engine.reload(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![RouteRule {
+                name: "new".into(),
+                matches: vec![MatchCondition::DomainRegex {
+                    patterns: vec![r"^new\.example\.com$".into()],
+                }],
+                target: "proxy".into(),
+            }],
+        });
+        assert!(
+            !engine.regex_cache.contains_key(r"^old\.example\.com$"),
+            "reload 后失效 pattern 应被剔除"
+        );
+        // 新 pattern 路由仍正常（缓存可再入新规则）。
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "new.example.com".into(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            metadata: Default::default(),
+        };
+        assert_eq!(engine.route(ctx).await.unwrap().final_node(), "proxy");
+    }
+
+    /// 审核发现 2026-11-05：并发 miss 时两个线程各编译一次再 insert，后者
+    /// 覆盖前者，返回的 Arc 与 map 内实例可能不同。回归：用引擎级 `entry`
+    /// 单例写入，并发 miss 后 map 内恰有一条且返回同一 Arc 语义。由于
+    /// `cached_regex` 私有，本测试通过缓存 map 数量 + 并发路由结果稳定性
+    /// 验证。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn cached_regex_concurrent_miss_is_single_instance_semantics() {
+        use seep_core::{FlowId, FlowTarget, TargetProto};
+        let engine = std::sync::Arc::new(RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![RouteRule {
+                name: "concurrent".into(),
+                matches: vec![MatchCondition::DomainRegex {
+                    patterns: vec![r"^concurrent\.example\.com$".into()],
+                }],
+                target: "proxy".into(),
+            }],
+        }));
+        let mut tasks = Vec::new();
+        for _ in 0..64 {
+            let engine = std::sync::Arc::clone(&engine);
+            tasks.push(tokio::spawn(async move {
+                let ctx = FlowContext {
+                    id: FlowId::new(),
+                    target: FlowTarget {
+                        host: "concurrent.example.com".into(),
+                        port: 443,
+                        proto: TargetProto::Tcp,
+                    },
+                    metadata: Default::default(),
+                };
+                engine.route(ctx).await.unwrap().final_node().to_string()
+            }));
+        }
+        for task in tasks {
+            assert_eq!(task.await.unwrap(), "proxy");
+        }
+        assert_eq!(
+            engine.regex_cache.len(),
+            1,
+            "并发 miss 后缓存内应恰有一条 pattern"
+        );
     }
 }
