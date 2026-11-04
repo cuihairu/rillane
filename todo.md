@@ -293,6 +293,7 @@ P3（收尾）：
 - [ ] **G2-11 redir/tproxy 透明代理入站**（Linux）。
   **BLOCKED**：`NetworkBlockConfig::validate` 显式拒绝 `transparent`/`tap`/`hybrid`（config/lib.rs:287-290，E1「仅 tun」），无 redir/tproxy 入口、iptables/nftables 重定向或 `SO_ORIGINAL_DST` 处理。需实现透明代理入站（REDIRECT/TPROXY 链 + 原始目标读取 + 协议解析）并需 root/CAP_NET_ADMIN 真实机器与防火墙验证；现缺特权测试环境。
 - [ ] **G2-12 服务端入站协议**（trojan/vless/ss 至少一种）——若坚持纯客户端内核定位则显式决策不做并登记。
+  **BLOCKED**：入站仅 socks5/http/mixed（seep-config `IngressConfig`，无 trojan/vless/ss 服务端变体），协议服务端实现为零。需用户显式决策「是否坚持纯客户端内核定位」；若做则需实现服务端认证/数据面并需真实客户端互通（trojan/vless/ss 各至少一个）验证。现缺产品定位决策与互操作端点。
 - [ ] **G2-13 tuic/anytls/shadowtls 出站**。
 - [ ] **G2-14 Clash API 兼容层（只读子集 + 面板直连）**——现控制面不兼容 /proxies /connections /traffic，metacubexd/yacd 无法直连。
 - [ ] **G2-15 httpupgrade/xhttp 传输；G3-16 macOS/Windows TUN + auto_route 全局接管；ICMP 代理、UoT、hosts 映射**。
