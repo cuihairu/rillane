@@ -289,6 +289,7 @@ P3（收尾）：
 - [ ] **G1-9 rule-set 远程规则提供者 + 订阅级 url-test 常驻测速**。
   **BLOCKED**：内联 rule-set 已支持（seep_dsl.rs `SeepRuleSet`/`RuleSet` 引用），但无远程 URL 拉取/热更；url-test 常驻测速仅有骨架（routing `start_health_check_task` 用模拟 `check_node_health`/`measure_node_latency`，lib.rs:286-340）。需新增规则提供者 URL 拉取+热更路径与真实测速目标（HTTP 探测 URL/端口）常驻任务接线；现缺指定远程规则源与测速端点配置/真实服务。
 - [ ] **G1-10 fake-ip + DNS 回填路由**（配合 G0-3）。
+  **BLOCKED**：无 fake-ip 配置/映射实现（全仓无 `fake_ip`/`fakeip` 类型或 198.18.0.0/15 分配），DNS 回填路由需在 TUN 域名解析与路由域名覆写间接线（依赖 G0-3 sniff 集成）。需新增 fake-ip 分配表 + DNS 应答注入 fake 地址 + 反向映射查询 + 路由用原域名；需真实 DNS/TUN 流量验证，且 G0-3 集成未完成（见上）。
 - [ ] **G2-11 redir/tproxy 透明代理入站**（Linux）。
 - [ ] **G2-12 服务端入站协议**（trojan/vless/ss 至少一种）——若坚持纯客户端内核定位则显式决策不做并登记。
 - [ ] **G2-13 tuic/anytls/shadowtls 出站**。
