@@ -127,13 +127,11 @@ fn lookup_sync(root: &Path, src: SocketAddr, proto: SockProto) -> Option<Process
 
 /// 归因缓存（键含 proto：同地址的 tcp/udp 行在不同 /proc 表，结果独立）
 type AttrCache = HashMap<(SocketAddr, SockProto), (Option<ProcessInfo>, Instant)>;
-/// 单flight 状态：cell 存最终结果（`get()==Some` 表示已 set，含负结果）；
-/// notify 供等待者唤醒。
-struct InflightState {
-    cell: tokio::sync::OnceCell<Option<ProcessInfo>>,
-    notify: tokio::sync::Notify,
-}
-type InflightCell = Arc<InflightState>;
+/// 单flight 状态：`OnceCell` 存最终结果（`get()==Some` 表示已 set，含负结果）。
+/// 直接用 `OnceCell` 而非 `OnceCell + Notify`——`get_or_init` 无 lost-wakeup
+/// （tokio 内部 watch 通道），且 init future 被取消/panic 时自愈（下次
+/// get_or_init 重跑 init），首领挂起/等待者永挂均消除（审核发现 2026-11-04）。
+type InflightCell = Arc<tokio::sync::OnceCell<Option<ProcessInfo>>>;
 
 /// 进程归因器（缓存 TTL 30s，含负缓存；§2.5「每流首包归因一次」的支撑面）
 pub struct ProcessAttributor {
@@ -141,8 +139,8 @@ pub struct ProcessAttributor {
     ttl: Duration,
     cache: Arc<Mutex<AttrCache>>,
     /// 并发同 key miss 单flight：合并重复 /proc 扫描（fd 遍历贵，见模块头）。
-    /// `tokio::sync::Mutex<HashMap<key, Weak<OnceCell>>>`——弱引用防已结束
-    /// 任务占位泄漏；TTL 过期后的下一次 miss 自会新建 cell。
+    /// `tokio::sync::Mutex<HashMap<key, Arc<OnceCell>>>`——完成后移除占位，
+    /// TTL 过期后的下一次 miss 自会新建 cell。
     inflight: Arc<Mutex<HashMap<(SocketAddr, SockProto), InflightCell>>>,
     /// 测试观测：lookup_sync 实际调用次数（并发合并断言用）。
     #[cfg(test)]
@@ -192,45 +190,41 @@ impl ProcessAttributor {
             if let Some(existing) = inflight.get(&key) {
                 existing.clone()
             } else {
-                let cell = Arc::new(InflightState {
-                    cell: tokio::sync::OnceCell::new(),
-                    notify: tokio::sync::Notify::new(),
-                });
-                let root = self.root.clone();
-                let cache = self.cache.clone();
-                let inflight_map = self.inflight.clone();
-                let cell2 = cell.clone();
-                #[cfg(test)]
-                let scan_count = self.scan_count.clone();
-                tokio::spawn(async move {
-                    #[cfg(test)]
-                    scan_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let found =
-                        tokio::task::spawn_blocking(move || lookup_sync(&root, src, proto))
-                            .await
-                            .ok()
-                            .flatten();
-                    cache
-                        .lock()
-                        .unwrap()
-                        .insert(key, (found.clone(), Instant::now()));
-                    let _ = cell2.cell.set(found);
-                    cell2.notify.notify_waiters();
-                    // 先 set 再移除：set 后新来者经 cell.get() 直接命中；移除
-                    // 使 TTL 过期后的下一次 miss 新建 cell 重扫（不复用旧 cell）。
-                    let mut infl = inflight_map.lock().unwrap();
-                    if infl.get(&key).is_some_and(|c| Arc::ptr_eq(c, &cell2)) {
-                        infl.remove(&key);
-                    }
-                });
+                let cell = Arc::new(tokio::sync::OnceCell::new());
                 inflight.insert(key, cell.clone());
                 cell
             }
         };
-        if cell.cell.get().is_none() {
-            cell.notify.notified().await;
+        // get_or_init：并发同 key miss 合并为一次 init；init future 被取消/
+        // panic 时 OnceCell 自愈（下次调用重跑 init），无 lost-wakeup——
+        // 替代旧「OnceCell + Notify」模式（审核发现 2026-11-04）。
+        let found = cell
+            .get_or_init(|| async {
+                let root = self.root.clone();
+                #[cfg(test)]
+                self.scan_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let found = tokio::task::spawn_blocking(move || lookup_sync(&root, src, proto))
+                    .await
+                    .ok()
+                    .flatten();
+                self.cache
+                    .lock()
+                    .unwrap()
+                    .insert(key, (found.clone(), Instant::now()));
+                found
+            })
+            .await;
+        // 完成后移除占位：新来者经 cell.get() 直接命中；TTL 过期后的下一次
+        // miss 新建 cell 重扫（不复用旧 cell）。仅当占位仍指向本 cell 才移除
+        // （防并发下他代误删）。
+        {
+            let mut infl = self.inflight.lock().unwrap();
+            if infl.get(&key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+                infl.remove(&key);
+            }
         }
-        cell.cell.get().and_then(|v| v.clone())
+        found.clone()
     }
 }
 
@@ -420,6 +414,30 @@ mod tests {
         let second = attr_expired2.attribute(src, SockProto::Udp).await;
         assert!(second.is_some());
         assert_eq!(attr_expired2.scan_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 回归（审核发现 2026-11-04）：首领任务在 init 中被取消时，旧
+    /// `OnceCell + Notify` 模式使等待者永久挂起（lost-wakeup）。改用
+    /// `get_or_init` 后自愈——被取消的 init 由下一次 `get_or_init` 重跑，
+    /// 等待者不挂起且最终拿到结果。
+    #[tokio::test]
+    async fn cancelled_leader_self_heals_and_waiters_complete() {
+        let root = fixture();
+        let attr = Arc::new(ProcessAttributor::with_root(&root));
+        let src: SocketAddr = "192.168.0.192:4660".parse().unwrap();
+
+        // 首启一个 attribute 任务并立即取消（模拟 init 中途被 drop——首领
+        // 挂起场景）。取消后 cell 未 set，占位仍在。
+        let attr1 = attr.clone();
+        let h = tokio::spawn(async move { attr1.attribute(src, SockProto::Udp).await });
+        h.abort();
+        let _ = h.await;
+
+        // 下一次 miss：get_or_init 应重跑 init（自愈），返回结果不挂起。
+        let r = attr.attribute(src, SockProto::Udp).await;
+        assert_eq!(r, Some(ProcessInfo { pid: 4242, comm: "gameproc".into() }));
 
         let _ = std::fs::remove_dir_all(&root);
     }

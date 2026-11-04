@@ -2245,8 +2245,9 @@ fn udp_session_config(cfg: &UdpConfig) -> seep_core::udp::UdpSessionConfig {
 }
 
 /// UDP 出站连接器表（udp-relay-path.md §3.1 能力表）：
-/// direct / shadowsocks / wireguard → 有能力；其余类型 → 判负（由
-/// `scan_udp_capability` 在构建期报错，hy2 的 V1 结论见该文档 §3.4/§6）。
+/// direct / shadowsocks / wireguard / reject → 有能力（reject 为静默丢弃，
+/// 审核发现 2026-11-04）；其余类型 → 判负（由 `scan_udp_capability` 在
+/// 构建期报错，hy2 的 V1 结论见该文档 §3.4/§6）。
 fn build_udp_connectors(
     descriptors: &[EgressDescriptor],
 ) -> Result<HashMap<String, Arc<dyn EgressUdpConnector>>> {
@@ -2287,6 +2288,10 @@ fn build_udp_connectors(
                 WireguardUdpConnector::new(allowed_ips.clone(), *mtu)
                     .with_context(|| format!("节点 {} 的 wireguard UDP 配置无效", desc.name))?,
             )),
+            // reject 出口（G0-5）UDP 面（审核发现 2026-11-04）：注册为有能力
+            // 连接器，关联即静默丢弃——不再被 scan_udp_capability 判负，广告/
+            // 黑名单目标可拦截 UDP 流而不阻塞整机构建。
+            EgressConfig::Reject => Some(Arc::new(seep_core::udp::RejectUdpConnector)),
             _ => None,
         };
         if let Some(c) = connector {
@@ -2358,7 +2363,7 @@ fn scan_udp_capability(
         anyhow::bail!(
             "udp.enabled 但以下出站节点不支持 UDP 转发（udp-relay-path.md §3.1 能力表）:\n\
              {detail}\n\
-             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard（hysteria2 归 V2，载具 quinn 未决）\n\
+             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard / reject（hysteria2 归 V2，载具 quinn 未决）\n\
              请更换这些节点的出站类型，或将 udp.enabled 关闭并移除 UDP 相关规则"
         );
     }
@@ -4629,6 +4634,28 @@ mod tests {
         };
         assert!(scan_udp_capability(&routing, &egress, &connectors).is_ok());
         assert_eq!(connectors.len(), 2);
+    }
+
+    /// G0-5 UDP 面（审核发现 2026-11-04）：reject 出口注册为 UDP 连接器
+    /// （RejectUdpConnector），reachable 的 reject 节点不再被 scan_udp_capability
+    /// 判负——广告/黑名单目标 + udp.enabled 不再整机构建失败。
+    #[test]
+    fn udp_capability_scan_passes_with_reject_reachable() {
+        let egress = vec![
+            node("block-ads", EgressConfig::Reject),
+            node("direct-out", EgressConfig::Direct),
+        ];
+        let connectors = build_udp_connectors(&egress).unwrap();
+        assert!(connectors.contains_key("block-ads"), "reject 应注册连接器");
+        let routing = RoutingConfig {
+            default_node: "direct-out".into(),
+            groups: vec![],
+            rules: vec![rule("ads", "block-ads")],
+        };
+        assert!(
+            scan_udp_capability(&routing, &egress, &connectors).is_ok(),
+            "reject 目标不应使 UDP 能力扫描失败"
+        );
     }
 
     #[test]

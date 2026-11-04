@@ -161,6 +161,53 @@ impl fmt::Debug for LocalRelay {
     }
 }
 
+/// reject 出站 UDP（G0-5 UDP 面，审核发现 2026-11-04）：拒绝语义 = 静默
+/// 丢弃而非构建期判负——与 TCP `RejectFlowOutput` 断流对齐，广告/黑名单
+/// 目标可拦截 UDP 而不阻塞整机构建。关联即返回 drop-only relay。
+pub struct RejectUdpConnector;
+
+#[async_trait]
+impl EgressUdpConnector for RejectUdpConnector {
+    fn name(&self) -> &str {
+        "reject"
+    }
+
+    async fn associate(
+        &self,
+        ctx: FlowContext,
+        _decision: &RouteDecision,
+    ) -> Result<Arc<dyn UdpRelay>> {
+        Ok(Arc::new(RejectUdpRelay {
+            target: ctx.target,
+        }))
+    }
+}
+
+/// reject 出站 UDP relay：`send_to` 吞包（uplink 计 Sent），`recv_from`
+/// 永久 pending（无下行源；downlink task 仅被取消时退出）。
+pub struct RejectUdpRelay {
+    target: FlowTarget,
+}
+
+#[async_trait]
+impl UdpRelay for RejectUdpRelay {
+    async fn send_to(&self, _target: &FlowTarget, _buf: &[u8]) -> Result<()> {
+        Ok(())
+    }
+
+    async fn recv_from(&self, _buf: &mut [u8]) -> Result<(FlowTarget, usize)> {
+        std::future::pending().await
+    }
+}
+
+impl fmt::Debug for RejectUdpRelay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RejectUdpRelay")
+            .field("target", &self.target)
+            .finish()
+    }
+}
+
 /// 测试用可编程 relay：send 可注入失败；下行经返回的 mpsc sender 注入。
 pub struct MockUdpRelay {
     target: FlowTarget,
@@ -250,6 +297,53 @@ impl fmt::Debug for MockUdpRelay {
         f.debug_struct("MockUdpRelay")
             .field("target", &self.target)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FlowId, RouteDecision, TargetProto};
+
+    /// reject UDP 面（G0-5，审核发现 2026-11-04）：关联成功返回 drop-only
+    /// relay；`send_to` 吞包（Ok），`recv_from` 永久 pending——上行计 Sent、
+    /// 下行无源不误发，与 TCP `RejectFlowOutput` 断流语义对齐。
+    #[tokio::test]
+    async fn reject_udp_connector_drops_sends_and_never_recvs() {
+        let connector = RejectUdpConnector;
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "ads.example.com".into(),
+                port: 53,
+                proto: TargetProto::Udp,
+            },
+            metadata: Default::default(),
+        };
+        let decision = RouteDecision::direct("block-ads".into());
+        let relay = connector.associate(ctx, &decision).await.expect("reject 关联应成功");
+
+        // send_to 吞包（静默丢弃）
+        relay
+            .send_to(
+                &FlowTarget {
+                    host: "ads.example.com".into(),
+                    port: 53,
+                    proto: TargetProto::Udp,
+                },
+                &[1, 2, 3],
+            )
+            .await
+            .expect("reject 吞包应 Ok");
+
+        // recv_from 永久 pending：select 带超时确认不产出数据
+        let mut buf = [0u8; 8];
+        let recv = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            relay.recv_from(&mut buf),
+        )
+        .await;
+        assert!(recv.is_err(), "reject 下行应无数据（超时）");
     }
 }
 

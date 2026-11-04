@@ -3595,6 +3595,7 @@ dependencies = [
  "async-trait",
  "dashmap 6.1.0",
  "rand 0.8.6",
+ "regex",
  "seep-config",
  "seep-core",
  "serde",

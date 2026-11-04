@@ -266,6 +266,11 @@ pub enum SeepRule {
         domains: Vec<String>,
         target: String,
     },
+    /// 域名正则匹配
+    DomainRegex {
+        patterns: Vec<String>,
+        target: String,
+    },
     /// IP CIDR
     IpCidr { cidrs: Vec<String>, target: String },
     /// GeoIP
@@ -1119,6 +1124,12 @@ impl SeepDslConverter {
                 // Seep 暂不支持完全域名匹配，转换为后缀匹配
                 let matches = vec![MatchCondition::DomainSuffix {
                     values: domains.clone(),
+                }];
+                (matches, target.clone())
+            }
+            SeepRule::DomainRegex { patterns, target } => {
+                let matches = vec![MatchCondition::DomainRegex {
+                    patterns: patterns.clone(),
                 }];
                 (matches, target.clone())
             }

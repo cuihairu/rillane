@@ -38,7 +38,7 @@ pub use metrics::{
 pub use reclaim::{sweep_once, SweepStats};
 pub use relay::{
     DirectUdpConnector, DownlinkPacket, EgressUdpConnector, LocalRelay, MockUdpRelay,
-    RoutingUdpConnector, UdpRelay,
+    RejectUdpConnector, RejectUdpRelay, RoutingUdpConnector, UdpRelay,
 };
 pub use table::{BindOutcome, ResolveError, SessionRef, UdpSessionTable, UpResult};
 

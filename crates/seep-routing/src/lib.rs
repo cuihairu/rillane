@@ -748,6 +748,14 @@ fn matches_condition(cond: &MatchCondition, ctx: &FlowContext) -> bool {
         MatchCondition::DomainKeyword { values } => values
             .iter()
             .any(|keyword| ctx.target.host.contains(keyword)),
+        MatchCondition::DomainRegex { patterns } => patterns.iter().any(|pattern| {
+            // 惰性编译：非法 pattern 恒不命中（构建期校验面应拦截）。
+            // regex 编译有成本，规则条数有限（rule-set/订阅级），命中面
+            // 逐流编译代价可接受；若热路径实测成瓶颈再升级为预编译缓存。
+            regex::Regex::new(pattern)
+                .map(|re| re.is_match(&ctx.target.host))
+                .unwrap_or(false)
+        }),
         MatchCondition::Geoip { country } => ctx
             .metadata
             .annotations
@@ -1307,5 +1315,70 @@ mod tests {
         // NOT(private): 非 10/8 命中 proxy；10/8 不命中 NOT → 落到 default
         assert_eq!(route_to(&engine, "8.8.8.8").await, "proxy", "Not: 非私网命中");
         assert_eq!(route_to(&engine, "10.0.0.1").await, "direct", "Not: 私网反选");
+    }
+
+    /// G0-2 域名正则匹配回归：`DomainRegex` 按 Rust `regex` 对目标 host
+    /// `is_match`；合法 pattern 命中/不命中符合预期；非法 pattern 恒不命中
+    /// （路由面不做构建期拒绝），落默认节点。
+    #[tokio::test]
+    async fn domain_regex_matches_target_host() {
+        use seep_core::{FlowId, FlowTarget, TargetProto};
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![RouteRule {
+                name: "ads-regex".into(),
+                matches: vec![MatchCondition::DomainRegex {
+                    patterns: vec![r"^ad\d+\.".into(), r"\.doubleclick\.net$".into()],
+                }],
+                target: "block".into(),
+            }],
+        });
+
+        async fn route_to(engine: &RoutingEngine, host: &str) -> String {
+            let ctx = FlowContext {
+                id: FlowId::new(),
+                target: FlowTarget {
+                    host: host.to_string(),
+                    port: 443,
+                    proto: TargetProto::Tcp,
+                },
+                metadata: Default::default(),
+            };
+            engine.route(ctx).await.unwrap().final_node().to_string()
+        }
+
+        assert_eq!(route_to(&engine, "ad123.example.com").await, "block", "^ad 前缀命中");
+        assert_eq!(route_to(&engine, "x.doubleclick.net").await, "block", "suffix 正则命中");
+        assert_eq!(route_to(&engine, "ads.com").await, "direct", "正则不命中");
+    }
+
+    /// G0-2 域名正则负形：非法 pattern（未闭合括号）恒不命中，落默认节点
+    /// ——路由面惰性编译不做拒绝（构建期校验面拦截）。
+    #[tokio::test]
+    async fn domain_regex_invalid_pattern_never_matches() {
+        use seep_core::{FlowId, FlowTarget, TargetProto};
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![RouteRule {
+                name: "bad-regex".into(),
+                matches: vec![MatchCondition::DomainRegex {
+                    patterns: vec!["(unclosed".into()],
+                }],
+                target: "block".into(),
+            }],
+        });
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "example.com".into(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            metadata: Default::default(),
+        };
+        let decision = engine.route(ctx).await.unwrap();
+        assert_eq!(decision.final_node(), "direct");
     }
 }

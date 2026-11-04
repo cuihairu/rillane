@@ -374,6 +374,12 @@ pub enum ClashRule {
         domains: Vec<String>,
         target: String,
     },
+    /// 域名正则匹配
+    DomainRegex {
+        #[serde(rename = "domain-regex")]
+        patterns: Vec<String>,
+        target: String,
+    },
     /// IP CIDR
     IpCidr {
         #[serde(rename = "ip-cidr")]
@@ -435,6 +441,11 @@ enum ClashRuleTagged {
         domains: Vec<String>,
         target: String,
     },
+    DomainRegex {
+        #[serde(rename = "domain-regex")]
+        patterns: Vec<String>,
+        target: String,
+    },
     IpCidr {
         #[serde(rename = "ip-cidr")]
         cidrs: Vec<String>,
@@ -490,6 +501,9 @@ impl From<ClashRuleTagged> for ClashRule {
                 ClashRule::DomainKeyword { keywords, target }
             }
             ClashRuleTagged::Domain { domains, target } => ClashRule::Domain { domains, target },
+            ClashRuleTagged::DomainRegex { patterns, target } => {
+                ClashRule::DomainRegex { patterns, target }
+            }
             ClashRuleTagged::IpCidr { cidrs, target } => ClashRule::IpCidr { cidrs, target },
             ClashRuleTagged::Geoip {
                 country_code,
@@ -579,6 +593,10 @@ impl ClashRule {
             }),
             "DOMAIN" => Ok(ClashRule::Domain {
                 domains: vec![get(1)?.to_string()],
+                target: get(2)?.to_string(),
+            }),
+            "DOMAIN-REGEX" => Ok(ClashRule::DomainRegex {
+                patterns: vec![get(1)?.to_string()],
                 target: get(2)?.to_string(),
             }),
             "IP-CIDR" | "IP-CIDR6" => Ok(ClashRule::IpCidr {
@@ -1140,6 +1158,12 @@ impl ClashConverter {
                 // Seep 暂不支持完全域名匹配，转换为后缀匹配
                 let matches = vec![MatchCondition::DomainSuffix {
                     values: domains.clone(),
+                }];
+                Ok((matches, format!("{}{}", self.group_prefix, target)))
+            }
+            ClashRule::DomainRegex { patterns, target } => {
+                let matches = vec![MatchCondition::DomainRegex {
+                    patterns: patterns.clone(),
                 }];
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
@@ -1964,5 +1988,48 @@ rules: []
         assert_eq!(counts.get(&ClashProxyType::Ss), Some(&2));
         assert_eq!(counts.get(&ClashProxyType::Vmess), Some(&1));
         assert_eq!(counts.get(&ClashProxyType::Http), None);
+    }
+
+    /// G0-2 DOMAIN-REGEX 解析：字符串规则（`DOMAIN-REGEX,pat,target`）
+    /// 与 tagged 形式（`type: domain-regex`）均产出 `DomainRegex` 变体，
+    /// 且经 `convert_clash_rule` 映射为 `MatchCondition::DomainRegex`。
+    #[test]
+    fn test_domain_regex_rule_parsing_and_conversion() {
+        // 字符串形式
+        let rule = ClashRule::parse_rule_string(r"DOMAIN-REGEX,^ad\d+\.,auto").unwrap();
+        match rule {
+            ClashRule::DomainRegex { patterns, target } => {
+                assert_eq!(patterns, vec![r"^ad\d+\.".to_string()]);
+                assert_eq!(target, "auto");
+            }
+            other => panic!("应为 DomainRegex: {other:?}"),
+        }
+
+        // tagged 形式
+        let yaml_content = r#"
+proxies: []
+proxy-groups: []
+rules:
+  - type: domain-regex
+    domain-regex:
+      - ^ad\d+\.
+    target: auto
+        "#;
+        let converter = ClashConverter::new();
+        let config = converter.parse(yaml_content).unwrap();
+        assert!(matches!(
+            config.rules[0],
+            ClashRule::DomainRegex { .. }
+        ));
+
+        // convert_clash_rule 映射
+        let (matches, target) = converter
+            .convert_clash_rule(&config.rules[0])
+            .expect("DomainRegex 应可转换");
+        assert_eq!(target, "auto");
+        assert!(matches!(
+            &matches[0],
+            MatchCondition::DomainRegex { patterns } if patterns == &vec![r"^ad\d+\.".to_string()]
+        ));
     }
 }

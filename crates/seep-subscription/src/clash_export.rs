@@ -563,6 +563,11 @@ fn condition_to_rules(cond: &MatchCondition, target: &str, rules: &mut Vec<Strin
                 rules.push(format!("DOMAIN-KEYWORD,{v},{target}"));
             }
         }
+        MatchCondition::DomainRegex { patterns } => {
+            for p in patterns {
+                rules.push(format!("DOMAIN-REGEX,{p},{target}"));
+            }
+        }
         MatchCondition::Geoip { country } => {
             rules.push(format!("GEOIP,{country},{target}"));
         }
@@ -725,8 +730,10 @@ fn degrade(report: &mut ClashExportReport, node: &str, present: bool, reason: &s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clash::ClashConverter;
-    use seep_config::{EgressDescriptor, PolicyGroup, RouteRule, RoutingConfig, Strategy};
+    use crate::clash::{ClashConverter, ClashRule};
+    use seep_config::{
+        EgressDescriptor, MatchCondition, PolicyGroup, RouteRule, RoutingConfig, Strategy,
+    };
 
     fn sample_config() -> ProjectConfig {
         ProjectConfig {
@@ -897,6 +904,43 @@ mod tests {
         assert_eq!(parsed.proxies.len(), report.exported_proxies.len());
         assert_eq!(parsed.proxy_groups.len(), report.exported_groups.len());
         assert_eq!(parsed.rules.len(), report.exported_rules + 1); // + MATCH
+    }
+
+    /// G0-2 域名正则导出往返：`DomainRegex` 条件 → `DOMAIN-REGEX` 规则串，
+    /// 且导出的 YAML 可被 ClashConverter 重新解析回 `DomainRegex` 变体
+    /// （export → reparse 真往返证据）。
+    #[test]
+    fn domain_regex_roundtrips_via_export_and_reparse() {
+        let mut cfg = sample_config();
+        cfg.routing.rules = vec![RouteRule {
+            name: "ads-regex".into(),
+            matches: vec![MatchCondition::DomainRegex {
+                patterns: vec![r"^ad\d+\.".into()],
+            }],
+            target: "vm".into(),
+        }];
+        let (yaml, report) = ClashExporter.export(&cfg).unwrap();
+        assert!(
+            yaml.contains(r"DOMAIN-REGEX,^ad\d+\.,vm"),
+            "应导出 DOMAIN-REGEX 规则：{yaml}"
+        );
+        assert_eq!(report.exported_rules, 1);
+
+        // 导出面产出的规则串应可被导入侧重新解析为 DomainRegex
+        let parsed = ClashConverter::new()
+            .parse(&yaml)
+            .expect("导出应可被导入侧解析");
+        let regex_rule = parsed
+            .rules
+            .iter()
+            .find(|r| matches!(r, ClashRule::DomainRegex { .. }))
+            .expect("应存在 DomainRegex 规则");
+        match regex_rule {
+            ClashRule::DomainRegex { patterns, .. } => {
+                assert_eq!(patterns, &vec![r"^ad\d+\.".to_string()]);
+            }
+            other => panic!("应为 DomainRegex: {other:?}"),
+        }
     }
 
     /// 组策略映射口径：Fixed→select、ConsistentHash→consistent-hashing、

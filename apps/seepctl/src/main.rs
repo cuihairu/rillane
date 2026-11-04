@@ -2745,7 +2745,7 @@ mod tests {
         assert_eq!(derive_rule_name("/tmp/chnroutes.txt"), "chnroutes");
         assert_eq!(derive_rule_name("/"), "imported");
 
-        // routing 面：域+CIDR 混源 → 两条规则 YAML，跳过项走报告
+        // routing 面：域+CIDR+regexp 混源 → 三条规则 YAML，跳过项走报告
         let (yaml, skipped) = render_import_rules(
             "example.com\n10.0.0.0/8\nregexp:^x\n",
             "cn",
@@ -2754,8 +2754,8 @@ mod tests {
         )
         .expect("routing 面应可渲染");
         let rules: Vec<seep_config::RouteRule> = serde_yaml::from_str(&yaml).expect("应可读回");
-        assert_eq!(rules.len(), 2);
-        assert_eq!(skipped.len(), 1);
+        assert_eq!(rules.len(), 3, "域/CIDR/regexp 各成一条规则");
+        assert_eq!(skipped.len(), 0, "regexp 现支持，无跳过项");
 
         // dns 面：裸域展开 exact + suffix，组随 target
         let (yaml, _) =

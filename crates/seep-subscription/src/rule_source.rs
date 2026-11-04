@@ -3,11 +3,12 @@
 //! 输入 = v2fly 文本规则源行集（geosite 域名清单 / chnroutes CIDR 清单），
 //! 逐行解析为结构化条目，再按目标面产出：
 //! - 路由面（`routing.rules`）：域清单 → `DomainSuffix` 联合条件、
-//!   `keyword:` → `DomainKeyword`、CIDR → `Network`——各成一条规则
+//!   `keyword:` → `DomainKeyword`、`regexp:` → `DomainRegex`、CIDR →
+//!   `Network`——各成一条规则
 //!   （`matches` 多条件是 AND，不同类型清单不能并进一条，见本文件 §AND）；
 //! - DNS 分流面（`network.dns.rules`）：裸域/`domain:` → exact + suffix
 //!   双 pattern（D-2：suffix 需前导点且不含本域，exact 补本域）、`full:` →
-//!   exact；keyword/CIDR 在 DNS 面无对应模式，显式报错不静默降级。
+//!   exact；keyword/regexp/CIDR 在 DNS 面无对应模式，显式报错不静默降级。
 //!
 //! 语义对齐先例：clash.rs `DOMAIN → DomainSuffix`（Seep 无完全域匹配路由
 //! 条件，转 suffix 并承认超集——`full:` 在路由面同样转 suffix）。
@@ -26,6 +27,8 @@ pub struct RuleSourceImport {
     pub fulls: Vec<String>,
     /// `keyword:` 条目（仅路由面）
     pub keywords: Vec<String>,
+    /// `regexp:` 条目（仅路由面；Rust `regex` 语法，`is_match` 语义）
+    pub regexps: Vec<String>,
     /// 规范化 CIDR（裸 IP 补 /32 或 /128）
     pub cidrs: Vec<String>,
     /// 无法表达的条目及原因（regexp/include/属性行/格式坏行）——逐条报告不阻塞
@@ -54,6 +57,15 @@ pub fn to_routing_rules(src: &RuleSourceImport, name: &str, target: &str) -> Vec
             target: target.to_string(),
         });
     }
+    if !src.regexps.is_empty() {
+        rules.push(RouteRule {
+            name: format!("{name}-regexp"),
+            matches: vec![MatchCondition::DomainRegex {
+                patterns: src.regexps.clone(),
+            }],
+            target: target.to_string(),
+        });
+    }
     if !src.cidrs.is_empty() {
         rules.push(RouteRule {
             name: format!("{name}-cidr"),
@@ -73,6 +85,12 @@ pub fn to_dns_rules(src: &RuleSourceImport, group: DnsGroup) -> Result<Vec<DnsRu
         return Err(anyhow!(
             "keyword 条目（{} 条）无 DNS 分流面对应模式（exact/suffix），请走 --face routing",
             src.keywords.len()
+        ));
+    }
+    if !src.regexps.is_empty() {
+        return Err(anyhow!(
+            "regexp 条目（{} 条）无 DNS 分流面对应模式（exact/suffix），请走 --face routing",
+            src.regexps.len()
         ));
     }
     if !src.cidrs.is_empty() {
@@ -108,9 +126,12 @@ pub fn parse_rule_source(raw: &str) -> RuleSourceImport {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(rest) = line.strip_prefix("regexp:") {
-            out.skipped.push(format!("{line}（regexp 不进轻量规则面）"));
-            let _ = rest;
+        if let Some(v) = line.strip_prefix("regexp:") {
+            if v.is_empty() {
+                out.skipped.push(format!("{line}（regexp 为空）"));
+            } else {
+                out.regexps.push(v.to_string());
+            }
             continue;
         }
         if line.starts_with("include:") {
@@ -207,10 +228,11 @@ mod tests {
         assert_eq!(src.domains, vec!["example.com", "foo.bar"]);
         assert_eq!(src.fulls, vec!["exact.org"]);
         assert_eq!(src.keywords, vec!["video"]);
+        assert_eq!(src.regexps, vec![r"^ad\d+\."]);
         assert!(src.cidrs.is_empty());
-        // regexp/include/属性行/坏域行逐条入 skipped 且原因可辨
-        assert_eq!(src.skipped.len(), 5, "{:?}", src.skipped);
-        assert!(src.skipped.iter().any(|s| s.contains("regexp")));
+        // include/属性行/坏域行逐条入 skipped 且原因可辨（regexp 已入 regexps）
+        assert_eq!(src.skipped.len(), 4, "{:?}", src.skipped);
+        assert!(src.skipped.iter().all(|s| !s.contains("regexp")));
         assert!(src.skipped.iter().any(|s| s.contains("include")));
         assert!(src.skipped.iter().any(|s| s.contains("@属性")));
         assert!(src.skipped.iter().filter(|s| s.contains("非法")).count() >= 2);
@@ -239,9 +261,9 @@ mod tests {
     #[test]
     fn routing_rules_split_by_condition_type() {
         // matches 多条件是 AND：不同类型清单各成一条规则（§AND）
-        let src = parse_rule_source("example.com\nkeyword:video\n10.0.0.0/8\n");
+        let src = parse_rule_source("example.com\nkeyword:video\nregexp:^ad\\.\n10.0.0.0/8\n");
         let rules = to_routing_rules(&src, "cn", "direct-main");
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 4);
         assert_eq!(rules[0].name, "cn");
         assert_eq!(rules[0].target, "direct-main");
         assert!(
@@ -252,9 +274,14 @@ mod tests {
             &rules[1].matches[0],
             MatchCondition::DomainKeyword { .. }
         ));
-        assert_eq!(rules[2].name, "cn-cidr");
+        assert_eq!(rules[2].name, "cn-regexp");
         assert!(matches!(
             &rules[2].matches[0],
+            MatchCondition::DomainRegex { patterns } if patterns == &vec![r"^ad\.".to_string()]
+        ));
+        assert_eq!(rules[3].name, "cn-cidr");
+        assert!(matches!(
+            &rules[3].matches[0],
             MatchCondition::IpCidr { .. }
         ));
 
@@ -289,6 +316,11 @@ mod tests {
                 },
             ]
         );
+
+        // regexp 条目无 DNS 分流面模式，显式报错不静默降级
+        let src = parse_rule_source("regexp:^ad\\.\n");
+        let err = to_dns_rules(&src, DnsGroup::Trusted).unwrap_err();
+        assert!(err.to_string().contains("regexp"), "{err}");
     }
 
     #[test]
