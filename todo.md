@@ -283,6 +283,7 @@ P3（收尾）：
 - [ ] **G1-6 REALITY + XTLS-Vision 出站**——主流机场节点形态，现订阅含 reality-opts/flow 即构建失败；可复用 VMess xray 向量互操作经验。
   **BLOCKED**：需实现 REALITY 客户端（TLS 记录层伪造 ClientHello 的 auth 扩展 + 服务端公钥签名校验）与 XTLS-Vision 分帧（VLESS flow 头 + 明文段标记），配置无 `reality`/`flow` 字段（seep_dsl.rs:795、clash.rs:932 均 `flow: None`），vless.rs 无 flow 处理。需真实 REALITY/XTLS-Vision 节点（xray 服务端）互通验证与 xray 向量互操作经验；现缺此类端点与测试环境。
 - [ ] **G1-7 hysteria2 UDP 面（quinn 载具）+ salamander/端口跳跃**——现归 V2，游戏定位下建议提前。
+  **BLOCKED**：现 connector 基于 `hysteria2` crate 0.1.6 TCP 面，该 crate 无 UDP API（仅 `UdpNotSupported` 错误，未暴露任何 UDP/QUIC stream），`build_udp_connectors` 亦未接入 hy2（runtime_builder.rs:2230）。需自研 hy2 UDP 帧格式或更换/扩展 QUIC 载具、实现 salamander 混淆与端口跳跃，并需真实 hysteria2 UDP 服务端（含 salamander/端口跳跃配置）互通验证；现缺此类端点与测试环境。
 - [ ] **G1-8 DNS 加密上游 DoH/DoT**——现仅裸 UDP 53；cross_check 在深水区才可靠。
 - [ ] **G1-9 rule-set 远程规则提供者 + 订阅级 url-test 常驻测速**。
 - [ ] **G1-10 fake-ip + DNS 回填路由**（配合 G0-3）。
