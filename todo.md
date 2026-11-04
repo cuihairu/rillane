@@ -287,6 +287,7 @@ P3（收尾）：
 - [ ] **G1-8 DNS 加密上游 DoH/DoT**——现仅裸 UDP 53；cross_check 在深水区才可靠。
   **BLOCKED**：`ResolverConfig`/`DnsResolver` 上游仅 `Vec<SocketAddr>`（dns_engine.rs:598），`query_upstream` 仅 `UdpSocket`（dns_engine.rs:880），配置 schema 亦只有地址串。需新增 DoH（HTTPS/RFC8484）与 DoT（TLS/RFC7858）上游类型、wire 格式复用/连接池/证书校验与配置面迁移。可离线实现协议，但必须用真实 DoH/DoT 服务验证证书、EDNS/压缩与解析器互操作；现缺指定加密 DNS 上游与测试环境。
 - [ ] **G1-9 rule-set 远程规则提供者 + 订阅级 url-test 常驻测速**。
+  **BLOCKED**：内联 rule-set 已支持（seep_dsl.rs `SeepRuleSet`/`RuleSet` 引用），但无远程 URL 拉取/热更；url-test 常驻测速仅有骨架（routing `start_health_check_task` 用模拟 `check_node_health`/`measure_node_latency`，lib.rs:286-340）。需新增规则提供者 URL 拉取+热更路径与真实测速目标（HTTP 探测 URL/端口）常驻任务接线；现缺指定远程规则源与测速端点配置/真实服务。
 - [ ] **G1-10 fake-ip + DNS 回填路由**（配合 G0-3）。
 - [ ] **G2-11 redir/tproxy 透明代理入站**（Linux）。
 - [ ] **G2-12 服务端入站协议**（trojan/vless/ss 至少一种）——若坚持纯客户端内核定位则显式决策不做并登记。
