@@ -291,6 +291,7 @@ P3（收尾）：
 - [ ] **G1-10 fake-ip + DNS 回填路由**（配合 G0-3）。
   **BLOCKED**：无 fake-ip 配置/映射实现（全仓无 `fake_ip`/`fakeip` 类型或 198.18.0.0/15 分配），DNS 回填路由需在 TUN 域名解析与路由域名覆写间接线（依赖 G0-3 sniff 集成）。需新增 fake-ip 分配表 + DNS 应答注入 fake 地址 + 反向映射查询 + 路由用原域名；需真实 DNS/TUN 流量验证，且 G0-3 集成未完成（见上）。
 - [ ] **G2-11 redir/tproxy 透明代理入站**（Linux）。
+  **BLOCKED**：`NetworkBlockConfig::validate` 显式拒绝 `transparent`/`tap`/`hybrid`（config/lib.rs:287-290，E1「仅 tun」），无 redir/tproxy 入口、iptables/nftables 重定向或 `SO_ORIGINAL_DST` 处理。需实现透明代理入站（REDIRECT/TPROXY 链 + 原始目标读取 + 协议解析）并需 root/CAP_NET_ADMIN 真实机器与防火墙验证；现缺特权测试环境。
 - [ ] **G2-12 服务端入站协议**（trojan/vless/ss 至少一种）——若坚持纯客户端内核定位则显式决策不做并登记。
 - [ ] **G2-13 tuic/anytls/shadowtls 出站**。
 - [ ] **G2-14 Clash API 兼容层（只读子集 + 面板直连）**——现控制面不兼容 /proxies /connections /traffic，metacubexd/yacd 无法直连。
