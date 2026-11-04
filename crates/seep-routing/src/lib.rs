@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    sync::LazyLock,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -16,6 +17,21 @@ use seep_core::{FlowContext, FlowRouter, RouteDecision};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::time::{interval, sleep};
+
+/// G0-2 域名正则热路径编译缓存（审核发现 2026-11-04）：同一 pattern 反复
+/// 出现的规则源在每流逐条 `Regex::new` 会重复编译并占用 Tokio 工作线程。
+/// 全局进程级缓存只编译一次；命中 O(1)（DashMap get + clone Arc），缺失
+/// 编译一次后常驻。单例编译器保证 insert 后返回值与 map 内一致。
+static REGEX_CACHE: LazyLock<DashMap<String, Arc<regex::Regex>>> = LazyLock::new(DashMap::new);
+
+fn cached_regex(pattern: &str) -> Option<Arc<regex::Regex>> {
+    if let Some(re) = REGEX_CACHE.get(pattern) {
+        return Some(Arc::clone(&re));
+    }
+    let re = Arc::new(regex::Regex::new(pattern).ok()?);
+    REGEX_CACHE.insert(pattern.to_string(), Arc::clone(&re));
+    Some(re)
+}
 
 /// 判断 IP 是否落在 CIDR 内（G0-1 目的 IP-CIDR 匹配）。仅支持 IP 字面量
 /// CIDR（`a.b.c.d/nn` 或 `::/nn`）；host 形式（无 `/`）按主机 /32 或 /128 处理；
@@ -732,15 +748,15 @@ impl RoutingEngine {
 }
 
 fn matches_rule(rule: &RouteRule, ctx: &FlowContext) -> bool {
-    rule.matches.iter().all(|matcher| matches_condition(matcher, ctx))
+    rule.matches
+        .iter()
+        .all(|matcher| matches_condition(matcher, ctx))
 }
 
 /// 单条件匹配（递归支持 Any/Not 逻辑组合）。
 fn matches_condition(cond: &MatchCondition, ctx: &FlowContext) -> bool {
     match cond {
-        MatchCondition::Any { conditions } => conditions
-            .iter()
-            .any(|c| matches_condition(c, ctx)),
+        MatchCondition::Any { conditions } => conditions.iter().any(|c| matches_condition(c, ctx)),
         MatchCondition::Not { condition } => !matches_condition(condition, ctx),
         MatchCondition::DomainSuffix { values } => values
             .iter()
@@ -749,10 +765,10 @@ fn matches_condition(cond: &MatchCondition, ctx: &FlowContext) -> bool {
             .iter()
             .any(|keyword| ctx.target.host.contains(keyword)),
         MatchCondition::DomainRegex { patterns } => patterns.iter().any(|pattern| {
-            // 惰性编译：非法 pattern 恒不命中（构建期校验面应拦截）。
-            // regex 编译有成本，规则条数有限（rule-set/订阅级），命中面
-            // 逐流编译代价可接受；若热路径实测成瓶颈再升级为预编译缓存。
-            regex::Regex::new(pattern)
+            // 构建期 `RoutingConfig::validate` 已拦截非法 pattern；此处
+            // `unwrap_or(false)` 仅为防御面（程序化构造绕过 validate 时
+            // 不 panic）。编译结果走进程级缓存，同一 pattern 只编译一次。
+            cached_regex(pattern)
                 .map(|re| re.is_match(&ctx.target.host))
                 .unwrap_or(false)
         }),
@@ -1253,12 +1269,32 @@ mod tests {
         }
 
         assert_eq!(hit(&engine, "10.1.2.3").await, "proxy", "IPv4 前缀命中");
-        assert_eq!(hit(&engine, "192.168.1.254").await, "proxy", "IPv4 边界内命中");
-        assert_eq!(hit(&engine, "2001:db8:1::9").await, "proxy", "IPv6 前缀命中");
-        assert_eq!(hit(&engine, "203.0.113.9").await, "proxy", "主机形式精确命中");
+        assert_eq!(
+            hit(&engine, "192.168.1.254").await,
+            "proxy",
+            "IPv4 边界内命中"
+        );
+        assert_eq!(
+            hit(&engine, "2001:db8:1::9").await,
+            "proxy",
+            "IPv6 前缀命中"
+        );
+        assert_eq!(
+            hit(&engine, "203.0.113.9").await,
+            "proxy",
+            "主机形式精确命中"
+        );
         assert_eq!(hit(&engine, "11.0.0.1").await, "direct", "CIDR 外不命中");
-        assert_eq!(hit(&engine, "203.0.113.10").await, "direct", "主机形式不匹配");
-        assert_eq!(hit(&engine, "example.com").await, "direct", "域名目标不命中");
+        assert_eq!(
+            hit(&engine, "203.0.113.10").await,
+            "direct",
+            "主机形式不匹配"
+        );
+        assert_eq!(
+            hit(&engine, "example.com").await,
+            "direct",
+            "域名目标不命中"
+        );
     }
 
     /// G0-2 逻辑规则回归：`Any`（OR）与 `Not`（NOT）语义——顶层 `matches`
@@ -1309,12 +1345,32 @@ mod tests {
             engine.route(ctx).await.unwrap().final_node().to_string()
         }
 
-        assert_eq!(route_to(&engine, "x.ads.com").await, "block", "Any: 首项命中");
-        assert_eq!(route_to(&engine, "y.game.net").await, "block", "Any: 次项命中");
-        assert_eq!(route_to(&engine, "other.com").await, "proxy", "Any: 均不命中 → 下条");
+        assert_eq!(
+            route_to(&engine, "x.ads.com").await,
+            "block",
+            "Any: 首项命中"
+        );
+        assert_eq!(
+            route_to(&engine, "y.game.net").await,
+            "block",
+            "Any: 次项命中"
+        );
+        assert_eq!(
+            route_to(&engine, "other.com").await,
+            "proxy",
+            "Any: 均不命中 → 下条"
+        );
         // NOT(private): 非 10/8 命中 proxy；10/8 不命中 NOT → 落到 default
-        assert_eq!(route_to(&engine, "8.8.8.8").await, "proxy", "Not: 非私网命中");
-        assert_eq!(route_to(&engine, "10.0.0.1").await, "direct", "Not: 私网反选");
+        assert_eq!(
+            route_to(&engine, "8.8.8.8").await,
+            "proxy",
+            "Not: 非私网命中"
+        );
+        assert_eq!(
+            route_to(&engine, "10.0.0.1").await,
+            "direct",
+            "Not: 私网反选"
+        );
     }
 
     /// G0-2 域名正则匹配回归：`DomainRegex` 按 Rust `regex` 对目标 host
@@ -1348,8 +1404,16 @@ mod tests {
             engine.route(ctx).await.unwrap().final_node().to_string()
         }
 
-        assert_eq!(route_to(&engine, "ad123.example.com").await, "block", "^ad 前缀命中");
-        assert_eq!(route_to(&engine, "x.doubleclick.net").await, "block", "suffix 正则命中");
+        assert_eq!(
+            route_to(&engine, "ad123.example.com").await,
+            "block",
+            "^ad 前缀命中"
+        );
+        assert_eq!(
+            route_to(&engine, "x.doubleclick.net").await,
+            "block",
+            "suffix 正则命中"
+        );
         assert_eq!(route_to(&engine, "ads.com").await, "direct", "正则不命中");
     }
 
@@ -1380,5 +1444,44 @@ mod tests {
         };
         let decision = engine.route(ctx).await.unwrap();
         assert_eq!(decision.final_node(), "direct");
+    }
+
+    /// G0-2 正则编译缓存回归（审核发现 2026-11-04：每流逐条同步重编译
+    /// 增大连接建立延迟）：同一 pattern 首流编译后，次流经缓存命中——
+    /// 结果一致即可观测缓存语义（DashMap 首写 + 后续读）。
+    #[tokio::test]
+    async fn domain_regex_cached_across_flows() {
+        use seep_core::{FlowId, FlowTarget, TargetProto};
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![RouteRule {
+                name: "cached".into(),
+                matches: vec![MatchCondition::DomainRegex {
+                    patterns: vec![r"^cached\.example\.com$".into()],
+                }],
+                target: "proxy".into(),
+            }],
+        });
+        let route_once = |host: &str| {
+            let ctx = FlowContext {
+                id: FlowId::new(),
+                target: FlowTarget {
+                    host: host.to_string(),
+                    port: 443,
+                    proto: TargetProto::Tcp,
+                },
+                metadata: Default::default(),
+            };
+            async { engine.route(ctx).await.unwrap().final_node().to_string() }
+        };
+
+        assert_eq!(route_once("cached.example.com").await, "proxy", "首流命中");
+        assert_eq!(
+            route_once("cached.example.com").await,
+            "proxy",
+            "次流经缓存命中"
+        );
+        assert_eq!(route_once("other.example.com").await, "direct", "不命中");
     }
 }

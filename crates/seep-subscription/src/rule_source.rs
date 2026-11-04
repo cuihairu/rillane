@@ -126,22 +126,25 @@ pub fn parse_rule_source(raw: &str) -> RuleSourceImport {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        if line.starts_with("include:") {
+            out.skipped
+                .push(format!("{line}（include 需多文件聚合，单文件导入不支持）"));
+            continue;
+        }
+        // @属性过滤先于 regexp 分支（审核发现 2026-11-04）：`regexp:... @cn`
+        // 的属性文本若进入表达式会导致预期域名不命中，且该行本应整行跳过
+        // 报告；故属性检查前置，正则行含属性即整行 skipped。
+        if line.contains('@') {
+            out.skipped
+                .push(format!("{line}（@属性过滤语义不在轻量面内）"));
+            continue;
+        }
         if let Some(v) = line.strip_prefix("regexp:") {
             if v.is_empty() {
                 out.skipped.push(format!("{line}（regexp 为空）"));
             } else {
                 out.regexps.push(v.to_string());
             }
-            continue;
-        }
-        if line.starts_with("include:") {
-            out.skipped
-                .push(format!("{line}（include 需多文件聚合，单文件导入不支持）"));
-            continue;
-        }
-        if line.contains('@') {
-            out.skipped
-                .push(format!("{line}（@属性过滤语义不在轻量面内）"));
             continue;
         }
         if let Some(v) = line.strip_prefix("domain:") {
@@ -256,6 +259,24 @@ mod tests {
         // 越界前缀与坏行入 skipped
         assert_eq!(src.skipped.len(), 2, "{:?}", src.skipped);
         assert!(src.domains.is_empty());
+    }
+
+    /// 审核发现 2026-11-04：`regexp:` 分支原先先于 `@` 属性检查，使
+    /// `regexp:^example\.com$ @cn` 被当作正则导入而非整行跳过——属性文本
+    /// 进入表达式导致预期域名不命中。回归：属性行整行 skipped，不入 regexps。
+    #[test]
+    fn regexp_with_attribute_is_skipped_whole_line() {
+        let src = parse_rule_source("regexp:^example\\.com$ @cn\nregexp:^plain\\.com$\n");
+        assert_eq!(src.regexps, vec![r"^plain\.com$"], "纯正则入 regexps");
+        assert!(
+            src.regexps.iter().all(|r| !r.contains('@')),
+            "属性文本不得进入 regexps"
+        );
+        assert!(
+            src.skipped.iter().any(|s| s.contains("@属性")),
+            "含属性正则行应整行 skipped：{:?}",
+            src.skipped
+        );
     }
 
     #[test]

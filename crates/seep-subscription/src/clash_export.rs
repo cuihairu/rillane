@@ -113,7 +113,9 @@ impl ClashExporter {
             }
             let target = target_name(&rule.target, &direct_names);
             let before = rules.len();
-            condition_to_rules(&rule.matches[0], &target, &mut rules);
+            let mut local_skipped = Vec::new();
+            condition_to_rules(&rule.matches[0], &target, &mut rules, &mut local_skipped);
+            report.skipped.extend(local_skipped);
             if rules.len() == before {
                 report.skipped.push(format!(
                     "规则 {}：Any/Not 逻辑条件暂不导出 Clash",
@@ -150,7 +152,9 @@ fn proxy_mapping(
     ins(&mut m, "name", name);
     match spec {
         EgressConfig::Reject => {
-            report.skipped.push(format!("出口 {name}：reject 无 Clash 对应，跳过"));
+            report
+                .skipped
+                .push(format!("出口 {name}：reject 无 Clash 对应，跳过"));
             return None;
         }
         EgressConfig::Direct => None,
@@ -550,7 +554,12 @@ fn h2_opts(m: &mut Mapping, network: &str, path: Option<&str>, host: Option<&[St
     ins(m, "h2-opts", h);
 }
 
-fn condition_to_rules(cond: &MatchCondition, target: &str, rules: &mut Vec<String>) {
+fn condition_to_rules(
+    cond: &MatchCondition,
+    target: &str,
+    rules: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) {
     match cond {
         MatchCondition::Any { .. } | MatchCondition::Not { .. } => {}
         MatchCondition::DomainSuffix { values } => {
@@ -565,7 +574,16 @@ fn condition_to_rules(cond: &MatchCondition, target: &str, rules: &mut Vec<Strin
         }
         MatchCondition::DomainRegex { patterns } => {
             for p in patterns {
-                rules.push(format!("DOMAIN-REGEX,{p},{target}"));
+                // Clash DOMAIN-REGEX 规则串以逗号分字段（审核发现
+                // 2026-11-04）：含逗号的合法正则导出后会被导入侧拆字段
+                // 截断，往返即损。此面不产出损坏规则，整条跳过并登记。
+                if p.contains(',') {
+                    skipped.push(format!(
+                        "DOMAIN-REGEX,{p},{target}（正则含逗号，Clash 规则串分字段无法往返）"
+                    ));
+                } else {
+                    rules.push(format!("DOMAIN-REGEX,{p},{target}"));
+                }
             }
         }
         MatchCondition::Geoip { country } => {
@@ -941,6 +959,36 @@ mod tests {
             }
             other => panic!("应为 DomainRegex: {other:?}"),
         }
+    }
+
+    /// 审核发现 2026-11-04：`^ad{1,3}\.com$` 是合法正则但含逗号，导出为
+    /// `DOMAIN-REGEX,^ad{1,3}\.com$,vm` 后导入侧按逗号拆字段，正则被截断
+    /// 且 target 变成 `3}\.com$`。回归：含逗号 pattern 不产出损坏规则，
+    /// 整条登记 skipped（调用方可呈现），无 DOMAIN-REGEX 行被导入侧拆坏。
+    #[test]
+    fn domain_regex_containing_comma_is_reported_not_corrupted() {
+        let mut cfg = sample_config();
+        cfg.routing.rules = vec![RouteRule {
+            name: "comma-regex".into(),
+            matches: vec![MatchCondition::DomainRegex {
+                patterns: vec![r"^ad{1,3}\.com$".into()],
+            }],
+            target: "vm".into(),
+        }];
+        let (yaml, report) = ClashExporter.export(&cfg).unwrap();
+        assert_eq!(report.exported_rules, 0, "含逗号正则不应导出");
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("正则含逗号，Clash 规则串分字段无法往返")),
+            "应登记跳过原因：{:?}",
+            report.skipped
+        );
+        assert!(
+            !yaml.contains("DOMAIN-REGEX"),
+            "不得产出会被导入侧拆字段的规则串：{yaml}"
+        );
     }
 
     /// 组策略映射口径：Fixed→select、ConsistentHash→consistent-hashing、

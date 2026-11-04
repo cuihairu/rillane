@@ -185,16 +185,30 @@ impl ProcessAttributor {
         }
 
         let key = (src, proto);
-        let cell = {
+        // 占位守卫：仅由创建 cell 的首领（leader）安装，在正常完成与
+        // future 被取消两种路径都执行移除——审核发现 2026-11-04 指出旧
+        // 实现 await 后移除在「首领被取消」时不执行，映射强引用随不同源
+        // 地址累积永久残留。guard 持 inflight/key/cell，drop 时若占位仍
+        // 指向本 cell（防并发下他代误删）即移除；等待者（found existing）
+        // 不安装 guard，不承担移除职责。
+        let (cell, guard) = {
             let mut inflight = self.inflight.lock().unwrap();
             if let Some(existing) = inflight.get(&key) {
-                existing.clone()
+                (existing.clone(), None)
             } else {
                 let cell = Arc::new(tokio::sync::OnceCell::new());
                 inflight.insert(key, cell.clone());
-                cell
+                let guard = InflightRemoveGuard {
+                    inflight: Arc::clone(&self.inflight),
+                    key,
+                    cell: Arc::clone(&cell),
+                };
+                (cell, Some(guard))
             }
         };
+        // 显式持 guard：无论 get_or_init 正常返回还是 future 被取消（drop），
+        // guard 都在 attribute 作用域退出时移除占位（不再依赖 await 后代码）。
+        let _guard = guard;
         // get_or_init：并发同 key miss 合并为一次 init；init future 被取消/
         // panic 时 OnceCell 自愈（下次调用重跑 init），无 lost-wakeup——
         // 替代旧「OnceCell + Notify」模式（审核发现 2026-11-04）。
@@ -215,16 +229,27 @@ impl ProcessAttributor {
                 found
             })
             .await;
-        // 完成后移除占位：新来者经 cell.get() 直接命中；TTL 过期后的下一次
-        // miss 新建 cell 重扫（不复用旧 cell）。仅当占位仍指向本 cell 才移除
-        // （防并发下他代误删）。
-        {
-            let mut infl = self.inflight.lock().unwrap();
-            if infl.get(&key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
-                infl.remove(&key);
-            }
-        }
         found.clone()
+    }
+}
+
+/// 占位移除守卫：`attribute` 正常完成或 future 被取消（drop）时执行，
+/// 保证 inflight 映射不因取消而残留强引用（审核发现 2026-11-04）。
+struct InflightRemoveGuard {
+    inflight: Arc<Mutex<HashMap<(SocketAddr, SockProto), InflightCell>>>,
+    key: (SocketAddr, SockProto),
+    cell: InflightCell,
+}
+
+impl Drop for InflightRemoveGuard {
+    fn drop(&mut self) {
+        let mut infl = self.inflight.lock().unwrap();
+        if infl
+            .get(&self.key)
+            .is_some_and(|c| Arc::ptr_eq(c, &self.cell))
+        {
+            infl.remove(&self.key);
+        }
     }
 }
 
@@ -396,7 +421,10 @@ mod tests {
             let r = h.await.unwrap();
             assert_eq!(
                 r,
-                Some(ProcessInfo { pid: 4242, comm: "gameproc".into() })
+                Some(ProcessInfo {
+                    pid: 4242,
+                    comm: "gameproc".into()
+                })
             );
         }
 
@@ -404,16 +432,20 @@ mod tests {
         assert_eq!(attr.scan_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // cell 已完成并移除：TTL 过期后的下一次 miss 新建 cell 重扫。
-        let attr_expired = Arc::new(
-            ProcessAttributor::with_root(&root).with_ttl(Duration::from_millis(50)),
-        );
+        let attr_expired =
+            Arc::new(ProcessAttributor::with_root(&root).with_ttl(Duration::from_millis(50)));
         let attr_expired2 = attr_expired.clone();
         let first = attr_expired.attribute(src, SockProto::Udp).await;
         assert!(first.is_some());
         tokio::time::sleep(Duration::from_millis(80)).await;
         let second = attr_expired2.attribute(src, SockProto::Udp).await;
         assert!(second.is_some());
-        assert_eq!(attr_expired2.scan_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            attr_expired2
+                .scan_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -437,7 +469,35 @@ mod tests {
 
         // 下一次 miss：get_or_init 应重跑 init（自愈），返回结果不挂起。
         let r = attr.attribute(src, SockProto::Udp).await;
-        assert_eq!(r, Some(ProcessInfo { pid: 4242, comm: "gameproc".into() }));
+        assert_eq!(
+            r,
+            Some(ProcessInfo {
+                pid: 4242,
+                comm: "gameproc".into()
+            })
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 回归（审核发现 2026-11-04）：最后一个调用者在初始化等待期间被取消
+    /// 时，旧实现的 await 后移除逻辑不会执行，inflight 映射持有强引用导致
+    /// 未再次访问的键永久残留。守卫 drop 后 inflight 必须为空。
+    #[tokio::test]
+    async fn cancelled_last_caller_removes_inflight_placeholder() {
+        let root = fixture();
+        let attr = Arc::new(ProcessAttributor::with_root(&root));
+        let src: SocketAddr = "192.168.0.192:4660".parse().unwrap();
+
+        let attr1 = attr.clone();
+        let h = tokio::spawn(async move { attr1.attribute(src, SockProto::Udp).await });
+        h.abort();
+        let _ = h.await;
+
+        assert!(
+            attr.inflight.lock().unwrap().is_empty(),
+            "future 取消后占位必须由 Drop guard 移除，不得永久残留强引用"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

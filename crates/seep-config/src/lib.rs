@@ -1496,8 +1496,38 @@ impl RoutingConfig {
                     .map_err(|e| anyhow::anyhow!("组 {} 的 slo 配置非法: {e}", group.name))?;
             }
         }
+        // G0-2 域名正则构建期校验（审核发现 2026-11-04）：非法或不支持的
+        // 正则若不在构建期拦截，匹配面会吞掉编译错误回落默认路由，使拦截
+        // 或代理规则静默失效。此处逐条编译验证，报错含规则名与 pattern。
+        for rule in &self.rules {
+            for cond in &rule.matches {
+                validate_condition_regex(cond, &rule.name)?;
+            }
+        }
         Ok(())
     }
+}
+
+/// 递归校验逻辑组合条件内的 `DomainRegex` pattern（Any/Not 嵌套）。
+fn validate_condition_regex(cond: &MatchCondition, rule_name: &str) -> anyhow::Result<()> {
+    match cond {
+        MatchCondition::Any { conditions } => {
+            for c in conditions {
+                validate_condition_regex(c, rule_name)?;
+            }
+        }
+        MatchCondition::Not { condition } => {
+            validate_condition_regex(condition, rule_name)?;
+        }
+        MatchCondition::DomainRegex { patterns } => {
+            for p in patterns {
+                regex::Regex::new(p)
+                    .map_err(|e| anyhow::anyhow!("规则 {} 的正则非法（{}）: {e}", rule_name, p))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
