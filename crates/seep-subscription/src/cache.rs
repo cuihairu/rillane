@@ -271,22 +271,41 @@ impl SubscriptionCache {
 
     /// 删除缓存条目
     pub fn remove(&self, key: &str) -> Option<String> {
-        let mut cache = self.memory_cache.write().expect("cache lock poisoned");
+        // 内存突变（锁序 memory_cache → current_size）与磁盘删除分离：不再
+        // 持 memory_cache 写锁跨同步 fs::remove_file（磁盘 IO 阻塞全部缓存
+        // 操作）。与 cleanup_* 同型——先释放写锁，再持 disk_io_lock 删盘。
+        let old_content = {
+            let mut cache = self.memory_cache.write().expect("cache lock poisoned");
+            cache.remove(key).map(|entry| {
+                let content_size = entry.content.len() as u64;
+                let mut current_size = self
+                    .current_size
+                    .write()
+                    .expect("current_size lock poisoned");
+                *current_size = current_size.saturating_sub(content_size);
+                entry.content
+            })
+        };
 
-        let old_content = cache.remove(key).map(|entry| {
-            // 更新大小统计
-            let content_size = entry.content.len() as u64;
-            let mut current_size = self
-                .current_size
-                .write()
-                .expect("current_size lock poisoned");
-            *current_size = current_size.saturating_sub(content_size);
-
-            entry.content
-        });
-
-        // 删除磁盘文件
+        // 锁外删盘（持 disk_io_lock 与 set 落盘串行；删前复查，若并发 set
+        // 重插了活跃副本则跳过——不误删 set 刚写的磁盘文件）。
         let disk_path = self.get_disk_path(key);
+        let Ok(_disk_guard) = self.disk_io_lock.lock() else {
+            warn!(
+                target: "seep::subscription::cache",
+                "磁盘锁毒化，跳过磁盘删除"
+            );
+            return old_content;
+        };
+        if self
+            .memory_cache
+            .read()
+            .expect("cache lock poisoned")
+            .contains_key(key)
+        {
+            // 并发 set 已重插活跃副本，保留其磁盘文件。
+            return old_content;
+        }
         if let Err(err) = fs::remove_file(&disk_path) {
             if !matches!(err.kind(), std::io::ErrorKind::NotFound) {
                 warn!(
@@ -311,15 +330,24 @@ impl SubscriptionCache {
 
     /// 清空所有缓存
     pub fn clear(&self) -> Result<()> {
-        let mut cache = self.memory_cache.write().expect("cache lock poisoned");
-        cache.clear();
+        // 内存突变（锁序 memory_cache → current_size）与磁盘删除分离：不再
+        // 持 memory_cache 写锁跨同步 read_dir/remove_file（磁盘 IO 阻塞全部
+        // 缓存操作）。与 cleanup_* 同型——先释放写锁，再持 disk_io_lock 删盘。
+        {
+            let mut cache = self.memory_cache.write().expect("cache lock poisoned");
+            cache.clear();
+            let mut current_size = self
+                .current_size
+                .write()
+                .expect("current_size lock poisoned");
+            *current_size = 0;
+        }
 
-        // 重置大小统计
-        let mut current_size = self
-            .current_size
-            .write()
-            .expect("current_size lock poisoned");
-        *current_size = 0;
+        // 锁外删盘（持 disk_io_lock 与 set 落盘串行，消除写删交错）。
+        let _disk_guard = self
+            .disk_io_lock
+            .lock()
+            .map_err(|_| anyhow!("磁盘锁毒化"))?;
 
         // 删除所有磁盘文件
         if let Err(err) = fs::read_dir(&self.cache_dir) {
@@ -812,6 +840,7 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&dir);
     }
+
 
     /// 容量上限路径：曾因持 current_size 写锁跨 cleanup（其内部取
     /// memory_cache 锁）与插入路径锁序成环（ABBA）而死锁，多次超限插入触发。
