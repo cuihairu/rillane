@@ -299,6 +299,7 @@ P3（收尾）：
 - [x] **G2-14 Clash API 兼容层（只读子集 + 面板直连）**——现控制面不兼容 /proxies /connections /traffic，metacubexd/yacd 无法直连。
   **已实现（2026-11-04 `f03424b`）**：`control_plane` 增只读端点 `/proxies`（出口名→ClashProxyDto{type,now,udp,history}）、`/connections`（flow stats 派生 ClashConnectionDto + downloadTotal/uploadTotal）、`/traffic`（runtime up/down）——metacubexd/yacd 可直连读。回归 `clash_api_readonly_endpoints_shape`。`cargo test --workspace` 全绿（44 二进制）。只读子集完成；写操作（/proxies/{name} 切换、/connections/{id} 断开）与 WebSocket 订阅面（/traffic 实时推送）未做，留作后续。
 - [ ] **G2-15 httpupgrade/xhttp 传输；G3-16 macOS/Windows TUN + auto_route 全局接管；ICMP 代理、UoT、hosts 映射**。
+  **BLOCKED**：httpupgrade/xhttp 传输未实现（vmess/vless 仅 tcp/ws/grpc，ws.rs 为 WebSocket 面）；macOS/Windows TUN 仅 Linux 实现（seep-platform `linux.rs`，`tun.rs` 接口无 macos/windows 实现）；ICMP 代理/UoT/hosts 映射全缺。需新增 httpupgrade 握手与 xhttp 帧、各平台 TUN/路由实现、ICMP 与 UoT 协议——需真实 macOS/Windows 机器、特权环境与真实代理节点验证；现缺平台与端点。
 
 ---
 
