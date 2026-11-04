@@ -285,6 +285,7 @@ P3（收尾）：
 - [ ] **G1-7 hysteria2 UDP 面（quinn 载具）+ salamander/端口跳跃**——现归 V2，游戏定位下建议提前。
   **BLOCKED**：现 connector 基于 `hysteria2` crate 0.1.6 TCP 面，该 crate 无 UDP API（仅 `UdpNotSupported` 错误，未暴露任何 UDP/QUIC stream），`build_udp_connectors` 亦未接入 hy2（runtime_builder.rs:2230）。需自研 hy2 UDP 帧格式或更换/扩展 QUIC 载具、实现 salamander 混淆与端口跳跃，并需真实 hysteria2 UDP 服务端（含 salamander/端口跳跃配置）互通验证；现缺此类端点与测试环境。
 - [ ] **G1-8 DNS 加密上游 DoH/DoT**——现仅裸 UDP 53；cross_check 在深水区才可靠。
+  **BLOCKED**：`ResolverConfig`/`DnsResolver` 上游仅 `Vec<SocketAddr>`（dns_engine.rs:598），`query_upstream` 仅 `UdpSocket`（dns_engine.rs:880），配置 schema 亦只有地址串。需新增 DoH（HTTPS/RFC8484）与 DoT（TLS/RFC7858）上游类型、wire 格式复用/连接池/证书校验与配置面迁移。可离线实现协议，但必须用真实 DoH/DoT 服务验证证书、EDNS/压缩与解析器互操作；现缺指定加密 DNS 上游与测试环境。
 - [ ] **G1-9 rule-set 远程规则提供者 + 订阅级 url-test 常驻测速**。
 - [ ] **G1-10 fake-ip + DNS 回填路由**（配合 G0-3）。
 - [ ] **G2-11 redir/tproxy 透明代理入站**（Linux）。
