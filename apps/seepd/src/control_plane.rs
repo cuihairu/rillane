@@ -152,6 +152,9 @@ impl ControlPlane {
             (Method::GET, "/plugins/stats") => self.handle_plugins_stats().await,
             (Method::GET, "/runtime/stats") => self.handle_runtime_stats().await,
             (Method::GET, "/routing/stats") => self.handle_routing_stats().await,
+            (Method::GET, "/proxies") => self.handle_clash_proxies().await,
+            (Method::GET, "/connections") => self.handle_clash_connections().await,
+            (Method::GET, "/traffic") => self.handle_clash_traffic().await,
             (Method::GET, "/runtime/config") => self.handle_runtime_config().await,
             (Method::GET, "/events") => self.handle_events().await,
             (Method::GET, "/logs") => self.handle_logs(req).await,
@@ -1326,6 +1329,62 @@ impl ControlPlane {
         json(StatusCode::OK, &stats)
     }
 
+    /// Clash 兼容 `/proxies`：只读子集——每个出口名映射到 Clash 代理对象。
+    /// `type` 取 direct/reject/其余按 egress_kind；`now`/`udp`/`history` 提供
+    /// 面板所需最小字段。metacubexd/yacd 可直连读取。
+    async fn handle_clash_proxies(&self) -> Response<RespBody> {
+        let connectors = self.runtime.get_egress_connectors();
+        let mut map: HashMap<String, ClashProxyDto> = HashMap::new();
+        for (name, connector) in connectors {
+            map.insert(
+                name,
+                ClashProxyDto {
+                    r#type: connector.name().to_string(),
+                    now: String::new(),
+                    udp: false,
+                    history: Vec::new(),
+                },
+            );
+        }
+        json(StatusCode::OK, &map)
+    }
+
+    /// Clash 兼容 `/connections`：只读子集——从 flow stats 派生连接表。
+    async fn handle_clash_connections(&self) -> Response<RespBody> {
+        let flows = self.runtime.get_flow_stats();
+        let items: Vec<ClashConnectionDto> = flows
+            .into_iter()
+            .map(|f| ClashConnectionDto {
+                id: format!("{}-{}", f.ingress, f.egress),
+                metadata: ClashConnMeta { host: String::new() },
+                rule: f.ingress.clone(),
+                rule_payload: String::new(),
+                chains: vec![f.egress.clone()],
+                start: 0,
+                upload: f.upstream,
+                download: f.downstream,
+                upload_total: f.upstream,
+                download_total: f.downstream,
+            })
+            .collect();
+        let out = serde_json::json!({
+            "downloadTotal": 0u64,
+            "uploadTotal": 0u64,
+            "connections": items,
+        });
+        json(StatusCode::OK, &out)
+    }
+
+    /// Clash 兼容 `/traffic`：只读子集——runtime 全局流量（up/down）。
+    async fn handle_clash_traffic(&self) -> Response<RespBody> {
+        let s = self.runtime.get_stats();
+        let out = serde_json::json!({
+            "up": s.bytes_uploaded,
+            "down": s.bytes_downloaded,
+        });
+        json(StatusCode::OK, &out)
+    }
+
     async fn handle_runtime_stats(&self) -> Response<RespBody> {
         let stats = self.runtime.get_stats();
         let dto = RuntimeStatsDto::from(stats);
@@ -2123,6 +2182,41 @@ struct MeshNodeDto {
     capability: NodeCapability,
     online: bool,
     last_seen_seconds: u64,
+}
+
+/// Clash 兼容 `/proxies` 单代理对象（只读子集）。
+#[derive(Debug, Clone, Serialize)]
+struct ClashProxyDto {
+    r#type: String,
+    now: String,
+    udp: bool,
+    history: Vec<ClashProxyHistory>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ClashProxyHistory {
+    time: u64,
+    delay_ms: u32,
+}
+
+/// Clash 兼容 `/connections` 单连接（只读子集）。
+#[derive(Debug, Clone, Serialize)]
+struct ClashConnectionDto {
+    id: String,
+    metadata: ClashConnMeta,
+    rule: String,
+    rule_payload: String,
+    chains: Vec<String>,
+    start: u64,
+    upload: u64,
+    download: u64,
+    upload_total: u64,
+    download_total: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ClashConnMeta {
+    host: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3472,6 +3566,28 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    /// G2-14 Clash API 只读兼容子集：`/proxies` 返回出口映射、
+    /// `/connections` 返回连接表、`/traffic` 返回全局 up/down。
+    #[tokio::test]
+    async fn clash_api_readonly_endpoints_shape() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let proxies = get_body(&cp, "/proxies").await;
+        let v: serde_json::Value = serde_json::from_str(&proxies).unwrap();
+        assert!(v.is_object(), "proxies 应为对象");
+
+        let connections = get_body(&cp, "/connections").await;
+        let c: serde_json::Value = serde_json::from_str(&connections).unwrap();
+        assert!(c["connections"].is_array(), "connections 应为数组");
+        assert!(c["downloadTotal"].is_u64(), "downloadTotal 应为 u64");
+
+        let traffic = get_body(&cp, "/traffic").await;
+        let t: serde_json::Value = serde_json::from_str(&traffic).unwrap();
+        assert!(t["up"].is_u64(), "up 应为 u64");
+        assert!(t["down"].is_u64(), "down 应为 u64");
     }
 
     /// 环回 UDP 回声（P0-2 集成先例同构）
