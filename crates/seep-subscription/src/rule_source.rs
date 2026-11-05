@@ -3,15 +3,16 @@
 //! 输入 = v2fly 文本规则源行集（geosite 域名清单 / chnroutes CIDR 清单），
 //! 逐行解析为结构化条目，再按目标面产出：
 //! - 路由面（`routing.rules`）：域清单 → `DomainSuffix` 联合条件、
-//!   `keyword:` → `DomainKeyword`、`regexp:` → `DomainRegex`、CIDR →
-//!   `Network`——各成一条规则
+//!   `full:` → `DomainFull`（G0-2 完全域匹配独立条件）、`keyword:` →
+//!   `DomainKeyword`、`regexp:` → `DomainRegex`、CIDR → `Network`——各成
+//!   一条规则
 //!   （`matches` 多条件是 AND，不同类型清单不能并进一条，见本文件 §AND）；
 //! - DNS 分流面（`network.dns.rules`）：裸域/`domain:` → exact + suffix
 //!   双 pattern（D-2：suffix 需前导点且不含本域，exact 补本域）、`full:` →
 //!   exact；keyword/regexp/CIDR 在 DNS 面无对应模式，显式报错不静默降级。
 //!
-//! 语义对齐先例：clash.rs `DOMAIN → DomainSuffix`（Seep 无完全域匹配路由
-//! 条件，转 suffix 并承认超集——`full:` 在路由面同样转 suffix）。
+//! 语义对齐先例：clash.rs `DOMAIN → DomainFull`（G0-2 完全域匹配路由条件
+//! 已就位，不再转 suffix 超集）。
 
 use std::net::IpAddr;
 
@@ -35,16 +36,27 @@ pub struct RuleSourceImport {
     pub skipped: Vec<String>,
 }
 
-/// 路由面产物：最多三条规则（域/关键词/CIDR 各一，空类不出规则）。
-/// 规则名取 `<name>`、`<name>-keyword`、`<name>-cidr`。
+/// 路由面产物：最多四条规则（域/完全域/关键词/CIDR 各一，空类不出规则）。
+/// 规则名取 `<name>`、`<name>-full`、`<name>-keyword`、`<name>-regexp`、
+/// `<name>-cidr`。
 pub fn to_routing_rules(src: &RuleSourceImport, name: &str, target: &str) -> Vec<RouteRule> {
     let mut rules = Vec::new();
-    let mut suffixes: Vec<String> = src.domains.clone();
-    suffixes.extend(src.fulls.iter().cloned());
-    if !suffixes.is_empty() {
+    if !src.domains.is_empty() {
         rules.push(RouteRule {
             name: name.to_string(),
-            matches: vec![MatchCondition::DomainSuffix { values: suffixes }],
+            matches: vec![MatchCondition::DomainSuffix {
+                values: src.domains.clone(),
+            }],
+            target: target.to_string(),
+        });
+    }
+    if !src.fulls.is_empty() {
+        // G0-2 `full:`：完全域匹配独立条件（不再并入 suffix 超集）。
+        rules.push(RouteRule {
+            name: format!("{name}-full"),
+            matches: vec![MatchCondition::DomainFull {
+                values: src.fulls.clone(),
+            }],
             target: target.to_string(),
         });
     }
@@ -306,13 +318,19 @@ mod tests {
             MatchCondition::IpCidr { .. }
         ));
 
-        // 纯域源只出一条规则；full 并入 suffix 联合（路由面无完全域匹配）
-        let only_domains = parse_rule_source("a.com\nfull:b.com\n");
-        let rules = to_routing_rules(&only_domains, "x", "auto");
-        assert_eq!(rules.len(), 1);
-        assert!(
-            matches!(&rules[0].matches[0], MatchCondition::DomainSuffix { values } if values.len() == 2)
-        );
+        // G0-2：`full:` 独立成完全域匹配规则，不再并入 suffix 超集。
+        let full_src = parse_rule_source("a.com\nfull:b.com\n");
+        let rules = to_routing_rules(&full_src, "x", "auto");
+        assert_eq!(rules.len(), 2);
+        assert!(matches!(
+            &rules[0].matches[0],
+            MatchCondition::DomainSuffix { values } if values == &vec!["a.com".to_string()]
+        ));
+        assert_eq!(rules[1].name, "x-full");
+        assert!(matches!(
+            &rules[1].matches[0],
+            MatchCondition::DomainFull { values } if values == &vec!["b.com".to_string()]
+        ));
     }
 
     #[test]

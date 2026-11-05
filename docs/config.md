@@ -99,7 +99,7 @@ routing:
 ```
 
 - Seven `strategy` values: `fixed | latency | random | bandwidth | weighted | consistent_hash | round_robin`.
-- Six `matches` condition types (`type` tags): `domain_suffix{values}` / `domain_keyword{values}` / `geoip{country}` / `network{cidrs}` / `port{values}` / `process{values}` (the process-name scope is `/proc/<pid>/comm` truncated to 15 bytes; **only the TUN ingress carries that annotation**, so other ingresses never match). `geoip` only reads the `geoip.country` annotation (no producer writes it today -- see [architecture.md](architecture.md)).
+- Routing condition `type` tags: `any{conditions}` / `not{condition}` / `domain_suffix{values}` / `domain_keyword{values}` / `domain_regex{patterns}` / `domain_full{values}` / `geoip{country}` / `geo_site{category}` / `ip_cidr{cidrs}` / `network{cidrs}` / `port{values}` / `process{values}`. The process-name scope is `/proc/<pid>/comm` truncated to 15 bytes; **only the TUN ingress carries that annotation**, so other ingresses never match. `geoip` reads `routing.geoip_db` (MaxMind DB Country `.mmdb`, target IP literal only) and `geo_site` reads `routing.geosite_db` (v2fly `.dat`); if a database path is absent or fails to load, the condition never matches. Relative database paths are resolved against the config-file directory.
 - `slo` validation: `loss_ratio` in [0,1], `loss_penalty_ms >= 0`; the `latency` strategy takes the lowest score inside the `slo:` gate, and the chain side's `slo_watch` switches automatically on degradation.
 
 ## udp (the whole block is off by default; changes take effect on restart -- session state cannot be hot-migrated)

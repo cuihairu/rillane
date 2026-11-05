@@ -99,7 +99,7 @@ routing:
 ```
 
 - `strategy` 七种：`fixed | latency | random | bandwidth | weighted | consistent_hash | round_robin`。
-- `matches` 条件六型（`type` 标签）：`domain_suffix{values}` / `domain_keyword{values}` / `geoip{country}` / `network{cidrs}` / `port{values}` / `process{values}`（进程名口径 `/proc/<pid>/comm` 截断 15 字节；**仅 TUN 入口有该注解**，其它 ingress 恒不命中）。`geoip` 仅读注解 `geoip.country`（当前无生产者写入——见 [architecture.md](architecture.md)）。
+- 路由条件 `type` 标签：`any{conditions}` / `not{condition}` / `domain_suffix{values}` / `domain_keyword{values}` / `domain_regex{patterns}` / `domain_full{values}` / `geoip{country}` / `geo_site{category}` / `ip_cidr{cidrs}` / `network{cidrs}` / `port{values}` / `process{values}`。进程名口径 `/proc/<pid>/comm` 截断 15 字节；**仅 TUN 入口有该注解**，其它 ingress 恒不命中。`geoip` 读 `routing.geoip_db`（MaxMind DB Country `.mmdb`，仅目标 IP 字面量）；`geo_site` 读 `routing.geosite_db`（v2fly `.dat`）。数据库路径缺席或加载失败时对应条件恒不命中。数据库相对路径按配置文件所在目录解析。
 - `slo` 校验：`loss_ratio ∈ [0,1]`、`loss_penalty_ms ≥ 0`；`latency` 策略在 `slo:` 门内取最低分，chain 侧 `slo_watch` 劣化自动切换。
 
 ## udp（缺省整块关；变更重启生效——会话状态不可热迁移）

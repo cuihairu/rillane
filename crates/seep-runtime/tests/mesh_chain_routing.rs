@@ -35,7 +35,7 @@ async fn mesh_target_routes_to_chain_decision() {
         routing: RoutingConfig {
             default_node: "mesh.exit1".into(),
             groups: vec![],
-            rules: vec![],
+            rules: vec![], ..Default::default()
         },
         udp: seep_config::UdpConfig::default(),
         network: None,

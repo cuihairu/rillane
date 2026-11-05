@@ -779,6 +779,7 @@ impl ClashConverter {
             default_node,
             groups,
             rules,
+            ..RoutingConfig::default()
         };
 
         let config = seep_config::SeepConfig {
@@ -1155,8 +1156,7 @@ impl ClashConverter {
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
             ClashRule::Domain { domains, target } => {
-                // Seep 暂不支持完全域名匹配，转换为后缀匹配
-                let matches = vec![MatchCondition::DomainSuffix {
+                let matches = vec![MatchCondition::DomainFull {
                     values: domains.clone(),
                 }];
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
@@ -1183,15 +1183,13 @@ impl ClashConverter {
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
             ClashRule::Geosite {
-                country_code: _,
-                target: _,
+                country_code,
+                target,
             } => {
-                // Seep 暂不支持 GeoSite，跳过
-                warn!(
-                    target: "seep::subscription::clash",
-                    "跳过 GeoSite 规则，Seep 暂不支持"
-                );
-                Err(anyhow!("GeoSite 规则暂不支持"))
+                let matches = vec![MatchCondition::GeoSite {
+                    category: country_code.clone(),
+                }];
+                Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
             ClashRule::SrcPort { ports, target } => {
                 let matches = vec![MatchCondition::Port {

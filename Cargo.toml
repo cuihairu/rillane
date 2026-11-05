@@ -90,3 +90,9 @@ aes-gcm = "0.10"
 chacha20poly1305 = "0.10"
 sha3 = "0.10"
 crc32fast = "1.4"
+# GeoIP/GeoSite database access (G0-2): maxminddb for GeoLite2/GeoIP2 .mmdb
+# and geosite-rs for v2fly .dat (both geoip and geosite protobuf formats).
+maxminddb = "0.32"
+geosite-rs = "0.1.6"
+# Test-only writer to synthesize a small .mmdb without external files.
+maxminddb-writer = "0.1.3"

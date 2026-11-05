@@ -19,7 +19,7 @@ seep/
 ## crate 划分
 - `seep-core`：抽象统一的 Flow / Router / Middleware 接口，是所有协议实现的契约层。
 - `seep-config`：定义配置 schema、解析/校验逻辑，支持 YAML/JSON/TOML 自动识别。
-- `seep-routing`：策略与路由引擎，输出 `RouteDecision`；匹配以度量/条件为主——Geoip 仅读注解 `geoip.country`（当前无生产者写入该注解，条件恒不命中），PSL 匹配未实现。
+- `seep-routing`：策略与路由引擎，输出 `RouteDecision`；匹配以度量/条件为主；GeoIP/GeoSite 条件按可选的 `routing.geoip_db`/`routing.geosite_db` 数据库查询，数据库缺席或加载失败时条件恒不命中，PSL 匹配未实现。
 - `seep-protocols`：入口、出口协议栈（Socks5/HTTP/Hysteria/Trojan/...），通过 `IngressEndpoint` 与 `EgressConnector` 接口挂接。
 - `seep-telemetry`：日志与 Tracing 初始化 + 日志捕获环（`logs_text`）；指标不在此注册——Prometheus 文本由控制面 `handle_metrics` 渲染，计数器散布各 crate（如 seep-core UDP metrics）。
 - `seep-platform`：封装各平台的安装、服务管理、权限处理，编译期通过 feature 划分实现。

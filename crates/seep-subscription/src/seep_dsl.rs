@@ -275,6 +275,8 @@ pub enum SeepRule {
     IpCidr { cidrs: Vec<String>, target: String },
     /// GeoIP
     Geoip { country: String, target: String },
+    /// GeoSite 站点类别（v2fly `.dat` 数据库）
+    GeoSite { category: String, target: String },
     /// 端口范围
     Port { ports: Vec<u16>, target: String },
     /// 进程名
@@ -413,6 +415,7 @@ impl SeepDslConverter {
             default_node: seep_config.default_target.clone(),
             groups,
             rules,
+            ..RoutingConfig::default()
         };
 
         let config = seep_config::SeepConfig {
@@ -1121,8 +1124,7 @@ impl SeepDslConverter {
                 (matches, target.clone())
             }
             SeepRule::Domain { domains, target } => {
-                // Seep 暂不支持完全域名匹配，转换为后缀匹配
-                let matches = vec![MatchCondition::DomainSuffix {
+                let matches = vec![MatchCondition::DomainFull {
                     values: domains.clone(),
                 }];
                 (matches, target.clone())
@@ -1142,6 +1144,12 @@ impl SeepDslConverter {
             SeepRule::Geoip { country, target } => {
                 let matches = vec![MatchCondition::Geoip {
                     country: country.clone(),
+                }];
+                (matches, target.clone())
+            }
+            SeepRule::GeoSite { category, target } => {
+                let matches = vec![MatchCondition::GeoSite {
+                    category: category.clone(),
                 }];
                 (matches, target.clone())
             }

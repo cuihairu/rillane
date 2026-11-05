@@ -577,6 +577,11 @@ fn condition_to_rules(
                 rules.push(format!("DOMAIN-KEYWORD,{v},{target}"));
             }
         }
+        MatchCondition::DomainFull { values } => {
+            for v in values {
+                rules.push(format!("DOMAIN,{v},{target}"));
+            }
+        }
         MatchCondition::DomainRegex { patterns } => {
             for p in patterns {
                 // Clash DOMAIN-REGEX 规则串以逗号分字段（审核发现
@@ -593,6 +598,9 @@ fn condition_to_rules(
         }
         MatchCondition::Geoip { country } => {
             rules.push(format!("GEOIP,{country},{target}"));
+        }
+        MatchCondition::GeoSite { category } => {
+            rules.push(format!("GEOSITE,{category},{target}"));
         }
         MatchCondition::Network { cidrs } => {
             for c in cidrs {
@@ -857,6 +865,8 @@ mod tests {
                         target: "vm".into(),
                     },
                 ],
+                geoip_db: None,
+                geosite_db: None,
             },
             ..serde_yaml::from_str(
                 "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
@@ -994,6 +1004,46 @@ mod tests {
             !yaml.contains("DOMAIN-REGEX"),
             "不得产出会被导入侧拆字段的规则串：{yaml}"
         );
+    }
+
+    /// G0-2 回归：`DomainFull`/`GeoSite` 导出为 Clash 的 `DOMAIN`/
+    /// `GEOSITE` 行，并可被导入侧解析回对应条件（保持完全域/站点类别
+    /// 语义，不再退化为 suffix 超集或跳过）。
+    #[test]
+    fn domain_full_and_geosite_roundtrip() {
+        let mut cfg = sample_config();
+        cfg.routing.rules = vec![
+            RouteRule {
+                name: "exact".into(),
+                matches: vec![MatchCondition::DomainFull {
+                    values: vec!["exact.org".into()],
+                }],
+                target: "vm".into(),
+            },
+            RouteRule {
+                name: "sites".into(),
+                matches: vec![MatchCondition::GeoSite {
+                    category: "cn".into(),
+                }],
+                target: "direct-out".into(),
+            },
+        ];
+        let (yaml, report) = ClashExporter.export(&cfg).unwrap();
+        assert_eq!(report.exported_rules, 2, "{:?}", report.skipped);
+        assert!(yaml.contains("DOMAIN,exact.org,vm"), "{yaml}");
+        assert!(yaml.contains("GEOSITE,cn,DIRECT"), "{yaml}");
+
+        let parsed = ClashConverter::new()
+            .parse(&yaml)
+            .unwrap_or_else(|e| panic!("导出 YAML 应可被导入侧解析: {e:#}\n{yaml}"));
+        assert!(parsed
+            .rules
+            .iter()
+            .any(|rule| matches!(rule, ClashRule::Domain { domains, .. } if domains == &vec!["exact.org".to_string()])));
+        assert!(parsed
+            .rules
+            .iter()
+            .any(|rule| matches!(rule, ClashRule::Geosite { country_code, .. } if country_code == "cn")));
     }
 
     /// 审核发现 2026-11-05：含逗号正则被整条跳过时，clash_export 仍走

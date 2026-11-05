@@ -3463,6 +3463,7 @@ mod tests {
                 default_node: "direct".to_string(),
                 groups: vec![],
                 rules: vec![],
+                ..Default::default()
             },
             udp: UdpConfig {
                 enabled: true,
@@ -3519,6 +3520,7 @@ mod tests {
                 default_node: "trojan-out".to_string(),
                 groups: vec![],
                 rules: vec![],
+                ..Default::default()
             },
             udp: UdpConfig {
                 enabled: false,

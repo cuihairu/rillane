@@ -17,6 +17,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::time::{interval, sleep};
 
+mod geo;
+pub use geo::{geoip_country, host_to_ip, GeoDatabases, GeoSiteDb};
+
 /// G0-2 域名正则热路径编译缓存（审核发现 2026-11-04）：同一 pattern 反复
 /// 出现的规则源在每流逐条 `Regex::new` 会重复编译并占用 Tokio 工作线程。
 /// 引擎级缓存只编译一次；命中 O(1)（DashMap get + clone Arc）。并发 miss
@@ -163,10 +166,19 @@ pub struct RoutingEngine {
     // 引擎级缓存，`reload` 时按新配置 prune 失效 pattern，避免热更新/订阅
     // 刷新后历史 pattern 占内存累积（审核发现 2026-11-05）。
     regex_cache: DashMap<String, Arc<regex::Regex>>,
+    // GeoIP/GeoSite 数据库容器（G0-2）：懒加载，路径取配置
+    // `routing.geoip_db`/`routing.geosite_db`。`reload` 时路径未变复用已
+    // 加载句柄；路径变化重建容器（热更路径切换生效）。`RwLock` 使
+    // `reload(&self)` 可原地替换（route 面读锁取当前容器）。
+    geo: RwLock<Arc<GeoDatabases>>,
 }
 
 impl RoutingEngine {
     pub fn new(config: RoutingConfig) -> Self {
+        let geo = Arc::new(GeoDatabases::new(
+            config.geoip_db.clone(),
+            config.geosite_db.clone(),
+        ));
         let engine = Self {
             config: RwLock::new(config),
             group_cache: RwLock::new(HashMap::new()),
@@ -176,12 +188,25 @@ impl RoutingEngine {
             bandwidth_stats: DashMap::new(),
             link_quality: DashMap::new(),
             regex_cache: DashMap::new(),
+            geo: RwLock::new(geo),
         };
         engine.build_group_cache();
         engine
     }
 
     pub fn reload(&self, next: RoutingConfig) {
+        // G0-2：GeoIP/GeoSite 路径随配置热更。路径未变保留已加载句柄
+        // （懒加载只做一次）；路径变化重建容器（新路径下次匹配时加载）。
+        let need_new_geo = {
+            let cur = self.config.read().expect("routing poisoned");
+            cur.geoip_db != next.geoip_db || cur.geosite_db != next.geosite_db
+        };
+        if need_new_geo {
+            *self.geo.write().expect("geo lock poisoned") = Arc::new(GeoDatabases::new(
+                next.geoip_db.clone(),
+                next.geosite_db.clone(),
+            ));
+        }
         *self.config.write().expect("routing poisoned") = next;
         self.build_group_cache();
         self.clear_round_robin_counters();
@@ -647,8 +672,9 @@ impl RoutingEngine {
 impl FlowRouter for RoutingEngine {
     async fn route(&self, ctx: FlowContext) -> Result<RouteDecision> {
         let config = self.snapshot();
+        let geo = self.geo.read().expect("geo lock poisoned").clone();
         for rule in &config.rules {
-            if matches_rule(&self.regex_cache, rule, &ctx) {
+            if matches_rule(&self.regex_cache, &geo, rule, &ctx) {
                 return self
                     .resolve_target(&rule.target, Some(rule.name.clone()), Some(&ctx))
                     .await;
@@ -797,45 +823,70 @@ impl RoutingEngine {
 
 fn matches_rule(
     regex_cache: &DashMap<String, Arc<regex::Regex>>,
+    geo: &GeoDatabases,
     rule: &RouteRule,
     ctx: &FlowContext,
 ) -> bool {
     rule.matches
         .iter()
-        .all(|matcher| matches_condition(regex_cache, matcher, ctx))
+        .all(|matcher| matches_condition(regex_cache, geo, matcher, ctx))
 }
 
 /// 单条件匹配（递归支持 Any/Not 逻辑组合）。
 fn matches_condition(
     regex_cache: &DashMap<String, Arc<regex::Regex>>,
+    geo: &GeoDatabases,
     cond: &MatchCondition,
     ctx: &FlowContext,
 ) -> bool {
     match cond {
         MatchCondition::Any { conditions } => conditions
             .iter()
-            .any(|c| matches_condition(regex_cache, c, ctx)),
-        MatchCondition::Not { condition } => !matches_condition(regex_cache, condition, ctx),
+            .any(|c| matches_condition(regex_cache, geo, c, ctx)),
+        MatchCondition::Not { condition } => !matches_condition(regex_cache, geo, condition, ctx),
         MatchCondition::DomainSuffix { values } => values
             .iter()
             .any(|suffix| ctx.target.host.ends_with(suffix)),
         MatchCondition::DomainKeyword { values } => values
             .iter()
             .any(|keyword| ctx.target.host.contains(keyword)),
+        MatchCondition::DomainFull { values } => {
+            let host = ctx.target.host.to_ascii_lowercase();
+            values
+                .iter()
+                .any(|v| host == v.to_ascii_lowercase())
+        }
         MatchCondition::DomainRegex { patterns } => patterns.iter().any(|pattern| {
             // 构建期 `RoutingConfig::validate` 已拦截非法 pattern；此处
             // `unwrap_or(false)` 仅为防御面（程序化构造绕过 validate 时
-            // 不 panic）。编译结果走进程级缓存，同一 pattern 只编译一次。
+            // 不 panic）。编译结果走引擎级缓存（`regex_cache`），同一
+            // pattern 只编译一次，`reload` 时按新配置 prune 失效 pattern。
             cached_regex(regex_cache, pattern)
                 .map(|re| re.is_match(&ctx.target.host))
                 .unwrap_or(false)
         }),
-        MatchCondition::Geoip { country } => ctx
-            .metadata
-            .annotations
-            .get("geoip.country")
-            .map(|c| c == country)
-            .unwrap_or(false),
+        MatchCondition::Geoip { country } => {
+            // G0-2：数据库查询替换注解等价物。目标为域名时不解析 DNS
+            // （路由面不做解析），恒不命中；IP 字面量查 mmdb 国家码。
+            let Some(ip) = host_to_ip(&ctx.target.host) else {
+                return false;
+            };
+            let Some(db) = geo.geoip() else {
+                return false;
+            };
+            geoip_country(&db, ip)
+                .map(|c| c.eq_ignore_ascii_case(country))
+                .unwrap_or(false)
+        }
+        MatchCondition::GeoSite { category } => {
+            // G0-2：GeoSite 站点类别按目标主机查询 `.dat` 数据库。
+            // 域名/IP 均可查询（域名条目按域名比较；IP 字面量对域名
+            // 条目恒不命中——v2fly 站点库仅域名面）。
+            let Some(db) = geo.geosite() else {
+                return false;
+            };
+            db.matches(category, &ctx.target.host)
+        }
         MatchCondition::Network { cidrs } => ctx
             .metadata
             .annotations
@@ -887,6 +938,7 @@ mod tests {
             default_node: "good".into(),
             groups: vec![],
             rules: vec![],
+            ..Default::default()
         });
         let members = two_member_group();
         let refs: Vec<&GroupDescriptorMember> = members.iter().collect();
@@ -915,6 +967,7 @@ mod tests {
             default_node: "good".into(),
             groups: vec![],
             rules: vec![],
+            ..Default::default()
         });
         let members = two_member_group();
         let refs: Vec<&GroupDescriptorMember> = members.iter().collect();
@@ -983,6 +1036,7 @@ mod tests {
             default_node: "good".into(),
             groups: vec![],
             rules: vec![],
+            ..Default::default()
         });
         let members = two_member_group();
         let refs: Vec<&GroupDescriptorMember> = members.iter().collect();
@@ -1044,6 +1098,7 @@ mod tests {
                 }),
             }],
             rules: vec![],
+            ..Default::default()
         };
         assert!(ok.validate().is_ok());
 
@@ -1097,6 +1152,7 @@ mod tests {
                 }],
                 target: "game-node".into(),
             }],
+            ..Default::default()
         });
         let mut ctx = FlowContext {
             id: FlowId::new(),
@@ -1156,6 +1212,7 @@ mod tests {
                 slo: None,
             }],
             rules: vec![],
+            ..Default::default()
         });
         engine.update_link_quality("real", 30, 0.0);
         engine.latency_stats.insert("legacy".into(), 40);
@@ -1214,6 +1271,7 @@ mod tests {
                 }),
             }],
             rules: vec![],
+            ..Default::default()
         });
         engine.update_link_quality("ok", 30, 0.0);
         engine.update_link_quality("violator", 80, 0.02);
@@ -1262,6 +1320,7 @@ mod tests {
                 },
             ],
             rules: vec![],
+            ..Default::default()
         });
         engine.update_link_quality("a", 80, 0.0);
         engine.update_link_quality("b", 60, 0.0);
@@ -1311,6 +1370,7 @@ mod tests {
                 }],
                 target: "proxy".into(),
             }],
+            ..Default::default()
         });
 
         async fn hit(engine: &RoutingEngine, host: &str) -> String {
@@ -1388,6 +1448,7 @@ mod tests {
                     target: "proxy".into(),
                 },
             ],
+            ..Default::default()
         });
 
         async fn route_to(engine: &RoutingEngine, host: &str) -> String {
@@ -1447,6 +1508,7 @@ mod tests {
                 }],
                 target: "block".into(),
             }],
+            ..Default::default()
         });
 
         async fn route_to(engine: &RoutingEngine, host: &str) -> String {
@@ -1490,6 +1552,7 @@ mod tests {
                 }],
                 target: "block".into(),
             }],
+            ..Default::default()
         });
         let ctx = FlowContext {
             id: FlowId::new(),
@@ -1520,6 +1583,7 @@ mod tests {
                 }],
                 target: "proxy".into(),
             }],
+            ..Default::default()
         });
         let route_once = |host: &str| {
             let ctx = FlowContext {
@@ -1559,6 +1623,7 @@ mod tests {
                 }],
                 target: "proxy".into(),
             }],
+            ..Default::default()
         });
         // 先经旧规则集路由，把旧 pattern 编入缓存。
         let ctx = FlowContext {
@@ -1585,6 +1650,7 @@ mod tests {
                 }],
                 target: "proxy".into(),
             }],
+            ..Default::default()
         });
         assert!(
             !engine.regex_cache.contains_key(r"^old\.example\.com$"),
@@ -1621,6 +1687,7 @@ mod tests {
                 }],
                 target: "proxy".into(),
             }],
+            ..Default::default()
         }));
         let mut tasks = Vec::new();
         for _ in 0..64 {
@@ -1646,5 +1713,219 @@ mod tests {
             1,
             "并发 miss 后缓存内应恰有一条 pattern"
         );
+    }
+
+    /// G0-2 路由面 GeoIP/GeoSite 集成：合成 mmdb/.dat 写入临时文件，引擎
+    /// 以对应配置加载；IP 字面量按国家码分流、域名按 geosite 类别分流；
+    /// 无数据库时条件恒不命中落默认节点。
+    #[tokio::test]
+    async fn geoip_geosite_routes_through_databases() {
+        use seep_core::{FlowId, FlowTarget, TargetProto};
+
+        // 合成 GeoIP Country mmdb：1.0.0.0/8 → CN。
+        let mmdb_dir = std::env::temp_dir().join(format!("seep-rt-geoip-{}", std::process::id()));
+        std::fs::create_dir_all(&mmdb_dir).unwrap();
+        let mmdb_path = mmdb_dir.join("cn.mmdb");
+        let mut mmdb = maxminddb_writer::Database::default();
+        mmdb.metadata.database_type = "GeoLite2-Country".to_string();
+        mmdb.metadata.languages = vec!["en".to_string()];
+        mmdb.metadata.binary_format_major_version = 2;
+        let cn: maxminddb::geoip2::Country = maxminddb::geoip2::Country {
+            country: maxminddb::geoip2::country::Country {
+                iso_code: Some("CN"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let data = mmdb.insert_value(cn).unwrap();
+        mmdb.insert_node(
+            "1.0.0.0/8".parse::<maxminddb_writer::paths::IpAddrWithMask>().unwrap(),
+            data,
+        );
+        let mut mmdb_buf = Vec::new();
+        mmdb.write_to(&mut mmdb_buf).unwrap();
+        std::fs::write(&mmdb_path, &mmdb_buf).unwrap();
+
+        // 合成 GeoSite dat：cn 类别含 Domain=example.com、Full=exact.org。
+        let dat_path = mmdb_dir.join("cn.dat");
+        let geosite = geosite_rs::GeoSiteList {
+            entry: vec![geosite_rs::GeoSite {
+                country_code: "cn".into(),
+                domain: vec![
+                    geosite_rs::Domain {
+                        r#type: geosite_rs::domain::Type::Domain as i32,
+                        value: "example.com".into(),
+                        attribute: vec![],
+                    },
+                ],
+            }],
+        };
+        std::fs::write(&dat_path, geosite_rs::encode_geosite(geosite)).unwrap();
+
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![
+                RouteRule {
+                    name: "cn-geoip".into(),
+                    matches: vec![MatchCondition::Geoip {
+                        country: "CN".into(),
+                    }],
+                    target: "cn-node".into(),
+                },
+                RouteRule {
+                    name: "cn-geosite".into(),
+                    matches: vec![MatchCondition::GeoSite {
+                        category: "cn".into(),
+                    }],
+                    target: "cn-node".into(),
+                },
+                RouteRule {
+                    name: "exact-domain".into(),
+                    matches: vec![MatchCondition::DomainFull {
+                        values: vec!["exact.org".into()],
+                    }],
+                    target: "full-node".into(),
+                },
+            ],
+            geoip_db: Some(mmdb_path.clone()),
+            geosite_db: Some(dat_path.clone()),
+            ..Default::default()
+        });
+
+        async fn route_to(engine: &RoutingEngine, host: &str) -> String {
+            let ctx = FlowContext {
+                id: FlowId::new(),
+                target: FlowTarget {
+                    host: host.to_string(),
+                    port: 443,
+                    proto: TargetProto::Tcp,
+                },
+                metadata: Default::default(),
+            };
+            engine.route(ctx).await.unwrap().final_node().to_string()
+        }
+
+        // GeoIP：IP 字面量命中 CN；非 CN 不命中（域名不解析）。
+        assert_eq!(route_to(&engine, "1.2.3.4").await, "cn-node", "GeoIP CN 命中");
+        assert_eq!(route_to(&engine, "8.8.8.8").await, "direct", "非 CN 不命中");
+        assert_eq!(route_to(&engine, "example.com").await, "cn-node", "GeoSite 后缀命中");
+        assert_eq!(route_to(&engine, "www.example.com").await, "cn-node", "GeoSite 子域命中");
+        assert_eq!(route_to(&engine, "exact.org").await, "full-node", "DomainFull 命中");
+        assert_eq!(route_to(&engine, "sub.exact.org").await, "direct", "DomainFull 子域不命中");
+        assert_eq!(route_to(&engine, "other.net").await, "direct", "均不命中落默认");
+    }
+
+    /// G0-2 无数据库（路径缺省 None）时 GeoIP/GeoSite 条件恒不命中——
+    /// 与原「注解等价物无生产者」行为一致，不阻塞路由。
+    #[tokio::test]
+    async fn geo_conditions_never_match_without_db() {
+        use seep_core::{FlowId, FlowTarget, TargetProto};
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![
+                RouteRule {
+                    name: "geoip".into(),
+                    matches: vec![MatchCondition::Geoip {
+                        country: "CN".into(),
+                    }],
+                    target: "cn".into(),
+                },
+                RouteRule {
+                    name: "geosite".into(),
+                    matches: vec![MatchCondition::GeoSite {
+                        category: "cn".into(),
+                    }],
+                    target: "cn".into(),
+                },
+            ],
+            ..Default::default()
+        });
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "1.2.3.4".into(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            metadata: Default::default(),
+        };
+        assert_eq!(engine.route(ctx).await.unwrap().final_node(), "direct");
+    }
+
+    /// G0-2 数据库路径热更：`reload` 换新数据库路径后，新路径在下次匹配
+    /// 时生效（容器重建）；路径未变则复用已加载句柄。
+    #[tokio::test]
+    async fn reload_swaps_geo_database_path() {
+        use seep_core::{FlowId, FlowTarget, TargetProto};
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![RouteRule {
+                name: "cn".into(),
+                matches: vec![MatchCondition::Geoip { country: "CN".into() }],
+                target: "cn-node".into(),
+            }],
+            ..Default::default()
+        });
+        // 无数据库：不命中。
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "1.2.3.4".into(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            metadata: Default::default(),
+        };
+        assert_eq!(engine.route(ctx).await.unwrap().final_node(), "direct");
+
+        // 热更到合成 mmdb 路径：下次匹配加载并命中。
+        let mmdb_dir = std::env::temp_dir().join(format!("seep-rt-reload-{}", std::process::id()));
+        std::fs::create_dir_all(&mmdb_dir).unwrap();
+        let mmdb_path = mmdb_dir.join("cn.mmdb");
+        let mut mmdb = maxminddb_writer::Database::default();
+        mmdb.metadata.database_type = "GeoLite2-Country".to_string();
+        mmdb.metadata.languages = vec!["en".to_string()];
+        mmdb.metadata.binary_format_major_version = 2;
+        let cn: maxminddb::geoip2::Country = maxminddb::geoip2::Country {
+            country: maxminddb::geoip2::country::Country {
+                iso_code: Some("CN"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let data = mmdb.insert_value(cn).unwrap();
+        mmdb.insert_node(
+            "1.0.0.0/8".parse::<maxminddb_writer::paths::IpAddrWithMask>().unwrap(),
+            data,
+        );
+        let mut mmdb_buf = Vec::new();
+        mmdb.write_to(&mut mmdb_buf).unwrap();
+        std::fs::write(&mmdb_path, &mmdb_buf).unwrap();
+
+        engine.reload(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![RouteRule {
+                name: "cn".into(),
+                matches: vec![MatchCondition::Geoip { country: "CN".into() }],
+                target: "cn-node".into(),
+            }],
+            geoip_db: Some(mmdb_path.clone()),
+            geosite_db: None,
+            ..Default::default()
+        });
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "1.2.3.4".into(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            metadata: Default::default(),
+        };
+        assert_eq!(engine.route(ctx).await.unwrap().final_node(), "cn-node");
     }
 }

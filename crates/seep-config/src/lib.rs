@@ -1077,11 +1077,24 @@ impl SeepConfig {
             .extension()
             .and_then(|ext| ext.to_str())
             .map(str::to_lowercase);
-        Self::from_str(&raw, hint.as_deref())
+        let mut config = Self::from_str_without_profile(&raw, hint.as_deref())?;
+        let base_dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+        if let Some(base_dir) = base_dir {
+            config.routing.geoip_db = config.routing.geoip_db.map(|db| resolve_geo_db(&db, base_dir));
+            config.routing.geosite_db = config.routing.geosite_db.map(|db| resolve_geo_db(&db, base_dir));
+        }
+        config.apply_profile();
+        Ok(config)
     }
 
     pub fn from_str(raw: &str, hint: Option<&str>) -> Result<Self> {
-        let mut config: Self = match hint {
+        let mut config = Self::from_str_without_profile(raw, hint)?;
+        config.apply_profile();
+        Ok(config)
+    }
+
+    fn from_str_without_profile(raw: &str, hint: Option<&str>) -> Result<Self> {
+        let config: Self = match hint {
             Some("json") => serde_json::from_str(raw).context("JSON 配置解析失败")?,
             Some("toml") => toml::from_str(raw).context("TOML 配置解析失败")?,
             Some("yaml") | Some("yml") => serde_yaml::from_str(raw).context("YAML 配置解析失败")?,
@@ -1090,9 +1103,6 @@ impl SeepConfig {
                 .or_else(|_| toml::from_str(raw))
                 .context("无法识别配置格式")?,
         };
-        // P2-3 §5-1：场景预设缺省填充（唯一入口——load_from_path 经此覆盖；
-        // 订阅转换等程序化构造不触发，「订阅不产场景块」同 obfuscation 先例）
-        config.apply_profile();
         Ok(config)
     }
 
@@ -1181,6 +1191,29 @@ impl SeepConfig {
     pub fn config_dir(&self) -> PathBuf {
         PathBuf::from("/etc/seep")
     }
+}
+
+/// GeoIP/GeoSite 数据库路径解析（load_from_path 专属）：相对路径 join 配
+/// 置文件目录并归一化（`..`/`.` 逐段消解，保留根路径），绝对路径原样返回。
+fn resolve_geo_db(db: &Path, base_dir: &Path) -> PathBuf {
+    if db.is_absolute() {
+        return db.to_path_buf();
+    }
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for comp in base_dir.components().chain(db.components()) {
+        match comp {
+            std::path::Component::ParentDir => {
+                if parts.last().map(|p| p != "..").unwrap_or(false) {
+                    parts.pop();
+                } else {
+                    parts.push(comp.as_os_str().to_os_string());
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => parts.push(other.as_os_str().to_os_string()),
+        }
+    }
+    parts.into_iter().collect()
 }
 
 /// game 预设规则模板域（scenario-profiles.md §4/§9-4：示例性常见平台域
@@ -1484,6 +1517,28 @@ pub struct RoutingConfig {
     pub default_node: String,
     pub groups: Vec<PolicyGroup>,
     pub rules: Vec<RouteRule>,
+    /// GeoIP 数据库文件（MaxMind DB `.mmdb`，GeoLite2/GeoIP2 Country）。
+    /// G0-2：路径缺省 None = 无数据库，`Geoip` 条件恒不命中（与原「注解
+    /// 等价物」行为一致）；文件存在但解析失败在首次匹配时 WARN 并保持未
+    /// 加载（fail-open）。相对路径按配置文件所在目录解析（见 load）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geoip_db: Option<PathBuf>,
+    /// GeoSite 数据库文件（v2fly `.dat`，protobuf）。语义同 `geoip_db`：
+    /// None = 无数据库，`GeoSite` 条件恒不命中。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geosite_db: Option<PathBuf>,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            default_node: "direct".to_string(),
+            groups: Vec::new(),
+            rules: Vec::new(),
+            geoip_db: None,
+            geosite_db: None,
+        }
+    }
 }
 
 impl RoutingConfig {
@@ -1505,6 +1560,46 @@ impl RoutingConfig {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod geo_db_tests {
+    use super::*;
+
+    fn base_yaml() -> &'static str {
+        "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: null\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n"
+    }
+
+    #[test]
+    fn routing_geo_db_fields_parse_and_serialize() {
+        let yaml = "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: null\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n  geoip_db: /data/geoip.mmdb\n  geosite_db: /data/geosite.dat\n";
+        let cfg: SeepConfig = serde_yaml::from_str(yaml).expect("应解析");
+        assert_eq!(cfg.routing.geoip_db.as_deref(), Some(std::path::Path::new("/data/geoip.mmdb")));
+        assert_eq!(cfg.routing.geosite_db.as_deref(), Some(std::path::Path::new("/data/geosite.dat")));
+        let rendered = serde_yaml::to_string(&cfg).unwrap();
+        let reparsed: SeepConfig = serde_yaml::from_str(&rendered).unwrap();
+        assert_eq!(reparsed.routing.geoip_db, cfg.routing.geoip_db);
+        assert_eq!(reparsed.routing.geosite_db, cfg.routing.geosite_db);
+    }
+
+    #[test]
+    fn routing_geo_db_absent_defaults_to_none() {
+        let cfg: SeepConfig = serde_yaml::from_str(base_yaml()).expect("无 geoip_db/geosite_db 应可解析");
+        assert_eq!(cfg.routing.geoip_db, None);
+        assert_eq!(cfg.routing.geosite_db, None);
+    }
+
+    #[test]
+    fn load_from_path_resolves_relative_geo_db() {
+        let dir = std::env::temp_dir().join(format!("seep-cfg-geo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("seep.yaml");
+        let yaml = "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: null\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n  geoip_db: geoip.mmdb\n  geosite_db: ../geosite.dat\n";
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = SeepConfig::load_from_path(&path).unwrap();
+        assert_eq!(cfg.routing.geoip_db.as_deref(), Some(dir.join("geoip.mmdb").as_path()));
+        assert_eq!(cfg.routing.geosite_db.as_deref(), Some(dir.parent().unwrap().join("geosite.dat").as_path()));
     }
 }
 
@@ -1835,6 +1930,20 @@ pub enum MatchCondition {
     },
     Geoip {
         country: String,
+    },
+    /// GeoSite 站点类别匹配（G0-2）：目标主机按 v2fly `.dat` 数据库查询
+    /// 站点类别（`geosite:` 前缀，如 `cn`/`geolocation-!cn`）。数据库由
+    /// `routing.geosite_db` 给出；缺失/未加载时恒不命中（与原「无数据库」
+    /// 行为一致）。匹配语义见 seep-routing `geo.rs`。
+    GeoSite {
+        category: String,
+    },
+    /// 完全域名匹配（G0-2 `domain full:`）：目标主机与值**完全相等**
+    /// （大小写不敏感，ASCII 小写化比较）。与 `DomainSuffix` 不同，本
+    /// 条件只命中域名自身，不含其子域——文本规则源 `full:` 与 Clash
+    /// `DOMAIN` 规则导入走此变体（不再并入 suffix 联合的超集语义）。
+    DomainFull {
+        values: Vec<String>,
     },
     Network {
         cidrs: Vec<String>,

@@ -114,6 +114,7 @@ fn create_test_config() -> RoutingConfig {
                 target: "hash-group".to_string(),
             },
         ],
+        ..Default::default()
     }
 }
 

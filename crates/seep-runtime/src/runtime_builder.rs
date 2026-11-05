@@ -3719,6 +3719,7 @@ mod tests {
                 default_node: "direct".to_string(),
                 groups: vec![],
                 rules: vec![],
+                ..Default::default()
             },
             udp: seep_config::UdpConfig::default(),
             network: None,
@@ -3763,6 +3764,7 @@ mod tests {
                 default_node: "direct".to_string(),
                 groups: vec![],
                 rules: vec![],
+                ..Default::default()
             },
             udp: seep_config::UdpConfig::default(),
             network: None,
@@ -3813,6 +3815,7 @@ mod tests {
                 default_node: "direct".to_string(),
                 groups: vec![],
                 rules: vec![],
+                ..Default::default()
             },
             udp: seep_config::UdpConfig::default(),
             network: None,
@@ -3884,6 +3887,7 @@ mod tests {
                 default_node: "direct".to_string(),
                 groups: vec![],
                 rules: vec![],
+                ..Default::default()
             },
             udp: seep_config::UdpConfig::default(),
             network: None,
@@ -3922,6 +3926,7 @@ mod tests {
                 default_node: "direct".to_string(),
                 groups: vec![],
                 rules: vec![],
+                ..Default::default()
             },
             udp: seep_config::UdpConfig::default(),
             network: None,
@@ -3982,6 +3987,7 @@ mod tests {
                     slo: None,
                 }],
                 rules: vec![],
+                ..Default::default()
             },
             udp: seep_config::UdpConfig::default(),
             network: None,
@@ -4052,6 +4058,7 @@ mod tests {
                         target: "p1".to_string(),
                     },
                 ],
+                ..Default::default()
             },
             udp: seep_config::UdpConfig::default(),
             network: None,
@@ -4127,6 +4134,7 @@ mod tests {
                 default_node: "direct".to_string(),
                 groups: vec![],
                 rules: vec![],
+                ..Default::default()
             },
             udp: seep_config::UdpConfig {
                 enabled: udp_enabled,
@@ -4631,6 +4639,7 @@ mod tests {
             default_node: "direct-out".into(),
             groups: vec![group("g", &[("ss-out", 1), ("direct-out", 1)])],
             rules: vec![rule("r1", "g")],
+            ..Default::default()
         };
         assert!(scan_udp_capability(&routing, &egress, &connectors).is_ok());
         assert_eq!(connectors.len(), 2);
@@ -4651,6 +4660,7 @@ mod tests {
             default_node: "direct-out".into(),
             groups: vec![],
             rules: vec![rule("ads", "block-ads")],
+            ..Default::default()
         };
         assert!(
             scan_udp_capability(&routing, &egress, &connectors).is_ok(),
@@ -4684,6 +4694,7 @@ mod tests {
             default_node: "vmess-out".into(),
             groups: vec![group("g", &[("hy2-out", 1)])],
             rules: vec![rule("r1", "g")],
+            ..Default::default()
         };
         let err = scan_udp_capability(&routing, &egress, &connectors)
             .expect_err("UDP 不可达节点应使构建失败");
@@ -4709,6 +4720,7 @@ mod tests {
             default_node: "ss-out".into(),
             groups: vec![],
             rules: vec![rule("r1", "mesh.exit1")],
+            ..Default::default()
         };
         assert!(scan_udp_capability(&routing, &egress, &connectors).is_ok());
     }
@@ -4735,6 +4747,7 @@ mod tests {
             default_node: "g1".into(),
             groups: vec![g1, g2],
             rules: vec![],
+            ..Default::default()
         };
         // 同步函数若无限循环会挂起测试——线程 + 限时回收判定终止。
         let (tx, rx) = std::sync::mpsc::channel();
@@ -4869,6 +4882,7 @@ mod tests {
                 default_node: "direct".to_string(),
                 groups: vec![],
                 rules: vec![],
+                ..Default::default()
             },
             udp,
             network: None,
@@ -5066,6 +5080,7 @@ mod tests {
                 default_node: "direct".to_string(),
                 groups: vec![],
                 rules: vec![],
+                ..Default::default()
             },
             udp: seep_config::UdpConfig::default(),
             network: None,

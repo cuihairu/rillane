@@ -107,6 +107,11 @@ egress:
 
 routing:
   default_node: direct-main
+  # GeoIP 数据库（MaxMind DB Country `.mmdb`）；相对路径按本配置文件目录解析。
+  # 缺席/加载失败时 `geoip` 条件恒不命中（fail-open）。缺省 null。
+  geoip_db: null
+  # GeoSite 数据库（v2fly `.dat`）；语义同 geoip_db。缺省 null。
+  geosite_db: null
   groups:
     - name: auto
       strategy: latency

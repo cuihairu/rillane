@@ -10,6 +10,7 @@ fn cfg(rules: Vec<RouteRule>) -> RoutingConfig {
         default_node: "direct".into(),
         groups: vec![],
         rules,
+        ..Default::default()
     }
 }
 

@@ -19,7 +19,7 @@ seep/
 ## Crate breakdown
 - `seep-core`: unified abstractions for Flow / Router / Middleware, the contract layer every protocol implements against.
 - `seep-config`: config schema definition, parsing and validation; YAML/JSON/TOML are auto-detected.
-- `seep-routing`: policy and routing engine, emitting `RouteDecision`; matching is metric/condition based -- Geoip only reads the `geoip.country` annotation (no producer writes that annotation today, so the condition never matches), PSL matching is not implemented.
+- `seep-routing`: policy and routing engine, emitting `RouteDecision`; matching is metric/condition based; GeoIP/GeoSite conditions query optional `.mmdb`/`.dat` databases configured by `routing.geoip_db`/`routing.geosite_db`, and absent or failed databases never match.
 - `seep-protocols`: ingress and egress protocol stacks (Socks5/HTTP/Hysteria/Trojan/...), plugged in through the `IngressEndpoint` and `EgressConnector` interfaces.
 - `seep-telemetry`: logging and tracing init + a log capture ring (`logs_text`); metrics are not registered here -- Prometheus text is rendered by the control plane's `handle_metrics`, counters live across crates (e.g. seep-core UDP metrics).
 - `seep-platform`: per-platform installation, service management and permission handling, split at compile time via features.

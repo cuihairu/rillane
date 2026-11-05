@@ -1647,6 +1647,8 @@ proxies:
                     default_node: "direct".to_string(),
                     groups: vec![],
                     rules: vec![],
+                    geoip_db: None,
+                    geosite_db: None,
                 },
                 udp: seep_config::UdpConfig::default(),
                 network: None,
