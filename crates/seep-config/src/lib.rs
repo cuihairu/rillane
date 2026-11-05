@@ -1199,18 +1199,18 @@ fn resolve_geo_db(db: &Path, base_dir: &Path) -> PathBuf {
     if db.is_absolute() {
         return db.to_path_buf();
     }
-    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    let mut parts: Vec<std::path::Component> = Vec::new();
     for comp in base_dir.components().chain(db.components()) {
         match comp {
             std::path::Component::ParentDir => {
-                if parts.last().map(|p| p != "..").unwrap_or(false) {
-                    parts.pop();
+                if parts.last() == Some(&std::path::Component::RootDir) {
+                    // 越出配置目录深度时钳制在根：`..` 不再弹出根、不累积。
                 } else {
-                    parts.push(comp.as_os_str().to_os_string());
+                    parts.pop();
                 }
             }
             std::path::Component::CurDir => {}
-            other => parts.push(other.as_os_str().to_os_string()),
+            other => parts.push(other),
         }
     }
     parts.into_iter().collect()
@@ -1600,6 +1600,18 @@ mod geo_db_tests {
         let cfg = SeepConfig::load_from_path(&path).unwrap();
         assert_eq!(cfg.routing.geoip_db.as_deref(), Some(dir.join("geoip.mmdb").as_path()));
         assert_eq!(cfg.routing.geosite_db.as_deref(), Some(dir.parent().unwrap().join("geosite.dat").as_path()));
+    }
+
+    #[test]
+    fn resolve_geo_db_clamps_relative_paths_at_root() {
+        assert_eq!(
+            resolve_geo_db(Path::new("../../../geoip.mmdb"), Path::new("/etc/seep")),
+            Path::new("/geoip.mmdb")
+        );
+        assert_eq!(
+            resolve_geo_db(Path::new("databases/../../geoip.mmdb"), Path::new("/etc/seep")),
+            Path::new("/etc/geoip.mmdb")
+        );
     }
 }
 

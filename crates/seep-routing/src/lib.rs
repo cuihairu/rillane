@@ -30,13 +30,23 @@ fn cached_regex(
     cache: &DashMap<String, Arc<regex::Regex>>,
     pattern: &str,
 ) -> Option<Arc<regex::Regex>> {
+    cached_regex_with(cache, pattern, |pattern| {
+        regex::Regex::new(pattern).ok().map(Arc::new)
+    })
+}
+
+fn cached_regex_with(
+    cache: &DashMap<String, Arc<regex::Regex>>,
+    pattern: &str,
+    compile: impl Fn(&str) -> Option<Arc<regex::Regex>>,
+) -> Option<Arc<regex::Regex>> {
     if let Some(re) = cache.get(pattern) {
         return Some(Arc::clone(&re));
     }
     match cache.entry(pattern.to_string()) {
         dashmap::mapref::entry::Entry::Occupied(occupied) => Some(Arc::clone(occupied.get())),
         dashmap::mapref::entry::Entry::Vacant(vacant) => {
-            let re = Arc::new(regex::Regex::new(pattern).ok()?);
+            let re = compile(pattern)?;
             vacant.insert(Arc::clone(&re));
             Some(re)
         }
@@ -844,12 +854,18 @@ fn matches_condition(
             .iter()
             .any(|c| matches_condition(regex_cache, geo, c, ctx)),
         MatchCondition::Not { condition } => !matches_condition(regex_cache, geo, condition, ctx),
-        MatchCondition::DomainSuffix { values } => values
-            .iter()
-            .any(|suffix| ctx.target.host.ends_with(suffix)),
-        MatchCondition::DomainKeyword { values } => values
-            .iter()
-            .any(|keyword| ctx.target.host.contains(keyword)),
+        MatchCondition::DomainSuffix { values } => {
+            let host = ctx.target.host.to_ascii_lowercase();
+            values
+                .iter()
+                .any(|suffix| host.ends_with(&suffix.to_ascii_lowercase()))
+        }
+        MatchCondition::DomainKeyword { values } => {
+            let host = ctx.target.host.to_ascii_lowercase();
+            values
+                .iter()
+                .any(|keyword| host.contains(&keyword.to_ascii_lowercase()))
+        }
         MatchCondition::DomainFull { values } => {
             let host = ctx.target.host.to_ascii_lowercase();
             values
@@ -862,7 +878,7 @@ fn matches_condition(
             // 不 panic）。编译结果走引擎级缓存（`regex_cache`），同一
             // pattern 只编译一次，`reload` 时按新配置 prune 失效 pattern。
             cached_regex(regex_cache, pattern)
-                .map(|re| re.is_match(&ctx.target.host))
+                .map(|re| re.is_match(&ctx.target.host.to_ascii_lowercase()))
                 .unwrap_or(false)
         }),
         MatchCondition::Geoip { country } => {
@@ -1607,6 +1623,66 @@ mod tests {
         assert_eq!(route_once("other.example.com").await, "direct", "不命中");
     }
 
+    /// G0-2 域名匹配大小写口径回归：Suffix/Keyword/Full/Regex 四类统一
+    /// ASCII 小写匹配——旧实现仅 Full 小写、Regex 原始大小写，四类分裂。
+    #[tokio::test]
+    async fn domain_match_conditions_are_case_insensitive() {
+        use seep_core::{FlowId, FlowTarget, TargetProto};
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            groups: vec![],
+            rules: vec![
+                RouteRule {
+                    name: "suffix".into(),
+                    matches: vec![MatchCondition::DomainSuffix {
+                        values: vec!["example.com".into()],
+                    }],
+                    target: "suffix-node".into(),
+                },
+                RouteRule {
+                    name: "keyword".into(),
+                    matches: vec![MatchCondition::DomainKeyword {
+                        values: vec!["video".into()],
+                    }],
+                    target: "keyword-node".into(),
+                },
+                RouteRule {
+                    name: "full".into(),
+                    matches: vec![MatchCondition::DomainFull {
+                        values: vec!["exact.org".into()],
+                    }],
+                    target: "full-node".into(),
+                },
+                RouteRule {
+                    name: "regex".into(),
+                    matches: vec![MatchCondition::DomainRegex {
+                        patterns: vec![r"^ad\d+\.".into()],
+                    }],
+                    target: "regex-node".into(),
+                },
+            ],
+            ..Default::default()
+        });
+
+        async fn route_to(engine: &RoutingEngine, host: &str) -> String {
+            let ctx = FlowContext {
+                id: FlowId::new(),
+                target: FlowTarget {
+                    host: host.to_string(),
+                    port: 443,
+                    proto: TargetProto::Tcp,
+                },
+                metadata: Default::default(),
+            };
+            engine.route(ctx).await.unwrap().final_node().to_string()
+        }
+
+        assert_eq!(route_to(&engine, "WWW.Example.Com").await, "suffix-node");
+        assert_eq!(route_to(&engine, "myVIDEO.net").await, "keyword-node");
+        assert_eq!(route_to(&engine, "EXACT.Org").await, "full-node");
+        assert_eq!(route_to(&engine, "AD123.example.net").await, "regex-node");
+    }
+
     /// 审核发现 2026-11-05：进程级缓存永不剔除，热更新后旧规则集的
     /// pattern 永久残留并随差异缓慢累积。回归：`reload` 换新规则集后，
     /// 失效 pattern 被剔除，仍用 pattern 保留，且新旧路由语义正常。
@@ -1713,6 +1789,31 @@ mod tests {
             1,
             "并发 miss 后缓存内应恰有一条 pattern"
         );
+    }
+
+    /// G0-2 回归：并发 miss 时同一 pattern 只编译一次。可注入 `compile`
+    /// 计数使旧「get 后无条件 insert」实现的并发双编译确定性失败。
+    #[test]
+    fn cached_regex_concurrent_miss_compiles_once() {
+        let cache = std::sync::Arc::new(DashMap::<String, Arc<regex::Regex>>::new());
+        let compiles = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handles: Vec<_> = (0..64)
+            .map(|_| {
+                let pattern = r"^once\.example\.com$".to_string();
+                let cache = std::sync::Arc::clone(&cache);
+                let compiles = std::sync::Arc::clone(&compiles);
+                std::thread::spawn(move || {
+                    cached_regex_with(&cache, &pattern, |pattern| {
+                        compiles.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        regex::Regex::new(pattern).ok().map(Arc::new)
+                    })
+                    .is_some()
+                })
+            })
+            .collect();
+        assert!(handles.into_iter().all(|handle| handle.join().unwrap()));
+        assert_eq!(compiles.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(cache.len(), 1);
     }
 
     /// G0-2 路由面 GeoIP/GeoSite 集成：合成 mmdb/.dat 写入临时文件，引擎

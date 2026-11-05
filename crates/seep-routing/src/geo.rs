@@ -45,9 +45,16 @@ pub struct GeoSiteDb {
 
 pub struct GeoSiteGroup {
     pub plains: Vec<String>,
-    pub domains: Vec<String>,
+    pub domains: Vec<GeoSiteDomain>,
     pub fulls: Vec<String>,
     pub regexes: Vec<Arc<regex::Regex>>,
+}
+
+/// GeoSite Domain 条目（加载期预小写并缓存 `.` + 值后缀串，匹配热路径
+/// 不再逐条 `to_ascii_lowercase` / `format!` 分配）。
+pub struct GeoSiteDomain {
+    pub value: String,
+    pub dotted: String,
 }
 
 impl GeoDatabases {
@@ -152,14 +159,21 @@ impl GeoDatabases {
                 match domain.r#type {
                     // v2fly 域条目类型：Plain=0（子串）、Regex=1、Domain=2
                     // （根域后缀）、Full=3（完全相等）。未知类型整条跳过。
-                    0 => group.plains.push(domain.value.clone()),
+                    0 => group.plains.push(domain.value.to_ascii_lowercase()),
                     1 => {
-                        if let Ok(re) = regex::Regex::new(&domain.value) {
+                        if let Ok(re) = regex::RegexBuilder::new(&domain.value)
+                            .case_insensitive(true)
+                            .build()
+                        {
                             group.regexes.push(Arc::new(re));
                         }
                     }
-                    2 => group.domains.push(domain.value.clone()),
-                    3 => group.fulls.push(domain.value.clone()),
+                    2 => {
+                        let value = domain.value.to_ascii_lowercase();
+                        let dotted = format!(".{value}");
+                        group.domains.push(GeoSiteDomain { value, dotted });
+                    }
+                    3 => group.fulls.push(domain.value.to_ascii_lowercase()),
                     _ => {}
                 }
             }
@@ -184,20 +198,24 @@ impl GeoSiteDb {
     /// 类别不存在 → false。匹配语义按 v2fly：
     /// - Plain：子串包含；
     /// - Domain：主机等于类别值或以其 `.` + 值为后缀（根域及子域）；
-    /// - Full：完全相等（不区分大小写，域名比较 ASCII 小写化）；
-    /// - Regex：加载期预编译，非法正则整条跳过（恒不命中）。
+    /// - Full：完全相等；
+    /// - Regex：加载期预编译并启用大小写不敏感，非法正则整条跳过。
     pub fn matches(&self, group: &str, host: &str) -> bool {
-        let Some(g) = self.groups.get(&group.to_ascii_lowercase()) else {
+        // 类别键已按小写存储；常见类别即小写时免分配直查，否则回退小写查。
+        let g = self
+            .groups
+            .get(group)
+            .or_else(|| self.groups.get(&group.to_ascii_lowercase()));
+        let Some(g) = g else {
             return false;
         };
         let host_lower = host.to_ascii_lowercase();
         g.plains.iter().any(|p| host_lower.contains(p))
-            || g.domains.iter().any(|d| {
-                let d = d.to_ascii_lowercase();
-                host_lower == d || host_lower.ends_with(&format!(".{d}"))
-            })
-            || g.fulls.iter().any(|f| host_lower == f.to_ascii_lowercase())
-            || g.regexes.iter().any(|re| re.is_match(host))
+            || g.domains
+                .iter()
+                .any(|d| host_lower == d.value || host_lower.ends_with(&d.dotted))
+            || g.fulls.iter().any(|f| host_lower == f.as_str())
+            || g.regexes.iter().any(|re| re.is_match(&host_lower))
     }
 }
 
@@ -310,6 +328,45 @@ mod tests {
         // 类别大小写不敏感；未知类别不命中
         assert!(loaded.matches("CN", "example.com"));
         assert!(!loaded.matches("us", "example.com"));
+    }
+
+    #[test]
+    fn geosite_matching_is_case_insensitive_across_entry_types() {
+        use geosite_rs::{GeoSite, GeoSiteList, domain, Domain};
+        let list = GeoSiteList {
+            entry: vec![GeoSite {
+                country_code: "CN".to_string(),
+                domain: vec![
+                    Domain {
+                        r#type: domain::Type::Plain as i32,
+                        value: "VIDEO".to_string(),
+                        attribute: vec![],
+                    },
+                    Domain {
+                        r#type: domain::Type::Domain as i32,
+                        value: "EXAMPLE.COM".to_string(),
+                        attribute: vec![],
+                    },
+                    Domain {
+                        r#type: domain::Type::Full as i32,
+                        value: "EXACT.ORG".to_string(),
+                        attribute: vec![],
+                    },
+                    Domain {
+                        r#type: domain::Type::Regex as i32,
+                        value: r"^AD\d+\.".to_string(),
+                        attribute: vec![],
+                    },
+                ],
+            }],
+        };
+        let path = write_temp("case-insensitive-geosite.dat", &geosite_rs::encode_geosite(list));
+        let db = GeoDatabases::new(None, Some(path));
+        let loaded = db.geosite().expect("应加载成功");
+        assert!(loaded.matches("cn", "MyVideo.Net"));
+        assert!(loaded.matches("cn", "WWW.Example.Com"));
+        assert!(loaded.matches("cn", "Exact.Org"));
+        assert!(loaded.matches("cn", "AD123.Example.Net"));
     }
 
     #[test]
