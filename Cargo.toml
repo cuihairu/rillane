@@ -60,6 +60,8 @@ base64 = "0.22"
 sha2 = "0.10"
 sha1 = "0.10"
 md-5 = "0.10"
+# QUIC Initial 解密（G0-3 sniff）：HKDF-SHA256 派生 Initial 密钥
+hkdf = "0.12"
 regex = "1.10"
 url = "2.5"
 dashmap = "6.0"

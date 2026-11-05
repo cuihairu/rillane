@@ -1080,8 +1080,14 @@ impl SeepConfig {
         let mut config = Self::from_str_without_profile(&raw, hint.as_deref())?;
         let base_dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
         if let Some(base_dir) = base_dir {
-            config.routing.geoip_db = config.routing.geoip_db.map(|db| resolve_geo_db(&db, base_dir));
-            config.routing.geosite_db = config.routing.geosite_db.map(|db| resolve_geo_db(&db, base_dir));
+            config.routing.geoip_db = config
+                .routing
+                .geoip_db
+                .map(|db| resolve_geo_db(&db, base_dir));
+            config.routing.geosite_db = config
+                .routing
+                .geosite_db
+                .map(|db| resolve_geo_db(&db, base_dir));
         }
         config.apply_profile();
         Ok(config)
@@ -1205,8 +1211,11 @@ fn resolve_geo_db(db: &Path, base_dir: &Path) -> PathBuf {
             std::path::Component::ParentDir => {
                 if parts.last() == Some(&std::path::Component::RootDir) {
                     // 越出配置目录深度时钳制在根：`..` 不再弹出根、不累积。
-                } else {
+                } else if let Some(std::path::Component::Normal(_)) = parts.last() {
                     parts.pop();
+                } else {
+                    // 相对配置目录越界时保留前导 `..`，不能静默丢弃上级路径。
+                    parts.push(comp);
                 }
             }
             std::path::Component::CurDir => {}
@@ -1575,8 +1584,14 @@ mod geo_db_tests {
     fn routing_geo_db_fields_parse_and_serialize() {
         let yaml = "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: null\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n  geoip_db: /data/geoip.mmdb\n  geosite_db: /data/geosite.dat\n";
         let cfg: SeepConfig = serde_yaml::from_str(yaml).expect("应解析");
-        assert_eq!(cfg.routing.geoip_db.as_deref(), Some(std::path::Path::new("/data/geoip.mmdb")));
-        assert_eq!(cfg.routing.geosite_db.as_deref(), Some(std::path::Path::new("/data/geosite.dat")));
+        assert_eq!(
+            cfg.routing.geoip_db.as_deref(),
+            Some(std::path::Path::new("/data/geoip.mmdb"))
+        );
+        assert_eq!(
+            cfg.routing.geosite_db.as_deref(),
+            Some(std::path::Path::new("/data/geosite.dat"))
+        );
         let rendered = serde_yaml::to_string(&cfg).unwrap();
         let reparsed: SeepConfig = serde_yaml::from_str(&rendered).unwrap();
         assert_eq!(reparsed.routing.geoip_db, cfg.routing.geoip_db);
@@ -1585,7 +1600,8 @@ mod geo_db_tests {
 
     #[test]
     fn routing_geo_db_absent_defaults_to_none() {
-        let cfg: SeepConfig = serde_yaml::from_str(base_yaml()).expect("无 geoip_db/geosite_db 应可解析");
+        let cfg: SeepConfig =
+            serde_yaml::from_str(base_yaml()).expect("无 geoip_db/geosite_db 应可解析");
         assert_eq!(cfg.routing.geoip_db, None);
         assert_eq!(cfg.routing.geosite_db, None);
     }
@@ -1598,8 +1614,14 @@ mod geo_db_tests {
         let yaml = "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: null\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n  geoip_db: geoip.mmdb\n  geosite_db: ../geosite.dat\n";
         std::fs::write(&path, yaml).unwrap();
         let cfg = SeepConfig::load_from_path(&path).unwrap();
-        assert_eq!(cfg.routing.geoip_db.as_deref(), Some(dir.join("geoip.mmdb").as_path()));
-        assert_eq!(cfg.routing.geosite_db.as_deref(), Some(dir.parent().unwrap().join("geosite.dat").as_path()));
+        assert_eq!(
+            cfg.routing.geoip_db.as_deref(),
+            Some(dir.join("geoip.mmdb").as_path())
+        );
+        assert_eq!(
+            cfg.routing.geosite_db.as_deref(),
+            Some(dir.parent().unwrap().join("geosite.dat").as_path())
+        );
     }
 
     #[test]
@@ -1609,8 +1631,15 @@ mod geo_db_tests {
             Path::new("/geoip.mmdb")
         );
         assert_eq!(
-            resolve_geo_db(Path::new("databases/../../geoip.mmdb"), Path::new("/etc/seep")),
+            resolve_geo_db(
+                Path::new("databases/../../geoip.mmdb"),
+                Path::new("/etc/seep")
+            ),
             Path::new("/etc/geoip.mmdb")
+        );
+        assert_eq!(
+            resolve_geo_db(Path::new("../../geoip.mmdb"), Path::new("conf")),
+            Path::new("../geoip.mmdb")
         );
     }
 }
@@ -1628,7 +1657,9 @@ fn validate_condition_regex(cond: &MatchCondition, rule_name: &str) -> anyhow::R
         }
         MatchCondition::DomainRegex { patterns } => {
             for p in patterns {
-                regex::Regex::new(p)
+                regex::RegexBuilder::new(p)
+                    .case_insensitive(true)
+                    .build()
                     .map_err(|e| anyhow::anyhow!("规则 {} 的正则非法（{}）: {e}", rule_name, p))?;
             }
         }

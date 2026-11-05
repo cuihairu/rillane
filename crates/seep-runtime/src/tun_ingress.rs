@@ -39,6 +39,8 @@ use seep_platform::network::route::{
 };
 use seep_platform::network::tun::{PacketInfo, TunConfig, TunProvider};
 
+use crate::sniff::sniff_quic_sni;
+use crate::sniff::{sniff_http_host, sniff_tls_sni};
 use crate::tun_process::{ProcessAttributor, ProcessInfo, SockProto};
 use crate::tun_tcp::{EstablishedTcp, SmolTcpStream, TcpFlowKey, TcpOutcome, TunTcpStack};
 
@@ -425,7 +427,7 @@ impl TunIngress {
             src,
             dst,
         };
-        let target = udp_target(dst);
+        let mut target = udp_target(dst);
 
         // 已建流：续期 + 直发（DashMap guard 不跨 await——先 clone relay 再放）
         if let Some(entry) = self.flow_table.get(&key) {
@@ -462,6 +464,13 @@ impl TunIngress {
             metadata
                 .annotations
                 .insert("process.pid".to_string(), p.pid.to_string());
+        }
+
+        // G0-3 sniff：首包 QUIC Initial 提取 SNI，覆写 target.host 后按域名
+        // 路由（UDP 面仅 QUIC 能承载域名语义；其余 UDP 保持 IP 目标）。
+        if let Some(sni) = sniff_quic_sni(dgram.payload) {
+            debug!(target: "seep::tun", sni = %sni, dst = %dst, "TUN UDP 嗅探到 QUIC SNI");
+            target.host.clone_from(&sni);
         }
 
         // ② 路由（带着 process.* 注解进引擎——MatchCondition::Process 在此生效）
@@ -681,6 +690,7 @@ impl TunIngress {
             self.tcp.abort(handle);
             return;
         };
+        let mut target = tcp_target(key.server);
         let mut metadata = FlowMetadata::default();
         if let Some(p) = &process {
             metadata
@@ -690,16 +700,52 @@ impl TunIngress {
                 .annotations
                 .insert("process.pid".to_string(), p.pid.to_string());
         }
+        // G0-3 sniff：交接前非阻塞 peek 首包。TLS/HTTP 首包已就绪时提取
+        // SNI/Host，覆写 target.host 并按域名重路由（覆盖 SYN 面粘滞决策）。
+        // peek 不消费数据——forward 首包照常可读。
+        let mut sniffed_domain = None;
+        let peeked = self.tcp.peek_socket(handle, 4096);
+        if !peeked.is_empty() {
+            let sniffed = sniff_tls_sni(&peeked).or_else(|| sniff_http_host(&peeked));
+            if let Some(host) = sniffed {
+                target.host.clone_from(&host);
+                sniffed_domain = Some(host);
+            }
+        }
+        let decision = if let Some(ref host) = sniffed_domain {
+            let ctx = FlowContext {
+                id: FlowId::new(),
+                target: target.clone(),
+                metadata: metadata.clone(),
+            };
+            match self.router().route(ctx).await {
+                Ok(d) => d,
+                Err(e) => {
+                    error!(
+                        target: "seep::tun",
+                        error = %e,
+                        server = %key.server,
+                        sni = %host,
+                        "TUN TCP sniff 后重路由失败，拆流"
+                    );
+                    self.tcp.abort(handle);
+                    return;
+                }
+            }
+        } else {
+            decision
+        };
         debug!(
             target: "seep::tun",
             server = %key.server,
             node = ?decision.path,
             process = ?process.as_ref().map(|p| p.comm.as_str()),
+            sni = ?sniffed_domain,
             "TUN TCP 流建立（交接）"
         );
         let flow = Flow {
             id: FlowId::new(),
-            target: tcp_target(key.server),
+            target,
             io: Box::new(SmolTcpStream::new(Arc::clone(&self.tcp), handle)),
             metadata,
         };
@@ -1032,7 +1078,8 @@ mod tests {
         let t = Arc::new(TunIngress::new(TunIngressConfig::default(), connector));
         let res = t.clone().run_internal().await;
         assert!(
-            res.as_ref().is_err_and(|e| e.to_string().contains("未注入")),
+            res.as_ref()
+                .is_err_and(|e| e.to_string().contains("未注入")),
             "未注入 endpoints 必须 fail-fast（含未注入错误），got: {res:?}"
         );
     }
@@ -1228,6 +1275,92 @@ mod tests {
         assert_eq!(st.parse_errors, 0);
     }
 
+    /// G0-3 sniff 回归：TLS ClientHello 作首包载荷随 Established 入缓冲 →
+    /// spawn_tcp_forward 非阻塞 peek 提取 SNI → 按域名重路由（第二次路由
+    /// target.host = SNI，覆盖 SYN 面 IP 粘滞决策）。
+    #[tokio::test]
+    async fn tcp_sniff_reroutes_on_tls_sni() {
+        let router = Arc::new(RecordingRouter {
+            seen: StdMutex::new(Vec::new()),
+            node: "game-node",
+        });
+        let connector = Arc::new(MockConnector {
+            feeds: StdMutex::new(Vec::new()),
+        });
+        let (done_tx, _done_rx) = mpsc::channel::<()>(1);
+        let output = Arc::new(EchoOutput { done: done_tx });
+        let t = Arc::new(TunIngress::new(TunIngressConfig::default(), connector));
+        t.set_endpoints(router.clone(), output);
+        let (downlink_tx, mut downlink_rx) = mpsc::channel::<Bytes>(DOWNLINK_CHANNEL_CAP);
+
+        let app: SocketAddr = "10.66.0.1:40000".parse().unwrap();
+        let server: SocketAddr = "203.0.113.10:443".parse().unwrap();
+        let app_isn = 1000u32;
+
+        // ① SYN → SYN-ACK
+        let (pkt, info) = tcp_uplink_packet(&app, &server, app_isn, 0, TcpFlags::SYN, b"");
+        t.handle_uplink(pkt, info, &downlink_tx).await;
+        let synack_pkt = tokio::time::timeout(Duration::from_secs(2), downlink_rx.recv())
+            .await
+            .expect("SYN-ACK 应在 2s 内回到通道")
+            .expect("通道存活");
+        let synack = parse_tcp_segment(&synack_pkt).unwrap();
+        let srv_isn = synack.seq;
+
+        // ② ACK + TLS ClientHello（SNI=sniffed.example.com）同段 → Established
+        // 检出时首包已在 socket 缓冲 → spawn 前 peek 命中 → 重路由。
+        let ch = build_minimal_client_hello(b"sniffed.example.com");
+        let (pkt, info) = tcp_uplink_packet(
+            &app,
+            &server,
+            app_isn + 1,
+            srv_isn + 1,
+            TcpFlags::PSH_ACK,
+            &ch,
+        );
+        t.handle_uplink(pkt, info, &downlink_tx).await;
+
+        // ③ 断言：路由进料含第二次调用，target.host = SNI（非 IP）
+        let seen: Vec<FlowContext> = router.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "sniff 命中应触发第二次路由");
+        assert_eq!(seen[0].target.host, "203.0.113.10", "首路由仍按 IP");
+        assert_eq!(
+            seen[1].target.host, "sniffed.example.com",
+            "sniff 重路由覆写为 SNI 域名"
+        );
+    }
+
+    /// 最小 TLS ClientHello 记录（SNI=name）——sniff 测试端构造，与
+    /// `sniff.rs` 测试同构。
+    fn build_minimal_client_hello(name: &[u8]) -> Vec<u8> {
+        let mut hs = Vec::new();
+        hs.push(0x01);
+        hs.extend_from_slice(&[0x00, 0x00, 0x00]);
+        hs.extend_from_slice(&[0x03, 0x03]);
+        hs.extend_from_slice(&[0u8; 32]);
+        hs.push(0);
+        hs.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
+        hs.push(0);
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&[0x00, 0x00]);
+        let mut server_name = Vec::new();
+        server_name.extend_from_slice(&[0x00, 0x00]);
+        server_name.push(0);
+        server_name.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        server_name.extend_from_slice(name);
+        ext.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+        ext.extend_from_slice(&server_name);
+        hs.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+        hs.extend_from_slice(&ext);
+        let hs_len = (hs.len() - 4) as u16;
+        hs[1] = (hs_len >> 8) as u8;
+        hs[2] = hs_len as u8;
+        let mut rec = vec![0x16, 0x03, 0x03];
+        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        rec.extend_from_slice(&hs);
+        rec
+    }
+
     /// 流键含 src：同目标不同源 = 两条流（归因/拆除面不串流）
     #[tokio::test]
     async fn flow_key_distinguishes_sources() {
@@ -1240,6 +1373,32 @@ mod tests {
             t.handle_uplink(pkt, info, &tx).await;
         }
         assert_eq!(t.active_flows(), 2, "同目标不同源应为两条流");
+    }
+
+    /// G0-3 sniff 回归：UDP 首包 QUIC Initial → 解密提取 SNI → 路由目标
+    /// 覆写为 SNI 域名（而非 IP 目标）。
+    #[tokio::test]
+    async fn udp_sniff_reroutes_on_quic_sni() {
+        use crate::sniff::tests::build_quic_initial;
+
+        let (t, router, _connector) = make_ingress(TunIngressConfig::default());
+        let (downlink_tx, _downlink_rx) = mpsc::channel::<Bytes>(DOWNLINK_CHANNEL_CAP);
+        let src: SocketAddr = "10.66.0.1:50000".parse().unwrap();
+        let dst: SocketAddr = "203.0.113.10:443".parse().unwrap();
+        let quic_pkt = build_quic_initial(
+            &[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08],
+            b"quic.example.org",
+        );
+        let (pkt, info) = uplink_packet(src, dst, &quic_pkt);
+        t.handle_uplink(pkt, info, &downlink_tx).await;
+
+        let seen: Vec<FlowContext> = router.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].target.host, "quic.example.org",
+            "QUIC SNI 覆写路由域名"
+        );
+        assert_eq!(seen[0].target.port, 443);
     }
 
     /// bypass 三源：默认（private）命中丢弃 + 计数；公网目标放行

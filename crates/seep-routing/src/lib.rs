@@ -31,7 +31,11 @@ fn cached_regex(
     pattern: &str,
 ) -> Option<Arc<regex::Regex>> {
     cached_regex_with(cache, pattern, |pattern| {
-        regex::Regex::new(pattern).ok().map(Arc::new)
+        regex::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .ok()
+            .map(Arc::new)
     })
 }
 
@@ -868,9 +872,7 @@ fn matches_condition(
         }
         MatchCondition::DomainFull { values } => {
             let host = ctx.target.host.to_ascii_lowercase();
-            values
-                .iter()
-                .any(|v| host == v.to_ascii_lowercase())
+            values.iter().any(|v| host == v.to_ascii_lowercase())
         }
         MatchCondition::DomainRegex { patterns } => patterns.iter().any(|pattern| {
             // 构建期 `RoutingConfig::validate` 已拦截非法 pattern；此处
@@ -878,7 +880,7 @@ fn matches_condition(
             // 不 panic）。编译结果走引擎级缓存（`regex_cache`），同一
             // pattern 只编译一次，`reload` 时按新配置 prune 失效 pattern。
             cached_regex(regex_cache, pattern)
-                .map(|re| re.is_match(&ctx.target.host.to_ascii_lowercase()))
+                .map(|re| re.is_match(&ctx.target.host))
                 .unwrap_or(false)
         }),
         MatchCondition::Geoip { country } => {
@@ -1656,7 +1658,11 @@ mod tests {
                 RouteRule {
                     name: "regex".into(),
                     matches: vec![MatchCondition::DomainRegex {
-                        patterns: vec![r"^ad\d+\.".into()],
+                        // 审核发现 2026-11-05：pattern 含大写（`^AD\d+\.`）须仍
+                        // 命中大写 host（`AD123.example.net`）——旧实现仅对
+                        // host 小写而保留 pattern 大小写敏感，`^AD` 匹配
+                        // `ad123` 失败，代理/拦截规则静默失效。
+                        patterns: vec![r"^AD\d+\.".into()],
                     }],
                     target: "regex-node".into(),
                 },
@@ -1840,7 +1846,9 @@ mod tests {
         };
         let data = mmdb.insert_value(cn).unwrap();
         mmdb.insert_node(
-            "1.0.0.0/8".parse::<maxminddb_writer::paths::IpAddrWithMask>().unwrap(),
+            "1.0.0.0/8"
+                .parse::<maxminddb_writer::paths::IpAddrWithMask>()
+                .unwrap(),
             data,
         );
         let mut mmdb_buf = Vec::new();
@@ -1852,13 +1860,11 @@ mod tests {
         let geosite = geosite_rs::GeoSiteList {
             entry: vec![geosite_rs::GeoSite {
                 country_code: "cn".into(),
-                domain: vec![
-                    geosite_rs::Domain {
-                        r#type: geosite_rs::domain::Type::Domain as i32,
-                        value: "example.com".into(),
-                        attribute: vec![],
-                    },
-                ],
+                domain: vec![geosite_rs::Domain {
+                    r#type: geosite_rs::domain::Type::Domain as i32,
+                    value: "example.com".into(),
+                    attribute: vec![],
+                }],
             }],
         };
         std::fs::write(&dat_path, geosite_rs::encode_geosite(geosite)).unwrap();
@@ -1908,13 +1914,37 @@ mod tests {
         }
 
         // GeoIP：IP 字面量命中 CN；非 CN 不命中（域名不解析）。
-        assert_eq!(route_to(&engine, "1.2.3.4").await, "cn-node", "GeoIP CN 命中");
+        assert_eq!(
+            route_to(&engine, "1.2.3.4").await,
+            "cn-node",
+            "GeoIP CN 命中"
+        );
         assert_eq!(route_to(&engine, "8.8.8.8").await, "direct", "非 CN 不命中");
-        assert_eq!(route_to(&engine, "example.com").await, "cn-node", "GeoSite 后缀命中");
-        assert_eq!(route_to(&engine, "www.example.com").await, "cn-node", "GeoSite 子域命中");
-        assert_eq!(route_to(&engine, "exact.org").await, "full-node", "DomainFull 命中");
-        assert_eq!(route_to(&engine, "sub.exact.org").await, "direct", "DomainFull 子域不命中");
-        assert_eq!(route_to(&engine, "other.net").await, "direct", "均不命中落默认");
+        assert_eq!(
+            route_to(&engine, "example.com").await,
+            "cn-node",
+            "GeoSite 后缀命中"
+        );
+        assert_eq!(
+            route_to(&engine, "www.example.com").await,
+            "cn-node",
+            "GeoSite 子域命中"
+        );
+        assert_eq!(
+            route_to(&engine, "exact.org").await,
+            "full-node",
+            "DomainFull 命中"
+        );
+        assert_eq!(
+            route_to(&engine, "sub.exact.org").await,
+            "direct",
+            "DomainFull 子域不命中"
+        );
+        assert_eq!(
+            route_to(&engine, "other.net").await,
+            "direct",
+            "均不命中落默认"
+        );
     }
 
     /// G0-2 无数据库（路径缺省 None）时 GeoIP/GeoSite 条件恒不命中——
@@ -1965,7 +1995,9 @@ mod tests {
             groups: vec![],
             rules: vec![RouteRule {
                 name: "cn".into(),
-                matches: vec![MatchCondition::Geoip { country: "CN".into() }],
+                matches: vec![MatchCondition::Geoip {
+                    country: "CN".into(),
+                }],
                 target: "cn-node".into(),
             }],
             ..Default::default()
@@ -1999,7 +2031,9 @@ mod tests {
         };
         let data = mmdb.insert_value(cn).unwrap();
         mmdb.insert_node(
-            "1.0.0.0/8".parse::<maxminddb_writer::paths::IpAddrWithMask>().unwrap(),
+            "1.0.0.0/8"
+                .parse::<maxminddb_writer::paths::IpAddrWithMask>()
+                .unwrap(),
             data,
         );
         let mut mmdb_buf = Vec::new();
@@ -2011,7 +2045,9 @@ mod tests {
             groups: vec![],
             rules: vec![RouteRule {
                 name: "cn".into(),
-                matches: vec![MatchCondition::Geoip { country: "CN".into() }],
+                matches: vec![MatchCondition::Geoip {
+                    country: "CN".into(),
+                }],
                 target: "cn-node".into(),
             }],
             geoip_db: Some(mmdb_path.clone()),

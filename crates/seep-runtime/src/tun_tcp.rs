@@ -451,6 +451,25 @@ impl TunTcpStack {
         self.kick.notify_one();
     }
 
+    /// 非阻塞 peek 接收缓冲首段（G0-3 sniff）：不消费数据，返回当前可读
+    /// 字节副本（≤`max`）。流已撤/无数据返回空。用于 Established 交接点
+    /// 读 TLS/HTTP 首包提取域名（数据保留在 socket 缓冲，forward 照常读）。
+    pub fn peek_socket(&self, handle: SocketHandle, max: usize) -> Vec<u8> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.flows.contains_key(&handle) {
+            return Vec::new();
+        }
+        let s = inner.sockets.get_mut::<tcp::Socket>(handle);
+        let mut buf = vec![0u8; max];
+        match s.peek_slice(&mut buf) {
+            Ok(n) => {
+                buf.truncate(n);
+                buf
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// teardown：全量关闭（应用连接随 EOF 退场；设备即将销毁不再出段）
     pub fn shutdown_all(&self) {
         let mut inner = self.inner.lock().unwrap();
@@ -718,5 +737,71 @@ mod tests {
         // ⑤ 清扫：ZERO 即全数超龄撤除（句柄退役收敛）
         assert_eq!(stack.sweep(Duration::ZERO), 2);
         assert_eq!(stack.active_count(), 0);
+    }
+
+    /// G0-3 sniff 回归：peek_socket 读取接收缓冲不消费数据（连续两次同值），
+    /// 随后 AsyncRead 仍可读到完整 payload。
+    #[tokio::test]
+    async fn peek_socket_returns_data_without_consuming() {
+        use std::pin::pin;
+        use tokio::io::{AsyncRead, AsyncReadExt};
+
+        let stack = Arc::new(TunTcpStack::new(None, 1500));
+        let key = TcpFlowKey {
+            app: "10.66.0.1:40000".parse().unwrap(),
+            server: "203.0.113.10:443".parse().unwrap(),
+        };
+        let out = stack
+            .ingest_syn(
+                uplink(
+                    "10.66.0.1",
+                    "203.0.113.10",
+                    40000,
+                    443,
+                    1000,
+                    0,
+                    TcpFlags::SYN,
+                    b"",
+                ),
+                key,
+                RouteDecision::direct("n1".into()),
+                None,
+            )
+            .expect("ingest_syn");
+        let synack = parse_tcp_segment(&out.tx_packets[0]).expect("parse");
+        let ack = uplink(
+            "10.66.0.1",
+            "203.0.113.10",
+            40000,
+            443,
+            1001,
+            synack.seq + 1,
+            TcpFlags::ACK,
+            b"",
+        );
+        let est = stack.ingest(ack, 443).expect("ingest ack").established;
+        assert_eq!(est.len(), 1);
+        let handle = est[0].handle;
+
+        // payload 段：peek 不消费——连续两次同值；AsyncRead 仍读完整。
+        let data = uplink(
+            "10.66.0.1",
+            "203.0.113.10",
+            40000,
+            443,
+            1001,
+            synack.seq + 1,
+            TcpFlags::ACK,
+            b"TLS CLIENT HELLO",
+        );
+        let _ = stack.ingest(data, 443).expect("ingest data");
+        assert_eq!(stack.peek_socket(handle, 32), b"TLS CLIENT HELLO");
+        assert_eq!(stack.peek_socket(handle, 32), b"TLS CLIENT HELLO");
+
+        let stream = SmolTcpStream::new(Arc::clone(&stack), handle);
+        let mut buf = [0u8; 32];
+        let n = pin!(stream).read(&mut buf).await.expect("read");
+        assert_eq!(n, 16);
+        assert_eq!(&buf[..16], b"TLS CLIENT HELLO");
     }
 }

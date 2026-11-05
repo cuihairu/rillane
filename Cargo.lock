@@ -1740,6 +1740,15 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac 0.12.1",
+]
+
+[[package]]
+name = "hkdf"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
@@ -3672,12 +3681,15 @@ dependencies = [
 name = "seep-runtime"
 version = "0.1.0"
 dependencies = [
+ "aes 0.8.4",
+ "aes-gcm 0.10.3",
  "anyhow",
  "async-trait",
  "bytes",
  "chrono",
  "dashmap 6.1.0",
  "futures",
+ "hkdf 0.12.4",
  "libc",
  "notify",
  "num_cpus",
@@ -3697,6 +3709,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "sha2",
  "smoltcp",
  "tokio",
  "tokio-rustls",
@@ -4006,7 +4019,7 @@ dependencies = [
  "aws-lc-rs",
  "cfg-if",
  "chacha20poly1305 0.11.0",
- "hkdf",
+ "hkdf 0.13.0",
  "md-5 0.11.0",
  "rand 0.10.3",
  "sha1 0.11.0",
