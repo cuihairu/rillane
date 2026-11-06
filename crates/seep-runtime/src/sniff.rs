@@ -10,6 +10,67 @@ use aes_gcm::Aes128Gcm;
 use hkdf::Hkdf;
 use sha2::Sha256;
 
+/// 单个 QUIC CRYPTO 帧（offset 是握手流偏移，不是包内偏移）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CryptoFrame {
+    pub(crate) offset: u64,
+    pub(crate) data: Vec<u8>,
+}
+
+/// QUIC Initial 解密后的 CRYPTO 帧集合（DCID 用于密钥派生/流归属）。
+pub(crate) struct QuicCryptoFrames {
+    pub(crate) dcid: Vec<u8>,
+    pub(crate) frames: Vec<CryptoFrame>,
+}
+
+/// QUIC CRYPTO 重组结果：区分「不是 QUIC Initial」「无 CRYPTO」「仍需
+/// 更多分片」与「已提取 SNI」，避免调用方把无 CRYPTO 包永久缓存。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum QuicSniffStep {
+    NotInitial,
+    NoCrypto,
+    Incomplete,
+    Host(String),
+}
+
+/// 单流 QUIC CRYPTO 重组器：按握手流偏移拼接跨包 ClientHello。
+pub(crate) struct QuicCryptoReassembler {
+    dcid: Vec<u8>,
+    buffer: Vec<u8>,
+}
+
+impl QuicCryptoReassembler {
+    pub(crate) fn new() -> Self {
+        Self {
+            dcid: Vec::new(),
+            buffer: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push(&mut self, packet: &[u8]) -> QuicSniffStep {
+        let Some(decoded) = quic_initial_crypto_frames(packet) else {
+            return QuicSniffStep::NotInitial;
+        };
+        if decoded.frames.is_empty() {
+            return QuicSniffStep::NoCrypto;
+        }
+        if self.dcid != decoded.dcid {
+            self.dcid = decoded.dcid;
+            self.buffer.clear();
+        }
+        if append_crypto_frames(&mut self.buffer, &decoded.frames).is_none() {
+            return QuicSniffStep::Incomplete;
+        }
+        match sniff_tls_handshake_sni(&self.buffer) {
+            Some(host) => QuicSniffStep::Host(host),
+            None => QuicSniffStep::Incomplete,
+        }
+    }
+}
+
+/// QUIC CRYPTO 重组上限：Initial ClientHello 远小于此值；超限即丢弃缓存。
+const QUIC_MAX_CRYPTO_BYTES: usize = 64 * 1024;
+
 /// 从 TLS 记录首包提取 SNI（ClientHello server_name 扩展）。
 /// 返回 `Some(host)` 或 `None`（非 ClientHello/无法解析/无 SNI）。
 pub fn sniff_tls_sni(buf: &[u8]) -> Option<String> {
@@ -21,35 +82,41 @@ pub fn sniff_tls_sni(buf: &[u8]) -> Option<String> {
     if buf.len() < 5 + rec_len {
         return None;
     }
-    let hs = &buf[5..5 + rec_len];
+    sniff_tls_handshake_sni(&buf[5..5 + rec_len])
+}
+
+/// 从裸 TLS 握手消息（QUIC CRYPTO 载荷无记录层，RFC 9001 §4）提取 SNI。
+fn sniff_tls_handshake_sni(hs: &[u8]) -> Option<String> {
     // 握手头：type(1)=1 + length(3) + version(2) + random(32)
     if hs.len() < 4 || hs[0] != 0x01 {
         return None;
     }
+    let hs_len = ((hs[1] as usize) << 16) | ((hs[2] as usize) << 8) | (hs[3] as usize);
+    let end = hs.len().min(4 + hs_len);
     let mut i = 4;
-    if hs.len() < i + 34 {
+    if end < i + 34 {
         return None;
     }
     i += 34; // version(2) + random(32)
     let sid_len = *hs.get(i)? as usize;
-    i += 1 + sid_len;
-    if i + 2 > hs.len() {
+    i = i.checked_add(1 + sid_len)?;
+    if i + 2 > end {
         return None;
     }
     let cs_len = u16::from_be_bytes([hs[i], hs[i + 1]]) as usize;
-    i += 2 + cs_len;
-    if i >= hs.len() {
+    i = i.checked_add(2 + cs_len)?;
+    if i >= end {
         return None;
     }
     let comp_len = *hs.get(i)? as usize;
-    i += 1 + comp_len;
-    if i + 2 > hs.len() {
+    i = i.checked_add(1 + comp_len)?;
+    if i + 2 > end {
         return None;
     }
     let ext_len = u16::from_be_bytes([hs[i], hs[i + 1]]) as usize;
     i += 2;
-    let end = (i + ext_len).min(hs.len());
-    while i + 4 <= end {
+    let ext_end = i.checked_add(ext_len)?.min(end);
+    while i + 4 <= ext_end {
         let et = u16::from_be_bytes([hs[i], hs[i + 1]]);
         let el = u16::from_be_bytes([hs[i + 2], hs[i + 3]]) as usize;
         let data = hs.get(i + 4..i + 4 + el)?;
@@ -72,9 +139,13 @@ pub fn sniff_tls_sni(buf: &[u8]) -> Option<String> {
 }
 
 /// 从 HTTP/1.x 请求首包提取 Host 头（大小写不敏感）。
-/// 返回 `Some(host)` 或 `None`（非 HTTP 请求/无 Host）。
+/// 返回 `Some(host)` 或 `None`（非 HTTP 请求/无 Host/头部尚不完整）。
+///
+/// 只解码 `\r\n\r\n` 之前的头部，避免合法请求体含二进制时 UTF-8 解码失败；
+/// 未见到头部结束标记即视为不完整，不用截断的域名参与路由。
 pub fn sniff_http_host(buf: &[u8]) -> Option<String> {
-    let head = std::str::from_utf8(buf).ok()?;
+    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = std::str::from_utf8(&buf[..header_end]).ok()?;
     let mut lines = head.split("\r\n");
     // 请求行：METHOD SP URI SP VERSION
     let request_line = lines.next()?;
@@ -84,10 +155,31 @@ pub fn sniff_http_host(buf: &[u8]) -> Option<String> {
     for line in lines {
         let (name, value) = line.split_once(':')?;
         if name.eq_ignore_ascii_case("host") {
-            return Some(value.trim().to_string());
+            return strip_host_port(value);
         }
     }
     None
+}
+
+/// Host 头去端口：`example.com:443` → `example.com`，
+/// `[2001:db8::1]:443` → `2001:db8::1`，裸 IPv6 保持原样。
+fn strip_host_port(raw: &str) -> Option<String> {
+    let host = raw.trim();
+    if host.is_empty() {
+        return None;
+    }
+    if let Some(rest) = host.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return (end > 0).then(|| rest[..end].to_string());
+    }
+    if host.matches(':').count() == 1 {
+        if let Some((name, port)) = host.rsplit_once(':') {
+            if !name.is_empty() && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    Some(host.to_string())
 }
 
 /// 统一嗅探入口：按协议分发（TLS SNI / HTTP Host / QUIC SNI）。
@@ -100,10 +192,17 @@ pub fn sniff_host(proto: &str, buf: &[u8]) -> Option<String> {
     }
 }
 
-/// QUIC v1 Initial 包解密 + 提取 ClientHello SNI（RFC 9000 §17.2 +
-/// RFC 9001 §5.2/§5.4.4 + HKDF-Expand-Label RFC 8446 §7.1）。
-/// 返回 `Some(sni)` 或 `None`（非 Initial / 解密失败 / 无 CRYPTO 帧 / 无 SNI）。
+/// 单包 QUIC Initial 提取 SNI（跨包分片由 [`QuicCryptoReassembler`] 处理）。
 pub fn sniff_quic_sni(buf: &[u8]) -> Option<String> {
+    let decoded = quic_initial_crypto_frames(buf)?;
+    let mut buffer = Vec::new();
+    append_crypto_frames(&mut buffer, &decoded.frames)?;
+    sniff_tls_handshake_sni(&buffer)
+}
+
+/// QUIC v1 Initial 包解密 + 返回 CRYPTO 帧（RFC 9000 §17.2 +
+/// RFC 9001 §5.2/§5.4.4 + HKDF-Expand-Label RFC 8446 §7.1）。
+pub(crate) fn quic_initial_crypto_frames(buf: &[u8]) -> Option<QuicCryptoFrames> {
     if buf.len() < 5 || buf[0] & 0xC0 != 0xC0 || buf[0] & 0x30 != 0x00 {
         return None; // 非长头或非 Initial（长头 bit7=1 + bit6=1；type Initial=0b00）
     }
@@ -125,18 +224,18 @@ pub fn sniff_quic_sni(buf: &[u8]) -> Option<String> {
         return None;
     }
     i += scid_len;
-    if buf.len() < i + 4 {
+    // RFC 9000 §17.2：Token Length / Length 均为 QUIC varint，不是固定 u32。
+    let (token_len, n) = read_varint(buf, i)?;
+    i = i
+        .checked_add(n)?
+        .checked_add(usize::try_from(token_len).ok()?)?;
+    if buf.len() < i {
         return None;
     }
-    let token_len = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
-    i += 4 + token_len;
-    if buf.len() < i + 4 {
-        return None;
-    }
-    let length = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
-    i += 4;
+    let (length, n) = read_varint(buf, i)?;
+    i = i.checked_add(n)?;
     let pn_offset = i;
-    let payload_end = pn_offset.checked_add(length)?;
+    let payload_end = pn_offset.checked_add(usize::try_from(length).ok()?)?;
     if buf.len() < payload_end {
         return None;
     }
@@ -147,7 +246,6 @@ pub fn sniff_quic_sni(buf: &[u8]) -> Option<String> {
     let sample = &buf[sample_offset..sample_offset + 16];
 
     let (key, iv, hp) = quic_initial_keys_v1(dcid);
-    let hp: [u8; 16] = hp.try_into().ok()?;
     let sample: [u8; 16] = sample.try_into().ok()?;
     let mask = aes_ecb_encrypt_block(&hp, &sample)?;
     let mut packet = buf[..payload_end].to_vec();
@@ -163,43 +261,61 @@ pub fn sniff_quic_sni(buf: &[u8]) -> Option<String> {
     for &b in &packet[pn_offset..pn_offset + pn_len] {
         pn = (pn << 8) | b as u64;
     }
-    let mut nonce = [0u8; 12];
-    nonce[4..].copy_from_slice(&iv[4..]);
-    let pn_be = pn.to_be_bytes();
-    for n in 0..8 {
-        nonce[4 + n] ^= pn_be[n];
-    }
+    let nonce = quic_aead_nonce(&iv, pn);
     let ciphertext = &packet[pn_offset + pn_len..payload_end];
     if ciphertext.len() < 16 {
         return None;
     }
     let payload = aes128gcm_decrypt(&key, &nonce, &packet[..pn_offset + pn_len], ciphertext)?;
-    parse_crypto_frames_sni(&payload)
+    let frames = parse_crypto_frames(&payload)?;
+    Some(QuicCryptoFrames {
+        dcid: dcid.to_vec(),
+        frames,
+    })
+}
+
+/// RFC 9001 §5.3：nonce = IV XOR 左填充 packet number。IV 前 4 字节不是
+/// 零填充区，必须完整拷入，再对最低 8 字节异或 PN。
+fn quic_aead_nonce(iv: &[u8; 12], pn: u64) -> [u8; 12] {
+    let mut nonce = *iv;
+    let pn_be = pn.to_be_bytes();
+    for n in 0..8 {
+        nonce[4 + n] ^= pn_be[n];
+    }
+    nonce
 }
 
 /// RFC 9001 §5.2 QUIC v1 Initial 密钥派生（HKDF-SHA256）。
-fn quic_initial_keys_v1(dcid: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    const SALT: [u8; 20] = [
-        0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c,
-        0xad, 0xcc, 0xbb, 0x7f, 0x0a,
-    ];
-    let (prk, _) = Hkdf::<Sha256>::extract(Some(&SALT), dcid);
+const QUIC_V1_INITIAL_SALT: [u8; 20] = [
+    0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
+    0xcc, 0xbb, 0x7f, 0x0a,
+];
+
+fn quic_initial_keys_v1(dcid: &[u8]) -> ([u8; 16], [u8; 12], [u8; 16]) {
+    let (prk, _) = Hkdf::<Sha256>::extract(Some(&QUIC_V1_INITIAL_SALT), dcid);
     let initial_secret = hkdf_expand_label(&prk, b"client in", &[], 32);
     (
-        hkdf_expand_label(&initial_secret, b"quic key", &[], 16),
-        hkdf_expand_label(&initial_secret, b"quic iv", &[], 12),
-        hkdf_expand_label(&initial_secret, b"quic hp", &[], 16),
+        hkdf_expand_label(&initial_secret, b"quic key", &[], 16)
+            .try_into()
+            .expect("quic key 恒 16B"),
+        hkdf_expand_label(&initial_secret, b"quic iv", &[], 12)
+            .try_into()
+            .expect("quic iv 恒 12B"),
+        hkdf_expand_label(&initial_secret, b"quic hp", &[], 16)
+            .try_into()
+            .expect("quic hp 恒 16B"),
     )
 }
 
 /// RFC 8446 §7.1 HKDF-Expand-Label。
 fn hkdf_expand_label(secret: &[u8], label: &[u8], context: &[u8], len: usize) -> Vec<u8> {
     let full_label = format!("tls13 {}", String::from_utf8_lossy(label));
-    let mut info = Vec::with_capacity(2 + full_label.len() + 2 + context.len());
-    info.push(len as u8);
-    info.extend_from_slice(&(full_label.len() as u16).to_be_bytes());
+    let mut info = Vec::with_capacity(2 + 1 + full_label.len() + 1 + context.len());
+    // struct HkdfLabel { uint16 length; opaque label<7..255>; opaque context<0..255>; }
+    info.extend_from_slice(&(len as u16).to_be_bytes());
+    info.push(full_label.len() as u8);
     info.extend_from_slice(full_label.as_bytes());
-    info.extend_from_slice(&(context.len() as u16).to_be_bytes());
+    info.push(context.len() as u8);
     info.extend_from_slice(context);
     let hk = Hkdf::<Sha256>::from_prk(secret).expect("Initial secret 恒 32B");
     let mut okm = vec![0u8; len];
@@ -235,31 +351,161 @@ fn aes128gcm_decrypt(
         .map(|p| p.to_vec())
 }
 
-/// 从 QUIC payload 解析 CRYPTO 帧（type 0x06，RFC 9000 §19.6），提取其中
-/// TLS 记录的 SNI。首 Initial 通常完整携带 ClientHello；分片场景由
-/// `sniff_tls_sni` 对不完整记录返回 None。
-fn parse_crypto_frames_sni(payload: &[u8]) -> Option<String> {
+/// 按握手流 offset 拼接 CRYPTO 帧；出现空洞或超限返回 None。
+fn append_crypto_frames(buffer: &mut Vec<u8>, frames: &[CryptoFrame]) -> Option<()> {
+    for frame in frames {
+        let offset = usize::try_from(frame.offset).ok()?;
+        if offset > buffer.len() {
+            return None;
+        }
+        let end = offset.checked_add(frame.data.len())?;
+        if end > QUIC_MAX_CRYPTO_BYTES {
+            return None;
+        }
+        if end > buffer.len() {
+            buffer.resize(end, 0);
+        }
+        buffer[offset..end].copy_from_slice(&frame.data);
+    }
+    Some(())
+}
+
+/// 从 QUIC payload 解析 CRYPTO 帧（type 0x06，RFC 9000 §19.6）。
+/// 跳过 Initial 包内合法的 PADDING/PING/ACK 等帧，收集全部 CRYPTO 帧；
+/// offset 保持握手流语义，由调用方负责跨包重组。
+fn parse_crypto_frames(payload: &[u8]) -> Option<Vec<CryptoFrame>> {
+    let mut frames = Vec::new();
     let mut i = 0usize;
     while i < payload.len() {
         let frame_type = payload[i];
         i += 1;
-        if frame_type != 0x06 {
-            // PADDING=0x00 可连续；PING=0x01；其余类型单包携带时跳过。
-            if frame_type == 0x00 {
-                continue;
+        match frame_type {
+            0x00 | 0x01 => {}
+            0x02 | 0x03 => {
+                // ACK: largest_ack, ack_delay, range_count, first_range,
+                //       range_count × (gap, range)；0x03 追加 ECN 三计数。
+                let (_, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?;
+                let (_, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?;
+                let (range_count, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?;
+                let (_, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?;
+                for _ in 0..range_count {
+                    let (_, n) = read_varint(payload, i)?;
+                    i = i.checked_add(n)?;
+                    let (_, n) = read_varint(payload, i)?;
+                    i = i.checked_add(n)?;
+                }
+                if frame_type == 0x03 {
+                    for _ in 0..3 {
+                        let (_, n) = read_varint(payload, i)?;
+                        i = i.checked_add(n)?;
+                    }
+                }
             }
+            0x04 => {
+                for _ in 0..3 {
+                    let (_, n) = read_varint(payload, i)?;
+                    i = i.checked_add(n)?;
+                }
+            }
+            0x05 => {
+                for _ in 0..2 {
+                    let (_, n) = read_varint(payload, i)?;
+                    i = i.checked_add(n)?;
+                }
+            }
+            0x06 => {
+                let (offset, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?;
+                let (len, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?;
+                let end = i.checked_add(usize::try_from(len).ok()?)?;
+                if payload.len() < end {
+                    return None;
+                }
+                frames.push(CryptoFrame {
+                    offset,
+                    data: payload[i..end].to_vec(),
+                });
+                i = end;
+            }
+            0x07 => {
+                let (len, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?.checked_add(usize::try_from(len).ok()?)?;
+                if payload.len() < i {
+                    return None;
+                }
+            }
+            0x08..=0x0f => {
+                let (_, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?;
+                if frame_type & 0x04 != 0 {
+                    let (_, n) = read_varint(payload, i)?;
+                    i = i.checked_add(n)?;
+                }
+                if frame_type & 0x02 != 0 {
+                    let (len, n) = read_varint(payload, i)?;
+                    i = i.checked_add(n)?.checked_add(usize::try_from(len).ok()?)?;
+                    if payload.len() < i {
+                        return None;
+                    }
+                } else {
+                    i = payload.len();
+                }
+            }
+            0x10 | 0x12 | 0x13 | 0x14 | 0x16 | 0x17 | 0x19 => {
+                let (_, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?;
+            }
+            0x11 | 0x15 => {
+                for _ in 0..2 {
+                    let (_, n) = read_varint(payload, i)?;
+                    i = i.checked_add(n)?;
+                }
+            }
+            0x18 => {
+                let (_, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?;
+                let (_, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?;
+                let cid_len = *payload.get(i)? as usize;
+                i = i.checked_add(1 + cid_len + 16)?;
+                if payload.len() < i {
+                    return None;
+                }
+            }
+            0x1a | 0x1b => {
+                i = i.checked_add(8)?;
+                if payload.len() < i {
+                    return None;
+                }
+            }
+            0x1c | 0x1d => {
+                let (_, n) = read_varint(payload, i)?;
+                i = i.checked_add(n)?;
+                if frame_type == 0x1c {
+                    let (_, n) = read_varint(payload, i)?;
+                    i = i.checked_add(n)?;
+                }
+                let (reason_len, n) = read_varint(payload, i)?;
+                i = i
+                    .checked_add(n)?
+                    .checked_add(usize::try_from(reason_len).ok()?)?;
+                if payload.len() < i {
+                    return None;
+                }
+            }
+            0x1e => {}
+            _ => return None,
+        }
+        if i > payload.len() {
             return None;
         }
-        let (offset, n1) = read_varint(payload, i)?;
-        let (len, n2) = read_varint(payload, i + n1)?;
-        let start = i + n1 + n2 + offset as usize;
-        let end = start.checked_add(len as usize)?;
-        if payload.len() < end {
-            return None;
-        }
-        return sniff_tls_sni(&payload[start..end]);
     }
-    None
+    Some(frames)
 }
 
 /// QUIC 变长整数解码（RFC 9000 §16）。
@@ -287,6 +533,13 @@ fn read_varint(buf: &[u8], start: usize) -> Option<(u64, usize)> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    fn wrap_tls_record(hs: &[u8]) -> Vec<u8> {
+        let mut rec = vec![0x16, 0x03, 0x03];
+        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        rec.extend_from_slice(hs);
+        rec
+    }
 
     #[test]
     fn tls_sni_extracts_server_name() {
@@ -317,10 +570,10 @@ pub(crate) mod tests {
         hs[1] = (hs_len >> 8) as u8;
         hs[2] = hs_len as u8;
 
-        let mut rec = vec![0x16, 0x03, 0x03];
-        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
-        rec.extend_from_slice(&hs);
-        assert_eq!(sniff_tls_sni(&rec).as_deref(), Some("example.com"));
+        assert_eq!(
+            sniff_tls_sni(&wrap_tls_record(&hs)).as_deref(),
+            Some("example.com")
+        );
     }
 
     #[test]
@@ -330,11 +583,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn http_host_extracts_host_header() {
+    fn http_host_extracts_host_header_without_port() {
         let req = b"GET /path HTTP/1.1\r\nHost: example.com:443\r\nAccept: */*\r\n\r\n";
-        assert_eq!(sniff_http_host(req).as_deref(), Some("example.com:443"));
+        assert_eq!(sniff_http_host(req).as_deref(), Some("example.com"));
         let req = b"POST / HTTP/1.1\r\nhost: Example.COM\r\n\r\n";
         assert_eq!(sniff_http_host(req).as_deref(), Some("Example.COM"));
+        let req = b"GET / HTTP/1.1\r\nHost: [2001:db8::1]:443\r\n\r\n";
+        assert_eq!(sniff_http_host(req).as_deref(), Some("2001:db8::1"));
+    }
+
+    #[test]
+    fn http_host_ignores_binary_body_and_requires_complete_headers() {
+        // 头部完整、请求体含非法 UTF-8：仍应提取 Host。
+        let mut req = b"POST / HTTP/1.1\r\nHost: body.example\r\n\r\n".to_vec();
+        req.extend_from_slice(&[0xff, 0x00, 0xfe]);
+        assert_eq!(sniff_http_host(&req).as_deref(), Some("body.example"));
+        // Host 行截断 / 缺头部结束标记：不得用不完整域名路由。
+        assert_eq!(
+            sniff_http_host(b"GET / HTTP/1.1\r\nHost: partial.exa"),
+            None
+        );
+        assert_eq!(
+            sniff_http_host(b"GET / HTTP/1.1\r\nHost: partial.example\r\n"),
+            None
+        );
     }
 
     #[test]
@@ -343,8 +615,7 @@ pub(crate) mod tests {
         assert_eq!(sniff_http_host(b"GET / HTTP/1.0\r\n\r\n"), None);
     }
 
-    /// 构造最小 TLS ClientHello 记录（与 `tls_sni_extracts_server_name`
-    /// 同构，抽出复用进 QUIC 合成包）。
+    /// 构造最小裸 TLS ClientHello 握手消息（无记录层，QUIC CRYPTO 载荷）。
     fn build_client_hello(name: &[u8]) -> Vec<u8> {
         let mut hs = Vec::new();
         hs.push(0x01);
@@ -368,10 +639,7 @@ pub(crate) mod tests {
         let hs_len = (hs.len() - 4) as u16;
         hs[1] = (hs_len >> 8) as u8;
         hs[2] = hs_len as u8;
-        let mut rec = vec![0x16, 0x03, 0x03];
-        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
-        rec.extend_from_slice(&hs);
-        rec
+        hs
     }
 
     /// RFC 9000 §16 变长整数编码（测试加密端使用）。
@@ -381,13 +649,28 @@ pub(crate) mod tests {
         } else if value < 16384 {
             buf.extend_from_slice(&[0x40 | (value >> 8) as u8, value as u8]);
         } else if value < 1073741824 {
-            buf.extend_from_slice(&[0x80, 0, 0, 0]);
-            let last = buf.len() - 4;
-            buf[last..].copy_from_slice(&value.to_be_bytes());
+            // 4 字节宽度：prefix=2，值低 30 位按 4 字节大端编码，首字节
+            // 高 2 位 = 0b10，其余 6 位为值最高 6 位（bit 29..24）。
+            let be = value.to_be_bytes();
+            buf.push(0x80 | ((value >> 24) as u8 & 0x3f));
+            buf.extend_from_slice(&be[5..]);
         } else {
-            buf.extend_from_slice(&[0xC0, 0, 0, 0, 0, 0, 0, 0]);
-            let last = buf.len() - 8;
-            buf[last..].copy_from_slice(&value.to_be_bytes());
+            // 8 字节宽度：prefix=3，值低 62 位按 8 字节大端编码，首字节
+            // 高 2 位 = 0b11，其余 6 位为值最高 6 位（bit 61..56）。
+            let be = value.to_be_bytes();
+            buf.push(0xC0 | ((value >> 56) as u8 & 0x3f));
+            buf.extend_from_slice(&be[1..]);
+        }
+    }
+
+    #[test]
+    fn write_varint_roundtrips_all_widths() {
+        for value in [0u64, 63, 64, 16383, 16384, 1 << 20, 1 << 29, 1 << 30] {
+            let mut encoded = Vec::new();
+            write_varint(&mut encoded, value);
+            let (decoded, used) = read_varint(&encoded, 0).expect("decode");
+            assert_eq!(decoded, value);
+            assert_eq!(used, encoded.len());
         }
     }
 
@@ -395,12 +678,16 @@ pub(crate) mod tests {
     /// 覆盖 RFC 9001 §5.2 密钥派生 + §5.4 header protection + §5.4.1 AEAD
     /// 全链路，证明解密端实现正确。
     pub(crate) fn build_quic_initial(dcid: &[u8], name: &[u8]) -> Vec<u8> {
+        let hs = build_client_hello(name);
+        build_quic_initial_with_crypto(dcid, 0, &hs)
+    }
+
+    fn build_quic_initial_with_crypto(dcid: &[u8], offset: u64, data: &[u8]) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.push(0x06); // CRYPTO
-        write_varint(&mut payload, 0); // offset
-        let tls_rec = build_client_hello(name);
-        write_varint(&mut payload, tls_rec.len() as u64);
-        payload.extend_from_slice(&tls_rec);
+        write_varint(&mut payload, offset);
+        write_varint(&mut payload, data.len() as u64);
+        payload.extend_from_slice(data);
 
         let (key, iv, hp) = quic_initial_keys_v1(dcid);
         let pn: u64 = 0;
@@ -411,18 +698,13 @@ pub(crate) mod tests {
         header.push(dcid.len() as u8);
         header.extend_from_slice(dcid);
         header.push(0); // SCID 空
-        header.extend_from_slice(&0u32.to_be_bytes()); // token_len=0
-                                                       // length = pn_len + payload_len + tag16，占位回填
+        write_varint(&mut header, 0); // token_len=0
+                                      // length = pn_len + payload_len + tag16，占位回填
         let length = pn_len + payload.len() + 16;
-        header.extend_from_slice(&(length as u32).to_be_bytes());
+        write_varint(&mut header, length as u64);
         header.push(pn as u8);
 
-        let mut nonce = [0u8; 12];
-        nonce[4..].copy_from_slice(&iv[4..]);
-        let pn_be = pn.to_be_bytes();
-        for n in 0..8 {
-            nonce[4 + n] ^= pn_be[n];
-        }
+        let nonce = quic_aead_nonce(&iv, pn);
         let cipher = Aes128Gcm::new_from_slice(&key).unwrap();
         let mut ciphertext = cipher
             .encrypt(
@@ -466,5 +748,71 @@ pub(crate) mod tests {
         let mut not_initial = build_quic_initial(&[1, 2, 3, 4], b"example.com");
         not_initial[0] = 0xD0 | (not_initial[0] & 0x0F);
         assert_eq!(sniff_quic_sni(&not_initial), None);
+    }
+
+    #[test]
+    fn quic_crypto_reassembles_split_client_hello() {
+        let dcid = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let hs = build_client_hello(b"split.example.com");
+        let mid = hs.len() / 2;
+        let first = build_quic_initial_with_crypto(&dcid, 0, &hs[..mid]);
+        let second = build_quic_initial_with_crypto(&dcid, mid as u64, &hs[mid..]);
+        let mut reassembler = QuicCryptoReassembler::new();
+        assert_eq!(
+            reassembler.push(&first),
+            QuicSniffStep::Incomplete,
+            "首片不应提前命中"
+        );
+        assert_eq!(
+            reassembler.push(&second),
+            QuicSniffStep::Host("split.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn quic_initial_keys_match_rfc9001_vector() {
+        let dcid = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+        let (key, iv, hp) = quic_initial_keys_v1(&dcid);
+        assert_eq!(
+            key,
+            [
+                0x1f, 0x36, 0x96, 0x13, 0xdd, 0x76, 0xd5, 0x46, 0x77, 0x30, 0xef, 0xcb, 0xe3, 0xb1,
+                0xa2, 0x2d
+            ]
+        );
+        assert_eq!(
+            iv,
+            [0xfa, 0x04, 0x4b, 0x2f, 0x42, 0xa3, 0xfd, 0x3b, 0x46, 0xfb, 0x25, 0x5c]
+        );
+        assert_eq!(
+            hp,
+            [
+                0x9f, 0x50, 0x44, 0x9e, 0x04, 0xa0, 0xe8, 0x10, 0x28, 0x3a, 0x1e, 0x99, 0x33, 0xad,
+                0xed, 0xd2
+            ]
+        );
+        // RFC 8446 §7.1 编码：uint16 length + u8 label len + label + u8 context len
+        let (prk, _) = Hkdf::<Sha256>::extract(Some(&QUIC_V1_INITIAL_SALT), &dcid);
+        assert_eq!(
+            hkdf_expand_label(&prk, b"client in", &[], 32),
+            [
+                0xc0, 0x0c, 0xf1, 0x51, 0xca, 0x5b, 0xe0, 0x75, 0xed, 0x0e, 0xbf, 0xb5, 0xc8, 0x03,
+                0x23, 0xc4, 0x2d, 0x6b, 0x7d, 0xb6, 0x78, 0x81, 0x28, 0x9a, 0xf4, 0x00, 0x8f, 0x1f,
+                0x6c, 0x35, 0x7a, 0xea
+            ],
+            "RFC 9001 A.1 client initial secret"
+        );
+    }
+
+    #[test]
+    fn quic_aead_nonce_xors_packet_number_into_full_iv() {
+        let iv = [
+            0xfa, 0x04, 0x4b, 0x2f, 0x42, 0xa3, 0xfd, 0x3b, 0x46, 0xfb, 0x25, 0x5c,
+        ];
+        assert_eq!(quic_aead_nonce(&iv, 0), iv);
+        assert_eq!(
+            quic_aead_nonce(&iv, 1),
+            [0xfa, 0x04, 0x4b, 0x2f, 0x42, 0xa3, 0xfd, 0x3b, 0x46, 0xfb, 0x25, 0x5d]
+        );
     }
 }

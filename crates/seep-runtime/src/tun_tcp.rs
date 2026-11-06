@@ -470,6 +470,28 @@ impl TunTcpStack {
         }
     }
 
+    /// 异步等待首包到达再 peek（G0-3 sniff 交接竞态）：真实 TLS ClientHello
+    /// 常在 Established 检出后的独立分段才到达。先非阻塞 peek；为空则
+    /// 短眠重试（数据到达会由 run 循环 kick 驱动 poll 入缓冲，peek 即可见），
+    /// 直到 `wait` 耗尽。不消费数据；流已撤返回空。
+    pub async fn peek_socket_with_wait(
+        &self,
+        handle: SocketHandle,
+        max: usize,
+        wait: Duration,
+    ) -> Vec<u8> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let buf = self.peek_socket(handle, max);
+            if !buf.is_empty() || tokio::time::Instant::now() >= deadline {
+                return buf;
+            }
+            // 步长上限：等待窗口细分为多次重试，兼顾低延迟与不空转。
+            let step = std::cmp::min(wait / 6, Duration::from_millis(20));
+            tokio::time::sleep(step).await;
+        }
+    }
+
     /// teardown：全量关闭（应用连接随 EOF 退场；设备即将销毁不再出段）
     pub fn shutdown_all(&self) {
         let mut inner = self.inner.lock().unwrap();
