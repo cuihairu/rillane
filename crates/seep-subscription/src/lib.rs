@@ -388,7 +388,8 @@ impl SubscriptionManager {
                 .subscriptions
                 .read()
                 .expect("subscriptions lock poisoned");
-            let subscription = subs.get(name)
+            let subscription = subs
+                .get(name)
                 .ok_or_else(|| anyhow!("订阅 {} 不存在", name))?
                 .clone();
             let snapshot_epoch = self.subscription_epoch.load(Ordering::Acquire);

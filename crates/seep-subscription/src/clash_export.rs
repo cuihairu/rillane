@@ -1040,10 +1040,9 @@ mod tests {
             .rules
             .iter()
             .any(|rule| matches!(rule, ClashRule::Domain { domains, .. } if domains == &vec!["exact.org".to_string()])));
-        assert!(parsed
-            .rules
-            .iter()
-            .any(|rule| matches!(rule, ClashRule::Geosite { country_code, .. } if country_code == "cn")));
+        assert!(parsed.rules.iter().any(
+            |rule| matches!(rule, ClashRule::Geosite { country_code, .. } if country_code == "cn")
+        ));
     }
 
     /// 审核发现 2026-11-05：含逗号正则被整条跳过时，clash_export 仍走

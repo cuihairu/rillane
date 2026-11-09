@@ -2015,10 +2015,7 @@ rules:
         "#;
         let converter = ClashConverter::new();
         let config = converter.parse(yaml_content).unwrap();
-        assert!(matches!(
-            config.rules[0],
-            ClashRule::DomainRegex { .. }
-        ));
+        assert!(matches!(config.rules[0], ClashRule::DomainRegex { .. }));
 
         // convert_clash_rule 映射
         let (matches, target) = converter

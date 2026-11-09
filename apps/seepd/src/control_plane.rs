@@ -1356,7 +1356,9 @@ impl ControlPlane {
             .into_iter()
             .map(|f| ClashConnectionDto {
                 id: format!("{}-{}", f.ingress, f.egress),
-                metadata: ClashConnMeta { host: String::new() },
+                metadata: ClashConnMeta {
+                    host: String::new(),
+                },
                 rule: f.ingress.clone(),
                 rule_payload: String::new(),
                 chains: vec![f.egress.clone()],

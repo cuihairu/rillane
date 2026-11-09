@@ -841,7 +841,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-
     /// 容量上限路径：曾因持 current_size 写锁跨 cleanup（其内部取
     /// memory_cache 锁）与插入路径锁序成环（ABBA）而死锁，多次超限插入触发。
     #[test]

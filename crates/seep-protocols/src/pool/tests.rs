@@ -264,7 +264,10 @@ async fn maybe_refill_no_spawn_when_key_at_capacity() {
     );
     assert_eq!(idle_len, 1, "后台填充完成前 idle 不变");
     wait_until(|| pool.idle_count_of(&key) == 3).await;
-    assert!(pool.snapshot().dials_refill_ok <= 2, "补充拨号受 per-key 上界约束");
+    assert!(
+        pool.snapshot().dials_refill_ok <= 2,
+        "补充拨号受 per-key 上界约束"
+    );
 }
 
 #[tokio::test]

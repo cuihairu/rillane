@@ -698,7 +698,10 @@ trojan://password@server.com:443#test
         assert_eq!(reqs.load(Ordering::SeqCst), 1, "404 终态不应重试");
 
         // 408/429 → 瞬时 anyhow（非 FetcherError），重试至上限。
-        for (status, label) in [("408 Request Timeout", "408"), ("429 Too Many Requests", "429")] {
+        for (status, label) in [
+            ("408 Request Timeout", "408"),
+            ("429 Too Many Requests", "429"),
+        ] {
             let reqs = Box::leak(Box::new(AtomicUsize::new(0)));
             let fetcher = SubscriptionFetcher::with_config(FetcherConfig {
                 max_retries: 3,
@@ -711,7 +714,11 @@ trojan://password@server.com:443#test
                 err.downcast_ref::<FetcherError>().is_none(),
                 "{label} 应为瞬时错误（可重试），不应是 FetcherError"
             );
-            assert_eq!(reqs.load(Ordering::SeqCst), 3, "{label} 应重试 max_retries 次");
+            assert_eq!(
+                reqs.load(Ordering::SeqCst),
+                3,
+                "{label} 应重试 max_retries 次"
+            );
         }
 
         // 5xx → 瞬时 anyhow（非 FetcherError）

@@ -177,9 +177,7 @@ impl EgressUdpConnector for RejectUdpConnector {
         ctx: FlowContext,
         _decision: &RouteDecision,
     ) -> Result<Arc<dyn UdpRelay>> {
-        Ok(Arc::new(RejectUdpRelay {
-            target: ctx.target,
-        }))
+        Ok(Arc::new(RejectUdpRelay { target: ctx.target }))
     }
 }
 
@@ -321,7 +319,10 @@ mod tests {
             metadata: Default::default(),
         };
         let decision = RouteDecision::direct("block-ads".into());
-        let relay = connector.associate(ctx, &decision).await.expect("reject 关联应成功");
+        let relay = connector
+            .associate(ctx, &decision)
+            .await
+            .expect("reject 关联应成功");
 
         // send_to 吞包（静默丢弃）
         relay

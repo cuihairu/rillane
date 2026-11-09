@@ -17,7 +17,6 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-
 /// 单一 GeoIP/GeoSite 数据库的惰性加载容器。
 ///
 /// `RwLock<Option<Arc<...>>>`：None = 未加载或加载失败（记录 WARN 后保持
@@ -108,7 +107,10 @@ impl GeoDatabases {
             *slot = Some(Arc::new(db));
             return slot.clone();
         }
-        *self.geosite_failed.write().expect("geosite_failed poisoned") = true;
+        *self
+            .geosite_failed
+            .write()
+            .expect("geosite_failed poisoned") = true;
         None
     }
 
@@ -154,7 +156,9 @@ impl GeoDatabases {
         };
         let mut groups = std::collections::HashMap::new();
         for entry in &list.entry {
-            let group = groups.entry(entry.country_code.to_ascii_lowercase()).or_insert_with(GeoSiteGroup::default);
+            let group = groups
+                .entry(entry.country_code.to_ascii_lowercase())
+                .or_insert_with(GeoSiteGroup::default);
             for domain in &entry.domain {
                 match domain.r#type {
                     // v2fly 域条目类型：Plain=0（子串）、Regex=1、Domain=2
@@ -227,7 +231,11 @@ pub fn geoip_country(reader: &maxminddb::Reader<Vec<u8>>, ip: IpAddr) -> Option<
     rec.country
         .iso_code
         .map(|s| s.to_ascii_uppercase())
-        .or_else(|| rec.registered_country.iso_code.map(|s| s.to_ascii_uppercase()))
+        .or_else(|| {
+            rec.registered_country
+                .iso_code
+                .map(|s| s.to_ascii_uppercase())
+        })
 }
 
 /// 目标主机 → 可查询 IP：字面量直接解析；域名不解析（路由面不做 DNS，
@@ -255,7 +263,7 @@ mod tests {
     }
 
     fn sample_geosite_dat() -> Vec<u8> {
-        use geosite_rs::{GeoSite, GeoSiteList, domain, Domain};
+        use geosite_rs::{domain, Domain, GeoSite, GeoSiteList};
         let list = GeoSiteList {
             entry: vec![GeoSite {
                 country_code: "cn".to_string(),
@@ -287,7 +295,7 @@ mod tests {
     }
 
     fn sample_mmdb() -> Vec<u8> {
-        use maxminddb_writer::{Database, paths::IpAddrWithMask};
+        use maxminddb_writer::{paths::IpAddrWithMask, Database};
         let mut db = Database::default();
         db.metadata.database_type = "GeoLite2-Country".to_string();
         db.metadata.languages = vec!["en".to_string()];
@@ -332,7 +340,7 @@ mod tests {
 
     #[test]
     fn geosite_matching_is_case_insensitive_across_entry_types() {
-        use geosite_rs::{GeoSite, GeoSiteList, domain, Domain};
+        use geosite_rs::{domain, Domain, GeoSite, GeoSiteList};
         let list = GeoSiteList {
             entry: vec![GeoSite {
                 country_code: "CN".to_string(),
@@ -360,7 +368,10 @@ mod tests {
                 ],
             }],
         };
-        let path = write_temp("case-insensitive-geosite.dat", &geosite_rs::encode_geosite(list));
+        let path = write_temp(
+            "case-insensitive-geosite.dat",
+            &geosite_rs::encode_geosite(list),
+        );
         let db = GeoDatabases::new(None, Some(path));
         let loaded = db.geosite().expect("应加载成功");
         assert!(loaded.matches("cn", "MyVideo.Net"));
@@ -392,7 +403,10 @@ mod tests {
         let path = write_temp("sample-geoip.mmdb", &mmdb);
         let db = GeoDatabases::new(Some(path.clone()), None);
         let reader = db.geoip().expect("应加载成功");
-        assert_eq!(geoip_country(&reader, "1.2.3.4".parse().unwrap()), Some("CN".into()));
+        assert_eq!(
+            geoip_country(&reader, "1.2.3.4".parse().unwrap()),
+            Some("CN".into())
+        );
         assert_eq!(geoip_country(&reader, "8.8.8.8".parse().unwrap()), None);
         // 域名不解析
         assert_eq!(host_to_ip("example.com"), None);

@@ -31,9 +31,7 @@ static ENGINE: LazyLock<Result<wasmtime::Engine, String>> = LazyLock::new(|| {
 });
 
 fn engine() -> Result<&'static wasmtime::Engine> {
-    ENGINE
-        .as_ref()
-        .map_err(|e| anyhow::anyhow!(e.clone()))
+    ENGINE.as_ref().map_err(|e| anyhow::anyhow!(e.clone()))
 }
 
 /// 从文件载入插件 → `FlowMiddleware` 适配器（同步调用；JIT 编译发生在本调用，

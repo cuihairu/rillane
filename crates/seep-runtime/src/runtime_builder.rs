@@ -2613,9 +2613,8 @@ fn build_egress_outputs(
     for desc in descriptors {
         match &desc.spec {
             EgressConfig::Reject => {
-                let flow_output: Arc<dyn FlowOutput> = Arc::new(RejectFlowOutput::new(
-                    desc.name.clone(),
-                ));
+                let flow_output: Arc<dyn FlowOutput> =
+                    Arc::new(RejectFlowOutput::new(desc.name.clone()));
                 outputs.insert(desc.name.clone(), flow_output);
             }
             EgressConfig::Direct => {
@@ -3839,11 +3838,8 @@ mod tests {
         let rt = runtime.clone();
         let mut handle = tokio::spawn(async move { rt.update_config(cfg).await });
         // 锁未放前 update_config 不得推进。
-        let still_pending = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            &mut handle,
-        )
-        .await;
+        let still_pending =
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut handle).await;
         assert!(
             still_pending.is_err(),
             "持 config_apply_lock 期间 update_config 必须等待"
@@ -3948,14 +3944,8 @@ mod tests {
         res2.expect("task2 不 panic").expect("merge2 成功");
 
         let connectors = runtime.get_egress_connectors();
-        assert!(
-            connectors.contains_key("n1"),
-            "并发 merge 不得丢失增量 n1"
-        );
-        assert!(
-            connectors.contains_key("n2"),
-            "并发 merge 不得丢失增量 n2"
-        );
+        assert!(connectors.contains_key("n1"), "并发 merge 不得丢失增量 n1");
+        assert!(connectors.contains_key("n2"), "并发 merge 不得丢失增量 n2");
     }
 
     #[test]
