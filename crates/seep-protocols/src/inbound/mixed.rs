@@ -22,6 +22,8 @@ pub struct MixedIngress {
     bearer_tokens: Vec<String>,
     /// UDP ASSOCIATE 服务（socks5 分支共享；None = 未启用）
     udp: Option<Arc<UdpAssociateService>>,
+    /// fake-ip 池（G1-10；None = 关闭，target 原样路由）
+    fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
 }
 
 impl MixedIngress {
@@ -31,6 +33,7 @@ impl MixedIngress {
         credentials: Vec<Credential>,
         bearer_tokens: Vec<String>,
         udp: Option<Arc<UdpAssociateService>>,
+        fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
     ) -> Self {
         Self {
             name,
@@ -38,6 +41,7 @@ impl MixedIngress {
             credentials,
             bearer_tokens,
             udp,
+            fake_ip,
         }
     }
 
@@ -61,6 +65,7 @@ impl MixedIngress {
                 router,
                 output,
                 self.udp.clone(),
+                self.fake_ip.clone(),
             )
             .await
         } else {
@@ -71,6 +76,7 @@ impl MixedIngress {
                 stream,
                 router,
                 output,
+                self.fake_ip.clone(),
             )
             .await
         }
@@ -168,6 +174,7 @@ mod tests {
             credentials,
             vec![],
             None,
+            None,
         ));
         let handle = tokio::spawn(async move {
             ingress
@@ -200,6 +207,7 @@ mod tests {
             addr.to_string(),
             vec![],
             bearer,
+            None,
             None,
         ));
         let handle = tokio::spawn(async move {
@@ -335,6 +343,70 @@ mod tests {
         let mut reply = [0u8; 2];
         client.read_exact(&mut reply).await.unwrap();
         assert_eq!(reply, [0x05, 0x00], "空凭据表应匿名放行");
+        server.abort();
+    }
+
+    /// 捕获路由上下文的桩路由（fake-ip 回填断言面）
+    struct CapturingRouter {
+        seen: Arc<std::sync::Mutex<Vec<(String, u16)>>>,
+    }
+
+    #[async_trait]
+    impl FlowRouter for CapturingRouter {
+        async fn route(&self, ctx: FlowContext) -> Result<RouteDecision> {
+            self.seen
+                .lock()
+                .expect("captured lock")
+                .push((ctx.target.host.clone(), ctx.target.port));
+            Ok(RouteDecision::direct("mock-egress".into()))
+        }
+    }
+
+    /// G1-10 fake-ip 回填：socks5 CONNECT 池段假地址 → 路由面见到原域名。
+    /// 入口持有与 DNS 面同一张池表，CONNECT 的假 IPv4 反查回原域名后再进
+    /// 路由；非池段地址/域名原样（其它用例覆盖）。
+    #[tokio::test]
+    async fn fake_ip_connect_backfills_domain_in_route_context() {
+        let table = Arc::new(seep_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/15").unwrap());
+        let fake = table.alloc("backfill.example");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = CapturingRouter { seen: seen.clone() };
+
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let ingress = Arc::new(MixedIngress::new(
+            "test-mixed".into(),
+            addr.to_string(),
+            vec![],
+            vec![],
+            None,
+            Some(table),
+        ));
+        let server =
+            tokio::spawn(async move { ingress.run(Arc::new(router), Arc::new(NullOutput)).await });
+
+        let mut client = connect_with_retry(addr).await;
+        // 匿名 socks5：0x00 放行 → CONNECT（IPv4 假地址）
+        client.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut reply = [0u8; 2];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [0x05, 0x00]);
+
+        let mut req = vec![0x05u8, 0x01, 0x00, 0x01];
+        req.extend_from_slice(&fake.octets());
+        req.extend_from_slice(&443u16.to_be_bytes());
+        client.write_all(&req).await.unwrap();
+        let mut rep = [0u8; 10];
+        client.read_exact(&mut rep).await.unwrap();
+        assert_eq!(rep[1], 0x00, "CONNECT 假地址应成功");
+
+        let captured = seen.lock().expect("seen lock").clone();
+        assert_eq!(
+            captured,
+            vec![("backfill.example".to_string(), 443)],
+            "路由面应见原域名（fake-ip 回填）"
+        );
         server.abort();
     }
 }

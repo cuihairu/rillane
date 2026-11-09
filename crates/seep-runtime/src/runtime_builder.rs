@@ -276,9 +276,21 @@ impl RuntimeBuilder {
                 let resolver = seep_platform::network::DnsResolver::new(resolver_cfg)
                     .map_err(|e| anyhow!("network.dns 引擎装配失败（E1）: {e}"))?;
                 let listen = SocketAddr::new(dns_cfg.listen_address, dns_cfg.listen_port);
+                // G1-10 fake-ip：块在场且启用 → 构建池表交本地监听（A 查询
+                // 稳定假地址应答）与入口面（出站 target 域名回填）；同一张
+                // 表两侧共享，分配/反查一致。
+                let fake_ip = match dns_cfg.fake_ip.as_ref() {
+                    Some(fake) if fake.enabled => {
+                        let table = seep_core::fake_ip::FakeIpTable::from_cidr(&fake.range)
+                            .map_err(|e| anyhow!("network.dns.fake_ip 配置非法：{e}"))?;
+                        Some(Arc::new(table))
+                    }
+                    _ => None,
+                };
                 Some(Arc::new(crate::dns_config::DnsService::new(
                     Arc::new(resolver),
                     listen,
+                    fake_ip,
                 )))
             }
             None => None,
@@ -479,12 +491,16 @@ impl RuntimeBuilder {
             None
         };
 
-        // 入口默认实现（udp_service 唯一消费点，随 UDP 块顺延至此）
+        // 入口默认实现（udp_service 唯一消费点，随 UDP 块顺延至此）。
+        // fake-ip 池表随 DNS 服务传递：入口面用它把池段假地址反查回原域名
+        // （G1-10 出站 target 回填）。
         if self.ingress_endpoints.is_empty() {
+            let fake_ip_table = dns_service.as_ref().and_then(|d| d.fake_ip());
             self.ingress_endpoints = build_ingress_endpoints(
                 &config_snapshot.ingress,
                 udp_service.clone(),
                 config_snapshot.udp.enabled,
+                fake_ip_table,
             )?;
         }
 
@@ -2177,6 +2193,7 @@ fn build_ingress_endpoints(
     descriptors: &[IngressDescriptor],
     udp: Option<Arc<seep_core::udp::UdpAssociateService>>,
     udp_enabled_global: bool,
+    fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
 ) -> Result<HashMap<String, Arc<dyn IngressEndpoint>>> {
     let mut map = HashMap::new();
     for desc in descriptors {
@@ -2207,6 +2224,7 @@ fn build_ingress_endpoints(
                 bind.clone(),
                 auth.clone().unwrap_or_default(),
                 udp_here,
+                fake_ip.clone(),
             )),
             IngressConfig::Http {
                 bind,
@@ -2217,6 +2235,7 @@ fn build_ingress_endpoints(
                 bind.clone(),
                 auth.clone().unwrap_or_default(),
                 bearer_tokens.clone().unwrap_or_default(),
+                fake_ip.clone(),
             )),
             IngressConfig::Mixed {
                 bind,
@@ -2229,6 +2248,7 @@ fn build_ingress_endpoints(
                 auth.clone().unwrap_or_default(),
                 bearer_tokens.clone().unwrap_or_default(),
                 udp_here,
+                fake_ip.clone(),
             )),
         };
         map.insert(desc.name.clone(), endpoint);

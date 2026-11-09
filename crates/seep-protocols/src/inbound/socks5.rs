@@ -22,6 +22,7 @@ pub(crate) async fn handle_socks5_stream(
     router: Arc<dyn FlowRouter>,
     output: Arc<dyn FlowOutput>,
     udp: Option<Arc<UdpAssociateService>>,
+    fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
 ) -> Result<()> {
     let client_addr = stream.peer_addr().ok();
     let auth_required = !credentials.is_empty();
@@ -49,6 +50,7 @@ pub(crate) async fn handle_socks5_stream(
                 output,
                 target_host,
                 target_port,
+                fake_ip,
             )
             .await
         }
@@ -67,7 +69,9 @@ pub(crate) async fn handle_socks5_stream(
     }
 }
 
-/// CONNECT 既有路径：构建 Flow 流式转发（行为不变）
+/// CONNECT 既有路径：构建 Flow 流式转发（行为不变）。
+/// fake-ip 回填（G1-10）：target 为池段 IPv4 时反查原域名改写（DNS 面分配
+/// 的假地址），路由按域名规则命中；原域名记 `dns.fakeip` 注解可观测。
 async fn forward_tcp(
     ingress_node_name: &str,
     client_addr: Option<std::net::SocketAddr>,
@@ -76,6 +80,7 @@ async fn forward_tcp(
     output: Arc<dyn FlowOutput>,
     target_host: String,
     target_port: u16,
+    fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
 ) -> Result<()> {
     let mut metadata = FlowMetadata {
         tags: vec![
@@ -92,6 +97,19 @@ async fn forward_tcp(
     metadata
         .annotations
         .insert("ingress.node".into(), ingress_node_name.to_string());
+
+    let target_host = match fake_ip
+        .as_ref()
+        .and_then(|t| seep_core::fake_ip::reverse_host(t, &target_host))
+    {
+        Some(domain) => {
+            metadata
+                .annotations
+                .insert("dns.fakeip".into(), domain.clone());
+            domain
+        }
+        None => target_host,
+    };
 
     let flow = Flow {
         id: FlowId::new(),
@@ -121,6 +139,8 @@ pub struct Socks5Ingress {
     credentials: Vec<Credential>,
     /// UDP ASSOCIATE 服务（None = udp.enabled=false → 0x03 应 0x07）
     udp: Option<Arc<UdpAssociateService>>,
+    /// fake-ip 池（G1-10；None = 关闭，target 原样路由）
+    fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
 }
 
 impl Socks5Ingress {
@@ -129,12 +149,14 @@ impl Socks5Ingress {
         bind: String,
         credentials: Vec<Credential>,
         udp: Option<Arc<UdpAssociateService>>,
+        fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
     ) -> Self {
         Self {
             name,
             bind,
             credentials,
             udp,
+            fake_ip,
         }
     }
 
@@ -151,6 +173,7 @@ impl Socks5Ingress {
             router,
             output,
             self.udp.clone(),
+            self.fake_ip.clone(),
         )
         .await
     }

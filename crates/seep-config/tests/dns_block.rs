@@ -103,6 +103,7 @@ fn dns_block_roundtrip() {
         }),
         listen_address: "0.0.0.0".parse().unwrap(),
         listen_port: 5353,
+        fake_ip: None,
     };
     let rendered = serde_yaml::to_string(&cfg).expect("应可序列化");
     let reparsed: DnsBlockConfig = serde_yaml::from_str(&rendered).expect("应可往返");
@@ -149,6 +150,7 @@ fn dns_block_validate_rejects_illegal_values() {
         tls_skip_verify: false,
         listen_address: "127.0.0.1".parse().unwrap(),
         listen_port: 15_353,
+        fake_ip: None,
     };
 
     let mut cfg = base();
@@ -284,4 +286,57 @@ fn dns_block_encrypted_upstream_forms() {
             .unwrap();
     let err = cfg.validate().expect_err("DoH 缺 host 应拒绝");
     assert!(err.to_string().contains("host"), "{err}");
+}
+
+/// fake-ip 块（G1-10）：缺席 None（存量零差异）；在场缺省 enabled + 基准
+/// 段 198.18.0.0/15；全配置 validate 逐块透传。
+#[test]
+fn dns_block_fake_ip_schema_and_defaults() {
+    let cfg: DnsBlockConfig =
+        serde_yaml::from_str("enabled: true\ntrusted: ['1.1.1.1:53']").expect("应可解析");
+    assert!(cfg.fake_ip.is_none(), "块缺席应 None（存量零差异）");
+    cfg.validate().expect("无 fake_ip 应过 validate");
+
+    let cfg: DnsBlockConfig = serde_yaml::from_str(
+        "enabled: true\ntrusted: ['1.1.1.1:53']\nfake_ip: {}\ndefault_group: trusted",
+    )
+    .expect("空块应可解析（全缺省）");
+    let fake = cfg.fake_ip.as_ref().expect("fake_ip 块应在");
+    assert!(fake.enabled, "块在场缺省启用");
+    assert_eq!(fake.range, "198.18.0.0/15", "段缺省 RFC 2544 基准");
+    cfg.validate().expect("缺省值应过 validate");
+}
+
+/// fake_ip.range 值域矩阵：缺前缀 / 非 IPv4 / 非数字前缀 / 前缀越界 /
+/// 主机位未清零全拒；enabled=false 容忍半配置（与 dns 块口径一致）。
+#[test]
+fn dns_block_fake_ip_range_matrix() {
+    let block = |range: &str| {
+        serde_yaml::from_str::<DnsBlockConfig>(&format!(
+            "enabled: true\ntrusted: ['1.1.1.1:53']\nfake_ip:\n  range: \"{range}\""
+        ))
+        .expect("应可解析")
+    };
+    for (range, expect) in [
+        ("198.18.0.0", "缺前缀"),
+        ("host/24", "IPv4"),
+        ("198.18.0.0/x", "数字"),
+        ("198.18.0.0/0", "1..=30"),
+        ("198.18.0.0/31", "1..=30"),
+        ("198.18.1.1/15", "主机位"),
+    ] {
+        let cfg = block(range);
+        let err = cfg.validate().expect_err(range);
+        assert!(
+            err.to_string().contains(expect),
+            "range {range:?} 应报 {expect:?}：{err}"
+        );
+    }
+
+    let cfg: DnsBlockConfig = serde_yaml::from_str(
+        "enabled: true\ntrusted: ['1.1.1.1:53']\nfake_ip:\n  enabled: false\n  range: \"bad\"",
+    )
+    .expect("应可解析");
+    cfg.validate()
+        .expect("enabled=false 应容忍半配置（首位短路口径）");
 }

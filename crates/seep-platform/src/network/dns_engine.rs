@@ -1251,14 +1251,23 @@ pub struct LocalDnsServer {
     resolver: Arc<DnsResolver>,
     local_address: IpAddr,
     local_port: u16,
+    /// fake-ip 池（G1-10）：Some = 对客户端 A 查询按池段稳定假地址应答
+    ///（不触上游，TTL 1）；None = 关闭，存量行为零差异
+    fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
 }
 
 impl LocalDnsServer {
-    pub fn new(resolver: Arc<DnsResolver>, local_address: IpAddr, local_port: u16) -> Self {
+    pub fn new(
+        resolver: Arc<DnsResolver>,
+        local_address: IpAddr,
+        local_port: u16,
+        fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
+    ) -> Self {
         Self {
             resolver,
             local_address,
             local_port,
+            fake_ip,
         }
     }
 
@@ -1296,8 +1305,9 @@ impl LocalDnsServer {
                             Err(e) => { warn!("克隆查询 socket 失败：{e}"); continue }
                         };
                         let resolver = self.resolver.clone();
+                        let fake_ip = self.fake_ip.clone();
                         tokio::spawn(async move {
-                            handle_dns_query(worker, peer, data, resolver).await;
+                            handle_dns_query(worker, peer, data, resolver, fake_ip).await;
                         });
                     }
                     Err(e) => warn!("DNS 监听收包失败：{e}"),
@@ -1308,22 +1318,47 @@ impl LocalDnsServer {
     }
 }
 
-/// 单查询处理（坏查询丢弃；NXDOMAIN/失败按 rcode 回写）
+/// 单查询处理（坏查询丢弃；NXDOMAIN/失败按 rcode 回写）。
+/// fake-ip 开启时客户端 A 查询按池段稳定假地址直接应答（不触上游，
+/// TTL 1 秒）；AAAA 与其余类型照常真实解析（应用走 IPv6 即回到 IP
+/// 直连路由语义，不破流）。
 async fn handle_dns_query(
     sock: UdpSocket,
     peer: SocketAddr,
     data: Vec<u8>,
     resolver: Arc<DnsResolver>,
+    fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
 ) {
     let reply = match decode_query(&data) {
-        Ok(q) => match resolver.resolve(&q.domain, q.qtype).await {
-            Ok(answers) => encode_response(q.id, &q.domain, q.qtype, 0, &answers),
-            Err(ResolveError::NxDomain(_)) => encode_response(q.id, &q.domain, q.qtype, 3, &[]),
-            Err(e) => {
-                debug!("DNS 查询失败（回 SERVFAIL）：{e}");
-                encode_response(q.id, &q.domain, q.qtype, 2, &[])
+        Ok(q) => {
+            if let (Some(table), DnsRecordType::A) = (fake_ip.as_ref(), q.qtype) {
+                let ip = table.alloc(&q.domain);
+                debug!("fake-ip 应答：{} → {ip}", q.domain);
+                encode_response(
+                    q.id,
+                    &q.domain,
+                    q.qtype,
+                    0,
+                    &[DnsAnswer {
+                        domain: q.domain.clone(),
+                        rtype: DnsRecordType::A,
+                        ttl: 1,
+                        data: DnsAnswerData::A(ip),
+                    }],
+                )
+            } else {
+                match resolver.resolve(&q.domain, q.qtype).await {
+                    Ok(answers) => encode_response(q.id, &q.domain, q.qtype, 0, &answers),
+                    Err(ResolveError::NxDomain(_)) => {
+                        encode_response(q.id, &q.domain, q.qtype, 3, &[])
+                    }
+                    Err(e) => {
+                        debug!("DNS 查询失败（回 SERVFAIL）：{e}");
+                        encode_response(q.id, &q.domain, q.qtype, 2, &[])
+                    }
+                }
             }
-        },
+        }
         Err(e) => {
             debug!("丢弃坏 DNS 查询：{e:#}");
             return;
@@ -1459,8 +1494,12 @@ impl DnsHandler for EngineDnsHandler {
         let mut tx = self.shutdown_tx.lock().await;
         ensure!(tx.is_none(), "DNS 监听已启动（重复 start）");
         let (stx, srx) = oneshot::channel();
-        let server =
-            LocalDnsServer::new(self.resolver.clone(), self.local_address, self.local_port);
+        let server = LocalDnsServer::new(
+            self.resolver.clone(),
+            self.local_address,
+            self.local_port,
+            None,
+        );
         let handle = tokio::spawn(async move {
             if let Err(e) = server.serve(srx).await {
                 error!("DNS 监听异常退出：{e:#}");
@@ -2168,7 +2207,7 @@ mod tests {
         let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let server = LocalDnsServer::new(resolver, "127.0.0.1".parse().unwrap(), port);
+        let server = LocalDnsServer::new(resolver, "127.0.0.1".parse().unwrap(), port, None);
         let (tx, rx) = oneshot::channel();
         let task = tokio::spawn(server.serve(rx));
         let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -2212,6 +2251,89 @@ mod tests {
             .expect("serve 应退出")
             .unwrap();
         assert!(out.is_ok());
+    }
+
+    /// G1-10 fake-ip：A 查询按池段稳定假地址应答（不触上游），同域名复得
+    /// 同地址，反查还原原域名；AAAA 照常走真实解析路径（mock 上游计数可辨）。
+    #[tokio::test]
+    async fn fake_ip_dns_answers_and_reverses() {
+        let (mock, hits) = spawn_mock(|d| (0, vec![v4(d, [8, 8, 4, 4], 120)])).await;
+        let cfg = ResolverConfig {
+            trusted: vec![DnsUpstream::Udp(mock)],
+            ..base_cfg()
+        };
+        let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
+        let table = Arc::new(seep_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/15").unwrap());
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let server = LocalDnsServer::new(
+            resolver,
+            "127.0.0.1".parse().unwrap(),
+            port,
+            Some(table.clone()),
+        );
+        let (tx, rx) = oneshot::channel();
+        let task = tokio::spawn(server.serve(rx));
+        let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli.connect(SocketAddr::from(([127, 0, 0, 1], port)))
+            .await
+            .unwrap();
+
+        let query = |id: u16, domain: &str, qtype: DnsRecordType| {
+            let domain = domain.to_string();
+            let cli = &cli;
+            async move {
+                let mut raw = [0u8; 512];
+                for _ in 0..100 {
+                    let q = encode_query(id, &domain, qtype).unwrap();
+                    if cli.send(&q).await.is_err() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                    if let Ok(Ok(n)) =
+                        tokio::time::timeout(Duration::from_millis(200), cli.recv(&mut raw)).await
+                    {
+                        return decode_response(&raw[..n]).unwrap();
+                    }
+                }
+                panic!("监听未在限时内应答 {domain} {qtype:?}");
+            }
+        };
+
+        // A 查询 → 池段假地址（非上游真值），稳定复得，反查命中
+        let resp = query(0x11, "example.com", DnsRecordType::A).await;
+        let DnsAnswerData::A(fake) = resp.answers[0].data else {
+            panic!("应为 A 应答");
+        };
+        assert_eq!(resp.rcode, 0);
+        assert_eq!(resp.answers[0].ttl, 1, "假地址 TTL 1");
+        assert!(table.in_range(&fake), "应答应落在池段内：{fake}");
+        assert_ne!(fake, Ipv4Addr::new(8, 8, 4, 4), "不得是上游真值");
+        assert_eq!(table.reverse(&fake).as_deref(), Some("example.com"));
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "A 查询不触上游"
+        );
+
+        // 同域名再查 → 同假地址
+        let again = query(0x12, "example.com", DnsRecordType::A).await;
+        let DnsAnswerData::A(fake2) = again.answers[0].data else {
+            panic!("应为 A 应答");
+        };
+        assert_eq!(fake, fake2, "同域名恒同假地址");
+
+        // AAAA → 照常真实解析（触上游；mock 按域名回 A 值，AAAA 查询上游
+        // 无 AAAA 应答 → 引擎按无应答/失败路径回包，仅断言触达上游）
+        let _ = query(0x13, "other.test", DnsRecordType::Aaaa).await;
+        assert!(
+            hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "AAAA 应触上游（fake-ip 只拦 A）"
+        );
+
+        drop(tx);
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
     }
 
     /// §7-7 工厂：UDP 可用 / 加密上游 Err / 零上游 Err / 端口 0 Err

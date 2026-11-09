@@ -36,6 +36,7 @@ pub(crate) async fn handle_http_connect_stream(
     mut stream: TcpStream,
     router: Arc<dyn FlowRouter>,
     output: Arc<dyn FlowOutput>,
+    fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
 ) -> Result<()> {
     let client_addr = stream.peer_addr().ok();
 
@@ -106,6 +107,21 @@ pub(crate) async fn handle_http_connect_stream(
         .annotations
         .insert("ingress.node".into(), ingress_node_name.to_string());
 
+    // fake-ip 回填（G1-10）：target 为池段 IPv4 时反查原域名改写（DNS 面
+    // 分配的假地址），路由按域名规则命中；原域名记 `dns.fakeip` 注解可观测
+    let host = match fake_ip
+        .as_ref()
+        .and_then(|t| seep_core::fake_ip::reverse_host(t, &host))
+    {
+        Some(domain) => {
+            metadata
+                .annotations
+                .insert("dns.fakeip".into(), domain.clone());
+            domain
+        }
+        None => host,
+    };
+
     let flow = Flow {
         id: FlowId::new(),
         target: FlowTarget {
@@ -136,6 +152,8 @@ pub struct HttpIngress {
     credentials: Vec<Credential>,
     /// Bearer 令牌表（None/空表 = 不启用；非空强制 Proxy-Authorization: Bearer）
     bearer_tokens: Vec<String>,
+    /// fake-ip 池（G1-10；None = 关闭，target 原样路由）
+    fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
 }
 
 impl HttpIngress {
@@ -144,12 +162,14 @@ impl HttpIngress {
         bind: String,
         credentials: Vec<Credential>,
         bearer_tokens: Vec<String>,
+        fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
     ) -> Self {
         Self {
             name,
             bind,
             credentials,
             bearer_tokens,
+            fake_ip,
         }
     }
 
@@ -166,6 +186,7 @@ impl HttpIngress {
             stream,
             router,
             output,
+            self.fake_ip.clone(),
         )
         .await
     }
@@ -347,6 +368,7 @@ mod tests {
                 stream,
                 Arc::new(FixedRouter),
                 Arc::new(NullOutput),
+                None,
             )
             .await
         });

@@ -398,6 +398,55 @@ const fn default_dns_listen_port() -> u16 {
     15_353
 }
 
+/// fake-ip 块（G1-10）：None = 关闭（存量零差异）。启用后本地 DNS 面对客户端
+/// A 查询按池段稳定假地址应答；出站面按假地址反查原域名回填路由。仅 IPv4；
+/// AAAA 查询照常走真实解析（应用若走 IPv6 即回到 IP 直连路由语义，不破流）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FakeIpConfig {
+    /// 块在场缺省启用
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// fake-ip 池段（IPv4 CIDR；RFC 2544 基准段 198.18.0.0/15）
+    #[serde(default = "default_fake_ip_range")]
+    pub range: String,
+}
+
+fn default_fake_ip_range() -> String {
+    "198.18.0.0/15".to_string()
+}
+
+impl FakeIpConfig {
+    /// 值域构建期拦截：段须为合法 IPv4 CIDR 且前缀 1..=30（池 ≥4 地址）。
+    /// 深检（前缀非法/地址非法/主机位未清零）在此报，构建失败浮出配置
+    /// 加载面。
+    pub fn validate(&self) -> Result<()> {
+        let (ip_part, prefix_part) = self.range.split_once('/').ok_or_else(|| {
+            anyhow::anyhow!("network.dns.fake_ip.range 缺前缀长度:{:?}", self.range)
+        })?;
+        let ip: std::net::Ipv4Addr = ip_part
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("network.dns.fake_ip.range 地址须为 IPv4:{ip_part:?}"))?;
+        let prefix: u32 = prefix_part.trim().parse().map_err(|_| {
+            anyhow::anyhow!("network.dns.fake_ip.range 前缀须为数字:{prefix_part:?}")
+        })?;
+        anyhow::ensure!(
+            (1..=30).contains(&prefix),
+            "network.dns.fake_ip.range 前缀须在 1..=30（池至少 4 地址）:{:?}",
+            self.range
+        );
+        let host_bits = 32 - prefix;
+        let mask = u32::MAX << host_bits;
+        anyhow::ensure!(
+            u32::from(ip) & mask == u32::from(ip),
+            "network.dns.fake_ip.range 地址含主机位（应写网络地址）:{:?}",
+            self.range
+        );
+        Ok(())
+    }
+}
+
 /// network.dns 块：两组上游 + 分流规则 + 防污染 + 缓存 + 本地监听。
 /// 块在场缺省启用（与 obfuscation 的 enabled=false 缺省相反——DNS 监听是
 /// 显式 opt-in 配置块，场即意图；false 供临时下线，容忍半配置）。
@@ -445,6 +494,9 @@ pub struct DnsBlockConfig {
     /// 本地监听端口；0 构建期拒绝（同 M0 工厂口径）
     #[serde(default = "default_dns_listen_port")]
     pub listen_port: u16,
+    /// fake-ip 块（G1-10）；None = 关闭（存量零差异）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fake_ip: Option<FakeIpConfig>,
 }
 
 impl DnsBlockConfig {
@@ -545,6 +597,11 @@ impl DnsBlockConfig {
         }
         anyhow::ensure!(self.timeout_ms >= 1, "network.dns.timeout_ms 必须 ≥ 1");
         anyhow::ensure!(self.listen_port != 0, "network.dns.listen_port 不能为 0");
+        if let Some(fake) = &self.fake_ip {
+            if fake.enabled {
+                fake.validate()?;
+            }
+        }
         Ok(())
     }
 }

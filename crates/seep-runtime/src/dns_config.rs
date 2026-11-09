@@ -129,6 +129,9 @@ pub fn dns_block_to_resolver_config(
 pub struct DnsService {
     resolver: Arc<DnsResolver>,
     listen: SocketAddr,
+    /// fake-ip 池（G1-10）：Some = 本地监听面对客户端 A 查询按池段稳定假
+    /// 地址应答；None = 关闭（存量零差异）
+    fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
     run: Mutex<Option<DnsServiceRun>>,
 }
 
@@ -147,12 +150,23 @@ impl fmt::Debug for DnsService {
 }
 
 impl DnsService {
-    pub fn new(resolver: Arc<DnsResolver>, listen: SocketAddr) -> Self {
+    pub fn new(
+        resolver: Arc<DnsResolver>,
+        listen: SocketAddr,
+        fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
+    ) -> Self {
         Self {
             resolver,
             listen,
+            fake_ip,
             run: Mutex::new(None),
         }
+    }
+
+    /// fake-ip 池句柄（None = 未启用）——运行时装配把它交给入口面做
+    /// 出站 target 域名回填（G1-10）。
+    pub fn fake_ip(&self) -> Option<Arc<seep_core::fake_ip::FakeIpTable>> {
+        self.fake_ip.clone()
     }
 
     /// 解析器单例（控制面 flush/指标外的直用面）
@@ -187,6 +201,7 @@ impl DnsService {
             Arc::clone(&self.resolver),
             self.listen.ip(),
             self.listen.port(),
+            self.fake_ip.clone(),
         );
         let task = tokio::spawn(async move { server.serve(rx).await });
         *run = Some(DnsServiceRun {
@@ -420,7 +435,7 @@ mod tests {
 
     fn service(resolver_cfg: ResolverConfig, port: u16) -> DnsService {
         let resolver = Arc::new(DnsResolver::new(resolver_cfg).expect("引擎装配应成功"));
-        DnsService::new(resolver, SocketAddr::from(([127, 0, 0, 1], port)))
+        DnsService::new(resolver, SocketAddr::from(([127, 0, 0, 1], port)), None)
     }
 
     /// 生命周期：重复 start Err → 端到端查询 + stats 命中面 → stop →
