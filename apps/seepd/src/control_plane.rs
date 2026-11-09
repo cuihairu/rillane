@@ -3818,6 +3818,7 @@ mod tests {
                 rules: vec![],
                 default_group: seep_config::DnsGroup::Trusted,
                 anti_poison: seep_config::DnsAntiPoisonMode::Off,
+                tls_skip_verify: false,
                 timeout_ms: 5_000,
                 retries: 2,
                 cache: None,

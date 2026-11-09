@@ -17,7 +17,7 @@ use seep_config::{DnsAntiPoisonMode, DnsBlockConfig, DnsGroup};
 use seep_platform::network::{
     dns::DnsCacheConfig,
     dns_engine::{
-        AntiPoison, DnsResolver, DnsStatsSnapshot, LocalDnsServer, PartitionPattern,
+        AntiPoison, DnsResolver, DnsStatsSnapshot, DnsUpstream, LocalDnsServer, PartitionPattern,
         ResolverConfig, UpstreamGroup,
     },
 };
@@ -39,12 +39,13 @@ pub fn dns_block_to_resolver_config(
     cfg: &DnsBlockConfig,
     tun_dns_servers: &[IpAddr],
 ) -> Result<ResolverConfig> {
-    let parse_group = |group: &str, servers: &[String]| -> Result<Vec<SocketAddr>> {
+    let parse_group = |group: &str, servers: &[String]| -> Result<Vec<DnsUpstream>> {
         servers
             .iter()
             .map(|s| {
-                s.parse::<SocketAddr>()
-                    .with_context(|| format!("network.dns.{group} 上游须为 ip:port 形式:{s:?}"))
+                DnsUpstream::parse(s).with_context(|| {
+                    format!("network.dns.{group} 上游解析失败:{s:?}（ip:port / tls://host:port / https://url）")
+                })
             })
             .collect()
     };
@@ -57,7 +58,7 @@ pub fn dns_block_to_resolver_config(
         );
         domestic = tun_dns_servers
             .iter()
-            .map(|ip| SocketAddr::new(*ip, 53))
+            .map(|ip| DnsUpstream::Udp(SocketAddr::new(*ip, 53)))
             .collect();
     }
     let trusted = parse_group("trusted", &cfg.trusted)?;
@@ -118,6 +119,7 @@ pub fn dns_block_to_resolver_config(
         timeout: Duration::from_millis(cfg.timeout_ms),
         retries: cfg.retries,
         cache,
+        tls_skip_verify: cfg.tls_skip_verify,
     })
 }
 
@@ -237,12 +239,14 @@ mod tests {
         let out = dns_block_to_resolver_config(&cfg, &[]).expect("转换应成功");
         assert_eq!(
             out.domestic,
-            vec!["223.5.5.5:53".parse::<SocketAddr>().unwrap()]
+            vec![DnsUpstream::Udp(
+                "223.5.5.5:53".parse::<SocketAddr>().unwrap()
+            )]
         );
         assert_eq!(out.trusted.len(), 2);
         assert_eq!(
             out.trusted[1],
-            "[2001:db8::1]:53".parse::<SocketAddr>().unwrap(),
+            DnsUpstream::Udp("[2001:db8::1]:53".parse::<SocketAddr>().unwrap()),
             "IPv6 上游应可解析"
         );
         assert_eq!(out.rules.len(), 2);
@@ -278,7 +282,7 @@ mod tests {
         let out = dns_block_to_resolver_config(&cfg, &tun_dns).expect("回落应成功");
         assert_eq!(
             out.domestic,
-            vec![SocketAddr::from(([192, 168, 1, 1], 53))],
+            vec![DnsUpstream::Udp(SocketAddr::from(([192, 168, 1, 1], 53)))],
             "回落应派生 53 端口"
         );
 
@@ -287,9 +291,62 @@ mod tests {
         let out = dns_block_to_resolver_config(&cfg, &tun_dns).expect("显式优先应成功");
         assert_eq!(
             out.domestic,
-            vec!["223.5.5.5:53".parse::<SocketAddr>().unwrap()],
+            vec![DnsUpstream::Udp(
+                "223.5.5.5:53".parse::<SocketAddr>().unwrap()
+            )],
             "显式 domestic 不混入回落"
         );
+    }
+
+    /// G1-8：tls:// / dot:// / https:// 上游串 → 引擎 DnsUpstream 三态映射。
+    #[test]
+    fn encrypted_upstream_forms_convert() {
+        let cfg = block(
+            "domestic: ['tls://dns.cn:8853']\n\
+             trusted: ['dot://one-dot.example', 'https://dns.example/dns-query', '1.1.1.1:53']\n\
+             default_group: trusted",
+        );
+        let out = dns_block_to_resolver_config(&cfg, &[]).expect("转换应成功");
+        assert_eq!(
+            out.domestic,
+            vec![DnsUpstream::Dot {
+                host: "dns.cn".into(),
+                port: 8853,
+                sni: "dns.cn".into()
+            }]
+        );
+        assert_eq!(
+            out.trusted[0],
+            DnsUpstream::Dot {
+                host: "one-dot.example".into(),
+                port: 853,
+                sni: "one-dot.example".into()
+            },
+            "dot:// 别名 + 缺省 853"
+        );
+        assert_eq!(
+            out.trusted[1],
+            DnsUpstream::Doh {
+                url: "https://dns.example/dns-query".into()
+            }
+        );
+        assert_eq!(
+            out.trusted[2],
+            DnsUpstream::Udp("1.1.1.1:53".parse().unwrap()),
+            "裸 ip:port 仍为 UDP"
+        );
+        assert!(!out.tls_skip_verify, "缺省校验证书");
+
+        // tls_skip_verify 配置透传
+        let cfg =
+            block("trusted: ['tls://a.example']\ndefault_group: trusted\ntls_skip_verify: true");
+        let out = dns_block_to_resolver_config(&cfg, &[]).expect("转换应成功");
+        assert!(out.tls_skip_verify);
+
+        // 非法形态点名报错
+        let cfg = block("trusted: ['ftp://x']\ndefault_group: trusted");
+        let err = dns_block_to_resolver_config(&cfg, &[]).unwrap_err();
+        assert!(err.to_string().contains("trusted"), "{err}");
     }
 
     /// 回落后仍空且被引用 → Err 带指引；未被引用（default=trusted 且无
@@ -373,7 +430,7 @@ mod tests {
         let mock = spawn_mock().await;
         let base = block("default_group: trusted\ntrusted: ['127.0.0.1:53']");
         let mut resolver_cfg = dns_block_to_resolver_config(&base, &[]).expect("缺省转换应成功");
-        resolver_cfg.trusted = vec![mock];
+        resolver_cfg.trusted = vec![DnsUpstream::Udp(mock)];
         let port = free_udp_port();
         let svc = service(resolver_cfg, port);
 

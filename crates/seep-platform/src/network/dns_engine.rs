@@ -19,9 +19,18 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use tokio::net::UdpSocket;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, UdpSocket},
+};
+use tokio_rustls::{
+    rustls::{self, client::danger::ServerCertVerifier},
+    TlsConnector,
+};
 use tracing::{debug, error, warn};
 
 use super::dns::{
@@ -591,13 +600,89 @@ pub enum AntiPoison {
     CrossCheck,
 }
 
+/// 加密上游形态（G1-8）：UDP / DoT（RFC 7858）/ DoH（RFC 8484）。
+///
+/// wire 格式三态共用（RFC 1035 编解码复用同一套）；UDP 之外的 TLS 校验
+/// 由 [`ResolverConfig::tls_skip_verify`] 统一裁决（缺省校验，webpki 根）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum DnsUpstream {
+    /// 传统 UDP DNS（`ip:port`）
+    Udp(SocketAddr),
+    /// DNS over TLS：`tls://host[:port]`（缺省 853）。host 可为 IP 或域名
+    /// （域名在连接期经系统解析器落地——引导期自举问题 M1 接受此口径）；
+    /// SNI = host 原串。
+    Dot {
+        host: String,
+        port: u16,
+        sni: String,
+    },
+    /// DNS over HTTPS：完整 `https://…` URL（GET `?dns=` base64url，
+    /// RFC 8484 §4.1 建议载荷 id=0）
+    Doh { url: String },
+}
+
+impl DnsUpstream {
+    /// 解析上游串（dns_config.rs 转换层与引擎测试共用）：
+    /// `ip:port` → Udp；`tls://host[:port]` / `dot://…` → Dot（缺省 853，
+    /// host 缺失即 Err）；`https://…` → Doh（整 URL 保留）。
+    pub fn parse(s: &str) -> Result<Self> {
+        let s = s.trim();
+        if let Some(rest) = s.strip_prefix("https://") {
+            ensure!(
+                !rest.trim().is_empty() && rest.trim() != "/",
+                "DoH 上游 URL 缺 host:{s:?}"
+            );
+            return Ok(DnsUpstream::Doh { url: s.to_string() });
+        }
+        if let Some(rest) = s
+            .strip_prefix("tls://")
+            .or_else(|| s.strip_prefix("dot://"))
+        {
+            let (host, port) = match rest.rsplit_once(':') {
+                Some((h, p)) => {
+                    let port: u16 = p
+                        .parse()
+                        .with_context(|| format!("DoT 上游端口非法:{s:?}"))?;
+                    ensure!(port != 0, "DoT 上游端口不能为 0:{s:?}");
+                    (h, port)
+                }
+                None => (rest, 853),
+            };
+            ensure!(
+                !host.is_empty() && !host.contains('/'),
+                "DoT 上游缺 host:{s:?}"
+            );
+            return Ok(DnsUpstream::Dot {
+                host: host.to_string(),
+                port,
+                sni: host.to_string(),
+            });
+        }
+        let addr: SocketAddr = s.parse().with_context(|| {
+            format!("DNS 上游须为 ip:port / tls://host:port / https://url 形式:{s:?}")
+        })?;
+        ensure!(addr.port() != 0, "DNS 上游端口不能为 0:{s:?}");
+        Ok(DnsUpstream::Udp(addr))
+    }
+}
+
+impl fmt::Display for DnsUpstream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DnsUpstream::Udp(a) => write!(f, "udp:{a}"),
+            DnsUpstream::Dot { host, port, .. } => write!(f, "tls://{host}:{port}"),
+            DnsUpstream::Doh { url } => write!(f, "doh:{url}"),
+        }
+    }
+}
+
 /// 解析器构造配置
 #[derive(Debug, Clone)]
 pub struct ResolverConfig {
     /// 国内/本地组上游
-    pub domestic: Vec<SocketAddr>,
+    pub domestic: Vec<DnsUpstream>,
     /// 可信组上游
-    pub trusted: Vec<SocketAddr>,
+    pub trusted: Vec<DnsUpstream>,
     /// 分流规则（先到先得）
     pub rules: Vec<(PartitionPattern, UpstreamGroup)>,
     /// 未命中兜底组
@@ -610,12 +695,101 @@ pub struct ResolverConfig {
     pub retries: u32,
     /// 缓存配置（None = 不缓存）
     pub cache: Option<DnsCacheConfig>,
+    /// DoT/DoH 证书校验开关（缺省 false = 校验；回环测试置 true）
+    pub tls_skip_verify: bool,
+}
+
+/// DoT/DoH 共享 TLS 面（每解析器构造一次；connector + DoH HTTP 客户端）。
+/// 进程级 TLS 提供方显式选 ring（依赖图同持 ring 与 aws_lc_rs 两特征，
+/// `builder()` 双提供方歧义下 panic——seep-protocols tls.rs 同款裁决）。
+struct DnsTlsCtx {
+    connector: TlsConnector,
+    doh: reqwest::Client,
+}
+
+fn dns_tls_ctx(skip_verify: bool) -> Result<DnsTlsCtx> {
+    static INSTALL: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALL.get_or_init(|| {
+        // install_default Err = 已有默认 provider，尊重既有安装
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?;
+    let config = if skip_verify {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(NoVerifier))
+            .with_no_client_auth()
+    } else {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        builder.with_root_certificates(roots).with_no_client_auth()
+    };
+    let doh = reqwest::Client::builder()
+        .danger_accept_invalid_certs(skip_verify)
+        .build()
+        .context("DoH HTTP 客户端构造失败")?;
+    Ok(DnsTlsCtx {
+        connector: TlsConnector::from(std::sync::Arc::new(config)),
+        doh,
+    })
+}
+
+/// 跳过证书验证的验证器（回环测试专用路径；生产缺省不启用）
+#[derive(Debug)]
+struct NoVerifier;
+
+impl ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+        ]
+    }
 }
 
 /// 分流解析器
 pub struct DnsResolver {
-    domestic: Vec<SocketAddr>,
-    trusted: Vec<SocketAddr>,
+    domestic: Vec<DnsUpstream>,
+    trusted: Vec<DnsUpstream>,
     partition: DnsPartition,
     cache: Option<Mutex<DnsCache>>,
     anti_poison: AntiPoison,
@@ -628,6 +802,8 @@ pub struct DnsResolver {
     /// 结果（含负缓存）经 watch 广播给所有等待者；等待者不重复查上游。
     /// tokio Mutex（守卫可跨 await，锁不跨上游查询——仅保护 map 访问）。
     inflight: tokio::sync::Mutex<InflightMap>,
+    /// DoT/DoH 共享 TLS 面（无加密上游也构造——构造成本一次，避免逐查询判空）
+    tls: DnsTlsCtx,
 }
 
 /// singleflight 映射（见 DnsResolver::inflight 注）。
@@ -680,6 +856,7 @@ impl DnsResolver {
         }
         let partition = DnsPartition::new(cfg.rules, cfg.default_group)?;
         let cache = cfg.cache.as_ref().map(|c| Mutex::new(DnsCache::new(c)));
+        let tls = dns_tls_ctx(cfg.tls_skip_verify)?;
         Ok(Self {
             domestic: cfg.domestic,
             trusted: cfg.trusted,
@@ -691,6 +868,7 @@ impl DnsResolver {
             stats: DnsStatsCounters::default(),
             query_ids: AtomicU16::new(0x4E00),
             inflight: tokio::sync::Mutex::new(HashMap::new()),
+            tls,
         })
     }
 
@@ -849,7 +1027,16 @@ impl DnsResolver {
         let mut last_err: Option<String> = None;
         for server in servers {
             for _attempt in 0..=self.retries {
-                match query_upstream(*server, domain, qtype, self.timeout, &self.query_ids).await {
+                match query_upstream(
+                    server,
+                    domain,
+                    qtype,
+                    self.timeout,
+                    &self.query_ids,
+                    &self.tls,
+                )
+                .await
+                {
                     Ok(resp) => {
                         if resp.rcode == 3 {
                             // NXDOMAIN 终止重试（负缓存由 resolve 插入）
@@ -876,16 +1063,47 @@ impl DnsResolver {
     }
 }
 
-/// 单上游 UDP 查询（临时端口 + connect 源过滤 + §5-E6 id 校验）
+/// 单上游查询分发（G1-8）：UDP / DoT / DoH 三态同 wire 格式（RFC 1035）。
+/// UDP/DoT 用随机 id 并校验应答 id（§5-E6）；DoH 按 RFC 8484 §4.1 载荷
+/// id=0（缓存友好，TLS 已保真伪）。
 async fn query_upstream(
-    server: SocketAddr,
+    server: &DnsUpstream,
     domain: &str,
     qtype: DnsRecordType,
     timeout: Duration,
     ids: &AtomicU16,
+    tls: &DnsTlsCtx,
 ) -> Result<DnsWireResponse, String> {
-    let id = ids.fetch_add(1, Ordering::Relaxed);
-    let packet = encode_query(id, domain, qtype).map_err(|e| format!("编码失败：{e}"))?;
+    match server {
+        DnsUpstream::Udp(addr) => {
+            let id = ids.fetch_add(1, Ordering::Relaxed);
+            udp_exchange(
+                *addr,
+                id,
+                &encode_query(id, domain, qtype).map_err(|e| format!("编码失败:{e}"))?,
+                timeout,
+            )
+            .await
+        }
+        DnsUpstream::Dot { host, port, sni } => {
+            let id = ids.fetch_add(1, Ordering::Relaxed);
+            let packet = encode_query(id, domain, qtype).map_err(|e| format!("编码失败:{e}"))?;
+            dot_exchange(host, *port, sni, &packet, id, timeout, &tls.connector).await
+        }
+        DnsUpstream::Doh { url } => {
+            let packet = encode_query(0, domain, qtype).map_err(|e| format!("编码失败:{e}"))?;
+            doh_exchange(url, &packet, timeout, &tls.doh).await
+        }
+    }
+}
+
+/// 单上游 UDP 查询（临时端口 + connect 源过滤 + §5-E6 id 校验）
+async fn udp_exchange(
+    server: SocketAddr,
+    id: u16,
+    packet: &[u8],
+    timeout: Duration,
+) -> Result<DnsWireResponse, String> {
     let bind = if server.is_ipv4() {
         "0.0.0.0:0"
     } else {
@@ -898,7 +1116,7 @@ async fn query_upstream(
         .await
         .map_err(|e| format!("连接 {server} 失败：{e}"))?;
     let recv = tokio::time::timeout(timeout, async {
-        sock.send(&packet)
+        sock.send(packet)
             .await
             .map_err(|e| format!("发送失败：{e}"))?;
         let mut buf = vec![0u8; 512];
@@ -917,6 +1135,109 @@ async fn query_upstream(
             "{server} 应答 id 不匹配（期望 {id}，得 {}）",
             resp.id
         ));
+    }
+    Ok(resp)
+}
+
+/// DoT 交换（RFC 7858）：TCP+TLS 连接后逐消息 2 字节大端长度前缀。
+/// host 允许域名（连接期经系统解析器落地）；SNI = 配置 host。
+async fn dot_exchange(
+    host: &str,
+    port: u16,
+    sni: &str,
+    packet: &[u8],
+    id: u16,
+    timeout: Duration,
+    connector: &TlsConnector,
+) -> Result<DnsWireResponse, String> {
+    let peer = format!("{host}:{port}");
+    let fut = async {
+        let tcp = TcpStream::connect(&peer)
+            .await
+            .map_err(|e| format!("连接 {peer} 失败：{e}"))?;
+        let name = rustls::pki_types::ServerName::try_from(sni.to_string())
+            .map_err(|e| format!("SNI {sni:?} 非法：{e}"))?;
+        let mut stream = connector
+            .connect(name, tcp)
+            .await
+            .map_err(|e| format!("{peer} TLS 握手失败：{e}"))?;
+        stream
+            .write_all(&(packet.len() as u16).to_be_bytes())
+            .await
+            .map_err(|e| format!("{peer} 写长度失败：{e}"))?;
+        stream
+            .write_all(packet)
+            .await
+            .map_err(|e| format!("{peer} 写查询失败：{e}"))?;
+        let mut len_buf = [0u8; 2];
+        stream
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(|e| format!("{peer} 读长度失败：{e}"))?;
+        let len = u16::from_be_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; len];
+        stream
+            .read_exact(&mut buf)
+            .await
+            .map_err(|e| format!("{peer} 读应答失败：{e}"))?;
+        Ok::<Vec<u8>, String>(buf)
+    };
+    let recv = tokio::time::timeout(timeout, fut)
+        .await
+        .map_err(|_| format!("{peer} 超时（{timeout:?}）"))??;
+    let resp = decode_response(&recv).map_err(|e| format!("{peer} 解码失败：{e}"))?;
+    if resp.id != id {
+        return Err(format!(
+            "{peer} 应答 id 不匹配（期望 {id}，得 {}）",
+            resp.id
+        ));
+    }
+    Ok(resp)
+}
+
+/// DoH 交换（RFC 8484 GET）：`?dns=` base64url 无填充，载荷 id=0，
+/// `accept: application/dns-message`；应答体即 wire 消息。
+async fn doh_exchange(
+    url: &str,
+    packet: &[u8],
+    timeout: Duration,
+    client: &reqwest::Client,
+) -> Result<DnsWireResponse, String> {
+    let b64 = URL_SAFE_NO_PAD.encode(packet);
+    let fut = async {
+        let resp = client
+            .get(url)
+            .query(&[("dns", &b64)])
+            .header("accept", "application/dns-message")
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| format!("{url} 请求失败：{e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("{url} 上游返回 {status}"));
+        }
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        if !content_type.starts_with("application/dns-message") {
+            tracing::warn!(target: "seep::network", %content_type, %url, "DoH 应答 content-type 非 dns-message");
+        }
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("{url} 读应答失败：{e}"))?;
+        Ok::<Vec<u8>, String>(body.to_vec())
+    };
+    let recv = tokio::time::timeout(timeout, fut)
+        .await
+        .map_err(|_| format!("{url} 超时（{timeout:?}）"))??;
+    let resp = decode_response(&recv).map_err(|e| format!("{url} 解码失败：{e}"))?;
+    if resp.id != 0 {
+        return Err(format!("{url} 应答 id 应为 0（RFC 8484），得 {}", resp.id));
     }
     Ok(resp)
 }
@@ -1049,7 +1370,7 @@ impl EngineDnsHandler {
             }
             s.validate()?;
             match s.server_type {
-                DnsServerType::Udp => udp.push(s.address),
+                DnsServerType::Udp => udp.push(DnsUpstream::Udp(s.address)),
                 other => rejected.push(format!("{}({:?})", s.name, other)),
             }
         }
@@ -1078,6 +1399,7 @@ impl EngineDnsHandler {
             timeout: config.timeout,
             retries: config.retries,
             cache: config.cache.clone(),
+            tls_skip_verify: false,
         })?;
         Ok(Self {
             config: config.clone(),
@@ -1249,6 +1571,7 @@ mod tests {
             timeout: Duration::from_millis(400),
             retries: 0,
             cache: Some(DnsCacheConfig::default()),
+            tls_skip_verify: false,
         }
     }
 
@@ -1499,7 +1822,7 @@ mod tests {
         let err = DnsResolver::new(base_cfg()).unwrap_err();
         assert!(err.to_string().contains("无可用服务器"), "{err}");
         let cfg = ResolverConfig {
-            trusted: vec!["223.5.5.5:53".parse().unwrap()],
+            trusted: vec![DnsUpstream::Udp("223.5.5.5:53".parse().unwrap())],
             rules: vec![(
                 PartitionPattern::Suffix(".cn".into()),
                 UpstreamGroup::Domestic,
@@ -1509,14 +1832,14 @@ mod tests {
         let err = DnsResolver::new(cfg).unwrap_err();
         assert!(err.to_string().contains("Domestic"), "{err}");
         let cfg = ResolverConfig {
-            trusted: vec!["1.1.1.1:53".parse().unwrap()],
+            trusted: vec![DnsUpstream::Udp("1.1.1.1:53".parse().unwrap())],
             anti_poison: AntiPoison::CrossCheck,
             ..base_cfg()
         };
         let err = DnsResolver::new(cfg).unwrap_err();
         assert!(err.to_string().contains("cross_check"), "{err}");
         let cfg = ResolverConfig {
-            trusted: vec!["1.1.1.1:53".parse().unwrap()],
+            trusted: vec![DnsUpstream::Udp("1.1.1.1:53".parse().unwrap())],
             timeout: Duration::ZERO,
             ..base_cfg()
         };
@@ -1528,7 +1851,7 @@ mod tests {
     async fn resolver_normalizes_and_serves_from_cache() {
         let (mock, hits) = spawn_mock(|_| (0, vec![v4("x", [9, 9, 9, 9], 300)])).await;
         let cfg = ResolverConfig {
-            trusted: vec![mock],
+            trusted: vec![DnsUpstream::Udp(mock)],
             ..base_cfg()
         };
         let r = DnsResolver::new(cfg).unwrap();
@@ -1557,7 +1880,7 @@ mod tests {
     async fn resolver_concurrent_cold_miss_singleflight() {
         let (mock, hits) = spawn_mock(|_| (0, vec![v4("x", [9, 9, 9, 9], 300)])).await;
         let cfg = ResolverConfig {
-            trusted: vec![mock],
+            trusted: vec![DnsUpstream::Udp(mock)],
             ..base_cfg()
         };
         let r = Arc::new(DnsResolver::new(cfg).unwrap());
@@ -1617,7 +1940,7 @@ mod tests {
             }
         });
         let cfg = ResolverConfig {
-            trusted: vec![addr],
+            trusted: vec![DnsUpstream::Udp(addr)],
             ..base_cfg()
         };
         let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
@@ -1658,8 +1981,8 @@ mod tests {
         let (dom, dom_hits) = spawn_mock(|_| (0, vec![v4("x", [6, 6, 6, 6], 300)])).await;
         let (trs, trs_hits) = spawn_mock(|_| (0, vec![v4("x", [9, 9, 9, 9], 300)])).await;
         let cfg = ResolverConfig {
-            domestic: vec![dom],
-            trusted: vec![trs],
+            domestic: vec![DnsUpstream::Udp(dom)],
+            trusted: vec![DnsUpstream::Udp(trs)],
             rules: vec![(
                 PartitionPattern::Suffix(".cn".into()),
                 UpstreamGroup::Domestic,
@@ -1701,8 +2024,8 @@ mod tests {
         .await;
         let (trs, _) = spawn_mock(|_| (0, vec![v4("x", [9, 9, 9, 9], 300)])).await;
         let cfg = ResolverConfig {
-            domestic: vec![dom],
-            trusted: vec![trs],
+            domestic: vec![DnsUpstream::Udp(dom)],
+            trusted: vec![DnsUpstream::Udp(trs)],
             rules: vec![(
                 PartitionPattern::Suffix(".test".into()),
                 UpstreamGroup::Domestic,
@@ -1741,8 +2064,8 @@ mod tests {
         })
         .await;
         let cfg = ResolverConfig {
-            domestic: vec![dom],
-            trusted: vec![trs],
+            domestic: vec![DnsUpstream::Udp(dom)],
+            trusted: vec![DnsUpstream::Udp(trs)],
             rules: vec![(
                 PartitionPattern::Suffix(".test".into()),
                 UpstreamGroup::Domestic,
@@ -1774,8 +2097,8 @@ mod tests {
         let silent_addr = silent.local_addr().unwrap();
         let (trs, _) = spawn_mock(|_| (0, vec![v4("x", [9, 9, 9, 9], 300)])).await;
         let cfg = ResolverConfig {
-            domestic: vec![silent_addr],
-            trusted: vec![trs],
+            domestic: vec![DnsUpstream::Udp(silent_addr)],
+            trusted: vec![DnsUpstream::Udp(trs)],
             rules: vec![(
                 PartitionPattern::Suffix(".test".into()),
                 UpstreamGroup::Domestic,
@@ -1798,7 +2121,7 @@ mod tests {
         let s2 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let a2 = s2.local_addr().unwrap();
         let cfg = ResolverConfig {
-            trusted: vec![a1, a2],
+            trusted: vec![DnsUpstream::Udp(a1), DnsUpstream::Udp(a2)],
             timeout: Duration::from_millis(80),
             ..base_cfg()
         };
@@ -1813,7 +2136,7 @@ mod tests {
     async fn nxdomain_negative_cache_hit() {
         let (mock, hits) = spawn_mock(|_| (3, vec![])).await;
         let cfg = ResolverConfig {
-            trusted: vec![mock],
+            trusted: vec![DnsUpstream::Udp(mock)],
             ..base_cfg()
         };
         let r = DnsResolver::new(cfg).unwrap();
@@ -1838,7 +2161,7 @@ mod tests {
         })
         .await;
         let cfg = ResolverConfig {
-            trusted: vec![mock],
+            trusted: vec![DnsUpstream::Udp(mock)],
             ..base_cfg()
         };
         let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
@@ -1969,5 +2292,198 @@ mod tests {
         h.stop().await.unwrap();
         h.start().await.unwrap();
         h.stop().await.unwrap();
+    }
+
+    // -------------------------------------------------------------------
+    // G1-8：加密上游（DoT RFC 7858 / DoH RFC 8484）
+    // -------------------------------------------------------------------
+
+    /// 上游串三形态解析：`ip:port`（UDP）/ `tls://`、`dot://`（DoT，缺省
+    /// 853）/ `https://`（DoH）；其余形态与非法值拒绝。
+    #[test]
+    fn upstream_parse_forms() {
+        assert_eq!(
+            DnsUpstream::parse(" 1.2.3.4:53 ").unwrap(),
+            DnsUpstream::Udp("1.2.3.4:53".parse().unwrap())
+        );
+        assert_eq!(
+            DnsUpstream::parse("tls://dns.example").unwrap(),
+            DnsUpstream::Dot {
+                host: "dns.example".into(),
+                port: 853,
+                sni: "dns.example".into()
+            }
+        );
+        assert_eq!(
+            DnsUpstream::parse("dot://dns.example:8853").unwrap(),
+            DnsUpstream::Dot {
+                host: "dns.example".into(),
+                port: 8853,
+                sni: "dns.example".into()
+            }
+        );
+        assert_eq!(
+            DnsUpstream::parse("https://dns.example/dns-query").unwrap(),
+            DnsUpstream::Doh {
+                url: "https://dns.example/dns-query".into()
+            }
+        );
+        assert!(DnsUpstream::parse("ftp://x").is_err());
+        assert!(DnsUpstream::parse("tls://").is_err());
+        assert!(DnsUpstream::parse("https://").is_err());
+        assert!(DnsUpstream::parse("1.2.3.4:0").is_err());
+        assert!(DnsUpstream::parse("no-address").is_err());
+        assert!(DnsUpstream::parse("tls://h:0").is_err());
+    }
+
+    /// 回环自签 acceptor（SAN=localhost；配合 tls_skip_verify 使用）
+    fn loopback_acceptor() -> tokio_rustls::TlsAcceptor {
+        use rustls::pki_types::pem::PemObject;
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen 自签");
+        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+            rustls::pki_types::CertificateDer::pem_slice_iter(certified.cert.pem().as_bytes())
+                .collect::<Result<_, _>>()
+                .expect("证书 PEM 解析");
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(
+            certified.key_pair.serialize_pem().as_bytes(),
+        )
+        .expect("私钥读取");
+        let builder = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("协议版本");
+        tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
+            builder
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .expect("服务端证书装配"),
+        ))
+    }
+
+    /// DoT 回环（RFC 7858）：2 字节大端长度前缀逐消息；应答 id 与查询一致。
+    #[tokio::test]
+    async fn dot_loopback_roundtrip() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let acceptor = loopback_acceptor();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let Ok(mut tls) = acceptor.accept(tcp).await else {
+                return;
+            };
+            let mut len_buf = [0u8; 2];
+            if tls.read_exact(&mut len_buf).await.is_err() {
+                return;
+            }
+            let mut buf = vec![0u8; u16::from_be_bytes(len_buf) as usize];
+            if tls.read_exact(&mut buf).await.is_err() {
+                return;
+            }
+            let Ok(q) = decode_query(&buf) else {
+                return;
+            };
+            let reply =
+                encode_response(q.id, &q.domain, q.qtype, 0, &[v4("d", [10, 1, 2, 3], 120)]);
+            if tls
+                .write_all(&(reply.len() as u16).to_be_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let _ = tls.write_all(&reply).await;
+        });
+
+        let cfg = ResolverConfig {
+            trusted: vec![DnsUpstream::Dot {
+                host: "127.0.0.1".into(),
+                port,
+                sni: "localhost".into(),
+            }],
+            tls_skip_verify: true,
+            ..base_cfg()
+        };
+        let r = DnsResolver::new(cfg).unwrap();
+        let a = r.resolve("dot.test", DnsRecordType::A).await.unwrap();
+        assert_eq!(a[0].data, DnsAnswerData::A(Ipv4Addr::new(10, 1, 2, 3)));
+    }
+
+    /// DoH 回环（RFC 8484 GET）：`?dns=` base64url 无填充、载荷 id=0、
+    /// `application/dns-message`；应答体即 wire 消息。
+    #[tokio::test]
+    async fn doh_loopback_roundtrip() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let acceptor = loopback_acceptor();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let Ok(mut tls) = acceptor.accept(tcp).await else {
+                return;
+            };
+            // 读请求直到头结束（\r\n\r\n）
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = match tls.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let text = String::from_utf8_lossy(&buf);
+            let path = text.split_whitespace().nth(1).unwrap_or("");
+            let b64 = path
+                .split("dns=")
+                .nth(1)
+                .unwrap_or("")
+                .split('&')
+                .next()
+                .unwrap_or("");
+            let Ok(wire) = URL_SAFE_NO_PAD.decode(b64) else {
+                return;
+            };
+            let Ok(q) = decode_query(&wire) else {
+                return;
+            };
+            let reply = encode_response(q.id, &q.domain, q.qtype, 0, &[v4("h", [10, 0, 9, 9], 60)]);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                reply.len()
+            );
+            if tls.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let _ = tls.write_all(&reply).await;
+        });
+
+        let cfg = ResolverConfig {
+            trusted: vec![DnsUpstream::Doh {
+                url: format!("https://127.0.0.1:{port}/dns-query"),
+            }],
+            tls_skip_verify: true,
+            ..base_cfg()
+        };
+        let r = DnsResolver::new(cfg).unwrap();
+        let a = r.resolve("doh.test", DnsRecordType::A).await.unwrap();
+        assert_eq!(a[0].data, DnsAnswerData::A(Ipv4Addr::new(10, 0, 9, 9)));
+    }
+
+    /// DoH 载荷 id=0 口径（RFC 8484 §4.1）：doh_exchange 发出的查询包
+    /// 头两字节（id 字段）为 0；对照 UDP/DoT 路径 id 原样编码。
+    #[test]
+    fn doh_payload_uses_zero_id() {
+        let packet = encode_query(0, "zero.test", DnsRecordType::A).unwrap();
+        assert_eq!(&packet[..2], &[0, 0], "DoH 载荷 id 须为 0");
+        let packet = encode_query(0x4E00, "zero.test", DnsRecordType::A).unwrap();
+        assert_eq!(&packet[..2], &[0x4E, 0x00], "UDP/DoT id 原样编码");
     }
 }

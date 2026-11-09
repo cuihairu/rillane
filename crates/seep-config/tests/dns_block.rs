@@ -91,6 +91,7 @@ fn dns_block_roundtrip() {
         ],
         default_group: DnsGroup::Trusted,
         anti_poison: DnsAntiPoisonMode::CrossCheck,
+        tls_skip_verify: false,
         timeout_ms: 2_500,
         retries: 3,
         cache: Some(DnsCacheBlockConfig {
@@ -145,6 +146,7 @@ fn dns_block_validate_rejects_illegal_values() {
         timeout_ms: 5_000,
         retries: 2,
         cache: None,
+        tls_skip_verify: false,
         listen_address: "127.0.0.1".parse().unwrap(),
         listen_port: 15_353,
     };
@@ -256,4 +258,30 @@ fn network_block_carries_dns_validation() {
 
     // parse_cidr_pair 仍在位（dns 块未破坏既有导出面）
     assert_eq!(parse_cidr_pair("10.0.0.1/8").unwrap().1, 8);
+}
+
+/// G1-8：tls:// / dot:// / https:// 上游形态过 validate；端口 0 与缺 host 拒绝。
+#[test]
+fn dns_block_encrypted_upstream_forms() {
+    let cfg: DnsBlockConfig = serde_yaml::from_str(
+        "enabled: true\n\
+         domestic: ['tls://dns.cn:8853']\n\
+         trusted: ['dot://a.example', 'https://dns.example/dns-query']\n\
+         default_group: trusted\n",
+    )
+    .expect("三形态应解析");
+    cfg.validate().expect("三形态应过 validate");
+    assert!(cfg.tls_skip_verify == false, "缺省不跳过证书校验");
+
+    let cfg: DnsBlockConfig =
+        serde_yaml::from_str("enabled: true\ntrusted: ['tls://h:0']\ndefault_group: trusted\n")
+            .unwrap();
+    let err = cfg.validate().expect_err("DoT 端口 0 应拒绝");
+    assert!(err.to_string().contains("端口"), "{err}");
+
+    let cfg: DnsBlockConfig =
+        serde_yaml::from_str("enabled: true\ntrusted: ['https://']\ndefault_group: trusted\n")
+            .unwrap();
+    let err = cfg.validate().expect_err("DoH 缺 host 应拒绝");
+    assert!(err.to_string().contains("host"), "{err}");
 }

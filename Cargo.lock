@@ -3584,12 +3584,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "dns-lookup",
  "futures",
  "network-interface",
  "nix 0.28.0",
+ "rcgen",
  "regex",
+ "reqwest",
+ "rustls",
  "seep-config",
  "seep-core",
  "serde",
@@ -3597,8 +3601,10 @@ dependencies = [
  "socket2 0.5.10",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "uuid",
+ "webpki-roots 0.26.11",
  "winapi",
 ]
 

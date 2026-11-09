@@ -1,7 +1,8 @@
 # P2-8 DNS split resolution (design draft)
 
 > Ready 2026-10-02; **M0-M1 landed** (M0 750de34 engine + factory switch; M1
-> config mirror + conversion + listener assembly + control plane metrics).
+> config mirror + conversion + listener assembly + control plane metrics);
+> **G1-8 M1 landed (2026-11-10)**: DoT/DoH encrypted upstreams.
 > Positioning basis: positioning.md "DNS split (web acceleration)" row -- domestic/foreign DNS split,
 > cache, anti-poisoning.
 
@@ -202,6 +203,20 @@ pollution_suspected/per-server counts within groups). No new endpoint (reuses th
    group** (trusted IP/self-built gateway UDP surface); encrypted upstreams go to V2. E6's id+source
    address validation is the Basic surface not the encrypted surface, plaintext UDP upstream links can
    be polluted by middleboxes -- R-dns1;
+   **G1-8 M1 landed (2026-11-10, this item narrows to DoQ)**: `DnsUpstream` three forms
+   (`ip:port` UDP / `tls://host[:port]` DoT RFC 7858, default 853 / `https://url` DoH RFC 8484),
+   parsed per-item from the `network.dns.domestic/trusted` string lists, schema unchanged; the wire
+   format is shared by all three (hand-written RFC 1035 codec reused). DoT = TCP+TLS with a 2-byte
+   big-endian length prefix per message; the host may be a hostname (resolved at connect via the
+   system resolver -- the bootstrap circularity is accepted for M1). DoH = GET `?dns=` base64url
+   no-pad with payload id=0 (RFC 8484 section 4.1, cache-friendly; UDP/DoT keep random ids with
+   response-id checks). Certificate verification uses webpki roots by default; the
+   `network.dns.tls_skip_verify` escape hatch exists (loopback/intranet testing only -- production
+   use is the deployer's own risk). Loopback tests: `dot_loopback_roundtrip` / `doh_loopback_roundtrip`
+   (self-signed + skip-verify). **Boundary**: real-upstream interop (public DoT/DoH cert chains,
+   EDNS behavior differences) unverified -- needs a real encrypted upstream deployment; DoQ stays
+   undone; the E6 UDP-side validation is unchanged; R-dns1 still applies (trusted-group trust is the
+   deployer's choice; on the DoT/DoH face verification is carried by the cert chain);
 2. **UDP message surface**: <=512B without EDNS0, the A/AAAA/CNAME surface suffices for web
    acceleration scenarios; TCP retransmission/large responses go to V2;
 3. **No TrustedOnly mode** (D-3): a pollution-sensitive domain's explicit rule going through the
@@ -227,4 +242,6 @@ pollution_suspected/per-server counts within groups). No new endpoint (reuses th
   `regexp:`/`include:`/`@attr`/bad lines go into the skip report one by one without blocking,
   keyword/CIDR on the dns surface raise explicit errors without silent downgrade; the converter lives
   in seep-subscription `rule_source`);
-- **O-dns2**: DoH/DoT upstreams, EDNS0, TCP surface go to V2.
+- **O-dns2**: ~~DoH/DoT upstreams, EDNS0, TCP surface go to V2~~ (DoH/DoT landed in G1-8 M1,
+  2026-11-10, see section 9-1; EDNS0 and the TCP surface stay V2; real-upstream interop acceptance
+  awaits an encrypted upstream deployment).

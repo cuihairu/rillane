@@ -406,13 +406,20 @@ const fn default_dns_listen_port() -> u16 {
 pub struct DnsBlockConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// domestic 组上游 `ip:port` 列表；缺省（空）回落 `network.tun.dns_servers`
-    /// 加 53 端口（回落落转换处——validate 只见本块，dns-partition.md §4-4）
+    /// domestic 组上游列表；缺省（空）回落 `network.tun.dns_servers` 加 53
+    /// 端口（回落落转换处——validate 只见本块，dns-partition.md §4-4）。
+    /// 形式（G1-8）：`ip:port`（UDP）/ `tls://host[:port]`（DoT，缺省 853）/
+    /// `https://url`（DoH）
     #[serde(default)]
     pub domestic: Vec<String>,
-    /// trusted 组上游；可信性由部署者保证（§10-R-dns1），不设回落
+    /// trusted 组上游（形式同 domestic）；可信性由部署者保证（§10-R-dns1），
+    /// 不设回落
     #[serde(default)]
     pub trusted: Vec<String>,
+    /// DoT/DoH 上游证书校验开关；缺省 false = 校验（webpki 根）。
+    /// 仅限内网/回环测试显式置 true——生产置 true 属部署者自担风险。
+    #[serde(default)]
+    pub tls_skip_verify: bool,
     /// 分流规则（配置序即优先级，先到先得）
     #[serde(default)]
     pub rules: Vec<DnsRuleConfig>,
@@ -450,9 +457,41 @@ impl DnsBlockConfig {
         }
         for (group, servers) in [("domestic", &self.domestic), ("trusted", &self.trusted)] {
             for s in servers {
+                // 三种形式（G1-8）：`ip:port`（UDP）/ `tls://host[:port]`（DoT）/
+                // `https://url`（DoH）；此处只做形态校验，真正解析归引擎转换层
+                let s_trim = s.trim();
+                if let Some(rest) = s_trim.strip_prefix("https://") {
+                    anyhow::ensure!(
+                        !rest.trim().is_empty() && rest.trim() != "/",
+                        "network.dns.{group} DoH 上游 URL 缺 host:{s:?}"
+                    );
+                    continue;
+                }
+                if let Some(rest) = s_trim
+                    .strip_prefix("tls://")
+                    .or_else(|| s_trim.strip_prefix("dot://"))
+                {
+                    let host = rest
+                        .rsplit_once(':')
+                        .filter(|(_, p)| p.parse::<u16>().is_ok())
+                        .map_or(rest, |(h, _)| h);
+                    anyhow::ensure!(
+                        !host.is_empty(),
+                        "network.dns.{group} DoT 上游缺 host:{s:?}"
+                    );
+                    if let Some((_, p)) = rest.rsplit_once(':') {
+                        anyhow::ensure!(
+                            p.parse::<u16>().map(|p| p != 0).unwrap_or(false),
+                            "network.dns.{group} DoT 上游端口非法:{s:?}"
+                        );
+                    }
+                    continue;
+                }
                 let addr: std::net::SocketAddr = s
                     .parse()
-                    .with_context(|| format!("network.dns.{group} 上游须为 ip:port 形式:{s:?}"))?;
+                    .with_context(|| {
+                        format!("network.dns.{group} 上游须为 ip:port / tls://host:port / https://url 形式:{s:?}")
+                    })?;
                 anyhow::ensure!(
                     addr.port() != 0,
                     "network.dns.{group} 上游端口不能为 0:{s:?}"

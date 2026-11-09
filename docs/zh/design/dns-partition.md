@@ -1,7 +1,8 @@
 # P2-8 DNS 分流解析（设计稿）
 
 > 2026-10-02 就绪；**M0–M1 已落地**（M0 750de34 引擎 + 工厂切换；M1 配置
-> 镜像 + 转换 + 监听装配 + 控制面指标）。定位依据：positioning.md
+> 镜像 + 转换 + 监听装配 + 控制面指标）；**G1-8 M1 已落地（2026-11-10）**：
+> DoT/DoH 加密上游。定位依据：positioning.md
 > 「DNS 分流（网页加速）」行——国内外 DNS 分流、缓存、防污染。
 
 ## 0. 范围与验收口径
@@ -193,6 +194,19 @@ pollution_suspected/组内 per-server 计数）。无新端点（复用 stats �
    「防污染」的可信通道由 **trusted 组的部署选择**承担（可信 IP/自建
    网关 UDP 面）；加密上游归 V2。E6 的 id+源地址校验是 Basic 面非
    加密面，明文 UDP 上游链路可被中间盒污染——R-dns1；
+   **G1-8 M1 已落地（2026-11-10，本条收窄至 DoQ）**：`DnsUpstream`
+   三形态（`ip:port` UDP / `tls://host[:port]` DoT RFC 7858，缺省 853 /
+   `https://url` DoH RFC 8484），`network.dns.domestic/trusted` 串列表
+   逐条解析、schema 不变；wire 格式三态共用（RFC 1035 手写编解码复用）。
+   DoT = TCP+TLS 逐消息 2 字节大端长度前缀，host 允许域名（连接期经系统
+   解析器落地——引导期自举 M1 接受此口径）；DoH = GET `?dns=` base64url
+   无填充、载荷 id=0（RFC 8484 §4.1，缓存友好；UDP/DoT 仍随机 id + 应答
+   id 校验）。证书校验缺省走 webpki 根，`network.dns.tls_skip_verify`
+   兜底（仅限回环/内网测试显式置 true）。回环测试：`dot_loopback_roundtrip`
+   / `doh_loopback_roundtrip`（自签 + skip-verify）。
+   **边界**：真实上游互操作（公网 DoT/DoH 证书链、EDNS 行为差异）未验——
+   需真实加密上游部署；DoQ 仍不做；E6 UDP 面校验不变；R-dns1 仍适用
+   （trusted 组可信性由部署者保证，DoT/DoH 面校验由证书链承担）；
 2. **UDP 报文面**：≤512B 无 EDNS0，A/AAAA/CNAME 面足够网页加速场景；
    TCP 重传/大应答归 V2；
 3. **不设 TrustedOnly 模式**（D-3）：污染敏感域显式规则走 trusted 组
@@ -217,4 +231,6 @@ pollution_suspected/组内 per-server 计数）。无新端点（复用 stats �
   双 pattern，D-2 前导点口径；`full:` → exact）；`regexp:`/`include:`/
   `@attr`/坏行逐条入跳过报告不阻塞，keyword/CIDR 在 dns 面显式报错
   不静默降级；转换器在 seep-subscription `rule_source`）；
-- **O-dns2**：DoH/DoT 上游、EDNS0、TCP 面归 V2。
+- **O-dns2**：~~DoH/DoT 上游、EDNS0、TCP 面归 V2~~（DoH/DoT 已于
+  G1-8 M1 落地 2026-11-10，见 §9-1；EDNS0、TCP 面归 V2 不变；真实上游
+  互操作验收待加密上游部署）。
