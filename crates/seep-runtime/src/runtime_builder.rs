@@ -281,6 +281,14 @@ impl RuntimeBuilder {
                 // 表两侧共享，分配/反查一致。
                 let fake_ip = match dns_cfg.fake_ip.as_ref() {
                     Some(fake) if fake.enabled => {
+                        // G1-10 M2 边界守卫：TUN 入口未接回填——假地址无反查
+                        // 改写则出口不可达（连接假 IP 必败），构建期显式拒绝
+                        // 该组合而非静默断流。
+                        if tun_enabled {
+                            anyhow::bail!(
+                                "network.dns.fake_ip 与 TUN 模式暂不兼容（G1-10 M2：TUN 入口回填未接线）——假地址无回填则出口不可达，请关闭其一"
+                            );
+                        }
                         let table = seep_core::fake_ip::FakeIpTable::from_cidr(&fake.range)
                             .map_err(|e| anyhow!("network.dns.fake_ip 配置非法：{e}"))?;
                         Some(Arc::new(table))
@@ -4593,6 +4601,70 @@ mod tests {
             .build()
             .expect("关闭态半配置应零差异 build 成功");
         assert!(runtime.get_dns_service().is_none(), "关闭态应 None");
+    }
+
+    /// G1-10 M2 边界守卫：fake_ip 启用 + TUN 模式 → build 拒绝（TUN 入口
+    /// 回填未接线，假地址无反查改写则出口不可达——构建期显式拒绝而非静默
+    /// 断流）。虚拟化关闭时同配置照常装配（socks5 入口已有回填）。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn fake_ip_with_tun_mode_build_rejected() {
+        let mk_cfg = || {
+            let mut cfg = s5_udp_config(false);
+            cfg.network = Some(seep_config::NetworkBlockConfig {
+                egress_fwmark: None,
+                mode: seep_config::NetworkBlockMode::Tun,
+                tun: None,
+                routing: None,
+                dns: Some(
+                    serde_yaml::from_str::<seep_config::DnsBlockConfig>(
+                        "trusted: ['1.1.1.1:53']\ndefault_group: trusted\nfake_ip: {}",
+                    )
+                    .expect("dns 块应可解析"),
+                ),
+            });
+            cfg
+        };
+        let tun_platform_cfg = seep_platform::network::NetworkConfig {
+            mode: NetworkMode::Tun,
+            tun: Some(seep_platform::network::TunConfig {
+                name: Some("seepFakeIp".into()),
+                ..Default::default()
+            }),
+            routing: Some(seep_platform::network::RoutingConfig {
+                enabled: true,
+                ..Default::default()
+            }),
+            filtering: None,
+            dns: None,
+        };
+        let rc = RuntimeConfig {
+            enable_network_virtualization: true,
+            network_config: Some(tun_platform_cfg),
+            ..RuntimeConfig::default()
+        };
+        let err = RuntimeBuilder::new(mk_cfg())
+            .with_runtime_config(rc)
+            .build()
+            .err()
+            .expect("fake_ip + TUN 应构建期拒绝");
+        assert!(
+            err.to_string().contains("fake_ip"),
+            "错误应点名 fake_ip：{err:#}"
+        );
+
+        // 非 TUN（虚拟化关）→ fake_ip 照常装配（池表交 DNS 服务 + 入口面）
+        let rc_off = RuntimeConfig {
+            enable_network_virtualization: false,
+            network_config: None,
+            ..RuntimeConfig::default()
+        };
+        let runtime = RuntimeBuilder::new(mk_cfg())
+            .with_runtime_config(rc_off)
+            .build()
+            .expect("非 TUN 下 fake_ip 应装配");
+        let svc = runtime.get_dns_service().expect("DNS 服务应在");
+        assert!(svc.fake_ip().is_some(), "fake-ip 池应装配");
     }
 
     /// build 期拦截：enabled 块 + 双空 domestic 引用（无 tun 回落）→ Err
