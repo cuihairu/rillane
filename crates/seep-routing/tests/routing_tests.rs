@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -27,6 +29,7 @@ fn create_test_config() -> RoutingConfig {
                     },
                 ],
                 slo: None,
+                url_test: None,
             },
             PolicyGroup {
                 name: "latency-group".to_string(),
@@ -40,6 +43,7 @@ fn create_test_config() -> RoutingConfig {
                     },
                 ],
                 slo: None,
+                url_test: None,
             },
             PolicyGroup {
                 name: "bandwidth-group".to_string(),
@@ -53,6 +57,7 @@ fn create_test_config() -> RoutingConfig {
                     },
                 ],
                 slo: None,
+                url_test: None,
             },
             PolicyGroup {
                 name: "hash-group".to_string(),
@@ -69,6 +74,7 @@ fn create_test_config() -> RoutingConfig {
                     },
                 ],
                 slo: None,
+                url_test: None,
             },
             PolicyGroup {
                 name: "random-group".to_string(),
@@ -82,6 +88,7 @@ fn create_test_config() -> RoutingConfig {
                     },
                 ],
                 slo: None,
+                url_test: None,
             },
         ],
         rules: vec![
@@ -290,6 +297,7 @@ async fn test_group_nesting() -> Result<()> {
             },
         ],
         slo: None,
+        url_test: None,
     });
 
     // 添加规则使用嵌套组
@@ -311,42 +319,103 @@ async fn test_group_nesting() -> Result<()> {
     Ok(())
 }
 
+/// G1-9 重写：健康数据唯一来源是注入的探测句柄；未注入 = no-op 不产数据
+///（旧随机 mock 已删——随机假数据比无数据更害选路）。url_test 组配置探测
+/// 目标/间隔/超时；断言面：健康表、延迟表、组过滤、间隔门控。
+fn urltest_group_config() -> RoutingConfig {
+    let mut config = create_test_config();
+    config.groups = vec![PolicyGroup {
+        name: "auto".to_string(),
+        strategy: Strategy::Latency,
+        members: vec![
+            GroupMember::Node {
+                name: "node1".to_string(),
+            },
+            GroupMember::Node {
+                name: "node2".to_string(),
+            },
+        ],
+        slo: None,
+        url_test: Some(seep_config::UrlTestConfig {
+            probe: "127.0.0.1:9".to_string(),
+            path: "/generate_204".to_string(),
+            interval_secs: 3600,
+            timeout_ms: 1000,
+        }),
+    }];
+    config
+}
+
 #[tokio::test]
 async fn test_health_check_integration() -> Result<()> {
-    let config = create_test_config();
-    let engine = RoutingEngine::new(config);
+    // 前半：无 url_test 组且未注入句柄——no-op 不产数据
+    let plain = RoutingEngine::new(create_test_config());
+    plain.perform_health_checks().await;
+    assert_eq!(plain.get_health_stats(), (0, 0));
 
-    // 获取初始健康统计
-    let (_healthy, total) = engine.get_health_stats();
+    // 后半：url_test 组 + 假句柄（node1 健康 42ms，其余 Err）——确定性断言
+    let engine = RoutingEngine::new(urltest_group_config());
+    engine.set_probe_handler(Arc::new(
+        |node: &str, _host: &str, _port: u16, _path: &str, _timeout: Duration| {
+            // 先落 own 再进 async 块：future 与入参引用生命周期解耦
+            let node = node.to_string();
+            Box::pin(async move {
+                if node == "node1" {
+                    Ok(42u64)
+                } else {
+                    Err(format!("{node} probe failed"))
+                }
+            }) as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
+        },
+    ));
+    engine.perform_health_checks().await;
 
-    // 初始时应该没有健康检查记录
-    assert_eq!(total, 0);
+    let (healthy, total) = engine.get_health_stats();
+    assert_eq!(total, 2, "仅 url_test 组成员入健康表");
+    assert_eq!(healthy, 1, "node1 健康、node2 不健康");
+    assert_eq!(engine.get_node_latency("node1"), Some(42));
+    assert_eq!(engine.get_node_latency("node2"), None, "探测失败不产延迟值");
 
-    // 等待健康检查任务运行
-    let engine_arc = Arc::new(engine);
-    let engine_clone = engine_arc.clone();
-    tokio::spawn(async move {
-        sleep(Duration::from_millis(100)).await;
-        // 手动触发一次健康检查
-        engine_clone.perform_health_checks().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_urltest_probe_interval_gating_and_group_filter() -> Result<()> {
+    let mut config = urltest_group_config();
+    // 追加无 url_test 的组：其成员绝不入探测
+    config.groups.push(PolicyGroup {
+        name: "plain".to_string(),
+        strategy: Strategy::RoundRobin,
+        members: vec![GroupMember::Node {
+            name: "node3".to_string(),
+        }],
+        slo: None,
+        url_test: None,
     });
 
-    // 等待健康检查完成（轮询至截止——固定 sleep 在 CPU 饱和下漏调度会假失败；
-    // healthy>0 同入轮询条件——check_node_health 为随机 10% 不健康，首个入表
-    // 节点恰抽中即 total>0 先现而 healthy==0，立即断言会假失败，等后续节点覆盖）
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let mut stats = engine_arc.get_health_stats();
-    while (stats.0 == 0 || stats.1 == 0) && std::time::Instant::now() < deadline {
-        sleep(Duration::from_millis(20)).await;
-        stats = engine_arc.get_health_stats();
-    }
+    let engine = RoutingEngine::new(config);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls_in_handler = Arc::clone(&calls);
+    engine.set_probe_handler(Arc::new(
+        move |_node: &str, _host: &str, _port: u16, _path: &str, _timeout: Duration| {
+            calls_in_handler.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(10u64) })
+                as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
+        },
+    ));
 
-    // 再次获取健康统计
-    let (healthy, total) = stats;
+    // 第一轮：url_test 组 2 成员各探测一次；plain 组不入探测不入健康表
+    engine.perform_health_checks().await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(engine.get_health_stats().1, 2, "plain 组成员不入健康表");
 
-    // 应该有健康检查记录
-    assert!(total > 0);
-    assert!(healthy > 0);
+    // 第二轮：interval_secs=3600 未到期，整组跳过
+    engine.perform_health_checks().await;
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "间隔未到期不得重复探测"
+    );
 
     Ok(())
 }

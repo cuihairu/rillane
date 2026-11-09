@@ -45,6 +45,7 @@ fn group_member_yaml_roundtrip_all_variants() {
             },
         ],
         slo: None,
+        url_test: None,
     });
 
     let rendered = serde_yaml::to_string(&cfg).expect("应可序列化");

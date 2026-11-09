@@ -1,5 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
+    pin::Pin,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -15,7 +17,7 @@ use seep_config::{
 use seep_core::{FlowContext, FlowRouter, RouteDecision};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tokio::time::{interval, sleep};
+use tokio::time::interval;
 
 mod geo;
 pub use geo::{geoip_country, host_to_ip, GeoDatabases, GeoSiteDb};
@@ -185,6 +187,44 @@ pub struct RoutingEngine {
     // 加载句柄；路径变化重建容器（热更路径切换生效）。`RwLock` 使
     // `reload(&self)` 可原地替换（route 面读锁取当前容器）。
     geo: RwLock<Arc<GeoDatabases>>,
+    // url-test 成员探测句柄（G1-9）：运行时注入——按节点名经其出口对
+    // 探测目标做 HTTP 探测，返回 RTT 毫秒。None = 未注入（无探测，默认
+    // 健康兜底；此前此处的随机 mock 已删——随机假数据比无数据更害）。
+    probe: RwLock<Option<NodeProbeFn>>,
+    // 组级最近探测轮时刻（G1-9）：组名 → 最近一轮 perform 的 Instant，
+    // url_test.interval_secs 到期才探测（任务 tick 10s 粒度对齐组间隔）。
+    urltest_last: RwLock<HashMap<String, std::time::Instant>>,
+}
+
+/// 成员探测句柄类型（G1-9）：（节点名, 探测 host, 端口, 路径, 超时）→
+/// RTT 毫秒 / Err（不健康）。运行时注入——内部经该节点出口以探测目标为
+/// target 走 forward 管道（见 seep-core `probe_via_output`）。
+pub type NodeProbeFn = Arc<
+    dyn Fn(
+            &str,
+            &str,
+            u16,
+            &str,
+            Duration,
+        ) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// 拆分探测目标 `host:port`（G1-9）：与 seep-config `UrlTestConfig::validate`
+/// 同一语义（最后一个 `:` 分隔；IPv6 字面量本方案不支持，validate 已挡）。
+/// 解析失败返回 None——探测循环整组跳过而非用坏数据污染健康表。
+fn split_probe_target(probe: &str) -> Option<(String, u16)> {
+    let (host, port_str) = probe.rsplit_once(':')?;
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    if host.is_empty() {
+        return None;
+    }
+    let port: u16 = port_str.parse().ok()?;
+    if port == 0 {
+        return None;
+    }
+    Some((host.to_string(), port))
 }
 
 impl RoutingEngine {
@@ -203,9 +243,17 @@ impl RoutingEngine {
             link_quality: DashMap::new(),
             regex_cache: DashMap::new(),
             geo: RwLock::new(geo),
+            probe: RwLock::new(None),
+            urltest_last: RwLock::new(HashMap::new()),
         };
         engine.build_group_cache();
         engine
+    }
+
+    /// 注入成员探测句柄（G1-9）：运行时构建出口面后调用一次；重复注入
+    /// 覆盖旧句柄（热更重建出口面场景）。
+    pub fn set_probe_handler(&self, probe: NodeProbeFn) {
+        *self.probe.write().expect("probe lock poisoned") = Some(probe);
     }
 
     pub fn reload(&self, next: RoutingConfig) {
@@ -396,53 +444,61 @@ impl RoutingEngine {
         }
     }
 
-    /// 执行健康检查
+    /// 执行健康检查（G1-9）：只探测配置了 `url_test` 的策略组，组级按
+    /// `interval_secs` 门控轮转（探测任务 10s tick 粒度）；其余组不动。
+    /// 未注入探测句柄时整体 no-op——不产生任何假健康/延迟数据（此前
+    /// 此处的随机 mock 已删：随机假数据比无数据更害选路）。
     pub async fn perform_health_checks(&self) {
+        let probe = self.probe.read().expect("probe lock poisoned").clone();
+        let Some(probe) = probe else {
+            return;
+        };
+
         let config = self.snapshot();
-        let nodes_to_check: Vec<String> = config
-            .groups
-            .iter()
-            .flat_map(|group| group.members.iter())
-            .map(|member| member.as_name())
-            .collect();
+        let now = std::time::Instant::now();
+        for group in &config.groups {
+            let Some(url_test) = &group.url_test else {
+                continue;
+            };
 
-        for node_name in nodes_to_check {
-            // 模拟健康检查 - 实际应用中应该是真实的连接测试
-            let is_healthy = self.check_node_health(&node_name).await;
+            // 组级间隔门控：未到期整组跳过本轮
+            {
+                let last = self
+                    .urltest_last
+                    .read()
+                    .expect("urltest_last lock poisoned");
+                if let Some(last) = last.get(&group.name) {
+                    if now.duration_since(*last) < Duration::from_secs(url_test.interval_secs) {
+                        continue;
+                    }
+                }
+            }
+            self.urltest_last
+                .write()
+                .expect("urltest_last lock poisoned")
+                .insert(group.name.clone(), now);
 
-            // 更新健康状态缓存
-            self.health_status
-                .insert(node_name.clone(), (is_healthy, std::time::Instant::now()));
+            let Some((host, port)) = split_probe_target(&url_test.probe) else {
+                continue;
+            };
+            let path = url_test.path.clone();
+            let timeout = Duration::from_millis(url_test.timeout_ms);
 
-            // 如果节点健康，更新延迟统计
-            if is_healthy {
-                if let Some(latency) = self.measure_node_latency(&node_name).await {
-                    self.latency_stats.insert(node_name.clone(), latency);
+            // 逐成员串行探测：并发探测互相抢带宽会失真 RTT
+            for member in &group.members {
+                let node_name = member.as_name();
+                match probe(&node_name, &host, port, &path, timeout).await {
+                    Ok(rtt) => {
+                        self.health_status.insert(node_name.clone(), (true, now));
+                        self.latency_stats
+                            .insert(node_name, (rtt.min(u32::MAX as u64)) as u32);
+                    }
+                    Err(_) => {
+                        self.health_status.insert(node_name, (false, now));
+                    }
                 }
             }
         }
-    }
-
-    /// 检查单个节点的健康状态
-    async fn check_node_health(&self, _node_name: &str) -> bool {
-        // 模拟健康检查 - 实际应用中应该是TCP连接测试或HTTP请求
-        sleep(Duration::from_millis(10)).await;
-
-        // 模拟90%的健康率
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        rng.gen_range(0..100) < 90
-    }
-
-    /// 测量节点延迟
-    async fn measure_node_latency(&self, _node_name: &str) -> Option<u32> {
-        // 模拟延迟测量 - 实际应用中应该测量真实的往返时间
-        sleep(Duration::from_millis(5)).await;
-
-        // 模拟10-100ms的延迟
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        Some(rng.gen_range(10..100))
     }
 
     /// 基于带宽选择成员
@@ -679,6 +735,12 @@ impl RoutingEngine {
             .filter(|entry| entry.value().0)
             .count();
         (healthy, total)
+    }
+
+    /// 获取节点最近探测 RTT（毫秒）（G1-9 url-test 写入，探测失败不清除
+    /// 旧值——健康表已单独标不健康，选路看健康位）
+    pub fn get_node_latency(&self, node_name: &str) -> Option<u32> {
+        self.latency_stats.get(node_name).map(|v| *v.value())
     }
 }
 
@@ -1114,6 +1176,7 @@ mod tests {
                     loss_ratio: Some(0.05),
                     loss_penalty_ms: Some(500.0),
                 }),
+                url_test: None,
             }],
             rules: vec![],
             ..Default::default()
@@ -1130,6 +1193,7 @@ mod tests {
                     loss_ratio: Some(1.5),
                     loss_penalty_ms: None,
                 }),
+                url_test: None,
             }],
             ..ok.clone()
         };
@@ -1147,6 +1211,7 @@ mod tests {
                     loss_ratio: None,
                     loss_penalty_ms: Some(-1.0),
                 }),
+                url_test: None,
             }],
             ..ok
         };
@@ -1228,6 +1293,7 @@ mod tests {
                     },
                 ],
                 slo: None,
+                url_test: None,
             }],
             rules: vec![],
             ..Default::default()
@@ -1287,6 +1353,7 @@ mod tests {
                     loss_ratio: Some(0.01),
                     loss_penalty_ms: None,
                 }),
+                url_test: None,
             }],
             rules: vec![],
             ..Default::default()
@@ -1325,6 +1392,7 @@ mod tests {
                         loss_ratio: None,
                         loss_penalty_ms: None,
                     }),
+                    url_test: None,
                 },
                 PolicyGroup {
                     name: "fixed-g".into(),
@@ -1335,6 +1403,7 @@ mod tests {
                         loss_ratio: None,
                         loss_penalty_ms: None,
                     }),
+                    url_test: None,
                 },
             ],
             rules: vec![],
@@ -2064,5 +2133,23 @@ mod tests {
             metadata: Default::default(),
         };
         assert_eq!(engine.route(ctx).await.unwrap().final_node(), "cn-node");
+    }
+
+    /// G1-9：探测目标拆分——host:port 正常、IPv6 方括号剥除；空 host /
+    /// 缺端口 / 端口 0 / 非数字端口拒绝。
+    #[test]
+    fn split_probe_target_forms() {
+        assert_eq!(
+            split_probe_target("127.0.0.1:443"),
+            Some(("127.0.0.1".to_string(), 443))
+        );
+        assert_eq!(
+            split_probe_target("[::1]:80"),
+            Some(("::1".to_string(), 80))
+        );
+        assert_eq!(split_probe_target("host"), None);
+        assert_eq!(split_probe_target(":443"), None);
+        assert_eq!(split_probe_target("host:0"), None);
+        assert_eq!(split_probe_target("host:notaport"), None);
     }
 }

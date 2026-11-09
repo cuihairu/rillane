@@ -1181,6 +1181,7 @@ impl SeepConfig {
                     name: self.routing.default_node.clone(),
                 }],
                 slo,
+                url_test: None,
             });
             created_group = true;
         }
@@ -1598,6 +1599,9 @@ impl RoutingConfig {
                 slo.validate()
                     .map_err(|e| anyhow::anyhow!("组 {} 的 slo 配置非法: {e}", group.name))?;
             }
+            if let Some(url_test) = &group.url_test {
+                url_test.validate(&group.name)?;
+            }
         }
         // G0-2 域名正则构建期校验（审核发现 2026-11-04）：非法或不支持的
         // 正则若不在构建期拦截，匹配面会吞掉编译错误回落默认路由，使拦截
@@ -1717,6 +1721,10 @@ pub struct PolicyGroup {
     /// （存量行为兼容面）
     #[serde(default)]
     pub slo: Option<SloPolicy>,
+    /// 组级 url-test 常驻测速（G1-9）：配置后成员按 interval 真实探测
+    /// （经成员出口 HTTP 探测，健康+RTT 入路由质量面）；缺省 None 不探测
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_test: Option<UrlTestConfig>,
 }
 
 /// 组级 SLO 目标策略（slo-scoring.md §2 D-1/D-2）。
@@ -1732,6 +1740,83 @@ pub struct SloPolicy {
     /// 丢包罚分权重（ms / 单位丢包率）；缺省 1000.0（1% 丢包 ≈ +10ms 罚分）
     #[serde(default)]
     pub loss_penalty_ms: Option<f64>,
+}
+
+/// 组级 url-test 探测配置（G1-9）：成员常驻真实测速。缺省 None = 该组
+/// 不做真实探测（无探测句柄时沿用默认健康兜底）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UrlTestConfig {
+    /// 探测目标 host:port（HTTP 探测经成员出口拨达）
+    pub probe: String,
+    /// 探测路径；缺省 /generate_204
+    #[serde(default = "default_url_test_path")]
+    pub path: String,
+    /// 探测间隔（秒）；缺省 300
+    #[serde(default = "default_url_test_interval")]
+    pub interval_secs: u64,
+    /// 单次探测超时（毫秒）；缺省 5000
+    #[serde(default = "default_url_test_timeout")]
+    pub timeout_ms: u64,
+}
+
+fn default_url_test_path() -> String {
+    "/generate_204".to_string()
+}
+
+fn default_url_test_interval() -> u64 {
+    300
+}
+
+fn default_url_test_timeout() -> u64 {
+    5_000
+}
+
+impl UrlTestConfig {
+    /// 值域构建期拦截：probe 须 host:port 且端口非 0；path 须以 / 开头；
+    /// 间隔 ≥1s；超时 ≥1ms。由 `RoutingConfig::validate` 逐组调用。
+    pub fn validate(&self, group: &str) -> anyhow::Result<()> {
+        let host = self
+            .probe
+            .rsplit_once(':')
+            .filter(|(_, p)| !p.is_empty())
+            .map_or(self.probe.as_str(), |(h, _)| h);
+        anyhow::ensure!(
+            !host.is_empty(),
+            "组 {group} 的 url_test.probe 缺 host:{probe:?}",
+            probe = self.probe
+        );
+        let port: u16 = match self.probe.rsplit_once(':') {
+            Some((_, p)) => p.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "组 {group} 的 url_test.probe 端口非法:{probe:?}",
+                    probe = self.probe
+                )
+            })?,
+            None => anyhow::bail!(
+                "组 {group} 的 url_test.probe 缺端口:{probe:?}",
+                probe = self.probe
+            ),
+        };
+        anyhow::ensure!(
+            port != 0,
+            "组 {group} 的 url_test.probe 端口不能为 0:{probe:?}",
+            probe = self.probe
+        );
+        anyhow::ensure!(
+            self.path.starts_with('/'),
+            "组 {group} 的 url_test.path 须以 / 开头:{path:?}",
+            path = self.path
+        );
+        anyhow::ensure!(
+            self.interval_secs >= 1,
+            "组 {group} 的 url_test.interval_secs 须 ≥1"
+        );
+        anyhow::ensure!(
+            self.timeout_ms >= 1,
+            "组 {group} 的 url_test.timeout_ms 须 ≥1"
+        );
+        Ok(())
+    }
 }
 
 impl SloPolicy {

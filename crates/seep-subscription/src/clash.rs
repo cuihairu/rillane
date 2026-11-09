@@ -10,8 +10,38 @@ use tracing::{debug, warn};
 
 use seep_config::{
     EgressConfig, EgressDescriptor, GroupMember, MatchCondition, PolicyGroup, RouteRule,
-    RoutingConfig, Strategy,
+    RoutingConfig, Strategy, UrlTestConfig,
 };
+
+/// Clash url-test 组测试 URL →（probe `host:port`, path）（G1-9）。仅认
+/// http/https URL；无端口按方案默认（80/443）补齐；空 authority 或端口
+/// 非法返回 None——调用方不注入 url_test（宁缺不造）。
+fn split_probe_url(url: &str) -> Option<(String, String)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let default_port = match scheme {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], rest[idx..].to_string()),
+        None => (rest, "/".to_string()),
+    };
+    if authority.is_empty() {
+        return None;
+    }
+    let probe = match authority.rsplit_once(':') {
+        Some((host, port_str)) => {
+            let port: u16 = port_str.parse().ok()?;
+            if port == 0 {
+                return None;
+            }
+            format!("{host}:{port}")
+        }
+        None => format!("{authority}:{default_port}"),
+    };
+    Some((probe, path))
+}
 
 /// Clash 代理类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1109,12 +1139,34 @@ impl ClashConverter {
             let strategy = self.convert_group_type_to_strategy(group.group_type);
             let members = self.convert_proxies_to_group_members(&group.proxies);
 
+            // G1-9：url-test 组的测试 URL/间隔映射为 UrlTestConfig，订阅导入
+            // 后即按原节奏探活选路。url 缺席或解析失败 = 不注入（宁缺不造，
+            // 不发明探测目标）；Clash interval 为毫秒，换算成秒下限 1。
+            let url_test =
+                match group.group_type {
+                    ClashProxyGroupType::UrlTest => group
+                        .url
+                        .as_deref()
+                        .and_then(split_probe_url)
+                        .map(|(probe, path)| UrlTestConfig {
+                            probe,
+                            path,
+                            interval_secs: group
+                                .interval
+                                .map(|ms| (ms / 1000).max(1))
+                                .unwrap_or(300),
+                            timeout_ms: 5000,
+                        }),
+                    _ => None,
+                };
+
             groups.push(PolicyGroup {
                 name,
                 strategy,
                 members,
                 // 订阅不产 SLO 目标（归用户主配置，P1-3/P1-4 同判）
                 slo: None,
+                url_test,
             });
         }
 
@@ -1434,6 +1486,62 @@ fn build_wireguard_address(proxy: &ClashProxy) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G1-9：url-test 组的 url/interval 映射为 UrlTestConfig——导入后即按
+    /// 原节奏探活。url 缺席 = 不注入（宁缺不造）；非 url-test 组即便带
+    /// url 也不注入。
+    #[test]
+    fn test_urltest_group_probe_config_mapped() {
+        let yaml_content = r#"
+proxies:
+  - name: "ss-1"
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: password
+
+proxy-groups:
+  - name: "auto"
+    type: url-test
+    url: "https://cp.cloudflare.com/generate_204"
+    interval: 60000
+    proxies:
+      - "ss-1"
+  - name: "manual"
+    type: url-test
+    proxies:
+      - "ss-1"
+  - name: "pick"
+    type: select
+    url: "https://cp.cloudflare.com/generate_204"
+    proxies:
+      - "ss-1"
+rules:
+  - MATCH,auto
+        "#;
+        let converter = ClashConverter::new();
+        let config = converter.parse(yaml_content).unwrap();
+        let groups = converter
+            .convert_proxy_groups_to_groups(&config.proxy_groups)
+            .unwrap();
+        assert_eq!(groups.len(), 3);
+
+        // auto：url 拆出 probe/path，interval 60000ms → 60s
+        let auto = groups.iter().find(|g| g.name.ends_with("auto")).unwrap();
+        let url_test = auto.url_test.as_ref().expect("url-test 组带 url 应注入");
+        assert_eq!(url_test.probe, "cp.cloudflare.com:443");
+        assert_eq!(url_test.path, "/generate_204");
+        assert_eq!(url_test.interval_secs, 60);
+
+        // manual：url-test 组缺 url → 不注入（宁缺不造）
+        let manual = groups.iter().find(|g| g.name.ends_with("manual")).unwrap();
+        assert!(manual.url_test.is_none());
+
+        // pick：select 组即便带 url 也不注入（只认 url-test 组）
+        let pick = groups.iter().find(|g| g.name.ends_with("pick")).unwrap();
+        assert!(pick.url_test.is_none());
+    }
 
     #[test]
     fn test_ss_plugin_obfs_import_converts_to_sip003() {

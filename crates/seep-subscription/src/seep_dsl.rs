@@ -1101,6 +1101,8 @@ impl SeepDslConverter {
                 members,
                 // 订阅不产 SLO 目标（归用户主配置，P1-3/P1-4 同判）
                 slo: None,
+                // Seep DSL 组无探测目标字段，url-test 探测目标归主配置
+                url_test: None,
             });
         }
 

@@ -264,6 +264,72 @@ pub trait FlowOutput: Send + Sync {
     async fn forward(&self, decision: RouteDecision, flow: Flow) -> Result<FlowReport>;
 }
 
+/// 经出口对探测目标做一次 HTTP 探测（G1-9 url-test 实测数据源）。
+///
+/// 构造 duplex 流作 ingress 侧、以探测目标为 Flow.target 走既有 forward
+/// 路径（与真实流量同管道），发出 HEAD 请求；收到任意响应字节即判健康，
+/// RTT = 探测发起到首字节的耗时。探测完 shutdown 写半关流（forward 在
+/// 独立任务自然收尾）。
+///
+/// timeout 覆盖连接+协议握手+请求往返全程；超时/出口缺失/转发失败均 Err。
+pub async fn probe_via_output(
+    output: Arc<dyn FlowOutput>,
+    node: &str,
+    host: &str,
+    port: u16,
+    path: &str,
+    timeout: Duration,
+) -> Result<u64, String> {
+    let (mut client, server) = tokio::io::duplex(16 * 1024);
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let flow = Flow {
+        id: FlowId::default(),
+        target: FlowTarget {
+            host: host.to_string(),
+            port,
+            proto: TargetProto::Tcp,
+        },
+        io: Box::new(server),
+        metadata: FlowMetadata::default(),
+    };
+    let decision = RouteDecision {
+        path: RoutePath::Direct {
+            node: node.to_string(),
+        },
+        reason: Some("url-test probe".to_string()),
+        route_type: RouteType::Standard,
+    };
+    let forward = tokio::spawn(async move { output.forward(decision, flow).await });
+
+    let fut = async {
+        let req = format!(
+            "HEAD {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: seep-urltest/1\r\nConnection: close\r\n\r\n"
+        );
+        client
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| format!("探测请求写入失败：{e}"))?;
+        let mut first = [0u8; 1];
+        client
+            .read_exact(&mut first)
+            .await
+            .map_err(|e| format!("探测响应读取失败：{e}"))?;
+        Ok::<(), String>(())
+    };
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(timeout, fut).await;
+    let _ = client.shutdown().await;
+    // forward 任务自然收尾：探测写半关后连接器侧 EOF 退出；不阻塞探测返回
+    tokio::spawn(async move {
+        let _ = forward.await;
+    });
+    match outcome {
+        Err(_) => Err(format!("探测 {node} → {host}:{port} 超时（{timeout:?}）")),
+        Ok(Err(e)) => Err(format!("探测 {node} → {host}:{port} 失败：{e}")),
+        Ok(Ok(())) => Ok(started.elapsed().as_millis() as u64),
+    }
+}
+
 #[async_trait]
 pub trait FlowMiddleware: Send + Sync {
     fn name(&self) -> &'static str;
@@ -887,5 +953,80 @@ mod tests {
             (score - 0.7).abs() < f64::EPSILON as f32,
             "应回退可靠性：{score}"
         );
+    }
+
+    /// G1-9 探测管道 stub 出口：无视 decision，把 ingress 流直连回环目标
+    /// （copy_bidirectional 全双工搬运——与真实出口连接器行为同形）。
+    struct ProbeStubOutput {
+        addr: std::net::SocketAddr,
+    }
+
+    #[async_trait::async_trait]
+    impl FlowOutput for ProbeStubOutput {
+        async fn forward(&self, _decision: RouteDecision, mut flow: Flow) -> Result<FlowReport> {
+            let mut upstream = tokio::net::TcpStream::connect(self.addr).await?;
+            tokio::io::copy_bidirectional(flow.io.as_mut(), &mut upstream).await?;
+            Ok(FlowReport {
+                upstream: 0,
+                downstream: 0,
+            })
+        }
+    }
+
+    /// G1-9：回环健康路径——对端回 HTTP 响应，探测拿到首字节返回 Ok 且
+    /// RTT 在超时窗口内。
+    #[tokio::test]
+    async fn probe_via_output_roundtrip_returns_rtt() -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 256];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        let output: Arc<dyn FlowOutput> = Arc::new(ProbeStubOutput { addr });
+        let rtt = probe_via_output(
+            output,
+            "n1",
+            &addr.ip().to_string(),
+            addr.port(),
+            "/generate_204",
+            Duration::from_secs(5),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+        assert!(rtt <= 5000, "RTT 应落在超时窗口内：{rtt}ms");
+        Ok(())
+    }
+
+    /// G1-9：黑洞路径——对端连上不回话，探测在 timeout 内 Err（超时语义
+    /// 归 Err 文本，不 panic 不挂起）。
+    #[tokio::test]
+    async fn probe_via_output_blackhole_times_out() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.expect("accept");
+            // 持有连接不读不回，探测侧 read_exact 停在超时
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let output: Arc<dyn FlowOutput> = Arc::new(ProbeStubOutput { addr });
+        let outcome = probe_via_output(
+            output,
+            "n2",
+            &addr.ip().to_string(),
+            addr.port(),
+            "/generate_204",
+            Duration::from_millis(200),
+        )
+        .await;
+        let err = outcome.expect_err("黑洞必须 Err");
+        assert!(err.contains("超时"), "超时语义：{err}");
+        Ok(())
     }
 }

@@ -6,7 +6,9 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
+    future::Future,
     net::SocketAddr,
+    pin::Pin,
     sync::{Arc, OnceLock, RwLock},
     time::{Duration, Instant},
 };
@@ -188,6 +190,25 @@ impl RuntimeBuilder {
                 self.egress_connectors = connectors;
             }
         }
+
+        // G1-9 url-test 成员探测句柄注入（出口面就绪后）：按节点名取其出口，
+        // 经出口 forward 管道对探测目标发 HTTP HEAD 读首字节判活（实现见
+        // seep-core `probe_via_output`）。调度/间隔门控在路由引擎
+        // `perform_health_checks`；未配置 url_test 的组不产生任何探测流量。
+        let probe_outputs = self.flow_outputs.clone();
+        router.set_probe_handler(Arc::new(
+            move |node: &str, host: &str, port: u16, path: &str, timeout: Duration| {
+                // 先落 own 再进 async 块：返回 future 与入参引用生命周期解耦
+                let node = node.to_string();
+                let host = host.to_string();
+                let path = path.to_string();
+                let output = probe_outputs.get(node.as_str()).cloned();
+                Box::pin(async move {
+                    let output = output.ok_or_else(|| format!("节点 {node} 无对应出口"))?;
+                    seep_core::probe_via_output(output, &node, &host, port, &path, timeout).await
+                }) as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
+            },
+        ));
 
         // P1-4 §1.2/§3.2：混淆 middleware 链（块缺席/关闭 = 空链零开销，§2.5）。
         // known_egress = 配置 egress 名 ∪ build 期已注册输出名（E5 判定输入；
@@ -4098,6 +4119,7 @@ mod tests {
                         name: "direct".to_string(),
                     }],
                     slo: None,
+                    url_test: None,
                 }],
                 rules: vec![],
                 ..Default::default()
@@ -4147,6 +4169,7 @@ mod tests {
                             name: "direct".to_string(),
                         }],
                         slo: None,
+                        url_test: None,
                     },
                     PolicyGroup {
                         name: "g2".to_string(),
@@ -4155,6 +4178,7 @@ mod tests {
                             name: "p1".to_string(),
                         }],
                         slo: None,
+                        url_test: None,
                     },
                 ],
                 rules: vec![
@@ -4656,6 +4680,7 @@ mod tests {
                 })
                 .collect(),
             slo: None,
+            url_test: None,
         }
     }
 
@@ -4883,12 +4908,14 @@ mod tests {
             strategy: Strategy::Weighted,
             members: vec![GroupMember::Group { name: "g2".into() }],
             slo: None,
+            url_test: None,
         };
         let g2 = PolicyGroup {
             name: "g2".into(),
             strategy: Strategy::Weighted,
             members: vec![GroupMember::Group { name: "g1".into() }],
             slo: None,
+            url_test: None,
         };
         let routing = RoutingConfig {
             default_node: "g1".into(),

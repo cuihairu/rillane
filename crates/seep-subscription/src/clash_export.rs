@@ -845,6 +845,7 @@ mod tests {
                         },
                     ],
                     slo: None,
+                    url_test: None,
                 }],
                 rules: vec![
                     RouteRule {
