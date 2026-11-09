@@ -163,6 +163,10 @@ pub struct UdpAssociateService {
     max_associates: usize,
     /// 并发 ASSOCIATE 门（§2.6）：同一控制连接对端 (ip, port) 只允许一条
     active: Mutex<HashSet<SocketAddr>>,
+    /// fake-ip 池表（G1-10 UDP 面）：Some = 数据报 target 为池段假 IPv4
+    /// 时反查原域名改写（会话按改写后 target 绑定，同域名复用）；None =
+    /// 关闭，target 原样
+    fake_ip: Option<Arc<crate::fake_ip::FakeIpTable>>,
     /// 周期回收任务随首个 ASSOCIATE 拉起（build 阶段无 tokio 上下文；
     /// 会话不可能先于任何 ASSOCIATE 存在，语义等价）
     reclaimer_once: std::sync::Once,
@@ -174,6 +178,7 @@ impl UdpAssociateService {
         connector: Arc<dyn EgressUdpConnector>,
         strict_udp_source: bool,
         max_associates: usize,
+        fake_ip: Option<Arc<crate::fake_ip::FakeIpTable>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             table,
@@ -182,6 +187,7 @@ impl UdpAssociateService {
             metrics: Arc::new(UdpIngressMetrics::default()),
             max_associates,
             active: Mutex::new(HashSet::new()),
+            fake_ip,
             reclaimer_once: std::sync::Once::new(),
         })
     }
@@ -372,6 +378,23 @@ async fn uplink_loop(mut u: UdpUplink) {
             }
         };
         let data = Bytes::copy_from_slice(&buf[hlen..n]);
+        // fake-ip 回填（G1-10 UDP 面）：数据报 target 为池段假 IPv4 时反查
+        // 原域名改写（与 TCP 入口 forward_tcp 同款语义）；域名/池外 IP
+        // 不命中即原样。改写先于粘滞键建立——会话按域名 target 绑定，
+        // 同域名后续数据报复用会话。
+        let target = match u
+            .service
+            .fake_ip
+            .as_ref()
+            .and_then(|t| crate::fake_ip::reverse_host(t, &target.host))
+        {
+            Some(domain) => FlowTarget {
+                host: domain,
+                port: target.port,
+                proto: TargetProto::Udp,
+            },
+            None => target,
+        };
         // 换源端口 = 新粘滞键 = 新会话（§2.3 换源语义，不做迁移）
         let key = UdpSessionKey::new(src).with_user(u.user.clone());
         u.keys.lock().unwrap().insert(key.clone());

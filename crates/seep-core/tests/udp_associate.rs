@@ -11,7 +11,7 @@ use seep_core::{
     FlowContext, FlowRouter, FlowTarget, RouteDecision, RoutePath, RouteType, TargetProto,
 };
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -46,7 +46,13 @@ fn make_service_with_limits(strict: bool, max_associates: usize) -> Arc<UdpAssoc
         MockClock::new() as Arc<dyn Clock>,
     )
     .unwrap();
-    UdpAssociateService::new(table, Arc::new(DirectUdpConnector), strict, max_associates)
+    UdpAssociateService::new(
+        table,
+        Arc::new(DirectUdpConnector),
+        strict,
+        max_associates,
+        None,
+    )
 }
 
 /// 回声 UDP 服务器（模拟 DNS：收什么回什么，同源回送）
@@ -515,4 +521,72 @@ async fn ingress_snapshot_fields_complete() {
     control.shutdown().await.unwrap();
     let _ = serve_handle.await;
     wait_until(|| svc.ingress_snapshot().associates_active == 0).await;
+}
+
+// ---------- G1-10 M2 残项②：socks5 UDP 数据报 fake-ip 回填 ----------
+
+/// 捕获路由 target 的路由器（回填断言面：域名应抵达路由上下文）
+struct CapturingRouter {
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl FlowRouter for CapturingRouter {
+    async fn route(&self, ctx: FlowContext) -> anyhow::Result<RouteDecision> {
+        self.seen.lock().unwrap().push(ctx.target.host.clone());
+        Ok(RouteDecision {
+            path: RoutePath::Direct {
+                node: NODE_A.into(),
+            },
+            reason: None,
+            route_type: RouteType::Standard,
+        })
+    }
+}
+
+#[tokio::test]
+async fn fake_ip_datagram_target_backfills_domain() {
+    // G1-10 UDP 面：池段假 IPv4 target 反查原域名（与 TCP 入口同款语义，
+    // 路由按域名规则命中）；池外 IP target 原样直达路由
+    let pool = Arc::new(seep_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/15").unwrap());
+    let fake = pool.alloc("udp.example");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let table = UdpSessionTable::new(
+        UdpSessionConfig::default(),
+        Arc::new(CapturingRouter {
+            seen: Arc::clone(&seen),
+        }) as Arc<dyn FlowRouter>,
+        MockClock::new() as Arc<dyn Clock>,
+    )
+    .unwrap();
+    let svc = UdpAssociateService::new(table, Arc::new(DirectUdpConnector), false, 256, Some(pool));
+    let (_control, relay_port, _handle) = associate(&svc).await;
+
+    let frame_for = |ip: std::net::Ipv4Addr, port: u16| {
+        let mut f = vec![0, 0, 0, 1]; // RSV(2) FRAG ATYP=IPv4
+        f.extend_from_slice(&ip.octets());
+        f.extend_from_slice(&port.to_be_bytes());
+        f
+    };
+
+    // 池外 IP：不回填，target 原样（UDP connect 本地即成，无网络依赖）
+    let pass = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    pass.send_to(
+        &frame_for(std::net::Ipv4Addr::new(8, 8, 8, 8), 53),
+        format!("127.0.0.1:{relay_port}"),
+    )
+    .await
+    .unwrap();
+    wait_until(|| seen.lock().unwrap().iter().any(|h| h == "8.8.8.8")).await;
+
+    // 池段假地址：反查回原域名，路由上下文见到的是域名而非假地址
+    let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    cli.send_to(&frame_for(fake, 443), format!("127.0.0.1:{relay_port}"))
+        .await
+        .unwrap();
+    wait_until(|| seen.lock().unwrap().iter().any(|h| h == "udp.example")).await;
+    assert!(
+        !seen.lock().unwrap().iter().any(|h| *h == fake.to_string()),
+        "池段假地址不得直达路由（必须反查回域名）"
+    );
 }

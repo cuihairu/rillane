@@ -504,6 +504,9 @@ impl RuntimeBuilder {
                 config_snapshot.udp.strict_udp_source,
                 // P0-5 §1.2：S0 落地的配置字段（S1 签名变更连带接线，S2 再提纯映射）
                 config_snapshot.udp.max_associates,
+                // G1-10 UDP 面：池段假地址 target 反查域名回填（池表随 DNS
+                // 服务装配；None = 未启用，存量零差异）
+                dns_service.as_ref().and_then(|d| d.fake_ip()),
             ))
         } else {
             None
