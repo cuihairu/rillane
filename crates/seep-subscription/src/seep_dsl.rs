@@ -72,6 +72,20 @@ pub struct SeepNode {
     /// 元数据
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
+    /// VLESS flow（如 xtls-rprx-vision；G1-6）。仅捕获以拒绝导入——无
+    /// flow 支持的节点静默降级为普通 VLESS 会连不上真节点（xtls 服务端
+    /// 期望 Vision 分帧），导入期点名拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<String>,
+    /// REALITY 选项块（public-key/short-id；G1-6）。仅捕获以拒绝导入——
+    /// REALITY 节点静默降级为普通 TLS VLESS 后服务端回落伪装站点。
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "reality-opts",
+        alias = "reality_opts"
+    )]
+    pub reality: Option<serde_json::Value>,
 }
 
 /// 节点认证信息
@@ -759,6 +773,22 @@ impl SeepDslConverter {
                     return Err(anyhow!("VLESS 节点缺少 UUID"));
                 };
 
+                // REALITY/flow 节点显式拒绝导入（G1-6）：静默降级为普通 TLS
+                // VLESS 后服务端回落伪装站点/期望 Vision 分帧，流量不走向
+                // 代理且无报错——导入期点名拒绝。
+                if node.reality.is_some() {
+                    anyhow::bail!(
+                        "VLESS 节点 {} 含 reality-opts（REALITY 协议），Seep 暂不支持 REALITY 出站（G1-6），拒绝导入以免静默降级为普通 TLS 节点",
+                        node.name
+                    );
+                }
+                if let Some(flow) = &node.flow {
+                    anyhow::bail!(
+                        "VLESS 节点 {} 含 flow {flow}（XTLS-Vision 等流控），Seep 暂不支持 flow，拒绝导入以免静默降级为普通 VLESS",
+                        node.name
+                    );
+                }
+
                 let (network, path, host, grpc_service_name) =
                     if let Some(transport) = &node.transport {
                         match transport {
@@ -1306,6 +1336,8 @@ rules:
             location: None,
             tags: vec![],
             metadata: HashMap::new(),
+            flow: None,
+            reality: None,
         };
         assert!(converter.is_valid_node(&valid_node));
 
@@ -1321,6 +1353,8 @@ rules:
             location: None,
             tags: vec![],
             metadata: HashMap::new(),
+            flow: None,
+            reality: None,
         };
         assert!(!converter.is_valid_node(&invalid_node));
     }
@@ -1358,6 +1392,8 @@ rules:
                 location: None,
                 tags: vec![],
                 metadata: HashMap::new(),
+                flow: None,
+                reality: None,
             },
             SeepNode {
                 name: "direct2".to_string(),
@@ -1371,6 +1407,8 @@ rules:
                 location: None,
                 tags: vec![],
                 metadata: HashMap::new(),
+                flow: None,
+                reality: None,
             },
             SeepNode {
                 name: "ss1".to_string(),
@@ -1384,6 +1422,8 @@ rules:
                 location: None,
                 tags: vec![],
                 metadata: HashMap::new(),
+                flow: None,
+                reality: None,
             },
         ];
 
@@ -1437,5 +1477,102 @@ rulesets: []
             }
             other => panic!("unexpected egress config: {:?}", other),
         }
+    }
+
+    /// G1-6 REALITY/flow 节点导入期显式拒绝（Seep DSL 面，与 clash 面同口径）。
+    #[test]
+    fn test_vless_reality_and_flow_nodes_rejected_on_convert() {
+        let converter = SeepDslConverter::new();
+        let base = || SeepNode {
+            name: "vl".to_string(),
+            node_type: NodeType::Vless,
+            server: Some("127.0.0.1".to_string()),
+            port: Some(443),
+            auth: Some(NodeAuth::Uuid {
+                uuid: "b831381d-6324-4d2a-b1e7-1bf75a1db7b3".to_string(),
+            }),
+            transport: None,
+            tls: Some(TlsConfig {
+                enabled: true,
+                ..Default::default()
+            }),
+            bandwidth_limit: None,
+            location: None,
+            tags: vec![],
+            metadata: HashMap::new(),
+            flow: None,
+            reality: None,
+        };
+
+        // REALITY
+        let mut reality = base();
+        reality.name = "vl-reality".to_string();
+        reality.reality = Some(serde_json::json!({
+            "public-key": "PBQh7j2tWxQmZHVub3RUYXJnZXQ",
+            "short-id": "0123ac"
+        }));
+        let err = converter
+            .convert_node_to_egress_config(&reality)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("REALITY"), "应点名 REALITY: {msg}");
+        assert!(msg.contains("vl-reality"), "应点名节点名: {msg}");
+
+        // flow（XTLS-Vision 等流控）
+        let mut flow = base();
+        flow.name = "vl-vision".to_string();
+        flow.flow = Some("xtls-rprx-vision".to_string());
+        let err = converter.convert_node_to_egress_config(&flow).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("xtls-rprx-vision"), "应点名 flow 值: {msg}");
+        assert!(msg.contains("vl-vision"), "应点名节点名: {msg}");
+
+        // 普通 VLESS 不受影响
+        let ok = converter.convert_node_to_egress_config(&base()).unwrap();
+        assert!(matches!(ok, EgressConfig::Vless { .. }));
+    }
+
+    /// G1-6 字段捕获：DSL `flow:` 与 `reality-opts:`（含下划线别名）须真的
+    /// 进字段而非被 serde 静默丢弃——否则拒绝逻辑根本不会触发。
+    #[test]
+    fn test_seep_node_captures_reality_and_flow_keys() {
+        let node: SeepNode = serde_yaml::from_str(
+            r#"
+name: vl
+type: vless
+server: 127.0.0.1
+port: 443
+auth:
+  type: uuid
+  value: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+tls:
+  enabled: true
+flow: xtls-rprx-vision
+reality-opts:
+  public-key: PBQh7j2tWxQmZHVub3RUYXJnZXQ
+  short-id: "0123ac"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(node.flow.as_deref(), Some("xtls-rprx-vision"));
+        assert!(node.reality.is_some(), "reality-opts 应被捕获");
+
+        let node: SeepNode = serde_yaml::from_str(
+            r#"
+name: vl
+type: vless
+server: 127.0.0.1
+port: 443
+auth:
+  type: uuid
+  value: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+tls:
+  enabled: true
+reality_opts:
+  public-key: PBQh7j2tWxQmZHVub3RUYXJnZXQ
+        "#,
+        )
+        .unwrap();
+        assert!(node.reality.is_some(), "reality_opts 下划线别名应被捕获");
     }
 }

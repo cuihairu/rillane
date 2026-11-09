@@ -206,6 +206,21 @@ pub struct ClashProxy {
         alias = "h2Options"
     )]
     pub h2_opts: Option<ClashH2Opts>,
+    /// VLESS flow（如 xtls-rprx-vision；G1-6）。仅捕获以拒绝导入——无
+    /// flow 支持的节点静默降级为普通 VLESS 会连不上真节点（xtls 服务端
+    /// 期望 Vision 分帧），与 plugin 无换算表同口径：显式报错。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<String>,
+    /// REALITY 选项块（`reality-opts.public-key`/`short-id`；G1-6）。仅捕获
+    /// 以拒绝导入——REALITY 节点静默降级为普通 TLS VLESS 后，服务端按
+    /// 非 REALITY 握手回落伪装站点，流量不走向代理且无任何报错。
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "reality-opts",
+        alias = "reality_opts"
+    )]
+    pub reality_opts: Option<Value>,
 }
 
 /// Clash `ws-opts` 子块（vmess/vless 的 ws 传输）
@@ -936,6 +951,21 @@ impl ClashConverter {
                     .uuid
                     .clone()
                     .ok_or_else(|| anyhow!("VLESS 缺少 UUID"))?;
+                // REALITY/flow 节点显式拒绝导入（G1-6）：静默降级为普通 TLS
+                // VLESS 后服务端回落伪装站点/期望 Vision 分帧，流量不走向
+                // 代理且无报错——与 plugin 无换算表同口径，导入期点名拒绝。
+                if proxy.reality_opts.is_some() {
+                    anyhow::bail!(
+                        "VLESS 节点 {} 含 reality-opts（REALITY 协议），Seep 暂不支持 REALITY 出站（G1-6），拒绝导入以免静默降级为普通 TLS 节点",
+                        proxy.name
+                    );
+                }
+                if let Some(flow) = &proxy.flow {
+                    anyhow::bail!(
+                        "VLESS 节点 {} 含 flow {flow}（XTLS-Vision 等流控），Seep 暂不支持 flow，拒绝导入以免静默降级为普通 VLESS",
+                        proxy.name
+                    );
+                }
                 let network = proxy.network.clone().unwrap_or_else(|| "tcp".to_string());
                 let is_h2 = network == "h2";
                 let (path, host) = if is_h2 {
@@ -948,7 +978,7 @@ impl ClashConverter {
                     server: proxy.server.clone(),
                     port: proxy.port,
                     uuid,
-                    flow: None, // Clash VLESS 通常不使用 flow
+                    flow: None,
                     network,
                     path,
                     host,
@@ -2026,5 +2056,81 @@ rules:
             &matches[0],
             MatchCondition::DomainRegex { patterns } if patterns == &vec![r"^ad\d+\.".to_string()]
         ));
+    }
+
+    /// G1-6 REALITY/flow 节点导入期显式拒绝：含 reality-opts/flow 的 VLESS
+    /// 若静默降级为普通 TLS VLESS，服务端会回落伪装站点/期望 Vision 分帧，
+    /// 流量不走向代理且无任何报错——parse 可过，convert 必须点名报错。
+    #[test]
+    fn test_vless_reality_and_flow_nodes_rejected_on_convert() {
+        let converter = ClashConverter::new();
+
+        // reality-opts（REALITY 协议）
+        let reality_yaml = r#"
+proxies:
+  - name: "vl-reality"
+    type: vless
+    server: 127.0.0.1
+    port: 443
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    network: tcp
+    tls: true
+    servername: www.apple.com
+    reality-opts:
+      public-key: PBQh7j2tWxQmZHVub3RUYXJnZXQ
+      short-id: "0123ac"
+
+proxy-groups: []
+rules: []
+        "#;
+        let reality_clash = converter.parse(reality_yaml).unwrap();
+        let err = converter.convert_to_seep(&reality_clash).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("REALITY"), "应点名 REALITY: {msg}");
+        assert!(msg.contains("vl-reality"), "应点名节点名: {msg}");
+
+        // flow（XTLS-Vision 等流控）
+        let flow_yaml = r#"
+proxies:
+  - name: "vl-vision"
+    type: vless
+    server: 127.0.0.1
+    port: 443
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    network: tcp
+    tls: true
+    flow: xtls-rprx-vision
+
+proxy-groups: []
+rules: []
+        "#;
+        let flow_clash = converter.parse(flow_yaml).unwrap();
+        let err = converter.convert_to_seep(&flow_clash).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("xtls-rprx-vision"), "应点名 flow 值: {msg}");
+        assert!(msg.contains("vl-vision"), "应点名节点名: {msg}");
+
+        // 无 reality/flow 的普通 VLESS 不受影响
+        let plain_yaml = r#"
+proxies:
+  - name: "vl-plain"
+    type: vless
+    server: 127.0.0.1
+    port: 443
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    network: tcp
+    tls: true
+
+proxy-groups: []
+rules: []
+        "#;
+        let plain = converter.parse(plain_yaml).unwrap();
+        let seep = converter.convert_to_seep(&plain).unwrap();
+        let vl = seep
+            .egress
+            .iter()
+            .find(|e| e.name == "vl-plain")
+            .expect("vl-plain egress 应存在");
+        assert!(matches!(vl.spec, EgressConfig::Vless { .. }));
     }
 }
