@@ -236,6 +236,16 @@ pub struct ClashProxy {
         alias = "h2Options"
     )]
     pub h2_opts: Option<ClashH2Opts>,
+    /// HTTPUpgrade 传输选项（Clash 规范块键 `httpupgrade-opts`；mihomo 口径，
+    /// network=httpupgrade 时的 path/Host——headers 与 ws-opts 同形）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "httpupgrade-opts",
+        alias = "httpupgrade_opts",
+        alias = "httpupgradeOptions"
+    )]
+    pub httpupgrade_opts: Option<ClashHttpUpgradeOpts>,
     /// VLESS flow（如 xtls-rprx-vision；G1-6）。仅捕获以拒绝导入——无
     /// flow 支持的节点静默降级为普通 VLESS 会连不上真节点（xtls 服务端
     /// 期望 Vision 分帧），与 plugin 无换算表同口径：显式报错。
@@ -303,6 +313,18 @@ pub struct ClashH2Opts {
     #[serde_as(as = "Option<serde_with::OneOrMany<_>>")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<Vec<String>>,
+}
+
+/// Clash `httpupgrade-opts` 子块（vmess/vless 的 httpupgrade 传输；mihomo
+/// 口径 headers 与 ws-opts 同形）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClashHttpUpgradeOpts {
+    /// 请求路径
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// 请求头（Host 伪装位；键大小写各发行版不一，三形兼容）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<ClashWsHeaders>,
 }
 
 /// Clash 代理组类型
@@ -396,6 +418,33 @@ impl ClashProxy {
             .and_then(|h| h.host.clone())
             .filter(|v| !v.is_empty())
             .or_else(|| self.host.clone().filter(|h| !h.is_empty()).map(|h| vec![h]))
+    }
+
+    /// httpupgrade 请求路径：平铺 `path` 优先（少数变体口径），否则
+    /// `httpupgrade-opts.path`（mihomo 规范块键）。空串按缺省处理（path
+    /// 缺失即 `/`）。
+    pub fn httpupgrade_path(&self) -> Option<String> {
+        self.path
+            .clone()
+            .filter(|p| !p.is_empty())
+            .or_else(|| self.httpupgrade_opts.as_ref().and_then(|h| h.path.clone()))
+            .filter(|p| !p.is_empty())
+    }
+
+    /// httpupgrade Host 伪装头：平铺 `host` 优先，否则
+    /// `httpupgrade-opts.headers.host`（大小写三形由 serde 别名覆盖）。
+    /// sni 回落由连接器侧负责。
+    pub fn httpupgrade_host(&self) -> Option<String> {
+        self.host
+            .clone()
+            .filter(|h| !h.is_empty())
+            .or_else(|| {
+                self.httpupgrade_opts
+                    .as_ref()
+                    .and_then(|h| h.headers.as_ref())
+                    .and_then(|h| h.host.clone())
+            })
+            .filter(|h| !h.is_empty())
     }
 }
 
@@ -947,10 +996,17 @@ impl ClashConverter {
                 let alter_id = 0; // Clash 默认 alterId 为 0
                 let network = proxy.network.clone().unwrap_or_else(|| "tcp".to_string());
                 // path/host 取值随传输面分派：ws 走 ws-opts 口径，h2 走
-                // h2-opts 口径（host 为数组）；其余 network 不消费两字段
+                // h2-opts 口径（host 为数组），httpupgrade 走
+                // httpupgrade-opts 口径（mihomo 规范）；其余 network 不消费两字段
                 let is_h2 = network == "h2";
+                let is_httpupgrade = network == "httpupgrade";
                 let (path, host) = if is_h2 {
                     (proxy.h2_path(), proxy.h2_hosts())
+                } else if is_httpupgrade {
+                    (
+                        proxy.httpupgrade_path(),
+                        proxy.httpupgrade_host().map(|h| vec![h]),
+                    )
                 } else {
                     (proxy.ws_path(), proxy.ws_host().map(|h| vec![h]))
                 };
@@ -998,8 +1054,14 @@ impl ClashConverter {
                 }
                 let network = proxy.network.clone().unwrap_or_else(|| "tcp".to_string());
                 let is_h2 = network == "h2";
+                let is_httpupgrade = network == "httpupgrade";
                 let (path, host) = if is_h2 {
                     (proxy.h2_path(), proxy.h2_hosts())
+                } else if is_httpupgrade {
+                    (
+                        proxy.httpupgrade_path(),
+                        proxy.httpupgrade_host().map(|h| vec![h]),
+                    )
                 } else {
                     (proxy.ws_path(), proxy.ws_host().map(|h| vec![h]))
                 };
@@ -1848,6 +1910,88 @@ rules: []
         let c2 = converter.parse(only_headers).unwrap();
         assert_eq!(c2.proxies[0].ws_path(), None);
         assert_eq!(c2.proxies[0].ws_host(), Some("h.test".to_string()));
+    }
+
+    #[test]
+    fn test_httpupgrade_opts_converted_for_vmess_and_vless() {
+        // httpupgrade 传输（mihomo 规范块键 httpupgrade-opts：path /
+        // headers.Host）：network 原样透传，path/host 从块内取值；平铺
+        // 键优先。块缺失时 path/host = None（连接器侧补 `/`）。
+        let yaml_content = r#"
+proxies:
+  - name: "vm-hu"
+    type: vmess
+    server: 127.0.0.1
+    port: 8447
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    alterId: 0
+    cipher: auto
+    network: httpupgrade
+    tls: true
+    servername: vm.test
+    httpupgrade-opts:
+      path: /vmhu
+      headers:
+        Host: hu.test
+  - name: "vl-hu"
+    type: vless
+    server: 127.0.0.1
+    port: 8448
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    network: httpupgrade
+    tls: true
+    servername: vm.test
+    httpupgrade-opts:
+      path: /vlhu
+      headers:
+        host: lower.test
+
+proxy-groups: []
+rules: []
+        "#;
+
+        let converter = ClashConverter::new();
+        let clash = converter.parse(yaml_content).unwrap();
+        let seep = converter.convert_to_seep(&clash).unwrap();
+
+        let grab = |name: &str| -> (String, Option<String>, Option<Vec<String>>) {
+            let egress = seep
+                .egress
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("缺少出口 {name}"));
+            match &egress.spec {
+                EgressConfig::Vmess {
+                    network,
+                    path,
+                    host,
+                    ..
+                } => (network.clone(), path.clone(), host.clone()),
+                EgressConfig::Vless {
+                    network,
+                    path,
+                    host,
+                    ..
+                } => (network.clone(), path.clone(), host.clone()),
+                other => panic!("unexpected egress config: {other:?}"),
+            }
+        };
+
+        let (network, path, host) = grab("vm-hu");
+        assert_eq!(network, "httpupgrade");
+        assert_eq!(path.as_deref(), Some("/vmhu"));
+        assert_eq!(host, Some(vec!["hu.test".to_string()]));
+
+        let (network, path, host) = grab("vl-hu");
+        assert_eq!(network, "httpupgrade");
+        assert_eq!(path.as_deref(), Some("/vlhu"));
+        assert_eq!(host, Some(vec!["lower.test".to_string()]));
+
+        // 块缺失：path/host 均 None（连接器侧补 `/`，Host 回落 sni/server）
+        let bare = "proxies:\n  - name: n\n    type: vmess\n    server: h\n    port: 1\n    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3\n    network: httpupgrade\nproxy-groups: []\nrules: []\n";
+        let c2 = converter.parse(bare).unwrap();
+        assert_eq!(c2.proxies[0].httpupgrade_path(), None);
+        assert_eq!(c2.proxies[0].httpupgrade_host(), None);
     }
 
     #[test]

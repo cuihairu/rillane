@@ -59,6 +59,7 @@ use uuid::Uuid;
 
 use super::grpc::grpc_tunnel;
 use super::h2::h2_tunnel;
+use super::httpupgrade::httpupgrade_client_handshake;
 use super::ws::{ws_client_handshake, WsReader, WsWriter};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
@@ -1043,6 +1044,34 @@ impl VmessConnector {
                 };
                 self.relay_session_over_ws(flow, ws).await
             }
+            "httpupgrade" => {
+                // upgrade 头与 ws 同语义；101 后裸流直读直写（无帧）
+                let host_hdr = self.ws_host_header();
+                let path = self.ws_path();
+                let sni_actual = self.sni.clone().unwrap_or_else(|| host_hdr.clone());
+                let key = self.transport_key(&sni_actual);
+
+                // 借出传输层（TLS 已由池侧建立）；upgrade 握手借出后进行（§4.2）
+                let (boxed, first_lease) = pool
+                    .acquire(&key)
+                    .await
+                    .with_context(|| format!("连接 VMess 服务器失败: {server_addr}"))?;
+                let handshake = httpupgrade_client_handshake(boxed, &host_hdr, &path).await;
+                let (stream, _lease) = match handshake {
+                    Ok(s) => (s, first_lease),
+                    Err(_) => {
+                        // 握手首写首读失败 → stale 一次性重拨（D-11）
+                        drop(first_lease);
+                        pool.note_stale(&key);
+                        let (boxed, lease) = pool.acquire_fresh(&key).await?;
+                        let s = httpupgrade_client_handshake(boxed, &host_hdr, &path).await?;
+                        (s, lease)
+                    }
+                };
+
+                // 裸字节流协议段：请求头直写后拆半，分块流读写与 tcp/h2 同构
+                self.relay_session_over_httpupgrade(flow, stream).await
+            }
             "grpc" => {
                 let service = self.grpc_service_name()?;
                 // grpc 恒叠 TLS + ALPN h2（gRPC over TLS 语义），SNI 回退 server
@@ -1258,6 +1287,38 @@ impl VmessConnector {
                         .await
                 }
             }
+            "httpupgrade" => {
+                // upgrade 头与 ws 同语义；101 后裸流直读直写（无帧）
+                let host_hdr = self.ws_host_header();
+                let path = self.ws_path();
+                let mut session = self.session(&flow.target.host, flow.target.port)?;
+
+                if self.tls {
+                    let sni = self.sni.clone().unwrap_or_else(|| host_hdr.clone());
+                    let connector = match &self.factory {
+                        Some(factory) => factory.connector(
+                            self.skip_cert_verify,
+                            self.alpn.as_deref().unwrap_or(&[]),
+                            self.fingerprint,
+                        )?,
+                        None => create_tls_connector_with_profile(
+                            self.skip_cert_verify,
+                            self.alpn.as_deref(),
+                            self.fingerprint,
+                        )?,
+                    };
+                    let server_name =
+                        rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+                    let tls_stream = connector.connect(server_name, tcp).await?;
+                    let stream = httpupgrade_client_handshake(tls_stream, &host_hdr, &path).await?;
+                    self.relay_session_over_httpupgrade_with(flow, stream, &mut session)
+                        .await
+                } else {
+                    let stream = httpupgrade_client_handshake(tcp, &host_hdr, &path).await?;
+                    self.relay_session_over_httpupgrade_with(flow, stream, &mut session)
+                        .await
+                }
+            }
             "grpc" => {
                 let service = self.grpc_service_name()?;
                 // grpc 恒叠 TLS + ALPN h2（gRPC over TLS 语义），SNI 回退 server
@@ -1442,6 +1503,45 @@ impl VmessConnector {
             upstream: up,
             downstream: down,
         })
+    }
+
+    /// HTTPUpgrade 传输（101 后裸流协议段；池路径复用）——会话从 flow
+    /// 现场构建
+    async fn relay_session_over_httpupgrade<S>(&self, flow: Flow, stream: S) -> Result<FlowReport>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let mut session = self.session(&flow.target.host, flow.target.port)?;
+        self.relay_session_over_httpupgrade_with(flow, stream, &mut session)
+            .await
+    }
+
+    /// VMess over HTTPUpgrade：裸字节流协议段——请求头直写后拆半，分块
+    /// 流读写与 tcp/h2 同构（无 WS 帧收发）
+    async fn relay_session_over_httpupgrade_with<S>(
+        &self,
+        flow: Flow,
+        mut stream: S,
+        session: &mut VmessSession,
+    ) -> Result<FlowReport>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        stream.write_all(&session.sealed_header).await?;
+        stream.flush().await?;
+        let (rr, ww) = tokio::io::split(stream);
+        let expect_v = session.expect_v;
+        let resp_keys = session.resp_header_keys.clone();
+        relay_vmess_stream(
+            flow,
+            rr,
+            ww,
+            &mut session.req_crypt,
+            &mut session.resp_crypt,
+            expect_v,
+            &resp_keys,
+        )
+        .await
     }
 
     /// gRPC 传输（隧道完成后的协议段；池/内联同参）——会话已由调用方构建
@@ -2212,10 +2312,13 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let cmd_key = test_cmd_key();
         let is_ws = network == "ws";
+        let is_httpupgrade = network == "httpupgrade";
         tokio::spawn(async move {
             while let Ok((st, _)) = listener.accept().await {
                 tokio::spawn(async move {
-                    let res = if is_ws {
+                    let res = if is_httpupgrade {
+                        serve_vmess_httpupgrade(st, cmd_key).await
+                    } else if is_ws {
                         serve_vmess_ws(st, cmd_key).await
                     } else {
                         serve_vmess_tcp(st, cmd_key).await
@@ -2249,6 +2352,24 @@ mod tests {
     #[tokio::test]
     async fn echo_loopback_ws() {
         let report = run_echo_test("ws").await;
+        assert!(report.upstream >= 40 * 1024 + 11);
+        assert!(report.downstream >= 40 * 1024 + 11);
+    }
+
+    /// httpupgrade 传输回环服务端：upgrade 握手（复刻 xray httpupgrade
+    /// 语义——请求头与 ws 同形，复用 ws_srv_handshake 的 101+accept 形）
+    /// 后裸流直入 TCP 协议段（101 即通道移交，无帧）
+    async fn serve_vmess_httpupgrade<S>(stream: S, cmd_key: [u8; 16]) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let raw = ws_srv_handshake(stream).await?;
+        serve_vmess_tcp(raw, cmd_key).await
+    }
+
+    #[tokio::test]
+    async fn echo_loopback_httpupgrade() {
+        let report = run_echo_test("httpupgrade").await;
         assert!(report.upstream >= 40 * 1024 + 11);
         assert!(report.downstream >= 40 * 1024 + 11);
     }

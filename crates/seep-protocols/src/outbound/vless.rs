@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use super::grpc::grpc_tunnel;
 use super::h2::h2_tunnel;
+use super::httpupgrade::httpupgrade_client_handshake;
 use super::ws::{ws_client_handshake, WsClient};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
@@ -309,6 +310,50 @@ impl VlessConnector {
                 };
                 self.relay_vless_over_ws(flow, ws).await
             }
+            "httpupgrade" => {
+                // upgrade 头与 ws 同语义；101 后裸流直读直写（无帧）
+                let host_hdr = self.ws_host_header();
+                let path = self.ws_path();
+                let sni_actual = self.sni.clone().unwrap_or_else(|| host_hdr.clone());
+                let key = self.transport_key(&sni_actual);
+
+                // 借出传输层（TLS 已由池侧建立）；upgrade 握手借出后进行（§4.2）
+                let (boxed, first_lease) = pool
+                    .acquire(&key)
+                    .await
+                    .with_context(|| format!("连接 VLESS 服务器失败: {server_addr}"))?;
+                let handshake = httpupgrade_client_handshake(boxed, &host_hdr, &path).await;
+                let (stream, _lease) = match handshake {
+                    Ok(s) => (s, first_lease),
+                    Err(_) => {
+                        // 握手首写首读失败 → stale 一次性重拨（D-11）
+                        drop(first_lease);
+                        pool.note_stale(&key);
+                        let (boxed, lease) = pool.acquire_fresh(&key).await?;
+                        let s = httpupgrade_client_handshake(boxed, &host_hdr, &path).await?;
+                        (s, lease)
+                    }
+                };
+
+                // 裸字节流协议段与 tcp/h2 同序：请求头直写、响应头直读、双向泵
+                let mut stream = stream;
+                let req = self.build_vless_tcp_request(&flow.target.host, flow.target.port)?;
+                stream.write_all(&req).await?;
+                stream.flush().await?;
+                Self::read_vless_response_header(&mut stream).await?;
+
+                let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                    &mut flow.io,
+                    &mut stream,
+                    seep_core::performance::relay_buffer(),
+                    seep_core::performance::relay_buffer(),
+                )
+                .await?;
+                Ok(FlowReport {
+                    upstream: up,
+                    downstream: down,
+                })
+            }
             "grpc" => {
                 let service = self.grpc_service_name()?;
                 // grpc 恒叠 TLS + ALPN h2（gRPC over TLS 语义），SNI 回退 server
@@ -519,6 +564,35 @@ impl VlessConnector {
                         .await
                 } else {
                     self.forward_vless_over_ws(flow, tcp, ws_host, ws_path)
+                        .await
+                }
+            }
+            "httpupgrade" => {
+                // upgrade 头与 ws 同语义；101 后裸流直读直写（无帧）
+                let host_hdr = self.ws_host_header();
+                let path = self.ws_path();
+
+                if self.tls {
+                    let sni = self.sni.clone().unwrap_or_else(|| host_hdr.clone());
+                    let connector = match &self.factory {
+                        Some(factory) => factory.connector(
+                            self.skip_cert_verify,
+                            self.alpn.as_deref().unwrap_or(&[]),
+                            self.fingerprint,
+                        )?,
+                        None => create_tls_connector_with_profile(
+                            self.skip_cert_verify,
+                            self.alpn.as_deref(),
+                            self.fingerprint,
+                        )?,
+                    };
+                    let server_name =
+                        rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+                    let tls_stream = connector.connect(server_name, tcp).await?;
+                    self.forward_vless_over_httpupgrade(flow, tls_stream, host_hdr, path)
+                        .await
+                } else {
+                    self.forward_vless_over_httpupgrade(flow, tcp, host_hdr, path)
                         .await
                 }
             }
@@ -774,6 +848,37 @@ impl VlessConnector {
         self.relay_vless_over_ws(flow, ws).await
     }
 
+    /// VLESS over HTTPUpgrade：upgrade 握手后协议段走裸字节流（与 tcp
+    /// 同序：请求头直写、响应头直读、双向泵——无 WS 帧收发）
+    async fn forward_vless_over_httpupgrade<S>(
+        &self,
+        mut flow: Flow,
+        stream: S,
+        host_hdr: String,
+        path: String,
+    ) -> Result<FlowReport>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let mut stream = httpupgrade_client_handshake(stream, &host_hdr, &path).await?;
+        let req = self.build_vless_tcp_request(&flow.target.host, flow.target.port)?;
+        stream.write_all(&req).await?;
+        stream.flush().await?;
+        Self::read_vless_response_header(&mut stream).await?;
+
+        let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+            &mut flow.io,
+            &mut stream,
+            seep_core::performance::relay_buffer(),
+            seep_core::performance::relay_buffer(),
+        )
+        .await?;
+        Ok(FlowReport {
+            upstream: up,
+            downstream: down,
+        })
+    }
+
     /// VLESS over WS 双向转发（upgrade 完成后的协议段；池路径复用——
     /// `WsClient<ReadHalf<BoxedIo>, WriteHalf<BoxedIo>>` 同型可用）。
     async fn relay_vless_over_ws<R, W>(
@@ -921,7 +1026,10 @@ impl VlessConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seep_core::{FlowId, FlowMetadata, RouteDecision, TargetProto};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use seep_core::{Flow, FlowId, FlowMetadata, FlowTarget, RouteDecision, TargetProto};
+    use sha1::{Digest, Sha1};
+    use std::time::Duration;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -1062,5 +1170,143 @@ mod tests {
             assert_eq!(tgt.port, 443);
             assert_eq!(tgt.proto, TargetProto::Udp);
         }
+    }
+
+    /// httpupgrade 传输回环服务端（G2-15/G3-16）：upgrade 握手（请求头
+    /// 与 ws 同语义，101+accept 复刻 xray httpupgrade 服务端形）→ 101 后
+    /// 裸流直入协议段：VLESS 头（与 tcp 同序）+ 原样 echo。
+    async fn serve_vless_httpupgrade<S>(mut stream: S) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 512];
+        loop {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                anyhow::bail!("httpupgrade 握手中连接关闭");
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&buf);
+        assert!(text.starts_with("GET /hp HTTP/1.1"), "请求行不符: {text}");
+        assert!(text.contains("Host: h.test"), "缺 Host 头: {text}");
+        for expect in ["upgrade: websocket", "connection: upgrade"] {
+            assert!(
+                text.to_ascii_lowercase().contains(expect),
+                "缺头 {expect}: {text}"
+            );
+        }
+        let key = text
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.trim()
+                    .eq_ignore_ascii_case("sec-websocket-key")
+                    .then(|| v.trim().to_string())
+            })
+            .ok_or_else(|| anyhow!("缺 Sec-WebSocket-Key"))?;
+        let mut hasher = Sha1::new();
+        hasher.update(key.as_bytes());
+        hasher.update(super::super::ws::WS_MAGIC.as_bytes());
+        let accept = BASE64.encode(hasher.finalize());
+        let resp = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        );
+        stream.write_all(resp.as_bytes()).await?;
+        stream.flush().await?;
+
+        // 协议段：VLESS 请求头（tcp 同序）→ 响应头 → 原样 echo
+        let (_uuid, cmd, host, port) = parse_vless_request(&mut stream).await?;
+        assert_eq!(cmd, 0x01, "应为 TCP 命令");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 443);
+        stream.write_all(&[0x00, 0x00]).await?;
+        stream.flush().await?;
+
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            stream.write_all(&chunk[..n]).await?;
+            stream.flush().await?;
+        }
+        Ok(())
+    }
+
+    /// G2-15/G3-16：VLESS over httpupgrade 回环（明文；101 后裸流直读直写，
+    /// 请求头直写/响应头直读与 tcp 同序）。
+    #[tokio::test]
+    async fn echo_loopback_httpupgrade() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (st, _) = listener.accept().await.unwrap();
+            if let Err(e) = serve_vless_httpupgrade(st).await {
+                eprintln!("测试服务端错误: {e:#}");
+            }
+        });
+
+        let (client_io, mut test_end) = tokio::io::duplex(256 * 1024);
+        let connector = VlessConnector::new(
+            "127.0.0.1".to_string(),
+            port,
+            TEST_UUID.to_string(),
+            None,
+            "httpupgrade".to_string(),
+            Some("/hp".to_string()),
+            Some(vec!["h.test".to_string()]),
+            None,
+            false, // tls
+            false,
+            None,
+            None,
+            TlsFingerprint::None,
+            None,
+            None,
+        );
+        let flow = Flow {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "example.com".to_string(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            io: Box::new(client_io),
+            metadata: FlowMetadata::default(),
+        };
+        let fwd = connector.forward(flow);
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async move {
+            tokio::join!(fwd, async {
+                test_end
+                    .write_all(b"hello vless httpupgrade")
+                    .await
+                    .unwrap();
+                let mut buf = [0u8; 23];
+                test_end.read_exact(&mut buf).await.unwrap();
+                assert_eq!(&buf, b"hello vless httpupgrade");
+
+                let big = vec![7u8; 40 * 1024];
+                test_end.write_all(&big).await.unwrap();
+                let mut rb = vec![0u8; big.len()];
+                test_end.read_exact(&mut rb).await.unwrap();
+                assert_eq!(rb, big);
+
+                // 半关写侧：裸流转发的双向泵以 EOF 收敛（vless 无帧
+                // 协议的带内终止语义，EOF 即收尾信号）
+                test_end.shutdown().await.unwrap();
+            })
+        })
+        .await
+        .expect("回环超时");
+        let (report, ()) = outcome;
+        let report = report.expect("forward 失败");
+        assert!(report.upstream >= 40 * 1024 + 23);
+        assert!(report.downstream >= 40 * 1024 + 23);
     }
 }

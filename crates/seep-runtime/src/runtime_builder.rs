@@ -2687,7 +2687,9 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Result<Vec<TransportKey>
                         alpn,
                         fp,
                     ));
-                    if network == "ws" || network == "websocket" {
+                    // upgrade 面（ws/httpupgrade）借出键 SNI 回退链含 host
+                    // 首值——与主键（tcp 面 sni ∥ server）异源时补第二键
+                    if network == "ws" || network == "websocket" || network == "httpupgrade" {
                         let ws_sni = sni
                             .clone()
                             .or_else(|| host.as_ref().and_then(|v| v.first().cloned()))
@@ -2749,7 +2751,9 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Result<Vec<TransportKey>
                         alpn,
                         fp,
                     ));
-                    if network == "ws" || network == "websocket" {
+                    // upgrade 面（ws/httpupgrade）借出键 SNI 回退链含 host
+                    // 首值——与主键（tcp 面 sni ∥ server）异源时补第二键
+                    if network == "ws" || network == "websocket" || network == "httpupgrade" {
                         let ws_sni = sni
                             .clone()
                             .or_else(|| host.as_ref().and_then(|v| v.first().cloned()))
@@ -3056,9 +3060,9 @@ fn build_egress_outputs(
                 tls_fingerprint,
             } => {
                 // build-time validation: security parse, alter_id==0, network
-                // tcp/ws/grpc/h2（clash 侧 network 只产 tcp/ws/h2，见
-                // clash.rs convert 方；"websocket" 长形与 vless 口径一致予以
-                // 兼容；grpc 需服务名）
+                // tcp/ws/httpupgrade/grpc/h2（clash 侧 network 只产
+                // tcp/ws/h2/httpupgrade，见 clash.rs convert 方；"websocket"
+                // 长形与 vless 口径一致予以兼容；grpc 需服务名）
                 let parsed_security = VmessSecurity::parse(security)?;
                 if *alter_id != 0 {
                     return Err(anyhow!(
@@ -3069,11 +3073,12 @@ fn build_egress_outputs(
                 if network != "tcp"
                     && network != "ws"
                     && network != "websocket"
+                    && network != "httpupgrade"
                     && network != "grpc"
                     && network != "h2"
                 {
                     return Err(anyhow!(
-                        "VMess network 仅支持 tcp/ws/grpc/h2，当前: {}",
+                        "VMess network 仅支持 tcp/ws/httpupgrade/grpc/h2，当前: {}",
                         network
                     ));
                 }
