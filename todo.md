@@ -309,7 +309,8 @@ P3（收尾）：
 - [x] **G2-14 Clash API 兼容层（只读子集 + 面板直连）**——现控制面不兼容 /proxies /connections /traffic，metacubexd/yacd 无法直连。
   **已实现（2026-11-04 `f03424b`）**：`control_plane` 增只读端点 `/proxies`（出口名→ClashProxyDto{type,now,udp,history}）、`/connections`（flow stats 派生 ClashConnectionDto + downloadTotal/uploadTotal）、`/traffic`（runtime up/down）——metacubexd/yacd 可直连读。回归 `clash_api_readonly_endpoints_shape`。`cargo test --workspace` 全绿（44 二进制）。只读子集完成；写操作（/proxies/{name} 切换、/connections/{id} 断开）与 WebSocket 订阅面（/traffic 实时推送）未做，留作后续。
 - [ ] **G2-15 httpupgrade/xhttp 传输；G3-16 macOS/Windows TUN + auto_route 全局接管；ICMP 代理、UoT、hosts 映射**。
-  **BLOCKED**：httpupgrade/xhttp 传输未实现（vmess/vless 仅 tcp/ws/grpc，ws.rs 为 WebSocket 面）；macOS/Windows TUN 仅 Linux 实现（seep-platform `linux.rs`，`tun.rs` 接口无 macos/windows 实现）；ICMP 代理/UoT/hosts 映射全缺。需新增 httpupgrade 握手与 xhttp 帧、各平台 TUN/路由实现、ICMP 与 UoT 协议——需真实 macOS/Windows 机器、特权环境与真实代理节点验证；现缺平台与端点。（2026-11-06 复核：outbound 仍无 httpupgrade/xhttp，network 仍仅 `linux.rs` 平台实现，外部条件未变，保留 BLOCKED）
+  **部分完成（2026-11-10 httpupgrade `86bb735`）**：httpupgrade 传输落地 vless/vmess——seep-protocols `outbound/httpupgrade.rs`（upgrade 握手：101 状态门、Sec-WebSocket-Accept 带则校验缺则容忍（xray 形）、101 后裸字节流 `HttpUpgradeStream` 直读直写无帧、握手残余回放保序）；vless/vmess 池+内联双路径接线（池借出→upgrade 握手→stale 一次性重拨 D-11 同口径；协议段与 tcp/h2 同序）；runtime_builder VMess 构建期白名单纳 httpupgrade + ws/httpupgrade 借出键预热第二键（host 首值 SNI 链）；clash.rs 导入读 `httpupgrade-opts` 块（vmess/vless，平铺键优先，块缺省回落 `/`），vless:// URI 面通用透传无需改。回环测试：vmess `echo_loopback_httpupgrade`、vless `echo_loopback_httpupgrade`（请求头/响应头直写直读+双向泵+EOF 半关收敛）、握手矩阵（accept 带/缺/错、非 101 拒、`stream_replays_leftover_before_inner`）。`cargo test --workspace` 全绿。UDP 面维持 network=tcp 口径（httpupgrade 节点无 UDP 连接器，scan_udp_capability 判负与 ws 同）。
+  **BLOCKED（余项）**：xhttp 传输——需真实 xhttp 端点验证其 HTTP/2/3 分帧语义，现缺端点；macOS/Windows TUN——仅 Linux 实现（seep-platform `linux.rs`），需真实 macOS/Windows 机器；ICMP 代理/UoT——需特权环境与真实链路验证。hosts 映射可本地做，本轮随后落地。
 
 ---
 
