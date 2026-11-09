@@ -104,6 +104,7 @@ fn dns_block_roundtrip() {
         listen_address: "0.0.0.0".parse().unwrap(),
         listen_port: 5353,
         fake_ip: None,
+        hosts: None,
     };
     let rendered = serde_yaml::to_string(&cfg).expect("应可序列化");
     let reparsed: DnsBlockConfig = serde_yaml::from_str(&rendered).expect("应可往返");
@@ -151,6 +152,7 @@ fn dns_block_validate_rejects_illegal_values() {
         listen_address: "127.0.0.1".parse().unwrap(),
         listen_port: 15_353,
         fake_ip: None,
+        hosts: None,
     };
 
     let mut cfg = base();
@@ -339,4 +341,52 @@ fn dns_block_fake_ip_range_matrix() {
     .expect("应可解析");
     cfg.validate()
         .expect("enabled=false 应容忍半配置（首位短路口径）");
+}
+
+/// hosts 映射 schema：缺省 None；非空映射过 validate；值须 IPv4/IPv6
+/// 字面量；键空白/键为 IP 拒绝（G2-15）。
+#[test]
+fn dns_block_hosts_schema_and_matrix() {
+    // 缺省 None（存量零差异）
+    let cfg: DnsBlockConfig =
+        serde_yaml::from_str("enabled: true\ntrusted: ['1.1.1.1:53']").expect("应可解析");
+    assert!(cfg.hosts.is_none(), "hosts 缺省 None");
+    cfg.validate().expect("应过 validate");
+
+    // 合法映射（v4 + v6 混合）
+    let cfg: DnsBlockConfig = serde_yaml::from_str(
+        "enabled: true\ntrusted: ['1.1.1.1:53']\nhosts:\n  \"a.test\": \"10.0.0.1\"\n  \"v6.test\": \"::1\"",
+    )
+    .expect("应可解析");
+    let hosts = cfg.hosts.as_ref().expect("hosts 应在");
+    assert_eq!(hosts.get("a.test").map(String::as_str), Some("10.0.0.1"));
+    assert_eq!(hosts.get("v6.test").map(String::as_str), Some("::1"));
+    cfg.validate().expect("合法映射应过 validate");
+
+    // 矩阵：坏值 / 空白键 / 键为 IP
+    for (yaml, expect) in [
+        (
+            "enabled: true\ntrusted: ['1.1.1.1:53']\nhosts:\n  \"a.test\": \"not-an-ip\"",
+            "IPv4/IPv6",
+        ),
+        (
+            "enabled: true\ntrusted: ['1.1.1.1:53']\nhosts:\n  \"   \": \"10.0.0.1\"",
+            "键不能为空",
+        ),
+        (
+            "enabled: true\ntrusted: ['1.1.1.1:53']\nhosts:\n  \"10.0.0.1\": \"10.0.0.2\"",
+            "而非 IP",
+        ),
+    ] {
+        let cfg: DnsBlockConfig = serde_yaml::from_str(yaml).expect("应可解析");
+        let err = cfg.validate().expect_err(yaml);
+        assert!(err.to_string().contains(expect), "应报 {expect:?}：{err}");
+    }
+
+    // 空映射 = 合法（等价关闭）
+    let cfg: DnsBlockConfig =
+        serde_yaml::from_str("enabled: true\ntrusted: ['1.1.1.1:53']\nhosts: {}")
+            .expect("应可解析");
+    assert!(cfg.hosts.as_ref().expect("hosts 应在").is_empty());
+    cfg.validate().expect("空映射应过 validate");
 }

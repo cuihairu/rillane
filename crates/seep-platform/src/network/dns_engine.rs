@@ -1254,6 +1254,10 @@ pub struct LocalDnsServer {
     /// fake-ip 池（G1-10）：Some = 对客户端 A 查询按池段稳定假地址应答
     ///（不触上游，TTL 1）；None = 关闭，存量行为零差异
     fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
+    /// 静态 hosts 表（G2-15）：Some = A/AAAA 查询命中直接应答真实映射
+    /// 地址（不触上游、不经 fake-ip，优先级高于 fake-ip）；None = 无表，
+    /// 存量行为零差异
+    hosts: Option<Arc<seep_core::hosts::DnsHosts>>,
 }
 
 impl LocalDnsServer {
@@ -1262,12 +1266,14 @@ impl LocalDnsServer {
         local_address: IpAddr,
         local_port: u16,
         fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
+        hosts: Option<Arc<seep_core::hosts::DnsHosts>>,
     ) -> Self {
         Self {
             resolver,
             local_address,
             local_port,
             fake_ip,
+            hosts,
         }
     }
 
@@ -1306,8 +1312,9 @@ impl LocalDnsServer {
                         };
                         let resolver = self.resolver.clone();
                         let fake_ip = self.fake_ip.clone();
+                        let hosts = self.hosts.clone();
                         tokio::spawn(async move {
-                            handle_dns_query(worker, peer, data, resolver, fake_ip).await;
+                            handle_dns_query(worker, peer, data, resolver, fake_ip, hosts).await;
                         });
                     }
                     Err(e) => warn!("DNS 监听收包失败：{e}"),
@@ -1319,19 +1326,44 @@ impl LocalDnsServer {
 }
 
 /// 单查询处理（坏查询丢弃；NXDOMAIN/失败按 rcode 回写）。
-/// fake-ip 开启时客户端 A 查询按池段稳定假地址直接应答（不触上游，
-/// TTL 1 秒）；AAAA 与其余类型照常真实解析（应用走 IPv6 即回到 IP
-/// 直连路由语义，不破流）。
+/// hosts 表（G2-15）命中即静态映射直答（真实地址、TTL 1，不触上游；
+/// 名命中族不符给空 NOERROR 不泄上游）。fake-ip 开启时客户端 A 查询按
+/// 池段稳定假地址直接应答（不触上游，TTL 1 秒）；AAAA 与其余类型照常
+/// 真实解析（应用走 IPv6 即回到 IP 直连路由语义，不破流）。
 async fn handle_dns_query(
     sock: UdpSocket,
     peer: SocketAddr,
     data: Vec<u8>,
     resolver: Arc<DnsResolver>,
     fake_ip: Option<Arc<seep_core::fake_ip::FakeIpTable>>,
+    hosts: Option<Arc<seep_core::hosts::DnsHosts>>,
 ) {
     let reply = match decode_query(&data) {
         Ok(q) => {
-            if let (Some(table), DnsRecordType::A) = (fake_ip.as_ref(), q.qtype) {
+            // hosts 直答（G2-15，先于 fake-ip：映射即静态语义，命中给真实
+            // 地址——该地址不属池段，入口反查不介入，路由按地址语义走）。
+            // None = 无表或名未命中（继续 fake-ip/上游）；Some(空) = 名命中
+            // 但族不符（空 NOERROR，不泄上游）
+            let hosts_hit = match (hosts.as_ref(), q.qtype) {
+                (Some(t), DnsRecordType::A) => t.lookup(&q.domain, true),
+                (Some(t), DnsRecordType::Aaaa) => t.lookup(&q.domain, false),
+                _ => None,
+            };
+            if let Some(ips) = hosts_hit {
+                let answers: Vec<DnsAnswer> = ips
+                    .iter()
+                    .map(|ip| DnsAnswer {
+                        domain: q.domain.clone(),
+                        rtype: q.qtype,
+                        ttl: 1,
+                        data: match *ip {
+                            std::net::IpAddr::V4(v4) => DnsAnswerData::A(v4),
+                            std::net::IpAddr::V6(v6) => DnsAnswerData::Aaaa(v6),
+                        },
+                    })
+                    .collect();
+                encode_response(q.id, &q.domain, q.qtype, 0, &answers)
+            } else if let (Some(table), DnsRecordType::A) = (fake_ip.as_ref(), q.qtype) {
                 let ip = table.alloc(&q.domain);
                 debug!("fake-ip 应答：{} → {ip}", q.domain);
                 encode_response(
@@ -1498,6 +1530,7 @@ impl DnsHandler for EngineDnsHandler {
             self.resolver.clone(),
             self.local_address,
             self.local_port,
+            None,
             None,
         );
         let handle = tokio::spawn(async move {
@@ -2207,7 +2240,7 @@ mod tests {
         let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let server = LocalDnsServer::new(resolver, "127.0.0.1".parse().unwrap(), port, None);
+        let server = LocalDnsServer::new(resolver, "127.0.0.1".parse().unwrap(), port, None, None);
         let (tx, rx) = oneshot::channel();
         let task = tokio::spawn(server.serve(rx));
         let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -2272,6 +2305,7 @@ mod tests {
             "127.0.0.1".parse().unwrap(),
             port,
             Some(table.clone()),
+            None,
         );
         let (tx, rx) = oneshot::channel();
         let task = tokio::spawn(server.serve(rx));
@@ -2330,6 +2364,105 @@ mod tests {
         assert!(
             hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "AAAA 应触上游（fake-ip 只拦 A）"
+        );
+
+        drop(tx);
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    }
+
+    /// G2-15 hosts 映射：A/AAAA 命中按映射直答真实地址（不触上游、不经
+    /// fake-ip，TTL 1）；名命中族不符 → 空 NOERROR 不泄上游；未命中回落
+    /// 既有路径（A → fake-ip 池段、AAAA → 上游）；hosts 优先于 fake-ip
+    ///（表内域名给真值不被假地址化）。
+    #[tokio::test]
+    async fn hosts_answers_before_upstream_and_fake_ip() {
+        let (mock, hits) = spawn_mock(|d| (0, vec![v4(d, [8, 8, 4, 4], 120)])).await;
+        let cfg = ResolverConfig {
+            trusted: vec![DnsUpstream::Udp(mock)],
+            ..base_cfg()
+        };
+        let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("mapped.test".to_string(), "10.0.0.9".to_string());
+        map.insert("v6only.test".to_string(), "::1".to_string());
+        let hosts = Arc::new(seep_core::hosts::DnsHosts::from_map(&map).unwrap());
+        let table = Arc::new(seep_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/15").unwrap());
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let server = LocalDnsServer::new(
+            resolver,
+            "127.0.0.1".parse().unwrap(),
+            port,
+            Some(table.clone()),
+            Some(hosts),
+        );
+        let (tx, rx) = oneshot::channel();
+        let task = tokio::spawn(server.serve(rx));
+        let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli.connect(SocketAddr::from(([127, 0, 0, 1], port)))
+            .await
+            .unwrap();
+
+        let query = |id: u16, domain: &str, qtype: DnsRecordType| {
+            let domain = domain.to_string();
+            let cli = &cli;
+            async move {
+                let mut raw = [0u8; 512];
+                for _ in 0..100 {
+                    let q = encode_query(id, &domain, qtype).unwrap();
+                    if cli.send(&q).await.is_err() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                    if let Ok(Ok(n)) =
+                        tokio::time::timeout(Duration::from_millis(200), cli.recv(&mut raw)).await
+                    {
+                        return decode_response(&raw[..n]).unwrap();
+                    }
+                }
+                panic!("监听未在限时内应答 {domain} {qtype:?}");
+            }
+        };
+
+        // A 命中 → 真实映射地址（非池段、非上游真值），不触上游
+        let resp = query(0x21, "mapped.test", DnsRecordType::A).await;
+        let DnsAnswerData::A(mapped) = resp.answers[0].data else {
+            panic!("应为 A 应答");
+        };
+        assert_eq!(resp.rcode, 0);
+        assert_eq!(mapped, Ipv4Addr::new(10, 0, 0, 9), "hosts 映射直答真值");
+        assert_eq!(resp.answers[0].ttl, 1);
+        assert!(!table.in_range(&mapped), "hosts 命中不经 fake-ip");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // 名命中族不符（mapped.test 仅 v4）→ 空 NOERROR，不泄上游
+        let resp = query(0x22, "mapped.test", DnsRecordType::Aaaa).await;
+        assert_eq!(resp.rcode, 0, "族不符应为 NOERROR 空应答");
+        assert!(resp.answers.is_empty(), "族不符不应答任何记录");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // AAAA 命中 v6 条目 → Aaaa 直答
+        let resp = query(0x23, "v6only.test", DnsRecordType::Aaaa).await;
+        let DnsAnswerData::Aaaa(v6) = resp.answers[0].data else {
+            panic!("应为 AAAA 应答");
+        };
+        assert_eq!(v6, std::net::Ipv6Addr::LOCALHOST);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // 表外域名：A → fake-ip 池段（hosts 未命中回落既有路径）
+        let resp = query(0x24, "unknown.test", DnsRecordType::A).await;
+        let DnsAnswerData::A(fake) = resp.answers[0].data else {
+            panic!("应为 A 应答");
+        };
+        assert!(table.in_range(&fake), "表外 A 应走 fake-ip 池段：{fake}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // 表外域名 AAAA → 上游（fake-ip 只拦 A；计数可辨）
+        let _ = query(0x25, "unknown.test", DnsRecordType::Aaaa).await;
+        assert!(
+            hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "表外 AAAA 应触上游"
         );
 
         drop(tx);

@@ -497,6 +497,11 @@ pub struct DnsBlockConfig {
     /// fake-ip 块（G1-10）；None = 关闭（存量零差异）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fake_ip: Option<FakeIpConfig>,
+    /// 静态 hosts 映射（G2-15）：域名 → IPv4/IPv6 字面量；本地 DNS 面
+    /// A/AAAA 查询命中直接应答（真实映射地址，不触上游、不经 fake-ip）。
+    /// 键精确匹配（小写归一，通配符不做）；None/空 = 关闭（存量零差异）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl DnsBlockConfig {
@@ -600,6 +605,19 @@ impl DnsBlockConfig {
         if let Some(fake) = &self.fake_ip {
             if fake.enabled {
                 fake.validate()?;
+            }
+        }
+        if let Some(hosts) = &self.hosts {
+            for (k, v) in hosts {
+                anyhow::ensure!(!k.trim().is_empty(), "network.dns.hosts 键不能为空");
+                anyhow::ensure!(
+                    k.trim().parse::<std::net::IpAddr>().is_err(),
+                    "network.dns.hosts 键须为域名而非 IP 地址：{k:?}"
+                );
+                anyhow::ensure!(
+                    v.trim().parse::<std::net::IpAddr>().is_ok(),
+                    "network.dns.hosts 值须为 IPv4/IPv6 字面量：{k:?} → {v:?}"
+                );
             }
         }
         Ok(())

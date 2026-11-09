@@ -3825,6 +3825,7 @@ mod tests {
                 listen_address: "127.0.0.1".parse().unwrap(),
                 listen_port: 15_353,
                 fake_ip: None,
+                hosts: None,
             }),
         });
         let rt_cfg = RuntimeConfig {

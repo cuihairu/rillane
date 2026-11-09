@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
 pub mod fake_ip;
+pub mod hosts;
 pub mod net_mark;
 pub mod performance;
 pub mod udp;

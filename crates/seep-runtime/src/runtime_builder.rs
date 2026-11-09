@@ -295,10 +295,20 @@ impl RuntimeBuilder {
                     }
                     _ => None,
                 };
+                // G2-15 hosts 映射：非空映射 → 构建静态表交本地监听面
+                //（A/AAAA 命中直答真实地址，先于 fake-ip）；空/缺 = None
+                let hosts_table = match dns_cfg.hosts.as_ref() {
+                    Some(map) if !map.is_empty() => Some(Arc::new(
+                        seep_core::hosts::DnsHosts::from_map(map)
+                            .map_err(|e| anyhow!("network.dns.hosts 配置非法：{e}"))?,
+                    )),
+                    _ => None,
+                };
                 Some(Arc::new(crate::dns_config::DnsService::new(
                     Arc::new(resolver),
                     listen,
                     fake_ip,
+                    hosts_table,
                 )))
             }
             None => None,
@@ -4670,6 +4680,83 @@ mod tests {
             .expect("非 TUN 下 fake_ip 应装配");
         let svc = runtime.get_dns_service().expect("DNS 服务应在");
         assert!(svc.fake_ip().is_some(), "fake-ip 池应装配");
+    }
+
+    /// G2-15 hosts 映射：非空 network.dns.hosts → DnsHosts 表装配 DNS 服务
+    ///（svc.hosts() 精确小写命中返回映射地址）；缺省零装配 None；非法值
+    /// 构建期拒绝。
+    #[test]
+    fn hosts_mapping_wired_into_dns_service() {
+        let mk_cfg = |dns_yaml: &str| {
+            let mut cfg = s5_udp_config(false);
+            cfg.network = Some(seep_config::NetworkBlockConfig {
+                egress_fwmark: None,
+                mode: seep_config::NetworkBlockMode::Tun,
+                tun: None,
+                routing: None,
+                dns: Some(
+                    serde_yaml::from_str::<seep_config::DnsBlockConfig>(dns_yaml)
+                        .expect("dns 块应可解析"),
+                ),
+            });
+            cfg
+        };
+        let mk_rc = || RuntimeConfig {
+            enable_network_virtualization: false,
+            network_config: None,
+            ..RuntimeConfig::default()
+        };
+
+        // 有映射：装配且命中语义正确（键小写归一可辨）
+        let runtime = RuntimeBuilder::new(mk_cfg(
+            "trusted: ['1.1.1.1:53']\ndefault_group: trusted\nhosts:\n  \"a.test\": \"10.0.0.7\"\n  \"V6.Test\": \"::1\"",
+        ))
+        .with_runtime_config(mk_rc())
+        .build()
+        .expect("hosts 映射应装配");
+        let hosts = runtime
+            .get_dns_service()
+            .expect("DNS 服务应在")
+            .hosts()
+            .expect("hosts 表应装配");
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(
+            hosts.lookup("a.test", true),
+            Some(vec![std::net::IpAddr::from([10, 0, 0, 7])])
+        );
+        assert_eq!(
+            hosts.lookup("v6.test", false),
+            Some(vec![std::net::IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1])])
+        );
+        assert_eq!(hosts.lookup("other.test", true), None);
+
+        // 非法值：构建期拒绝（错误点名 dns.hosts）
+        let err = RuntimeBuilder::new(mk_cfg(
+            "trusted: ['1.1.1.1:53']\nhosts:\n  \"a.test\": \"bad\"",
+        ))
+        .with_runtime_config(mk_rc())
+        .build()
+        .err()
+        .expect("非法 hosts 值应构建期拒绝");
+        assert!(
+            format!("{err:#}").contains("dns.hosts"),
+            "错误应点名 dns.hosts：{err:#}"
+        );
+
+        // 缺省（无 hosts 键）：零装配 None（存量零差异）
+        let runtime =
+            RuntimeBuilder::new(mk_cfg("trusted: ['1.1.1.1:53']\ndefault_group: trusted"))
+                .with_runtime_config(mk_rc())
+                .build()
+                .expect("缺省应装配");
+        assert!(
+            runtime
+                .get_dns_service()
+                .expect("DNS 服务应在")
+                .hosts()
+                .is_none(),
+            "无 hosts 键应零装配"
+        );
     }
 
     /// build 期拦截：enabled 块 + 双空 domestic 引用（无 tun 回落）→ Err
