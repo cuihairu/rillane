@@ -33,6 +33,7 @@
 //! auto/aes-128-gcm/chacha20-poly1305（xray 同期口径，legacy/none 已删）；
 //! 仅 TCP 转发（UDP 在 runtime 构建期扫描即报错）。
 
+use std::fmt;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -46,10 +47,14 @@ use async_trait::async_trait;
 use chacha20poly1305::ChaCha20Poly1305;
 use md5::Md5;
 use rand::{rngs::OsRng, RngCore};
-use seep_core::{EgressConnector, Flow, FlowReport, TargetProto};
+use seep_core::udp::{EgressUdpConnector, UdpRelay};
+use seep_core::{
+    BoxedIo, EgressConnector, Flow, FlowContext, FlowReport, FlowTarget, RouteDecision, TargetProto,
+};
 use sha2::{Digest, Sha256};
 use sha3::digest::{ExtendableOutput, XofReader};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use super::grpc::grpc_tunnel;
@@ -315,8 +320,10 @@ fn unix_now() -> Result<i64> {
 }
 
 /// 请求头明文（EncodeRequestHeader，纯函数）：
-/// [0x01][reqIV 16][reqKey 16][V][option][(pad<<4)|security][0x00][0x01 TCP]
+/// [0x01][reqIV 16][reqKey 16][V][option][(pad<<4)|security][0x00][command]
 /// [port BE16][地址][padding][FNV1a32 BE]
+///
+/// `command`：RequestCommand 字节（0x01 TCP / 0x02 UDP，xray headers.go 口径）
 fn build_request_header_bytes(
     req_iv: &[u8; 16],
     req_key: &[u8; 16],
@@ -325,6 +332,7 @@ fn build_request_header_bytes(
     security: VmessSecurity,
     target_host: &str,
     target_port: u16,
+    command: u8,
 ) -> Result<Vec<u8>> {
     if padding.len() > 15 {
         return Err(anyhow!("VMess 请求头 padding 过长（>15，4bit 位域）"));
@@ -337,7 +345,7 @@ fn build_request_header_bytes(
     buf.push(REQUEST_OPTION);
     buf.push((padding.len() as u8) << 4 | security.header_byte());
     buf.push(0x00); // Reserved
-    buf.push(0x01); // Command: TCP
+    buf.push(command); // Command: 0x01 TCP / 0x02 UDP
     buf.extend_from_slice(&target_port.to_be_bytes());
 
     // 地址（AddressType：1=IPv4 2=域名 3=IPv6）
@@ -406,11 +414,15 @@ struct VmessSession {
 }
 
 /// 一次会话的请求头 + 双向分块态（随机量现场抽取）
+///
+/// `command`：0x01 TCP / 0x02 UDP（G0-4；UDP 数据面每数据报一块，见
+/// `VmessUdpRelay`）
 fn build_session(
     cmd_key: &[u8; 16],
     security: VmessSecurity,
     host: &str,
     port: u16,
+    command: u8,
 ) -> Result<VmessSession> {
     let mut req_iv = [0u8; 16];
     let mut req_key = [0u8; 16];
@@ -422,8 +434,9 @@ fn build_session(
     let mut pad = vec![0u8; pad_len];
     OsRng.fill_bytes(&mut pad);
 
-    let plain =
-        build_request_header_bytes(&req_iv, &req_key, expect_v, &pad, security, host, port)?;
+    let plain = build_request_header_bytes(
+        &req_iv, &req_key, expect_v, &pad, security, host, port, command,
+    )?;
     let sealed_header = seal_vmess_aead_header(cmd_key, &plain)?;
 
     Ok(VmessSession {
@@ -911,6 +924,15 @@ impl VmessConnector {
     }
 
     fn session(&self, target_host: &str, target_port: u16) -> Result<VmessSession> {
+        self.session_command(target_host, target_port, 0x01)
+    }
+
+    fn session_command(
+        &self,
+        target_host: &str,
+        target_port: u16,
+        command: u8,
+    ) -> Result<VmessSession> {
         if self.alter_id != 0 {
             return Err(anyhow!(
                 "VMess AEAD 仅支持 alter_id=0（legacy MD5 认证已不支持）"
@@ -918,7 +940,7 @@ impl VmessConnector {
         }
         let id = Uuid::parse_str(self.uuid.trim()).context("无效的 VMess uuid")?;
         let cmd_key = cmd_key_from_uuid(id.as_bytes());
-        build_session(&cmd_key, self.security, target_host, target_port)
+        build_session(&cmd_key, self.security, target_host, target_port, command)
     }
 }
 
@@ -1511,6 +1533,160 @@ impl VmessConnector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// UDP 数据面（G0-4）：command 0x02 + 每数据报一块
+// ---------------------------------------------------------------------------
+
+/// VMess 明文/TLS over tcp 传输上的 UDP 出站连接器（udp-relay-path.md §3.1
+/// 能力表扩展）。数据面 = xray vmess `TransferTypePacket`：每个 UDP 数据报
+/// 经 `AuthenticationWriter.writePacket` 独立封一块（[掩码 2B len][AEAD][pad]），
+/// 即复用 `write_chunk`/`read_chunk` 的分块流原语——与 TCP 唯一差异是
+/// command=0x02 与"一块一报"语义。
+///
+/// 仅 network=tcp 注册（ws/grpc/h2 的 UDP 面构建期由 scan_udp_capability 判负）。
+pub struct VmessUdpConnector {
+    server: String,
+    port: u16,
+    uuid: String,
+    alter_id: u16,
+    security: VmessSecurity,
+    tls: bool,
+    skip_cert_verify: bool,
+    sni: Option<String>,
+    alpn: Option<Vec<String>>,
+    fingerprint: TlsFingerprint,
+    factory: Option<Arc<TlsConnectorFactory>>,
+}
+
+impl VmessUdpConnector {
+    /// 从已校验的 TCP 连接器复用节点配置（保证 UDP 面与 TCP 面同一份配置）
+    pub fn from_connector(conn: &VmessConnector) -> Self {
+        Self {
+            server: conn.server.clone(),
+            port: conn.port,
+            uuid: conn.uuid.clone(),
+            alter_id: conn.alter_id,
+            security: conn.security,
+            tls: conn.tls,
+            skip_cert_verify: conn.skip_cert_verify,
+            sni: conn.sni.clone(),
+            alpn: conn.alpn.clone(),
+            fingerprint: conn.fingerprint,
+            factory: conn.factory.clone(),
+        }
+    }
+
+    fn server_addr(&self) -> String {
+        format!("{}:{}", self.server, self.port)
+    }
+
+    /// 建立明文/TLS over tcp 的 boxed 传输（UDP 长连，不走连接池）
+    async fn open_transport(&self) -> Result<BoxedIo> {
+        let tcp = seep_core::net_mark::connect_tcp(self.server_addr())
+            .await
+            .with_context(|| format!("连接 VMess 服务器失败: {}", self.server_addr()))?;
+        let _ = tcp.set_nodelay(true);
+        if !self.tls {
+            return Ok(Box::new(tcp));
+        }
+        let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
+        let connector = match &self.factory {
+            Some(f) => f.connector(
+                self.skip_cert_verify,
+                self.alpn.as_deref().unwrap_or(&[]),
+                self.fingerprint,
+            )?,
+            None => create_tls_connector_with_profile(
+                self.skip_cert_verify,
+                self.alpn.as_deref(),
+                self.fingerprint,
+            )?,
+        };
+        let server_name = rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+        Ok(Box::new(connector.connect(server_name, tcp).await?))
+    }
+}
+
+#[async_trait]
+impl EgressUdpConnector for VmessUdpConnector {
+    fn name(&self) -> &str {
+        "vmess"
+    }
+
+    async fn associate(
+        &self,
+        ctx: FlowContext,
+        _decision: &RouteDecision,
+    ) -> Result<Arc<dyn UdpRelay>> {
+        if self.alter_id != 0 {
+            return Err(anyhow!(
+                "VMess AEAD 仅支持 alter_id=0（legacy MD5 认证已不支持）"
+            ));
+        }
+        let mut stream = self.open_transport().await?;
+        let session = self.session_udp_for(&ctx.target.host, ctx.target.port)?;
+        stream.write_all(&session.sealed_header).await?;
+        stream.flush().await?;
+        // 先拆半再读响应头：ReadHalf<BoxedIo> 有 ChunkRead 实现
+        // （BoxedIo 本体无——避免为 box 再添一层 impl）
+        let (mut rr, ww) = tokio::io::split(stream);
+        read_response_header(&mut rr, session.expect_v, &session.resp_header_keys).await?;
+        Ok(Arc::new(VmessUdpRelay {
+            reader: AsyncMutex::new(rr),
+            writer: AsyncMutex::new(ww),
+            req_crypt: AsyncMutex::new(session.req_crypt),
+            resp_crypt: AsyncMutex::new(session.resp_crypt),
+            target: ctx.target,
+        }))
+    }
+}
+
+impl VmessUdpConnector {
+    fn session_udp_for(&self, host: &str, port: u16) -> Result<VmessSession> {
+        let id = Uuid::parse_str(self.uuid.trim()).context("无效的 VMess uuid")?;
+        let cmd_key = cmd_key_from_uuid(id.as_bytes());
+        build_session(&cmd_key, self.security, host, port, 0x02)
+    }
+}
+
+/// 字节级 VMess UDP relay（G0-4）：每数据报一块（write_chunk/read_chunk）。
+/// send/recv 分属 forward_up/forwarder 两任务，读写半 + 分块态各持 tokio
+/// Mutex（async_trait 的 Send future 约束下不得跨 await 持 std MutexGuard）。
+struct VmessUdpRelay {
+    reader: AsyncMutex<tokio::io::ReadHalf<BoxedIo>>,
+    writer: AsyncMutex<tokio::io::WriteHalf<BoxedIo>>,
+    req_crypt: AsyncMutex<ChunkCrypt>,
+    resp_crypt: AsyncMutex<ChunkCrypt>,
+    /// 会话绑定的目标（VMess 明文 UDP 单目标/单连接，映射目标即此）
+    target: FlowTarget,
+}
+
+#[async_trait]
+impl UdpRelay for VmessUdpRelay {
+    async fn send_to(&self, _target: &FlowTarget, buf: &[u8]) -> Result<()> {
+        let mut c = self.req_crypt.lock().await;
+        let mut w = self.writer.lock().await;
+        write_chunk(&mut c, &mut *w, buf).await
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> Result<(FlowTarget, usize)> {
+        let mut c = self.resp_crypt.lock().await;
+        let mut r = self.reader.lock().await;
+        let data = read_chunk(&mut c, &mut *r).await?;
+        let n = data.len().min(buf.len());
+        buf[..n].copy_from_slice(&data[..n]);
+        Ok((self.target.clone(), n))
+    }
+}
+
+impl fmt::Debug for VmessUdpRelay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VmessUdpRelay")
+            .field("target", &self.target)
+            .finish()
+    }
+}
+
 /// 分块流双向转发（tcp/tls 流路径）：上行至客户端 EOF 发终止块；下行至
 /// 终止块关客户端写侧。响应头在下发任务内先于首块读取——不得在上行
 /// 启动前单独阻塞等它：xray 服务端响应头经写缓冲随下发链路落线
@@ -1577,7 +1753,7 @@ where
 mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-    use seep_core::{FlowId, FlowMetadata, FlowTarget};
+    use seep_core::{FlowContext, FlowId, FlowMetadata, FlowTarget, RouteDecision, TargetProto};
     use sha1::{Digest as Sha1Digest, Sha1};
     use std::time::Duration;
     use tokio::{io::duplex, net::TcpListener};
@@ -1711,6 +1887,7 @@ mod tests {
             VmessSecurity::Aes128Gcm,
             "example.com",
             443,
+            0x01,
         )
         .unwrap();
         assert_eq!(
@@ -1731,6 +1908,7 @@ mod tests {
             VmessSecurity::Aes128Gcm,
             "127.0.0.1",
             80,
+            0x01,
         )
         .unwrap();
         assert_eq!(&v4[40..45], &[0x01, 127, 0, 0, 1]);
@@ -1753,6 +1931,7 @@ mod tests {
             VmessSecurity::Aes128Gcm,
             "example.com",
             443,
+            0x01,
         )
         .unwrap();
         let (sealed, auth_id) = seal_vmess_aead_header_det(
@@ -1830,6 +2009,8 @@ mod tests {
         req_key: [u8; 16],
         expect_v: u8,
         option: u8,
+        /// 请求命令（0x01 TCP / 0x02 UDP；G0-4 UDP 测试断言）
+        command: u8,
         security: VmessSecurity,
     }
 
@@ -1868,14 +2049,15 @@ mod tests {
             req_key,
             expect_v: plain[33],
             option: plain[34],
+            command: plain[37],
             security,
         })
     }
 
-    /// 服务端响应头：[V 回声][option][cmd=1][cmdLen=0] 两级 GCM（AAD 空）
+    /// 服务端响应头：[V 回声][option][cmd 回声][cmdLen=0] 两级 GCM（AAD 空）
     fn build_response_header(req: &TestReqHeader) -> Result<Vec<u8>> {
         let keys = RespHeaderKeys::derive(&req.req_key, &req.req_iv);
-        let payload = [req.expect_v, req.option, 0x01, 0x00];
+        let payload = [req.expect_v, req.option, req.command, 0x00];
         let len_aead = Aes128Gcm::new_from_slice(&keys.len_key).unwrap();
         let pay_aead = Aes128Gcm::new_from_slice(&keys.pay_key).unwrap();
         let sealed_len = len_aead
@@ -1954,6 +2136,26 @@ mod tests {
             write_chunk(&mut down, &mut StreamSink(&mut stream), &plain).await?;
         }
         write_chunk(&mut down, &mut StreamSink(&mut stream), &[]).await?;
+        Ok(())
+    }
+
+    /// UDP 回环服务端（G0-4）：断言请求命令 0x02，逐块 echo（每数据报一块；
+    /// 无终止块语义）。rounds 为 echo 次数，与服务端客户端约定一致。
+    async fn serve_vmess_udp<S>(mut stream: S, cmd_key: [u8; 16], rounds: usize) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let req = open_request_header_stream(&mut stream, &cmd_key).await?;
+        assert_eq!(req.command, 0x02, "VMess UDP 请求命令应为 0x02");
+        stream.write_all(&build_response_header(&req)?).await?;
+        stream.flush().await?;
+
+        let mut up = ChunkCrypt::new(req.security, &req.req_key, &req.req_iv)?;
+        let mut down = ChunkCrypt::derive_response(req.security, &req.req_key, &req.req_iv)?;
+        for _ in 0..rounds {
+            let plain = read_chunk(&mut up, &mut StreamSrc(&mut stream)).await?;
+            write_chunk(&mut down, &mut StreamSink(&mut stream), &plain).await?;
+        }
         Ok(())
     }
 
@@ -2098,6 +2300,48 @@ mod tests {
         let report = report.expect("forward 失败");
         assert!(report.upstream >= 40 * 1024 + 11);
         assert!(report.downstream >= 40 * 1024 + 11);
+    }
+
+    /// G0-4：VMess 明文 UDP 回环（命令 0x02，每数据报一块，无终止块）。
+    /// 服务端复刻 xray `AuthenticationWriter.writePacket`：单目标/单连接，
+    /// 一块一数据报；客户端 `VmessUdpConnector::associate` + send_to/recv_from。
+    #[tokio::test]
+    async fn udp_loopback_command_02() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cmd_key = test_cmd_key();
+        const ROUNDS: usize = 2;
+        tokio::spawn(async move {
+            let (st, _) = listener.accept().await.unwrap();
+            if let Err(e) = serve_vmess_udp(st, cmd_key, ROUNDS).await {
+                eprintln!("测试服务端错误: {e:#}");
+            }
+        });
+
+        let connector = VmessUdpConnector::from_connector(&test_connector(port, "tcp"));
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "example.com".to_string(),
+                port: 443,
+                proto: TargetProto::Udp,
+            },
+            metadata: FlowMetadata::default(),
+        };
+        let decision = RouteDecision::direct("test".to_string());
+        let relay = connector.associate(ctx.clone(), &decision).await.unwrap();
+
+        // 小数据报 + >16KiB 大块（跨分块长度掩码/填充边界）
+        let msgs: Vec<Vec<u8>> = vec![b"hello udp vmess".to_vec(), vec![9u8; 40 * 1024]];
+        for m in &msgs {
+            relay.send_to(&ctx.target, m).await.unwrap();
+            let mut buf = vec![0u8; m.len() + 64];
+            let (tgt, n) = relay.recv_from(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], &m[..], "UDP 回环载荷不一致");
+            assert_eq!(tgt.host, "example.com");
+            assert_eq!(tgt.port, 443);
+            assert_eq!(tgt.proto, TargetProto::Udp);
+        }
     }
 
     #[tokio::test]

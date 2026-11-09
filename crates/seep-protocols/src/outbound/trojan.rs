@@ -1,12 +1,17 @@
 //! Trojan 出口连接器实现
 
+use std::fmt;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use seep_core::{EgressConnector, Flow, FlowReport};
+use seep_core::udp::{EgressUdpConnector, UdpRelay};
+use seep_core::{
+    BoxedIo, EgressConnector, Flow, FlowContext, FlowReport, FlowTarget, RouteDecision,
+};
 use sha2::{Digest, Sha224};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::grpc::grpc_tunnel;
 use super::ws::{ws_client_handshake, WsClient};
@@ -78,8 +83,12 @@ impl TrojanConnector {
         hex::encode(&result)
     }
 
-    /// 构建 Trojan 请求头
+    /// 构建 Trojan 请求头（CONNECT 路径）
     fn build_request(&self, host: &str, port: u16) -> Result<Vec<u8>> {
+        self.build_request_command(host, port, 0x01)
+    }
+
+    fn build_request_command(&self, host: &str, port: u16, command: u8) -> Result<Vec<u8>> {
         // P2 深审（2026-11-03）：域名长度无守卫，`len() as u8` 会静默截断
         // 产畸形帧（对照 vless.rs:165 有守卫）。加显式拒绝（>255 域名不可能
         // 出现在合法目标，拒发比发畸形帧安全）。
@@ -95,8 +104,8 @@ impl TrojanConnector {
         // CRLF
         request.extend_from_slice(b"\r\n");
 
-        // CMD: CONNECT (0x01)
-        request.push(0x01);
+        // CMD: 0x01 CONNECT / 0x03 UDP ASSOCIATE
+        request.push(command);
 
         // 地址类型和地址
         // 0x03 = 域名
@@ -529,6 +538,239 @@ impl TrojanConnector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// UDP 数据面（G0-4）：command 0x03 + 每报 [ATYP][ADDR][PORT][LEN][CRLF][payload]
+// ---------------------------------------------------------------------------
+
+/// Trojan UDP 出站连接器（udp-relay-path.md §3.1 能力表扩展）。数据面 =
+/// trojan-gfw protocol.md `UDP ASSOCIATE`：每数据报 =
+/// [ATYP][DST.ADDR][DST.PORT(2BE)][Length(2BE)][CRLF][payload]，逐报携带
+/// 目标（单连接多目标；seep 映射语义下一映射一目标）。Trojan 恒叠 TLS。
+///
+/// 仅 network=tcp 注册（ws/grpc 的 UDP 面构建期由 scan_udp_capability 判负）。
+pub struct TrojanUdpConnector {
+    server: String,
+    port: u16,
+    password: String,
+    sni: Option<String>,
+    skip_cert_verify: bool,
+    fingerprint: TlsFingerprint,
+    factory: Option<Arc<TlsConnectorFactory>>,
+}
+
+impl TrojanUdpConnector {
+    /// 从已校验的 TCP 连接器复用节点配置（保证 UDP 面与 TCP 面同一份配置）
+    pub fn from_connector(conn: &TrojanConnector) -> Self {
+        Self {
+            server: conn.server.clone(),
+            port: conn.port,
+            password: conn.password.clone(),
+            sni: conn.sni.clone(),
+            skip_cert_verify: conn.skip_cert_verify,
+            fingerprint: conn.fingerprint,
+            factory: conn.factory.clone(),
+        }
+    }
+
+    fn server_addr(&self) -> String {
+        format!("{}:{}", self.server, self.port)
+    }
+
+    fn password_hash(&self) -> String {
+        let mut hasher = Sha224::new();
+        hasher.update(self.password.as_bytes());
+        hex::encode(&hasher.finalize())
+    }
+
+    /// TLS over tcp boxed 传输（trojan 恒叠 TLS；UDP 长连，不走连接池）
+    async fn open_transport(&self) -> Result<BoxedIo> {
+        let tcp = seep_core::net_mark::connect_tcp(self.server_addr())
+            .await
+            .with_context(|| format!("连接 Trojan 服务器失败: {}", self.server_addr()))?;
+        let _ = tcp.set_nodelay(true);
+        let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
+        let connector = match &self.factory {
+            Some(f) => f.connector(self.skip_cert_verify, &[], self.fingerprint)?,
+            None => {
+                create_tls_connector_with_profile(self.skip_cert_verify, None, self.fingerprint)?
+            }
+        };
+        let server_name = rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+        Ok(Box::new(connector.connect(server_name, tcp).await?))
+    }
+
+    /// UDP ASSOCIATE 请求：hash + CRLF + 0x03 + ATYP + ADDR + PORT + CRLF
+    fn build_udp_associate(&self, host: &str, port: u16) -> Result<Vec<u8>> {
+        if host.len() > u8::MAX as usize {
+            anyhow::bail!("trojan: 目标主机名超长（>255 字节）");
+        }
+        let mut request = Vec::with_capacity(128);
+        request.extend_from_slice(self.password_hash().as_bytes());
+        request.extend_from_slice(b"\r\n");
+        request.push(0x03);
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            match ip {
+                std::net::IpAddr::V4(v4) => {
+                    request.push(0x01);
+                    request.extend_from_slice(&v4.octets());
+                }
+                std::net::IpAddr::V6(v6) => {
+                    request.push(0x04);
+                    request.extend_from_slice(&v6.octets());
+                }
+            }
+        } else {
+            request.push(0x03);
+            request.push(host.len() as u8);
+            request.extend_from_slice(host.as_bytes());
+        }
+        request.extend_from_slice(&port.to_be_bytes());
+        request.extend_from_slice(b"\r\n");
+        Ok(request)
+    }
+}
+
+#[async_trait]
+impl EgressUdpConnector for TrojanUdpConnector {
+    fn name(&self) -> &str {
+        "trojan"
+    }
+
+    async fn associate(
+        &self,
+        ctx: FlowContext,
+        _decision: &RouteDecision,
+    ) -> Result<Arc<dyn UdpRelay>> {
+        let mut stream = self.open_transport().await?;
+        let req = self.build_udp_associate(&ctx.target.host, ctx.target.port)?;
+        stream.write_all(&req).await?;
+        stream.flush().await?;
+        // trojan UDP ASSOCIATE 无独立应答头（serversession.cpp：直接进入
+        // UDP_FORWARD 转发循环），请求头写毕即收发数据报
+        let (rr, ww) = tokio::io::split(stream);
+        Ok(Arc::new(TrojanUdpRelay {
+            reader: AsyncMutex::new(rr),
+            writer: AsyncMutex::new(ww),
+            initial_target: ctx.target,
+        }))
+    }
+}
+
+/// 字节级 Trojan UDP relay（G0-4）：每报 [ATYP][ADDR][PORT][LEN][CRLF][payload]。
+/// send/recv 分属 forward_up/forwarder 两任务，读写半各持 tokio Mutex。
+struct TrojanUdpRelay {
+    reader: AsyncMutex<tokio::io::ReadHalf<BoxedIo>>,
+    writer: AsyncMutex<tokio::io::WriteHalf<BoxedIo>>,
+    /// 关联时的首目标（recv 未解析出地址时的兜底；实际逐报带地址）
+    initial_target: FlowTarget,
+}
+
+/// 编码 SOCKS5 风格地址段：[ATYP][ADDR][PORT(2BE)]，返回写出的字节数
+fn write_socks_addr(out: &mut Vec<u8>, target: &FlowTarget) -> Result<()> {
+    if target.host.len() > u8::MAX as usize {
+        anyhow::bail!("trojan: 目标主机名超长（>255 字节）");
+    }
+    if let Ok(ip) = target.host.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                out.push(0x01);
+                out.extend_from_slice(&v4.octets());
+            }
+            std::net::IpAddr::V6(v6) => {
+                out.push(0x04);
+                out.extend_from_slice(&v6.octets());
+            }
+        }
+    } else {
+        out.push(0x03);
+        out.push(target.host.len() as u8);
+        out.extend_from_slice(target.host.as_bytes());
+    }
+    out.extend_from_slice(&target.port.to_be_bytes());
+    Ok(())
+}
+
+#[async_trait]
+impl UdpRelay for TrojanUdpRelay {
+    async fn send_to(&self, target: &FlowTarget, buf: &[u8]) -> Result<()> {
+        let mut w = self.writer.lock().await;
+        if buf.len() > u16::MAX as usize {
+            return Err(anyhow!("Trojan UDP 数据报过大（>65535）"));
+        }
+        let mut frame = Vec::with_capacity(64 + buf.len());
+        write_socks_addr(&mut frame, target)?;
+        frame.extend_from_slice(&(buf.len() as u16).to_be_bytes());
+        frame.extend_from_slice(b"\r\n");
+        frame.extend_from_slice(buf);
+        w.write_all(&frame).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> Result<(FlowTarget, usize)> {
+        let mut r = self.reader.lock().await;
+        let mut atyp = [0u8; 1];
+        r.read_exact(&mut atyp).await?;
+        let host;
+        let port: u16;
+        match atyp[0] {
+            0x01 => {
+                let mut b = [0u8; 4];
+                r.read_exact(&mut b).await?;
+                host = std::net::Ipv4Addr::from(b).to_string();
+            }
+            0x04 => {
+                let mut b = [0u8; 16];
+                r.read_exact(&mut b).await?;
+                host = std::net::Ipv6Addr::from(b).to_string();
+            }
+            0x03 => {
+                let mut l = [0u8; 1];
+                r.read_exact(&mut l).await?;
+                let mut h = vec![0u8; l[0] as usize];
+                r.read_exact(&mut h).await?;
+                host = String::from_utf8_lossy(&h).into_owned();
+            }
+            other => return Err(anyhow!("Trojan UDP 未知地址类型: {other}")),
+        }
+        let mut port_b = [0u8; 2];
+        r.read_exact(&mut port_b).await?;
+        port = u16::from_be_bytes(port_b);
+        let mut len_b = [0u8; 2];
+        r.read_exact(&mut len_b).await?;
+        let len = u16::from_be_bytes(len_b) as usize;
+        let mut crlf = [0u8; 2];
+        r.read_exact(&mut crlf).await?;
+        if crlf != [0x0d, 0x0a] {
+            return Err(anyhow!("Trojan UDP 帧 CRLF 校验失败"));
+        }
+        let n = len.min(buf.len());
+        r.read_exact(&mut buf[..n]).await?;
+        if len > n {
+            let mut skip = vec![0u8; len - n];
+            r.read_exact(&mut skip).await?;
+        }
+        let target = if host.is_empty() {
+            self.initial_target.clone()
+        } else {
+            FlowTarget {
+                host,
+                port,
+                proto: seep_core::TargetProto::Udp,
+            }
+        };
+        Ok((target, n))
+    }
+}
+
+impl fmt::Debug for TrojanUdpRelay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TrojanUdpRelay")
+            .field("initial_target", &self.initial_target)
+            .finish()
+    }
+}
+
 // 辅助模块：hex 编码
 mod hex {
     const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
@@ -540,5 +782,194 @@ mod hex {
             result.push(HEX_CHARS[(byte & 0x0f) as usize] as char);
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::pki_types::pem::PemObject as _;
+    use seep_core::{FlowContext, FlowId, FlowMetadata, RouteDecision, TargetProto};
+    use std::sync::Arc;
+    use tokio::io::{AsyncRead, AsyncWrite};
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+
+    const TEST_PASSWORD: &str = "test-trojan-password";
+
+    fn test_connector(port: u16) -> TrojanConnector {
+        TrojanConnector::new(
+            "127.0.0.1".to_string(),
+            port,
+            TEST_PASSWORD.to_string(),
+            Some("localhost".to_string()),
+            true, // skip_cert_verify：自签证书
+            TlsFingerprint::None,
+            "tcp".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn test_ctx() -> (FlowContext, RouteDecision) {
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "example.com".to_string(),
+                port: 443,
+                proto: TargetProto::Udp,
+            },
+            metadata: FlowMetadata::default(),
+        };
+        (ctx, RouteDecision::direct("test".to_string()))
+    }
+
+    /// 读一个 trojan UDP 数据报帧 [ATYP][ADDR][PORT][LEN][CRLF][payload]，
+    /// 返回完整帧字节（含地址段），供 echo 原样回写。
+    async fn read_udp_frame<S>(stream: &mut S) -> Result<Vec<u8>>
+    where
+        S: AsyncRead + Unpin,
+    {
+        let mut out = Vec::new();
+        let mut atyp = [0u8; 1];
+        stream.read_exact(&mut atyp).await?;
+        out.push(atyp[0]);
+        match atyp[0] {
+            0x01 => {
+                let mut b = [0u8; 4];
+                stream.read_exact(&mut b).await?;
+                out.extend_from_slice(&b);
+            }
+            0x04 => {
+                let mut b = [0u8; 16];
+                stream.read_exact(&mut b).await?;
+                out.extend_from_slice(&b);
+            }
+            0x03 => {
+                let mut l = [0u8; 1];
+                stream.read_exact(&mut l).await?;
+                out.push(l[0]);
+                let mut h = vec![0u8; l[0] as usize];
+                stream.read_exact(&mut h).await?;
+                out.extend_from_slice(&h);
+            }
+            other => anyhow::bail!("trojan UDP 测试未知地址类型: {other}"),
+        }
+        let mut port_b = [0u8; 2];
+        stream.read_exact(&mut port_b).await?;
+        out.extend_from_slice(&port_b);
+        let mut len_b = [0u8; 2];
+        stream.read_exact(&mut len_b).await?;
+        out.extend_from_slice(&len_b);
+        let len = u16::from_be_bytes(len_b) as usize;
+        let mut crlf = [0u8; 2];
+        stream.read_exact(&mut crlf).await?;
+        assert_eq!(crlf, [0x0d, 0x0a], "trojan UDP 帧 CRLF 校验失败");
+        out.extend_from_slice(&crlf);
+        let mut payload = vec![0u8; len];
+        stream.read_exact(&mut payload).await?;
+        out.extend_from_slice(&payload);
+        Ok(out)
+    }
+
+    /// trojan UDP ASSOCIATE 回环服务端（G0-4）：TLS 握手 → 校验 hash + 命令
+    /// 0x03 → 逐报 echo（无应答头，UDP_FORWARD 直进）。
+    async fn serve_trojan_udp<S>(mut stream: S, rounds: usize) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        // 请求头：hash(56) CRLF CMD(1) ATYP(1) ADDR PORT(2) CRLF(2)
+        let mut head = [0u8; 56 + 2 + 1 + 1];
+        stream.read_exact(&mut head).await?;
+        let hash = String::from_utf8_lossy(&head[..56]).to_string();
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()), "hash 非 hex");
+        let mut hasher = Sha224::new();
+        hasher.update(TEST_PASSWORD.as_bytes());
+        let expect_hash = hex::encode(&hasher.finalize());
+        assert_eq!(hash, expect_hash, "trojan 密码 hash 不匹配");
+        assert_eq!(&head[56..58], b"\r\n", "请求头 CRLF 不匹配");
+        assert_eq!(head[58], 0x03, "trojan UDP 命令应为 0x03");
+        // ATYP=0x03（域名 example.com）+ len + domain + port(2) + CRLF(2)
+        assert_eq!(head[59], 0x03, "请求应为域名地址类型");
+        let mut rest = [0u8; 1];
+        stream.read_exact(&mut rest).await?;
+        let dlen = rest[0] as usize;
+        let mut domain = vec![0u8; dlen];
+        stream.read_exact(&mut domain).await?;
+        assert_eq!(String::from_utf8_lossy(&domain), "example.com");
+        let mut port_b = [0u8; 2];
+        stream.read_exact(&mut port_b).await?;
+        assert_eq!(u16::from_be_bytes(port_b), 443);
+        let mut crlf = [0u8; 2];
+        stream.read_exact(&mut crlf).await?;
+        assert_eq!(crlf, [0x0d, 0x0a], "请求尾 CRLF 不匹配");
+
+        for _ in 0..rounds {
+            let frame = read_udp_frame(&mut stream).await?;
+            stream.write_all(&frame).await?;
+            stream.flush().await?;
+        }
+        Ok(())
+    }
+
+    /// G0-4：trojan UDP ASSOCIATE 回环（恒叠 TLS；命令 0x03；逐报
+    /// [ATYP][ADDR][PORT][LEN][CRLF][payload]）。
+    #[tokio::test]
+    async fn udp_loopback_command_03_tls() {
+        // 自签证书（SAN=localhost；客户端 skip_cert_verify 不校验链）
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen 自签");
+        let cert_pem = certified.cert.pem();
+        let key_pem = certified.key_pair.serialize_pem();
+        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+            rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+                .collect::<Result<_, _>>()
+                .expect("证书 PEM 解析");
+        let key =
+            rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).expect("私钥读取");
+
+        let provider = crate::tls::tls_crypto_provider();
+        let builder = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("协议版本");
+        let config = Arc::new(
+            builder
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .expect("服务端证书装配"),
+        );
+        let acceptor = TlsAcceptor::from(config);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        const ROUNDS: usize = 2;
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let Ok(mut tls) = acceptor.accept(tcp).await else {
+                return;
+            };
+            if let Err(e) = serve_trojan_udp(&mut tls, ROUNDS).await {
+                eprintln!("测试服务端错误: {e:#}");
+            }
+            let _ = tls.shutdown().await;
+        });
+
+        let connector = TrojanUdpConnector::from_connector(&test_connector(port));
+        let (ctx, decision) = test_ctx();
+        let relay = connector.associate(ctx.clone(), &decision).await.unwrap();
+
+        let msgs: Vec<Vec<u8>> = vec![b"hello udp trojan".to_vec(), vec![3u8; 18 * 1024]];
+        for m in &msgs {
+            relay.send_to(&ctx.target, m).await.unwrap();
+            let mut buf = vec![0u8; m.len() + 64];
+            let (tgt, n) = relay.recv_from(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], &m[..], "trojan UDP 回环载荷不一致");
+            assert_eq!(tgt.host, "example.com");
+            assert_eq!(tgt.port, 443);
+            assert_eq!(tgt.proto, TargetProto::Udp);
+        }
     }
 }

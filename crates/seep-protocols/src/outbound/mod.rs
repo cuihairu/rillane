@@ -31,9 +31,9 @@ pub use http::HttpConnector;
 pub use hysteria2::Hysteria2Connector;
 pub use shadowsocks::{ShadowsocksConnector, ShadowsocksUdpConnector};
 pub use socks5::Socks5Connector;
-pub use trojan::TrojanConnector;
-pub use vless::VlessConnector;
-pub use vmess::{VmessConnector, VmessSecurity};
+pub use trojan::{TrojanConnector, TrojanUdpConnector};
+pub use vless::{VlessConnector, VlessUdpConnector};
+pub use vmess::{VmessConnector, VmessSecurity, VmessUdpConnector};
 #[cfg(not(any(
     target_os = "android",
     all(target_os = "linux", target_env = "ohos", target_arch = "arm")

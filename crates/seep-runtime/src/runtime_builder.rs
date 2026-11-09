@@ -48,7 +48,8 @@ use seep_protocols::{
     DirectConnector, HttpConnector, HttpIngress, Hysteria2Connector, MixedIngress,
     ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress,
     TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool, TrojanConnector,
-    VlessConnector, VmessConnector, VmessSecurity, WireguardConnector, WireguardUdpConnector,
+    TrojanUdpConnector, VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity,
+    VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
 };
 use seep_routing::RoutingEngine;
 use seep_subscription::SubscriptionConverter;
@@ -374,7 +375,11 @@ impl RuntimeBuilder {
                 )
             });
         let udp_service = if udp_needed {
-            let udp_connectors = build_udp_connectors(&config_snapshot.egress)?;
+            let udp_connectors = build_udp_connectors(
+                &config_snapshot.egress,
+                transport_pool.clone(),
+                tls_factory.clone(),
+            )?;
             scan_udp_capability(
                 &config_snapshot.routing,
                 &config_snapshot.egress,
@@ -2245,11 +2250,18 @@ fn udp_session_config(cfg: &UdpConfig) -> seep_core::udp::UdpSessionConfig {
 }
 
 /// UDP 出站连接器表（udp-relay-path.md §3.1 能力表）：
-/// direct / shadowsocks / wireguard / reject → 有能力（reject 为静默丢弃，
-/// 审核发现 2026-11-04）；其余类型 → 判负（由 `scan_udp_capability` 在
-/// 构建期报错，hy2 的 V1 结论见该文档 §3.4/§6）。
+/// direct / shadowsocks / wireguard / reject / vmess / vless / trojan →
+/// 有能力（reject 为静默丢弃，审核发现 2026-11-04）；其余类型 → 判负
+/// （由 `scan_udp_capability` 在构建期报错，hy2 的 V1 结论见该文档 §3.4/§6）。
+///
+/// vmess/vless/trojan 仅 network=tcp 注册（ws/grpc 的 UDP 面未实现，由
+/// scan_udp_capability 判负）；UDP 面复用 TCP 面连接器的构建期校验
+/// （VMessSecurity::parse、alter_id=0、trojan tls 等），`from_connector`
+/// 保证 UDP 面与 TCP 面同一份节点配置。
 fn build_udp_connectors(
     descriptors: &[EgressDescriptor],
+    transport_pool: Option<Arc<TransportPool>>,
+    tls_factory: Option<Arc<TlsConnectorFactory>>,
 ) -> Result<HashMap<String, Arc<dyn EgressUdpConnector>>> {
     let mut connectors = HashMap::new();
     for desc in descriptors {
@@ -2292,6 +2304,117 @@ fn build_udp_connectors(
             // 连接器，关联即静默丢弃——不再被 scan_udp_capability 判负，广告/
             // 黑名单目标可拦截 UDP 流而不阻塞整机构建。
             EgressConfig::Reject => Some(Arc::new(seep_core::udp::RejectUdpConnector)),
+            EgressConfig::Vmess {
+                server,
+                port,
+                uuid,
+                alter_id,
+                security,
+                network,
+                path,
+                host,
+                grpc_service_name,
+                tls,
+                skip_cert_verify,
+                sni,
+                alpn,
+                tls_fingerprint,
+            } if network == "tcp" => {
+                // 仅 network=tcp 支持 UDP 面（G0-4）；ws/grpc/h2 → None 判负。
+                // 复用 TCP 面构建期校验（security/alter_id/network 白名单）。
+                let conn = VmessConnector::new(
+                    server.clone(),
+                    *port,
+                    uuid.clone(),
+                    *alter_id,
+                    VmessSecurity::parse(security)?,
+                    network.clone(),
+                    path.clone(),
+                    host.clone(),
+                    grpc_service_name.clone(),
+                    *tls,
+                    *skip_cert_verify,
+                    sni.clone(),
+                    alpn.clone(),
+                    parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
+                    transport_pool.clone(),
+                    tls_factory.clone(),
+                );
+                Some(Arc::new(VmessUdpConnector::from_connector(&conn)))
+            }
+            EgressConfig::Vless {
+                server,
+                port,
+                uuid,
+                flow,
+                network,
+                path,
+                host,
+                grpc_service_name,
+                tls,
+                skip_cert_verify,
+                sni,
+                alpn,
+                tls_fingerprint,
+            } if network == "tcp" => {
+                // flow（xtls-rprx-vision）不适用 UDP（command 0x02 无流控）：
+                // 与 TCP 面一致，构建期判负（错误含节点名）。
+                if flow.is_some() {
+                    return Err(anyhow!(
+                        "VLESS 暂不支持 flow（例如 xtls-rprx-vision），请设置为 null/省略 (egress={})",
+                        desc.name
+                    ));
+                }
+                let conn = VlessConnector::new(
+                    server.clone(),
+                    *port,
+                    uuid.clone(),
+                    flow.clone(),
+                    network.clone(),
+                    path.clone(),
+                    host.clone(),
+                    grpc_service_name.clone(),
+                    *tls,
+                    *skip_cert_verify,
+                    sni.clone(),
+                    alpn.clone(),
+                    parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
+                    transport_pool.clone(),
+                    tls_factory.clone(),
+                );
+                Some(Arc::new(VlessUdpConnector::from_connector(&conn)))
+            }
+            EgressConfig::Trojan {
+                server,
+                port,
+                password,
+                network,
+                path,
+                host,
+                grpc_service_name,
+                tls,
+                skip_cert_verify,
+                sni,
+                tls_fingerprint,
+                ..
+            } if network == "tcp" && *tls => {
+                // Trojan 恒叠 TLS；仅 network=tcp 支持 UDP 面（G0-4）。
+                let conn = TrojanConnector::new(
+                    server.clone(),
+                    *port,
+                    password.clone(),
+                    sni.clone(),
+                    *skip_cert_verify,
+                    parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
+                    network.clone(),
+                    path.clone(),
+                    host.clone(),
+                    grpc_service_name.clone(),
+                    transport_pool.clone(),
+                    tls_factory.clone(),
+                );
+                Some(Arc::new(TrojanUdpConnector::from_connector(&conn)))
+            }
             _ => None,
         };
         if let Some(c) = connector {
@@ -2363,7 +2486,7 @@ fn scan_udp_capability(
         anyhow::bail!(
             "udp.enabled 但以下出站节点不支持 UDP 转发（udp-relay-path.md §3.1 能力表）:\n\
              {detail}\n\
-             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard / reject（hysteria2 归 V2，载具 quinn 未决）\n\
+             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard / reject / vmess / vless / trojan（均仅 network=tcp；hysteria2 归 V2，载具 quinn 未决）\n\
              请更换这些节点的出站类型，或将 udp.enabled 关闭并移除 UDP 相关规则"
         );
     }
@@ -4576,6 +4699,23 @@ mod tests {
         }
     }
 
+    fn trojan_spec() -> EgressConfig {
+        EgressConfig::Trojan {
+            server: "127.0.0.1".into(),
+            port: 443,
+            password: "x".into(),
+            network: "tcp".into(),
+            path: None,
+            host: None,
+            grpc_service_name: None,
+            tls: true,
+            skip_cert_verify: false,
+            sni: None,
+            alpn: None,
+            tls_fingerprint: None,
+        }
+    }
+
     fn vless_spec() -> EgressConfig {
         EgressConfig::Vless {
             server: "127.0.0.1".into(),
@@ -4620,19 +4760,31 @@ mod tests {
 
     #[test]
     fn udp_capability_scan_passes_when_all_reachable_are_capable() {
+        // G0-4：vmess/vless/trojan（network=tcp）入能力表
         let egress = vec![
             node("direct-out", EgressConfig::Direct),
             node("ss-out", ss_spec()),
+            node("vm-out", vmess_spec()),
+            node("vl-out", vless_spec()),
+            node("tj-out", trojan_spec()),
         ];
-        let connectors = build_udp_connectors(&egress).unwrap();
+        let connectors = build_udp_connectors(&egress, None, None).unwrap();
         let routing = RoutingConfig {
             default_node: "direct-out".into(),
-            groups: vec![group("g", &[("ss-out", 1), ("direct-out", 1)])],
-            rules: vec![rule("r1", "g")],
+            groups: vec![group(
+                "g",
+                &[
+                    ("ss-out", 1),
+                    ("direct-out", 1),
+                    ("vm-out", 1),
+                    ("vl-out", 1),
+                ],
+            )],
+            rules: vec![rule("r1", "g"), rule("r2", "tj-out")],
             ..Default::default()
         };
         assert!(scan_udp_capability(&routing, &egress, &connectors).is_ok());
-        assert_eq!(connectors.len(), 2);
+        assert_eq!(connectors.len(), 5);
     }
 
     /// G0-5 UDP 面（审核发现 2026-11-04）：reject 出口注册为 UDP 连接器
@@ -4644,7 +4796,7 @@ mod tests {
             node("block-ads", EgressConfig::Reject),
             node("direct-out", EgressConfig::Direct),
         ];
-        let connectors = build_udp_connectors(&egress).unwrap();
+        let connectors = build_udp_connectors(&egress, None, None).unwrap();
         assert!(connectors.contains_key("block-ads"), "reject 应注册连接器");
         let routing = RoutingConfig {
             default_node: "direct-out".into(),
@@ -4660,9 +4812,14 @@ mod tests {
 
     #[test]
     fn udp_capability_scan_fails_listing_offending_nodes_and_sources() {
-        // default_node=vmess（无能力）+ rule target 指向 hy2（无能力）
+        // default_node=vmess-ws（network=ws 无 UDP 面）+ rule target 指向
+        // hy2（V2，quinn 未决）
+        let mut vmess_ws = vmess_spec();
+        if let EgressConfig::Vmess { network, .. } = &mut vmess_ws {
+            *network = "ws".into();
+        }
         let egress = vec![
-            node("vmess-out", vmess_spec()),
+            node("vmess-ws", vmess_ws),
             node(
                 "hy2-out",
                 EgressConfig::Hysteria2 {
@@ -4678,10 +4835,10 @@ mod tests {
                 },
             ),
         ];
-        let connectors = build_udp_connectors(&egress).unwrap();
-        assert!(connectors.is_empty(), "vmess/hy2 均不产 UDP 连接器");
+        let connectors = build_udp_connectors(&egress, None, None).unwrap();
+        assert!(connectors.is_empty(), "vmess-ws/hy2 均不产 UDP 连接器");
         let routing = RoutingConfig {
-            default_node: "vmess-out".into(),
+            default_node: "vmess-ws".into(),
             groups: vec![group("g", &[("hy2-out", 1)])],
             rules: vec![rule("r1", "g")],
             ..Default::default()
@@ -4689,7 +4846,7 @@ mod tests {
         let err = scan_udp_capability(&routing, &egress, &connectors)
             .expect_err("UDP 不可达节点应使构建失败");
         let msg = format!("{err:#}");
-        assert!(msg.contains("vmess-out"), "应点名 vmess-out: {msg}");
+        assert!(msg.contains("vmess-ws"), "应点名 vmess-ws: {msg}");
         assert!(
             msg.contains("default_node"),
             "应标注来源 default_node: {msg}"
@@ -4705,7 +4862,7 @@ mod tests {
     fn udp_capability_scan_skips_non_egress_targets() {
         // 规则目标指向 mesh 节点（非本配置出站节点）→ 不报错
         let egress = vec![node("ss-out", ss_spec())];
-        let connectors = build_udp_connectors(&egress).unwrap();
+        let connectors = build_udp_connectors(&egress, None, None).unwrap();
         let routing = RoutingConfig {
             default_node: "ss-out".into(),
             groups: vec![],
@@ -4720,7 +4877,7 @@ mod tests {
     #[test]
     fn udp_capability_scan_terminates_on_group_cycle() {
         let egress = vec![node("direct-out", EgressConfig::Direct)];
-        let connectors = build_udp_connectors(&egress).unwrap();
+        let connectors = build_udp_connectors(&egress, None, None).unwrap();
         let g1 = PolicyGroup {
             name: "g1".into(),
             strategy: Strategy::Weighted,
@@ -4750,11 +4907,14 @@ mod tests {
             .expect("组环应正常扫描（direct-out 有 UDP 能力）");
     }
 
+    /// G0-4：vmess/vless/trojan 仅 network=tcp 注册 UDP 连接器；ws/grpc/h2
+    /// 与 hysteria2 静默跳过（由能力扫描兜底报错）。
     #[test]
     fn udp_build_connectors_skips_unsupported_kinds() {
         let egress = vec![
             node("d", EgressConfig::Direct),
             node("v", vmess_spec()),
+            node("vl", vless_spec()),
             node(
                 "t",
                 EgressConfig::Trojan {
@@ -4773,10 +4933,21 @@ mod tests {
                 },
             ),
         ];
-        let connectors = build_udp_connectors(&egress).unwrap();
-        // 只有 direct 产连接器；vmess/trojan 静默跳过（由能力扫描兜底报错）
-        assert_eq!(connectors.len(), 1);
+        let connectors = build_udp_connectors(&egress, None, None).unwrap();
+        assert_eq!(connectors.len(), 4, "direct/vmess/vless/trojan(tcp) 全注册");
         assert!(connectors.contains_key("d"));
+        assert!(connectors.contains_key("v"));
+        assert!(connectors.contains_key("vl"));
+        assert!(connectors.contains_key("t"));
+
+        // network=ws 的 vmess 不注册（UDP 面未实现）
+        let mut vmess_ws = vmess_spec();
+        if let EgressConfig::Vmess { network, .. } = &mut vmess_ws {
+            *network = "ws".into();
+        }
+        let egress = vec![node("v-ws", vmess_ws)];
+        let connectors = build_udp_connectors(&egress, None, None).unwrap();
+        assert!(connectors.is_empty(), "vmess ws 不应有 UDP 连接器");
     }
 
     // ---------- P0-5 §10-S2 运行时接线 ----------

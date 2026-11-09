@@ -85,8 +85,8 @@ RFC 1928：TCP 控制连接终止，服务器应结束该关联。落地：
 | `Shadowsocks` | 是（`plugin` 字段非空时**判负**：SIP003 插件仅定义 TCP 数据面，插件模式该节点 UDP 需求由本扫描构建期报错，2026-10-07） | crate UDP relay（§3.3） |
 | `Hysteria2` | 是（以 V1 核查为前提） | QUIC 数据报（§3.4） |
 | `WireGuard` | 是 | IP 包封装（§3.5） |
-| `Socks5` / `Http` / `Trojan` / `Vless` | 否（S1 范围外，udp-dataplane.md §3.5） | 构建期报错 |
-| `Vmess` | 否（TCP 连接器已落地 2026-10-02；UDP 承载未实现，构建期扫描即报错） | 同上 |
+| `Socks5` / `Http` | 否（S1 范围外，udp-dataplane.md §3.5） | 构建期报错 |
+| `Vmess` / `Vless` / `Trojan` | 是（**G0-4，2026-11-09**；仅 `network=tcp`——ws/grpc/h2 载具仍判负、构建期扫描报错；`Vless.flow` 构建期拒；Trojan 恒叠 TLS） | TCP 隧道 ASSOCIATE：VMess 命令 0x02 每数据报一块，VLESS 命令 0x02 `[2B len][payload]` 帧（xray `MultiLengthPacketWriter`），Trojan 命令 0x03 UDP ASSOCIATE 逐报 `[ATYP][ADDR][PORT][LEN][CRLF][payload]`、无应答头（trojan-gfw protocol.md） |
 
 - `RuntimeBuilder` 构建期：对 `routing.rules`/`default_node`/组 `members` 可达的全部出站求 UDP 能力闭包；UDP 流量可达但无 UDP 能力的节点 → **启动失败**，错误信息逐个列出节点名与规则来源（todo P0-3 验收"构建期明确报错"）；
 - mesh 目标（`mesh.*`）不在本表，P0-4 另行处理（udp-dataplane.md §4）。

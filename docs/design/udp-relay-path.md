@@ -85,8 +85,8 @@ A second ASSOCIATE from the same `client (ip, port)`: the MVP **refuses** (reply
 | `Shadowsocks` | yes (**judged no** when the `plugin` field is non-empty: the SIP003 plugin only defines a TCP data plane; for plugin mode, this scan errors at build time on that node's UDP needs, 2026-10-07) | crate UDP relay (§3.3) |
 | `Hysteria2` | yes (premised on the V1 check) | QUIC datagrams (§3.4) |
 | `WireGuard` | yes | IP packet encapsulation (§3.5) |
-| `Socks5` / `Http` / `Trojan` / `Vless` | no (out of S1 scope, udp-dataplane.md §3.5) | build-time error |
-| `Vmess` | no (the TCP connector landed 2026-10-02; the UDP underlay is not implemented, and the build-time scan errors immediately) | same as above |
+| `Socks5` / `Http` | no (out of S1 scope, udp-dataplane.md §3.5) | build-time error |
+| `Vmess` / `Vless` / `Trojan` | yes (**G0-4, 2026-11-09**; `network=tcp` only -- ws/grpc/h2 transports stay judged no and scan errors at build time; `Vless.flow` is rejected at build time; Trojan always layers TLS) | TCP-tunnel ASSOCIATE: VMess command 0x02 one-chunk-per-datagram, VLESS command 0x02 `[2B len][payload]` frames (xray `MultiLengthPacketWriter`), Trojan command 0x03 UDP ASSOCIATE `[ATYP][ADDR][PORT][LEN][CRLF][payload]` per datagram, no response header (trojan-gfw protocol.md) |
 
 - At `RuntimeBuilder` build time: compute the UDP capability closure over all egress nodes reachable from `routing.rules`/`default_node`/group `members`; a node that UDP traffic can reach but which has no UDP capability → **startup fails**, and the error lists each node name and rule source (todo P0-3 acceptance "clear error at build time");
 - mesh targets (`mesh.*`) are not in this table; P0-4 handles them separately (udp-dataplane.md §4).

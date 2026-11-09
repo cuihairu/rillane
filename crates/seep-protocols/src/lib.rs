@@ -26,8 +26,9 @@ pub use inbound::{HttpIngress, MixedIngress, Socks5Ingress};
 pub use middleware::LatencyProbe;
 pub use outbound::{
     DirectConnector, HttpConnector, Hysteria2Connector, ShadowsocksConnector,
-    ShadowsocksUdpConnector, Socks5Connector, TrojanConnector, VlessConnector, VmessConnector,
-    VmessSecurity, WireguardConnector, WireguardUdpConnector,
+    ShadowsocksUdpConnector, Socks5Connector, TrojanConnector, TrojanUdpConnector, VlessConnector,
+    VlessUdpConnector, VmessConnector, VmessSecurity, VmessUdpConnector, WireguardConnector,
+    WireguardUdpConnector,
 };
 pub use pool::{
     BoxedIo, KeySnapshot, LeaseGuard, MockPoolClock, PoolClock, PoolPolicy, PoolSnapshot,

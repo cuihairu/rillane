@@ -1,13 +1,18 @@
 //! VLESS 出口连接器实现（TCP/TLS/WS/gRPC）
 
+use std::fmt;
 use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::BytesMut;
-use seep_core::{EgressConnector, Flow, FlowReport, TargetProto};
+use seep_core::udp::{EgressUdpConnector, UdpRelay};
+use seep_core::{
+    BoxedIo, EgressConnector, Flow, FlowContext, FlowReport, FlowTarget, RouteDecision, TargetProto,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use super::grpc::grpc_tunnel;
@@ -16,6 +21,52 @@ use super::ws::{ws_client_handshake, WsClient};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
 use crate::tls::{create_tls_connector_with_profile, TlsConnectorFactory};
+
+/// 请求头字节（TCP/UDP 共用，G0-4）：Version(0x00) + UUID + OptLen(0) +
+/// Command（0x01 TCP / 0x02 UDP，xray RequestCommand）+ Port(BE) + Address。
+fn build_vless_request_bytes(
+    uuid: [u8; 16],
+    target_host: &str,
+    target_port: u16,
+    command: u8,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(64 + target_host.len());
+
+    // Version
+    out.push(0x00);
+    // UUID
+    out.extend_from_slice(&uuid);
+    // OptLen = 0
+    out.push(0x00);
+    // Command: 0x01 TCP / 0x02 UDP
+    out.push(command);
+    // Port (BE)
+    out.extend_from_slice(&target_port.to_be_bytes());
+
+    // Address
+    if let Ok(ip) = target_host.parse::<IpAddr>() {
+        match ip {
+            IpAddr::V4(v4) => {
+                out.push(0x01);
+                out.extend_from_slice(&v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                out.push(0x04);
+                out.extend_from_slice(&v6.octets());
+            }
+        }
+    } else {
+        let host_bytes = target_host.as_bytes();
+        if host_bytes.len() > 255 {
+            return Err(anyhow!("目标域名过长（>255）"));
+        }
+        out.push(0x03);
+        out.push(host_bytes.len() as u8);
+        out.extend_from_slice(host_bytes);
+    }
+
+    Ok(out)
+}
 
 pub struct VlessConnector {
     server: String,
@@ -134,43 +185,7 @@ impl VlessConnector {
     }
 
     fn build_vless_tcp_request(&self, target_host: &str, target_port: u16) -> Result<Vec<u8>> {
-        let uuid = self.uuid_bytes()?;
-        let mut out = Vec::with_capacity(64 + target_host.len());
-
-        // Version
-        out.push(0x00);
-        // UUID
-        out.extend_from_slice(&uuid);
-        // OptLen = 0
-        out.push(0x00);
-        // Command: TCP = 0x01
-        out.push(0x01);
-        // Port (BE)
-        out.extend_from_slice(&target_port.to_be_bytes());
-
-        // Address
-        if let Ok(ip) = target_host.parse::<IpAddr>() {
-            match ip {
-                IpAddr::V4(v4) => {
-                    out.push(0x01);
-                    out.extend_from_slice(&v4.octets());
-                }
-                IpAddr::V6(v6) => {
-                    out.push(0x04);
-                    out.extend_from_slice(&v6.octets());
-                }
-            }
-        } else {
-            let host_bytes = target_host.as_bytes();
-            if host_bytes.len() > 255 {
-                return Err(anyhow!("目标域名过长（>255）"));
-            }
-            out.push(0x03);
-            out.push(host_bytes.len() as u8);
-            out.extend_from_slice(host_bytes);
-        }
-
-        Ok(out)
+        build_vless_request_bytes(self.uuid_bytes()?, target_host, target_port, 0x01)
     }
 
     async fn read_vless_response_header<S: AsyncRead + Unpin + ?Sized>(
@@ -583,6 +598,167 @@ impl VlessConnector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// UDP 数据面（G0-4）：command 0x02 + 每报 [2B BE len][payload]
+// ---------------------------------------------------------------------------
+
+/// VLESS 明文/TLS over tcp 传输上的 UDP 出站连接器（udp-relay-path.md §3.1
+/// 能力表扩展）。数据面 = xray vless `MultiLengthPacketWriter`/`LengthPacketReader`
+/// （proxy/vless/encoding/addons.go）：每个 UDP 数据报 = [2B BE 载荷长度][载荷]，
+/// 单目标单连接（会话目标即请求头目标）。
+///
+/// 仅 network=tcp 注册（ws/grpc/h2 与 flow=XTLS-Vision 的 UDP 面构建期由
+/// scan_udp_capability 判负）。
+pub struct VlessUdpConnector {
+    server: String,
+    port: u16,
+    uuid: String,
+    flow: Option<String>,
+    tls: bool,
+    skip_cert_verify: bool,
+    sni: Option<String>,
+    alpn: Option<Vec<String>>,
+    fingerprint: TlsFingerprint,
+    factory: Option<Arc<TlsConnectorFactory>>,
+}
+
+impl VlessUdpConnector {
+    /// 从已校验的 TCP 连接器复用节点配置（保证 UDP 面与 TCP 面同一份配置）
+    pub fn from_connector(conn: &VlessConnector) -> Self {
+        Self {
+            server: conn.server.clone(),
+            port: conn.port,
+            uuid: conn.uuid.clone(),
+            flow: conn.flow.clone(),
+            tls: conn.tls,
+            skip_cert_verify: conn.skip_cert_verify,
+            sni: conn.sni.clone(),
+            alpn: conn.alpn.clone(),
+            fingerprint: conn.fingerprint,
+            factory: conn.factory.clone(),
+        }
+    }
+
+    fn server_addr(&self) -> String {
+        format!("{}:{}", self.server, self.port)
+    }
+
+    /// 建立明文/TLS over tcp 的 boxed 传输（UDP 长连，不走连接池）
+    async fn open_transport(&self) -> Result<BoxedIo> {
+        let tcp = seep_core::net_mark::connect_tcp(self.server_addr())
+            .await
+            .with_context(|| format!("连接 VLESS 服务器失败: {}", self.server_addr()))?;
+        let _ = tcp.set_nodelay(true);
+        if !self.tls {
+            return Ok(Box::new(tcp));
+        }
+        let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
+        let connector = match &self.factory {
+            Some(f) => f.connector(
+                self.skip_cert_verify,
+                self.alpn.as_deref().unwrap_or(&[]),
+                self.fingerprint,
+            )?,
+            None => create_tls_connector_with_profile(
+                self.skip_cert_verify,
+                self.alpn.as_deref(),
+                self.fingerprint,
+            )?,
+        };
+        let server_name = rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+        Ok(Box::new(connector.connect(server_name, tcp).await?))
+    }
+}
+
+#[async_trait]
+impl EgressUdpConnector for VlessUdpConnector {
+    fn name(&self) -> &str {
+        "vless"
+    }
+
+    async fn associate(
+        &self,
+        ctx: FlowContext,
+        _decision: &RouteDecision,
+    ) -> Result<Arc<dyn UdpRelay>> {
+        if self.flow.is_some() {
+            return Err(anyhow!(
+                "VLESS UDP 暂不支持 flow（例如 xtls-rprx-vision），请设置为 null/省略"
+            ));
+        }
+        let mut stream = self.open_transport().await?;
+        let req = self.build_vless_udp_request(&ctx.target.host, ctx.target.port)?;
+        stream.write_all(&req).await?;
+        stream.flush().await?;
+        let (mut rr, ww) = tokio::io::split(stream);
+        VlessConnector::read_vless_response_header(&mut rr).await?;
+        Ok(Arc::new(VlessUdpRelay {
+            reader: AsyncMutex::new(rr),
+            writer: AsyncMutex::new(ww),
+            target: ctx.target,
+        }))
+    }
+}
+
+impl VlessUdpConnector {
+    /// UDP 请求（G0-4）：command 0x02（xray vless RequestCommandUDP）
+    fn build_vless_udp_request(&self, target_host: &str, target_port: u16) -> Result<Vec<u8>> {
+        build_vless_request_bytes(self.uuid_bytes()?, target_host, target_port, 0x02)
+    }
+
+    fn uuid_bytes(&self) -> Result<[u8; 16]> {
+        let id = Uuid::parse_str(self.uuid.trim()).context("无效的 VLESS uuid")?;
+        Ok(*id.as_bytes())
+    }
+}
+
+/// 字节级 VLESS UDP relay（G0-4）：每报 [2B BE len][payload]。
+/// send/recv 分属 forward_up/forwarder 两任务，读写半各持 tokio Mutex。
+struct VlessUdpRelay {
+    reader: AsyncMutex<tokio::io::ReadHalf<BoxedIo>>,
+    writer: AsyncMutex<tokio::io::WriteHalf<BoxedIo>>,
+    /// 会话绑定的目标（VLESS 明文 UDP 单目标/单连接，映射目标即此）
+    target: FlowTarget,
+}
+
+#[async_trait]
+impl UdpRelay for VlessUdpRelay {
+    async fn send_to(&self, _target: &FlowTarget, buf: &[u8]) -> Result<()> {
+        let mut w = self.writer.lock().await;
+        if buf.len() > u16::MAX as usize {
+            return Err(anyhow!("VLESS UDP 数据报过大（>65535）"));
+        }
+        let len = buf.len() as u16;
+        w.write_all(&len.to_be_bytes()).await?;
+        w.write_all(buf).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> Result<(FlowTarget, usize)> {
+        let mut r = self.reader.lock().await;
+        let mut len_b = [0u8; 2];
+        r.read_exact(&mut len_b).await?;
+        let len = u16::from_be_bytes(len_b) as usize;
+        let n = len.min(buf.len());
+        r.read_exact(&mut buf[..n]).await?;
+        // 上游长度超出调用方缓冲：丢弃余量，保流对齐
+        if len > n {
+            let mut skip = vec![0u8; len - n];
+            r.read_exact(&mut skip).await?;
+        }
+        Ok((self.target.clone(), n))
+    }
+}
+
+impl fmt::Debug for VlessUdpRelay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VlessUdpRelay")
+            .field("target", &self.target)
+            .finish()
+    }
+}
+
 impl VlessConnector {
     async fn forward_vless_over_ws<S>(
         &self,
@@ -739,5 +915,152 @@ impl VlessConnector {
             upstream: up,
             downstream: down,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seep_core::{FlowId, FlowMetadata, RouteDecision, TargetProto};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const TEST_UUID: &str = "b831381d-6324-4d2a-b1e7-1bf75a1db7b3";
+
+    fn test_connector(port: u16) -> VlessConnector {
+        VlessConnector::new(
+            "127.0.0.1".to_string(),
+            port,
+            TEST_UUID.to_string(),
+            None,
+            "tcp".to_string(),
+            None,
+            None,
+            None,
+            false, // tls
+            false,
+            None,
+            None,
+            TlsFingerprint::None,
+            None,
+            None,
+        )
+    }
+
+    fn test_ctx() -> (FlowContext, RouteDecision) {
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "example.com".to_string(),
+                port: 443,
+                proto: TargetProto::Udp,
+            },
+            metadata: FlowMetadata::default(),
+        };
+        let decision = RouteDecision::direct("test".to_string());
+        (ctx, decision)
+    }
+
+    /// 读取 VLESS 请求头（version + uuid + opt + cmd + port + address），返回
+    /// (uuid, command, host, port)。校验 version=0、optlen=0。
+    async fn parse_vless_request<S>(stream: &mut S) -> Result<([u8; 16], u8, String, u16)>
+    where
+        S: AsyncRead + Unpin,
+    {
+        let mut ver = [0u8; 1];
+        stream.read_exact(&mut ver).await?;
+        assert_eq!(ver[0], 0x00, "VLESS 请求版本应为 0");
+        let mut uuid = [0u8; 16];
+        stream.read_exact(&mut uuid).await?;
+        let mut optlen = [0u8; 1];
+        stream.read_exact(&mut optlen).await?;
+        assert_eq!(optlen[0], 0x00, "VLESS 请求 OptLen 应为 0");
+        let mut cmd = [0u8; 1];
+        stream.read_exact(&mut cmd).await?;
+        let mut port_b = [0u8; 2];
+        stream.read_exact(&mut port_b).await?;
+        let port = u16::from_be_bytes(port_b);
+        let mut atyp = [0u8; 1];
+        stream.read_exact(&mut atyp).await?;
+        let host = match atyp[0] {
+            0x01 => {
+                let mut b = [0u8; 4];
+                stream.read_exact(&mut b).await?;
+                std::net::Ipv4Addr::from(b).to_string()
+            }
+            0x04 => {
+                let mut b = [0u8; 16];
+                stream.read_exact(&mut b).await?;
+                std::net::Ipv6Addr::from(b).to_string()
+            }
+            0x03 => {
+                let mut l = [0u8; 1];
+                stream.read_exact(&mut l).await?;
+                let mut h = vec![0u8; l[0] as usize];
+                stream.read_exact(&mut h).await?;
+                String::from_utf8_lossy(&h).into_owned()
+            }
+            other => anyhow::bail!("VLESS 未知地址类型: {other}"),
+        };
+        Ok((uuid, cmd[0], host, port))
+    }
+
+    /// VLESS UDP 回环服务端（G0-4）：断言命令 0x02 + 目标；应答头
+    /// [0x00][0x00]；逐报 [2B len][payload] echo（rounds 次）。
+    async fn serve_vless_udp<S>(mut stream: S, rounds: usize) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let (uuid, cmd, host, port) = parse_vless_request(&mut stream).await?;
+        assert_eq!(cmd, 0x02, "VLESS UDP 请求命令应为 0x02");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 443);
+        let expect_uuid: [u8; 16] = *Uuid::parse_str(TEST_UUID).unwrap().as_bytes();
+        assert_eq!(uuid, expect_uuid, "UUID 不匹配");
+
+        // 响应头：version=0 + optlen=0
+        stream.write_all(&[0x00, 0x00]).await?;
+        stream.flush().await?;
+
+        for _ in 0..rounds {
+            let mut len_b = [0u8; 2];
+            stream.read_exact(&mut len_b).await?;
+            let len = u16::from_be_bytes(len_b) as usize;
+            let mut payload = vec![0u8; len];
+            stream.read_exact(&mut payload).await?;
+            stream.write_all(&len_b).await?;
+            stream.write_all(&payload).await?;
+            stream.flush().await?;
+        }
+        Ok(())
+    }
+
+    /// G0-4：VLESS 明文 UDP 回环（command 0x02，[2B len][payload] 帧）。
+    #[tokio::test]
+    async fn udp_loopback_command_02() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        const ROUNDS: usize = 2;
+        tokio::spawn(async move {
+            let (st, _) = listener.accept().await.unwrap();
+            if let Err(e) = serve_vless_udp(st, ROUNDS).await {
+                eprintln!("测试服务端错误: {e:#}");
+            }
+        });
+
+        let connector = VlessUdpConnector::from_connector(&test_connector(port));
+        let (ctx, decision) = test_ctx();
+        let relay = connector.associate(ctx.clone(), &decision).await.unwrap();
+
+        let msgs: Vec<Vec<u8>> = vec![b"hello udp vless".to_vec(), vec![5u8; 20 * 1024]];
+        for m in &msgs {
+            relay.send_to(&ctx.target, m).await.unwrap();
+            let mut buf = vec![0u8; m.len() + 64];
+            let (tgt, n) = relay.recv_from(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], &m[..], "VLESS UDP 回环载荷不一致");
+            assert_eq!(tgt.host, "example.com");
+            assert_eq!(tgt.port, 443);
+            assert_eq!(tgt.proto, TargetProto::Udp);
+        }
     }
 }
