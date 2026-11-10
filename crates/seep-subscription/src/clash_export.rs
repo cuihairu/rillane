@@ -160,7 +160,7 @@ fn proxy_mapping(
             report
                 .skipped
                 .push(format!("出口 {name}：reject 无 Clash 对应，跳过"));
-            return None;
+            None
         }
         EgressConfig::Direct => None,
         EgressConfig::Socks5 {

@@ -353,10 +353,11 @@ impl HotReloadManager {
 
     /// 处理重载事件
     async fn handle_reload_events(&self) {
-        let mut reload_rx = match {
+        let taken = {
             let mut rx_guard = self.reload_rx.write().expect("reload_rx lock poisoned");
             rx_guard.take()
-        } {
+        };
+        let mut reload_rx = match taken {
             Some(rx) => rx,
             // 二次 start() 或外部 take_reload_rx 已取走——该任务无事可做，
             // 静默返回（原 expect 在双启动时 panic；事件处理单属首启动）。

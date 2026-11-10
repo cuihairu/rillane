@@ -42,6 +42,7 @@ pub struct GeoSiteDb {
     groups: std::collections::HashMap<String, GeoSiteGroup>,
 }
 
+#[derive(Default)]
 pub struct GeoSiteGroup {
     pub plains: Vec<String>,
     pub domains: Vec<GeoSiteDomain>,
@@ -183,17 +184,6 @@ impl GeoDatabases {
             }
         }
         Some(GeoSiteDb { groups })
-    }
-}
-
-impl Default for GeoSiteGroup {
-    fn default() -> Self {
-        Self {
-            plains: Vec::new(),
-            domains: Vec::new(),
-            fulls: Vec::new(),
-            regexes: Vec::new(),
-        }
     }
 }
 

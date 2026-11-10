@@ -1966,7 +1966,6 @@ mod tests {
             ],
             geoip_db: Some(mmdb_path.clone()),
             geosite_db: Some(dat_path.clone()),
-            ..Default::default()
         });
 
         async fn route_to(engine: &RoutingEngine, host: &str) -> String {
@@ -2121,7 +2120,6 @@ mod tests {
             }],
             geoip_db: Some(mmdb_path.clone()),
             geosite_db: None,
-            ..Default::default()
         });
         let ctx = FlowContext {
             id: FlowId::new(),

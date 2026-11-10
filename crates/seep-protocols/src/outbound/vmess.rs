@@ -325,6 +325,7 @@ fn unix_now() -> Result<i64> {
 /// [port BE16][地址][padding][FNV1a32 BE]
 ///
 /// `command`：RequestCommand 字节（0x01 TCP / 0x02 UDP，xray headers.go 口径）
+#[allow(clippy::too_many_arguments)]
 fn build_request_header_bytes(
     req_iv: &[u8; 16],
     req_key: &[u8; 16],

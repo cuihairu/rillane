@@ -4010,7 +4010,7 @@ mod tests {
         let good_target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let good_target_addr = good_target.local_addr().unwrap();
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let from = client.local_addr().unwrap();
+        let _from = client.local_addr().unwrap();
         // bad-host FULL：DNS 解析失败/超时 → handle_udp_datagram 返回 Err → serve 丢弃。
         let bad = UdpEnvelope {
             version: UDP_ENVELOPE_VERSION,

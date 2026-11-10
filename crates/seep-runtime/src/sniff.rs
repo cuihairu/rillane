@@ -341,7 +341,7 @@ fn aes128gcm_decrypt(
     let cipher = Aes128Gcm::new_from_slice(key).ok()?;
     cipher
         .decrypt(
-            GenericArray::from_slice(nonce).into(),
+            GenericArray::from_slice(nonce),
             Payload {
                 msg: ciphertext,
                 aad,
@@ -708,7 +708,7 @@ pub(crate) mod tests {
         let cipher = Aes128Gcm::new_from_slice(&key).unwrap();
         let mut ciphertext = cipher
             .encrypt(
-                GenericArray::from_slice(&nonce).into(),
+                GenericArray::from_slice(&nonce),
                 Payload {
                     msg: &payload,
                     aad: &header,
@@ -720,8 +720,7 @@ pub(crate) mod tests {
         let pn_pos = packet.len() - 1; // PN 位于 header 末尾（append 前）
         packet.append(&mut ciphertext);
         let sample = packet[pn_pos + 4..pn_pos + 20].to_vec();
-        let mask =
-            aes_ecb_encrypt_block(&hp.try_into().unwrap(), &sample.try_into().unwrap()).unwrap();
+        let mask = aes_ecb_encrypt_block(&hp, &sample.try_into().unwrap()).unwrap();
         packet[0] ^= mask[0] & 0x0f;
         for n in 0..pn_len {
             packet[pn_pos + n] ^= mask[1 + n];

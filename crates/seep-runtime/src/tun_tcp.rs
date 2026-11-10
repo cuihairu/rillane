@@ -766,7 +766,7 @@ mod tests {
     #[tokio::test]
     async fn peek_socket_returns_data_without_consuming() {
         use std::pin::pin;
-        use tokio::io::{AsyncRead, AsyncReadExt};
+        use tokio::io::AsyncReadExt;
 
         let stack = Arc::new(TunTcpStack::new(None, 1500));
         let key = TcpFlowKey {

@@ -275,7 +275,7 @@ fn dns_block_encrypted_upstream_forms() {
     )
     .expect("三形态应解析");
     cfg.validate().expect("三形态应过 validate");
-    assert!(cfg.tls_skip_verify == false, "缺省不跳过证书校验");
+    assert!(!cfg.tls_skip_verify, "缺省不跳过证书校验");
 
     let cfg: DnsBlockConfig =
         serde_yaml::from_str("enabled: true\ntrusted: ['tls://h:0']\ndefault_group: trusted\n")

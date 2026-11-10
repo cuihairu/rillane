@@ -45,7 +45,7 @@ pub fn decide_shaping_offset(spec: &ShapingSpec, flow_id: &FlowId, k: u64) -> u6
         // jitter_ms=u64::MAX 时 +1 裹 0 → % 0 panic（validate 允许
         // jitter_ms=interval_ms=u64::MAX）；checked_add 满值截断为
         // % u64::MAX，域 [0, u64::MAX-1]，语义不变且无 panic。
-        range_hash(flow_id, k) % spec.jitter_ms.checked_add(1).unwrap_or(u64::MAX)
+        range_hash(flow_id, k) % spec.jitter_ms.saturating_add(1)
     };
     // k×interval + jitter 可能溢（interval/jitter 允许 u64::MAX）；饱和加再
     // 截断，域有界且不 panic。

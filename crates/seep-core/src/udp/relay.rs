@@ -298,6 +298,24 @@ impl fmt::Debug for MockUdpRelay {
     }
 }
 
+/// 出站 UDP 连接器（udp-dataplane.md §1.2 / udp-relay-path.md §3）。
+/// 每次关联一个目标；实现方保证不缓存可跨目标复用的状态。
+#[async_trait]
+pub trait EgressUdpConnector: Send + Sync {
+    fn name(&self) -> &str;
+    /// UDP 能力标记：能力表扫描（udp-relay-path.md §3.1）构建期使用
+    fn udp_capable(&self) -> bool {
+        true
+    }
+    /// 关联一个出站 relay；`decision` 为会话的粘滞路由决策（relay-path §3.4），
+    /// 实现方按其最终节点选承载，不重新路由（粘滞语义）
+    async fn associate(
+        &self,
+        ctx: FlowContext,
+        decision: &RouteDecision,
+    ) -> Result<Arc<dyn UdpRelay>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,22 +364,4 @@ mod tests {
         .await;
         assert!(recv.is_err(), "reject 下行应无数据（超时）");
     }
-}
-
-/// 出站 UDP 连接器（udp-dataplane.md §1.2 / udp-relay-path.md §3）。
-/// 每次关联一个目标；实现方保证不缓存可跨目标复用的状态。
-#[async_trait]
-pub trait EgressUdpConnector: Send + Sync {
-    fn name(&self) -> &str;
-    /// UDP 能力标记：能力表扫描（udp-relay-path.md §3.1）构建期使用
-    fn udp_capable(&self) -> bool {
-        true
-    }
-    /// 关联一个出站 relay；`decision` 为会话的粘滞路由决策（relay-path §3.4），
-    /// 实现方按其最终节点选承载，不重新路由（粘滞语义）
-    async fn associate(
-        &self,
-        ctx: FlowContext,
-        decision: &RouteDecision,
-    ) -> Result<Arc<dyn UdpRelay>>;
 }

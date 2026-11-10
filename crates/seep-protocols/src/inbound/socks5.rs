@@ -72,6 +72,7 @@ pub(crate) async fn handle_socks5_stream(
 /// CONNECT 既有路径：构建 Flow 流式转发（行为不变）。
 /// fake-ip 回填（G1-10）：target 为池段 IPv4 时反查原域名改写（DNS 面分配
 /// 的假地址），路由按域名规则命中；原域名记 `dns.fakeip` 注解可观测。
+#[allow(clippy::too_many_arguments)]
 async fn forward_tcp(
     ingress_node_name: &str,
     client_addr: Option<std::net::SocketAddr>,

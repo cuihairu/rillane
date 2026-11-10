@@ -7,7 +7,7 @@ use anyhow::Result;
 use seep_config::{GroupMember, MatchCondition, PolicyGroup, RouteRule, RoutingConfig, Strategy};
 use seep_core::{FlowContext, FlowId, FlowMetadata, FlowRouter, FlowTarget, TargetProto};
 use seep_routing::RoutingEngine;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 
 fn create_test_config() -> RoutingConfig {
     RoutingConfig {

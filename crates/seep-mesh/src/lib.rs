@@ -1293,7 +1293,7 @@ mod tests {
         assert_eq!(stale, vec!["n1".to_string()], "快照应收集超时节点");
 
         // 模拟快照后、写锁前的真实心跳刷新。
-        registry.update_node_health(&"n1".to_string(), 0.5).unwrap();
+        registry.update_node_health("n1", 0.5).unwrap();
 
         // 写锁复检必须看到新 last_seen → 不标记。
         let marked = registry.mark_stale_offline(&stale, ttl);

@@ -711,31 +711,29 @@ impl UdpRelay for TrojanUdpRelay {
         let mut r = self.reader.lock().await;
         let mut atyp = [0u8; 1];
         r.read_exact(&mut atyp).await?;
-        let host;
-        let port: u16;
-        match atyp[0] {
+        let host = match atyp[0] {
             0x01 => {
                 let mut b = [0u8; 4];
                 r.read_exact(&mut b).await?;
-                host = std::net::Ipv4Addr::from(b).to_string();
+                std::net::Ipv4Addr::from(b).to_string()
             }
             0x04 => {
                 let mut b = [0u8; 16];
                 r.read_exact(&mut b).await?;
-                host = std::net::Ipv6Addr::from(b).to_string();
+                std::net::Ipv6Addr::from(b).to_string()
             }
             0x03 => {
                 let mut l = [0u8; 1];
                 r.read_exact(&mut l).await?;
                 let mut h = vec![0u8; l[0] as usize];
                 r.read_exact(&mut h).await?;
-                host = String::from_utf8_lossy(&h).into_owned();
+                String::from_utf8_lossy(&h).into_owned()
             }
             other => return Err(anyhow!("Trojan UDP 未知地址类型: {other}")),
-        }
+        };
         let mut port_b = [0u8; 2];
         r.read_exact(&mut port_b).await?;
-        port = u16::from_be_bytes(port_b);
+        let port = u16::from_be_bytes(port_b);
         let mut len_b = [0u8; 2];
         r.read_exact(&mut len_b).await?;
         let len = u16::from_be_bytes(len_b) as usize;

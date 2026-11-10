@@ -9,7 +9,9 @@
 //! mark ≠ 0 但 `SO_MARK` 设置失败（缺 CAP_NET_ADMIN/非 Linux）→ 降级直连
 //! （warn 一次，行为同缺省——不因逃逸功能自爆启动）。
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use tokio::net::TcpStream;
 

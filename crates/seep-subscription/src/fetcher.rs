@@ -749,7 +749,6 @@ trojan://password@server.com:443#test
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let body = body.to_vec();
-            let chunked = chunked;
             tokio::spawn(async move {
                 if let Ok((mut s, _)) = listener.accept().await {
                     let mut buf = [0u8; 1024];
@@ -766,7 +765,8 @@ trojan://password@server.com:443#test
                     }
                     if chunked {
                         // 单大块（超过 50MiB）→ 流式读体触发 ChunkOverLimit。
-                        let resp = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+                        let resp =
+                            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_string();
                         let _ = s.write_all(resp.as_bytes()).await;
                         let _ = s
                             .write_all(format!("{:X}\r\n", body.len()).as_bytes())
