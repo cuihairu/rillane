@@ -9,9 +9,33 @@ use serde_yaml::Value;
 use tracing::{debug, warn};
 
 use seep_config::{
-    EgressConfig, EgressDescriptor, GroupMember, MatchCondition, PolicyGroup, RouteRule,
-    RoutingConfig, Strategy, UrlTestConfig,
+    EgressConfig, EgressDescriptor, GroupMember, MatchCondition, PolicyGroup, RealityConfig,
+    RouteRule, RoutingConfig, Strategy, UrlTestConfig,
 };
+
+/// reality-opts YAML 块 → `RealityConfig`（G1-6 配置保留面）：键 kebab/snake
+/// 兼容；块缺席 = None；缺 public-key 点名拒绝（无公钥的 REALITY 节点
+/// 不可用且非法，不静默造空）。
+fn reality_from_yaml(value: &Option<Value>, node: &str) -> Result<Option<RealityConfig>> {
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    let m = v
+        .as_mapping()
+        .ok_or_else(|| anyhow!("VLESS 节点 {node} 的 reality-opts 须为映射"))?;
+    let get = |k: &str| -> Option<String> {
+        m.get(Value::String(k.to_string()))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+    };
+    let public_key = get("public-key")
+        .or_else(|| get("public_key"))
+        .ok_or_else(|| anyhow!("VLESS 节点 {node} 的 reality-opts 缺少 public-key"))?;
+    Ok(Some(RealityConfig {
+        public_key,
+        short_id: get("short-id").or_else(|| get("short_id")),
+    }))
+}
 
 /// Clash url-test 组测试 URL →（probe `host:port`, path）（G1-9）。仅认
 /// http/https URL；无端口按方案默认（80/443）补齐；空 authority 或端口
@@ -246,13 +270,13 @@ pub struct ClashProxy {
         alias = "httpupgradeOptions"
     )]
     pub httpupgrade_opts: Option<ClashHttpUpgradeOpts>,
-    /// VLESS flow（如 xtls-rprx-vision；G1-6）。仅捕获以拒绝导入——无
-    /// flow 支持的节点静默降级为普通 VLESS 会连不上真节点（xtls 服务端
-    /// 期望 Vision 分帧），与 plugin 无换算表同口径：显式报错。
+    /// VLESS flow（如 xtls-rprx-vision；G1-6）。捕获随节点保留（拨号期对
+    /// 不支持面点名拒绝）——静默降级为普通 VLESS 会连不上真节点（xtls 服务
+    /// 端期望 Vision 分帧）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<String>,
-    /// REALITY 选项块（`reality-opts.public-key`/`short-id`；G1-6）。仅捕获
-    /// 以拒绝导入——REALITY 节点静默降级为普通 TLS VLESS 后，服务端按
+    /// REALITY 选项块（`reality-opts.public-key`/`short-id`；G1-6）。捕获随
+    /// 节点保留（拨号期点名拒绝）——静默降级为普通 TLS VLESS 后，服务端按
     /// 非 REALITY 握手回落伪装站点，流量不走向代理且无任何报错。
     #[serde(
         default,
@@ -1037,21 +1061,12 @@ impl ClashConverter {
                     .uuid
                     .clone()
                     .ok_or_else(|| anyhow!("VLESS 缺少 UUID"))?;
-                // REALITY/flow 节点显式拒绝导入（G1-6）：静默降级为普通 TLS
-                // VLESS 后服务端回落伪装站点/期望 Vision 分帧，流量不走向
-                // 代理且无报错——与 plugin 无换算表同口径，导入期点名拒绝。
-                if proxy.reality_opts.is_some() {
-                    anyhow::bail!(
-                        "VLESS 节点 {} 含 reality-opts（REALITY 协议），Seep 暂不支持 REALITY 出站（G1-6），拒绝导入以免静默降级为普通 TLS 节点",
-                        proxy.name
-                    );
-                }
-                if let Some(flow) = &proxy.flow {
-                    anyhow::bail!(
-                        "VLESS 节点 {} 含 flow {flow}（XTLS-Vision 等流控），Seep 暂不支持 flow，拒绝导入以免静默降级为普通 VLESS",
-                        proxy.name
-                    );
-                }
+                // REALITY/flow 配置保留（G1-6，2026-11-10 拍板改 M1 拒绝策略）：
+                // 字段进 EgressConfig::Vless（serde 不再静默丢键，节点模型零
+                // 信息损失）；不支持面在拨号期点名拒绝（防静默降级——普通 TLS
+                // 会被 REALITY 服务端回落伪装站点，普通 VLESS 连不上期望
+                // Vision 分帧的服务端且无报错），节点级失败不阻塞同订阅其余节点。
+                let reality = reality_from_yaml(&proxy.reality_opts, &proxy.name)?;
                 let network = proxy.network.clone().unwrap_or_else(|| "tcp".to_string());
                 let is_h2 = network == "h2";
                 let is_httpupgrade = network == "httpupgrade";
@@ -1070,7 +1085,8 @@ impl ClashConverter {
                     server: proxy.server.clone(),
                     port: proxy.port,
                     uuid,
-                    flow: None,
+                    flow: proxy.flow.clone(),
+                    reality,
                     network,
                     path,
                     host,
@@ -2310,11 +2326,12 @@ rules:
         ));
     }
 
-    /// G1-6 REALITY/flow 节点导入期显式拒绝：含 reality-opts/flow 的 VLESS
-    /// 若静默降级为普通 TLS VLESS，服务端会回落伪装站点/期望 Vision 分帧，
-    /// 流量不走向代理且无任何报错——parse 可过，convert 必须点名报错。
+    /// G1-6 REALITY/flow 配置保留（2026-11-10 拍板改 M1 拒绝策略）：含
+    /// reality-opts/flow 的 VLESS convert 成功且字段完整保留（serde 不静默
+    /// 丢键）；不支持面在拨号期点名拒绝（防静默降级为普通 TLS VLESS——服务
+    /// 端回落伪装站点/期望 Vision 分帧且无报错）。缺 public-key 仍点名报错。
     #[test]
-    fn test_vless_reality_and_flow_nodes_rejected_on_convert() {
+    fn test_vless_reality_and_flow_nodes_preserved_on_convert() {
         let converter = ClashConverter::new();
 
         // reality-opts（REALITY 协议）
@@ -2336,10 +2353,33 @@ proxy-groups: []
 rules: []
         "#;
         let reality_clash = converter.parse(reality_yaml).unwrap();
-        let err = converter.convert_to_seep(&reality_clash).unwrap_err();
+        let seep = converter.convert_to_seep(&reality_clash).unwrap();
+        let vl = seep
+            .egress
+            .iter()
+            .find(|e| e.name == "vl-reality")
+            .expect("vl-reality egress 应存在");
+        // G1-6（拍板改 M1 拒绝策略）：serde 不静默丢键——reality-opts 解析成功
+        // 且字段完整保留（拨号期才点名拒绝）
+        match &vl.spec {
+            EgressConfig::Vless { reality, flow, .. } => {
+                let r = reality.as_ref().expect("reality 应保留");
+                assert_eq!(r.public_key, "PBQh7j2tWxQmZHVub3RUYXJnZXQ");
+                assert_eq!(r.short_id.as_deref(), Some("0123ac"));
+                assert!(flow.is_none(), "无 flow 节点 flow 应为 None");
+            }
+            other => panic!("应为 Vless: {other:?}"),
+        }
+
+        // reality-opts 缺 public-key → 转换期点名报错（配置不完整不静默半配）
+        let bad_yaml = reality_yaml.replace("      public-key: PBQh7j2tWxQmZHVub3RUYXJnZXQ\n", "");
+        let bad_clash = converter.parse(&bad_yaml).unwrap();
+        let err = converter.convert_to_seep(&bad_clash).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("REALITY"), "应点名 REALITY: {msg}");
-        assert!(msg.contains("vl-reality"), "应点名节点名: {msg}");
+        assert!(
+            msg.contains("public-key") && msg.contains("vl-reality"),
+            "应点名缺 public-key 与节点名: {msg}"
+        );
 
         // flow（XTLS-Vision 等流控）
         let flow_yaml = r#"
@@ -2357,10 +2397,19 @@ proxy-groups: []
 rules: []
         "#;
         let flow_clash = converter.parse(flow_yaml).unwrap();
-        let err = converter.convert_to_seep(&flow_clash).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("xtls-rprx-vision"), "应点名 flow 值: {msg}");
-        assert!(msg.contains("vl-vision"), "应点名节点名: {msg}");
+        let seep = converter.convert_to_seep(&flow_clash).unwrap();
+        let vl = seep
+            .egress
+            .iter()
+            .find(|e| e.name == "vl-vision")
+            .expect("vl-vision egress 应存在");
+        match &vl.spec {
+            EgressConfig::Vless { reality, flow, .. } => {
+                assert_eq!(flow.as_deref(), Some("xtls-rprx-vision"), "flow 应保留");
+                assert!(reality.is_none(), "无 reality 节点 reality 应为 None");
+            }
+            other => panic!("应为 Vless: {other:?}"),
+        }
 
         // 无 reality/flow 的普通 VLESS 不受影响
         let plain_yaml = r#"

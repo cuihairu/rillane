@@ -7,9 +7,33 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use seep_config::{
-    EgressConfig, EgressDescriptor, GroupMember, MatchCondition, PolicyGroup, RouteRule,
-    RoutingConfig, Strategy,
+    EgressConfig, EgressDescriptor, GroupMember, MatchCondition, PolicyGroup, RealityConfig,
+    RouteRule, RoutingConfig, Strategy,
 };
+
+/// reality-opts JSON 块 → `RealityConfig`（G1-6 配置保留面，与 clash.rs
+/// 的 YAML 版同语义）：键 kebab/snake 兼容；块缺席 = None；缺 public-key
+/// 点名拒绝（不静默造空）。
+fn reality_from_json(
+    value: &Option<serde_json::Value>,
+    node: &str,
+) -> anyhow::Result<Option<RealityConfig>> {
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    let m = v
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("VLESS 节点 {node} 的 reality-opts 须为映射"))?;
+    let get =
+        |k: &str| -> Option<String> { m.get(k).and_then(|x| x.as_str()).map(|s| s.to_string()) };
+    let public_key = get("public-key")
+        .or_else(|| get("public_key"))
+        .ok_or_else(|| anyhow::anyhow!("VLESS 节点 {node} 的 reality-opts 缺少 public-key"))?;
+    Ok(Some(RealityConfig {
+        public_key,
+        short_id: get("short-id").or_else(|| get("short_id")),
+    }))
+}
 
 /// Seep DSL 版本
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,13 +96,13 @@ pub struct SeepNode {
     /// 元数据
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
-    /// VLESS flow（如 xtls-rprx-vision；G1-6）。仅捕获以拒绝导入——无
-    /// flow 支持的节点静默降级为普通 VLESS 会连不上真节点（xtls 服务端
-    /// 期望 Vision 分帧），导入期点名拒绝。
+    /// VLESS flow（如 xtls-rprx-vision；G1-6）。捕获随节点保留（拨号期对
+    /// 不支持面点名拒绝）——静默降级为普通 VLESS 会连不上真节点（xtls 服务
+    /// 端期望 Vision 分帧）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<String>,
-    /// REALITY 选项块（public-key/short-id；G1-6）。仅捕获以拒绝导入——
-    /// REALITY 节点静默降级为普通 TLS VLESS 后服务端回落伪装站点。
+    /// REALITY 选项块（public-key/short-id；G1-6）。捕获随节点保留（拨号
+    /// 期点名拒绝）——静默降级为普通 TLS VLESS 后服务端回落伪装站点。
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -773,21 +797,10 @@ impl SeepDslConverter {
                     return Err(anyhow!("VLESS 节点缺少 UUID"));
                 };
 
-                // REALITY/flow 节点显式拒绝导入（G1-6）：静默降级为普通 TLS
-                // VLESS 后服务端回落伪装站点/期望 Vision 分帧，流量不走向
-                // 代理且无报错——导入期点名拒绝。
-                if node.reality.is_some() {
-                    anyhow::bail!(
-                        "VLESS 节点 {} 含 reality-opts（REALITY 协议），Seep 暂不支持 REALITY 出站（G1-6），拒绝导入以免静默降级为普通 TLS 节点",
-                        node.name
-                    );
-                }
-                if let Some(flow) = &node.flow {
-                    anyhow::bail!(
-                        "VLESS 节点 {} 含 flow {flow}（XTLS-Vision 等流控），Seep 暂不支持 flow，拒绝导入以免静默降级为普通 VLESS",
-                        node.name
-                    );
-                }
+                // REALITY/flow 配置保留（G1-6，2026-11-10 拍板改 M1 拒绝策略）：
+                // 字段进 EgressConfig::Vless（serde 不再静默丢键）；不支持面
+                // 在拨号期点名拒绝（防静默降级），节点级失败不阻塞其余节点。
+                let reality = reality_from_json(&node.reality, &node.name)?;
 
                 let (network, path, host, grpc_service_name) =
                     if let Some(transport) = &node.transport {
@@ -830,7 +843,8 @@ impl SeepDslConverter {
                     server,
                     port,
                     uuid,
-                    flow: None,
+                    flow: node.flow.clone(),
+                    reality,
                     network,
                     path,
                     host,
@@ -1481,9 +1495,10 @@ rulesets: []
         }
     }
 
-    /// G1-6 REALITY/flow 节点导入期显式拒绝（Seep DSL 面，与 clash 面同口径）。
+    /// G1-6 REALITY/flow 配置保留（Seep DSL 面，与 clash 面同口径；拍板改
+    /// M1 拒绝策略——转换成功且字段保留，拨号期才点名拒绝）。
     #[test]
-    fn test_vless_reality_and_flow_nodes_rejected_on_convert() {
+    fn test_vless_reality_and_flow_nodes_preserved_on_convert() {
         let converter = SeepDslConverter::new();
         let base = || SeepNode {
             name: "vl".to_string(),
@@ -1513,21 +1528,44 @@ rulesets: []
             "public-key": "PBQh7j2tWxQmZHVub3RUYXJnZXQ",
             "short-id": "0123ac"
         }));
-        let err = converter
+        // G1-6（拍板改 M1 拒绝策略）：转换不再拒绝，reality 字段完整保留
+        //（serde 不静默丢键）；缺 public-key 仍点名报错
+        let ok = converter
             .convert_node_to_egress_config(&reality)
-            .unwrap_err();
+            .expect("REALITY 节点应转换成功（配置保留）");
+        match ok {
+            EgressConfig::Vless { reality, .. } => {
+                let r = reality.expect("reality 应保留");
+                assert_eq!(r.public_key, "PBQh7j2tWxQmZHVub3RUYXJnZXQ");
+                assert_eq!(r.short_id.as_deref(), Some("0123ac"));
+            }
+            other => panic!("应为 Vless: {other:?}"),
+        }
+
+        // reality-opts 缺 public-key → 转换期点名报错
+        let mut bad = base();
+        bad.name = "vl-reality".to_string();
+        bad.reality = Some(serde_json::json!({ "short-id": "0123ac" }));
+        let err = converter.convert_node_to_egress_config(&bad).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("REALITY"), "应点名 REALITY: {msg}");
-        assert!(msg.contains("vl-reality"), "应点名节点名: {msg}");
+        assert!(
+            msg.contains("public-key") && msg.contains("vl-reality"),
+            "应点名缺 public-key 与节点名: {msg}"
+        );
 
         // flow（XTLS-Vision 等流控）
         let mut flow = base();
         flow.name = "vl-vision".to_string();
         flow.flow = Some("xtls-rprx-vision".to_string());
-        let err = converter.convert_node_to_egress_config(&flow).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("xtls-rprx-vision"), "应点名 flow 值: {msg}");
-        assert!(msg.contains("vl-vision"), "应点名节点名: {msg}");
+        let ok = converter
+            .convert_node_to_egress_config(&flow)
+            .expect("flow 节点应转换成功（配置保留）");
+        match ok {
+            EgressConfig::Vless { flow, .. } => {
+                assert_eq!(flow.as_deref(), Some("xtls-rprx-vision"));
+            }
+            other => panic!("应为 Vless: {other:?}"),
+        }
 
         // 普通 VLESS 不受影响
         let ok = converter.convert_node_to_egress_config(&base()).unwrap();

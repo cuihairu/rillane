@@ -1,33 +1,43 @@
 # G1-6 设计：REALITY + XTLS-Vision 出站
 
-> 状态：**M1 已落地（捕获 + 导入期显式拒绝，2026-11-10）** · M2–M4 受阻（§5）· 对应 [todo.md](../../../todo.md) G1-6 · 关联：[tls-fingerprint.md](tls-fingerprint.md)（ClientHello 组装器决策空间）· [udp-relay-path.md](udp-relay-path.md)（出站能力表）
+> 状态：**M1 已落地（捕获 + 导入期拒绝，2026-11-10）· M1.5 已落地（配置保留 + 拨号期点名门，2026-11-10）** · M2–M4 受阻（§5）· 对应 [todo.md](../../../todo.md) G1-6 · 关联：[tls-fingerprint.md](tls-fingerprint.md)（ClientHello 组装器决策空间）· [udp-relay-path.md](udp-relay-path.md)（出站能力表）
 
 ## 执行摘要
 
 主流商业订阅普遍携带 `reality-opts`（REALITY）与 `flow: xtls-rprx-vision`（XTLS-Vision）的 VLESS 节点。Seep 的节点模型此前没有这两个键的字段，serde 静默丢弃后节点降级为普通 TLS VLESS：对 REALITY 服务端，非 REALITY 握手会拿到伪装站点（流量不走向代理，且任何环节都无报错）；对 Vision 服务端，连接直接失败（服务端期望 Vision 分帧）。两种结局都无声无息、无法排查——比一次响亮的导入失败更糟。
 
-本批落地 **M1**：三个导入面全部捕获这两个键到显式字段，并在导入期点名拒绝该节点——与 plugin 无换算表的拒绝同口径。完整 REALITY 出站承载（M2）受阻于 rustls 不提供 ClientHello 字节级控制（§4.3），且需要真实 xray REALITY 节点做互操作验收；Vision（M3）还需实现 Vision 分帧并做同样的真机验收。
+M1 落地捕获 + 导入期拒绝；**M1.5（同日）拍板翻转策略**：三个导入面捕获的字段保留进 `EgressConfig::Vless`（serde 不再静默丢键），拒绝点移到**拨号期**——`VlessConnector::gate_reality_and_flow` 在任何网络 I/O 前点名 REALITY/Vision。理由：节点级失败优于导入级失败（一个 REALITY 节点不应拖垮整份批量订阅；url-test 探活标不健康，其余节点照常工作），响亮的拨号期报错同样防住了 M1 要防的静默降级。完整 REALITY 出站承载（M2）仍受阻于 rustls 不提供 ClientHello 字节级控制（§4.3），且需要真实 xray REALITY 节点做互操作验收；Vision（M3）还需实现 Vision 分帧并做同样的真机验收。
 
 ## 1. 行为矩阵
 
-| 节点携带 | 之前 | 之后（M1） |
+| 节点携带 | 之前 | 之后（M1.5，现行） |
 |---|---|---|
-| `reality-opts`（Clash YAML / Seep DSL） | 键被静默丢弃 → 普通 TLS VLESS → 服务端回落伪装站点，无报错 | 导入期 `Err` 点名节点与 REALITY（G1-6） |
-| `pbk`/`sid`/`security=reality`（vless:// 链接） | 参数被静默丢弃 → 同样静默降级 | 链接捕获 → 按批量路径约定 warning + 跳过该节点 |
-| `flow: xtls-rprx-vision` | 键被静默丢弃 → 普通 VLESS → 服务端期望 Vision 分帧，连接失败 | 导入期拒绝并点名 flow 值（YAML/DSL）；链接路径 warning + 跳过 |
+| `reality-opts`（Clash YAML / Seep DSL） | 键被静默丢弃 → 普通 TLS VLESS → 服务端回落伪装站点，无报错 | 字段解析保留进 `EgressConfig::Vless.reality`；拨号期在任何 I/O 前点名 REALITY 的 `Err` |
+| `pbk`/`sid`/`security=reality`（vless:// 链接） | 参数被静默丢弃 → 同样静默降级 | 链接捕获随节点保留，照常导入；拨号期点名 `Err`（TCP + UDP `associate`） |
+| `flow: xtls-rprx-vision` | 键被静默丢弃 → 普通 VLESS → 服务端期望 Vision 分帧，连接失败 | 保留进 `EgressConfig::Vless.flow`；拨号期点名 flow 值的 `Err` |
 | 两者皆无 | 普通 VLESS（不变） | 普通 VLESS（不变） |
 
-错误策略分面（与各面既有约定一致）：
+（M1 的导入期拒绝已被取代——为什么见执行摘要。`reality-opts` 缺 `public-key` 仍在转换期响亮报错：半配置的 REALITY 绝不被静默改造成别的东西。）
 
-- **Clash YAML / Seep DSL**（整份配置文件）：转换器硬 `Err`——一个坏节点在导入面即暴露，与「VLESS 缺少 UUID」硬失败一致。
-- **vless:// 批量链接**：该节点被丢弃并在 `ConversionResult.warnings` 记录警告——与 `convert_v2ray` 逐行警告约定一致，其余行照常导入。门禁放在 `convert_v2ray` 链接解析之后：默认 url-test 组引用全部已解析节点，迟到的拒绝会让整个订阅导入失败。
+错误策略（M1.5）：
+
+- **导入期**：键被捕获、绝不丢弃；仅不完整的 REALITY 块（缺 `public-key`）报错并点名节点。
+- **拨号期**（TCP `forward` 与 UDP `associate`）：REALITY/flow 节点自身连接以点名错误失败，说明为何拒绝静默降级——在任何网络 I/O 之前。订阅其余节点照常工作；url-test 探活把该节点标为不健康。
 
 ## 2. 已落地实施面（M1）
 
 - `crates/seep-subscription/src/clash.rs` — `ClashProxy` 新增 `flow: Option<String>` 与 `reality_opts: Option<serde_yaml::Value>`（别名 `reality-opts` / `reality_opts`）；VLESS 转换臂点名拒绝。
 - `crates/seep-subscription/src/seep_dsl.rs` — `SeepNode` 新增 `flow` / `reality`（别名 `reality-opts` / `reality_opts`）；VLESS 臂同样拒绝。
-- `crates/seep-subscription/src/converter.rs` — `parse_vless` 捕获 `pbk`（public-key）、`sid`（short-id）、`security=reality` 进 `reality_opts`，`flow` 进 `flow`；`convert_v2ray` 把捕获命中的节点转为 warning + 跳过。
-- 测试：两个转换器的拒绝路径（普通 VLESS 不受影响）、serde 捕获证明（kebab + snake 别名）、链接参数捕获、批量导入 warning + 跳过。
+- `crates/seep-subscription/src/converter.rs` — `parse_vless` 捕获 `pbk`（public-key）、`sid`（short-id）、`security=reality` 进 `reality_opts`，`flow` 进 `flow`；批量导入照常保留。
+- 测试：serde 捕获证明（kebab + snake 别名）、链接参数捕获、批量导入保留 REALITY 行。
+
+### 2.1 已落地实施面（M1.5，拨号期门）
+
+- `crates/seep-config/src/lib.rs` — `RealityConfig { public_key, short_id }`（内层键 kebab 别名）+ `EgressConfig::Vless.reality: Option<RealityConfig>`；`flow` 已携带。
+- `crates/seep-subscription` — Clash/DSL/vless:// 三面 REALITY 节点转换成功且字段保留；仅缺 `public-key` 报错。
+- `crates/seep-protocols/src/outbound/vless.rs` — `gate_reality_flow` 在 `forward_pooled`/`forward_inline` 顶部与 `VlessUdpConnector::associate` 触发，先于任何网络 I/O。
+- `crates/seep-runtime/src/runtime_builder.rs` — 构建不再拒绝 flow/reality（构建期拒绝已移除；两臂把 `reality` 传入连接器）；clash 导出往返 `reality-opts`。
+- 测试：`build_egress_outputs_carries_vless_flow_and_reality`（runtime）、`forward_rejects_reality_named_before_io` / `forward_rejects_flow_named_before_io` / `udp_associate_rejects_reality_named`（protocols）、保留式转换（clash + dsl）、`test_v2ray_bulk_import_preserves_reality_line`（converter）、`reality_config.rs`（config serde 往返）。
 
 ## 3. 协议分析
 
@@ -59,11 +69,13 @@ rustls 不提供 ClientHello 字节级控制：`session_id` 内容、扩展顺�
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M1 | 三个导入面捕获 `reality-opts`/`flow` + 导入期显式拒绝/警告 + 测试 | **已落地（2026-11-10）** |
+| M1.5 | 捕获配置保留进 `EgressConfig::Vless`；拒绝点移至拨号期（TCP + UDP），任何 I/O 前点名 REALITY/Vision；clash 导出往返 `reality-opts` | **已落地（2026-11-10）** |
 | M2 | REALITY 出站承载（拨号级） | BLOCKED：ClientHello 控制路线需栈层决策（§4.3）；需真实 xray REALITY 节点做互操作验收 |
 | M3 | VLESS 出站上的 Vision `flow` 支持 | BLOCKED：依赖 M2 承载形态；需真实 Vision 节点；先做 loopback 向量（VMess xray 向量先例） |
 | M4 | 两者真机验收 | BLOCKED：外部节点凭据 |
 
 ## 5. 验收映射
 
-- M1：`cargo test -p seep-subscription` — `test_vless_reality_and_flow_nodes_rejected_on_convert`（clash + dsl 两处）、`test_seep_node_captures_reality_and_flow_keys`、`test_vless_reality_link_params_captured`、`test_v2ray_bulk_import_warns_and_skips_reality_line`。
+- M1：`cargo test -p seep-subscription` — `test_vless_reality_and_flow_nodes_preserved_on_convert`（clash + dsl 两处，M1.5 翻转）、`test_seep_node_captures_reality_and_flow_keys`、`test_vless_reality_link_params_captured`、`test_v2ray_bulk_import_preserves_reality_line`（M1.5 翻转）。
+- M1.5：`cargo test -p seep-config --test reality_config`（serde 不丢键 + 往返）、`cargo test -p seep-protocols` 拨号门测试（TCP + UDP 点名报错）、`build_egress_outputs_carries_vless_flow_and_reality`（runtime 构建保留两字段）。
 - M2–M4：仅能真机互操作验收（开启 REALITY 的 xray/sing-box 服务端），承载落地后按 tls-fingerprint.md 的可区分性测试手法补 ClientHello 捕获断言。

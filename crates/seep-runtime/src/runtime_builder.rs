@@ -2432,6 +2432,7 @@ fn build_udp_connectors(
                 port,
                 uuid,
                 flow,
+                reality,
                 network,
                 path,
                 host,
@@ -2442,19 +2443,15 @@ fn build_udp_connectors(
                 alpn,
                 tls_fingerprint,
             } if network == "tcp" => {
-                // flow（xtls-rprx-vision）不适用 UDP（command 0x02 无流控）：
-                // 与 TCP 面一致，构建期判负（错误含节点名）。
-                if flow.is_some() {
-                    return Err(anyhow!(
-                        "VLESS 暂不支持 flow（例如 xtls-rprx-vision），请设置为 null/省略 (egress={})",
-                        desc.name
-                    ));
-                }
+                // G1-6（2026-11-10 拍板改 M1 拒绝策略）：flow/reality 不再在
+                // 构建期判负——配置随连接器保留，拨号期点名拒绝（防静默降级），
+                // 节点级失败不拖垮整份订阅。
                 let conn = VlessConnector::new(
                     server.clone(),
                     *port,
                     uuid.clone(),
                     flow.clone(),
+                    reality.clone(),
                     network.clone(),
                     path.clone(),
                     host.clone(),
@@ -3012,6 +3009,7 @@ fn build_egress_outputs(
                 port,
                 uuid,
                 flow,
+                reality,
                 network,
                 path,
                 host,
@@ -3022,16 +3020,9 @@ fn build_egress_outputs(
                 alpn,
                 tls_fingerprint,
             } => {
-                // flow（如 xtls-rprx-vision）不支持——构建期即拦（对齐 UDP 能力表
-                // §3.1 / VMess security 校验的构建期扫描惯例，不带伤等运行期首条
-                // 连接），错误含节点名；口径与 VlessConnector::forward 同为
-                // `is_some()` 即拒
-                if flow.is_some() {
-                    return Err(anyhow!(
-                        "VLESS 暂不支持 flow（例如 xtls-rprx-vision），请设置为 null/省略 (egress={})",
-                        desc.name
-                    ));
-                }
+                // G1-6（2026-11-10 拍板改 M1 拒绝策略）：flow/reality 不再在构建
+                // 期即拦——配置随连接器保留，拨号期点名拒绝（VlessConnector::
+                // gate_reality_and_flow，防静默降级），节点级失败不拖垮整份订阅。
                 // network=grpc 需非空服务名（恒叠 TLS，ALPN 固定 h2）；
                 // network=h2 恒叠 TLS（mihomo 口径 h2 仅 TLS）
                 if network == "grpc" {
@@ -3060,6 +3051,7 @@ fn build_egress_outputs(
                     *port,
                     uuid.clone(),
                     flow.clone(),
+                    reality.clone(),
                     network.clone(),
                     path.clone(),
                     host.clone(),
@@ -5015,6 +5007,7 @@ mod tests {
             port: 443,
             uuid: "00000000-0000-0000-0000-000000000000".into(),
             flow: None,
+            reality: None,
             network: "tcp".into(),
             path: None,
             host: None,
@@ -5028,22 +5021,25 @@ mod tests {
     }
 
     #[test]
-    fn build_egress_outputs_rejects_vless_flow_at_build_time() {
-        // flow 非 None 构建期即报错（节点名列出），与 forward() 首条连接同口径
-        let mut bad_flow = vless_spec();
-        if let EgressConfig::Vless { flow, .. } = &mut bad_flow {
+    fn build_egress_outputs_carries_vless_flow_and_reality() {
+        // G1-6（2026-11-10 拍板改 M1 拒绝策略）：flow/reality 不再构建期判负，
+        // 配置随连接器保留、拨号期点名拒绝——含 flow+REALITY 的节点必须装配
+        // 成功（节点级失败不拖垮整份订阅，url-test 探活标记不健康即可）。
+        let mut with_g6 = vless_spec();
+        if let EgressConfig::Vless { flow, reality, .. } = &mut with_g6 {
             *flow = Some("xtls-rprx-vision".to_string());
+            *reality = Some(seep_config::RealityConfig {
+                public_key: "pbk-test".to_string(),
+                short_id: Some("ab12".to_string()),
+            });
         }
-        let egress = vec![node("vl-bad-flow", bad_flow)];
-        let err = build_egress_outputs(&egress, None, None)
-            .err()
-            .expect("flow 必须构建期报错");
-        assert!(
-            err.to_string().contains("flow") && err.to_string().contains("vl-bad-flow"),
-            "实际：{err}"
-        );
+        let egress = vec![node("vl-g6", with_g6)];
+        let (outputs, connectors) =
+            build_egress_outputs(&egress, None, None).expect("flow+reality 应装配成功（保留面）");
+        assert!(outputs.contains_key("vl-g6"));
+        assert_eq!(connectors.get("vl-g6").expect("connector").name(), "vless");
 
-        // flow 缺省照常装配
+        // flow/reality 缺省照常装配
         let egress = vec![node("vl-ok", vless_spec())];
         let (outputs, connectors) =
             build_egress_outputs(&egress, None, None).expect("无 flow 应装配成功");
@@ -5716,6 +5712,7 @@ mod tests {
                     port: 443,
                     uuid: "00000000-0000-0000-0000-000000000000".to_string(),
                     flow: None,
+                    reality: None,
                     network: "ws".to_string(),
                     path: Some("/ws".to_string()),
                     host: Some(vec!["cdn.example".to_string()]),

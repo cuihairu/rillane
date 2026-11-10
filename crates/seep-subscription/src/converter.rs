@@ -440,26 +440,10 @@ impl SubscriptionConverter {
             }
         }
 
-        // G1-6：REALITY/flow 节点在本层拒绝（parse_v2ray_link 已捕获 pbk/
-        // sid/flow），按本路径既有约定转 warning + 跳过，其余行照常导入；
-        // 若放行到 clash 转换会连带 url-test 组引用使整个订阅导入失败。
-        let mut gated_nodes = Vec::with_capacity(nodes.len());
-        for node in nodes {
-            if node.reality_opts.is_some() || node.flow.is_some() {
-                warnings.push(format!(
-                    "节点 {}：{}",
-                    node.name,
-                    if node.reality_opts.is_some() {
-                        "含 reality-opts（REALITY 协议），Seep 暂不支持 REALITY 出站（G1-6），拒绝导入以免静默降级为普通 TLS 节点"
-                    } else {
-                        "含 flow（XTLS-Vision 等流控），Seep 暂不支持 flow，拒绝导入以免静默降级为普通 VLESS"
-                    }
-                ));
-                continue;
-            }
-            gated_nodes.push(node);
-        }
-        let nodes = gated_nodes;
+        // G1-6（2026-11-10 拍板改 M1 拒绝策略）：REALITY/flow 节点不再在
+        // 本层跳过——parse_v2ray_link 捕获的 pbk/sid/flow 随节点保留进
+        // EgressConfig::Vless；不支持面在拨号期点名拒绝（节点级失败不阻塞
+        // 同订阅其余节点）。
 
         // 过滤和去重
         let filtered_nodes = self.filter_and_dedup_v2ray_nodes(nodes, &mut warnings);
@@ -823,8 +807,9 @@ impl SubscriptionConverter {
         let alpn = q.get("alpn").map(|s| parse_alpn(s)).unwrap_or_default();
 
         // REALITY/flow 链接参数（G1-6）：pbk = public-key、sid = short-id、
-        // security=reality；仅捕获以便 convert 期显式拒绝，防止静默降级为
-        // 普通 TLS VLESS（服务端回落伪装站点且无报错）。
+        // security=reality、flow；捕获随节点保留进 EgressConfig::Vless
+        //（拨号期对不支持面点名拒绝，防静默降级为普通 TLS VLESS——服务端
+        // 回落伪装站点且无报错）。
         let pbk = q.get("pbk").cloned();
         let sid = q.get("sid").cloned();
         let reality_opts = if security == "reality" || pbk.is_some() {
@@ -1404,6 +1389,7 @@ impl Default for SubscriptionConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seep_config::EgressConfig;
 
     #[test]
     fn test_subscription_type_detection() {
@@ -1761,12 +1747,12 @@ proxies:
         assert!(plain.flow.is_none());
     }
 
-    /// G1-6 批量 v2ray 导入：REALITY 行按既有约定转为 warning + 跳过，
-    /// 其余行照常导入；warning 须点名 REALITY。
+    /// G1-6 批量 v2ray 导入（2026-11-10 拍板改 M1 拒绝策略）：REALITY 行
+    /// 照常导入且 pbk/sid/flow 随节点保留，无跳过告警；拨号期才点名拒绝。
     #[tokio::test]
-    async fn test_v2ray_bulk_import_warns_and_skips_reality_line() {
+    async fn test_v2ray_bulk_import_preserves_reality_line() {
         let converter = SubscriptionConverter::new();
-        let content = "vless://b831381d-6324-4d2a-b1e7-1bf75a1db7b3@example.com:443?security=reality&pbk=PBQh7j2tWxQmZHVub3RUYXJnZXQ&sid=0123ac&flow=xtls-rprx-vision&sni=www.apple.com#vl-r\nvless://b831381d-6324-4d2a-b1e7-1bf75a1db7b3@example.com:443?security=tls&sni=a.com#vl-plain\n";
+        let content = "vless://b831381d-6324-4d2a-b1e7-1bf75a1db7b3@example.com:443?security=reality&pbk=PBQh7j2tWxQmZHVub3RUYXJnZXQ&sid=0123ac&flow=xtls-rprx-vision&sni=www.apple.com#vl-r\nvless://b831381d-6324-4d2a-b1e7-1bf75a1db7b3@plain.example.com:443?security=tls&sni=a.com#vl-plain\n";
         let sub = Subscription {
             name: "test".to_string(),
             url: "unused".to_string(),
@@ -1782,22 +1768,36 @@ proxies:
             content_hash: None,
             last_modified: None,
         };
+        // G1-6（拍板改 M1 拒绝策略）：REALITY 行照常导入且 pbk/sid/flow 随节点
+        // 保留（拨号期才点名拒绝）；节点级失败不拖垮整份批量订阅
         let result = converter.auto_convert(&sub, content).await.unwrap();
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.contains("REALITY") && w.contains("vl-r")),
-            "warning 应点名 REALITY 与节点名: {:?}",
-            result.warnings
-        );
         let names: Vec<&str> = result
             .config
             .egress
             .iter()
             .map(|e| e.name.as_str())
             .collect();
-        assert!(!names.contains(&"vl-r"), "REALITY 行不得进入结果节点");
+        assert!(names.contains(&"vl-r"), "REALITY 行应照常导入");
         assert!(names.contains(&"vl-plain"), "普通行照常导入");
+        assert!(
+            result.warnings.is_empty(),
+            "不应再有跳过告警: {:?}",
+            result.warnings
+        );
+        let vl_r = result
+            .config
+            .egress
+            .iter()
+            .find(|e| e.name == "vl-r")
+            .expect("vl-r egress 应存在");
+        match &vl_r.spec {
+            EgressConfig::Vless { reality, flow, .. } => {
+                let r = reality.as_ref().expect("reality 应保留");
+                assert_eq!(r.public_key, "PBQh7j2tWxQmZHVub3RUYXJnZXQ");
+                assert_eq!(r.short_id.as_deref(), Some("0123ac"));
+                assert_eq!(flow.as_deref(), Some("xtls-rprx-vision"));
+            }
+            other => panic!("应为 Vless: {other:?}"),
+        }
     }
 }

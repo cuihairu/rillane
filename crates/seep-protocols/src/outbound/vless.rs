@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::BytesMut;
+use seep_config::RealityConfig;
 use seep_core::udp::{EgressUdpConnector, UdpRelay};
 use seep_core::{
     BoxedIo, EgressConnector, Flow, FlowContext, FlowReport, FlowTarget, RouteDecision, TargetProto,
@@ -22,6 +23,23 @@ use super::ws::{ws_client_handshake, WsClient};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
 use crate::tls::{create_tls_connector_with_profile, TlsConnectorFactory};
+
+/// REALITY/Vision 拨号期门（G1-6 配置保留面，TCP/UDP 面共用）：配置保留至
+/// 此拦，拒绝静默降级——普通 TLS 会被 REALITY 服务端回落伪装站点（流量
+/// 不走代理且无报错），普通 VLESS 连不上期望 Vision 分帧的服务端且无报错。
+fn gate_reality_flow(reality: &Option<RealityConfig>, flow: &Option<String>) -> Result<()> {
+    if reality.is_some() {
+        return Err(anyhow!(
+            "REALITY 出站未实现（G1-6）：需要 ClientHello 字节级控制（session_id 认证材料/浏览器指纹仿冒），rustls 不暴露且无维护中的 Rust uTLS 等价物（设计文档 §4.3 栈决策待定）；拒绝静默降级为普通 TLS——服务端将回落伪装站点且无报错"
+        ));
+    }
+    if let Some(f) = flow {
+        return Err(anyhow!(
+            "VLESS flow {f}（XTLS-Vision 等流控）分帧未实现（G1-6 M3）；拒绝静默降级为普通 VLESS——服务端期望 Vision 分帧，连接将失败且无报错"
+        ));
+    }
+    Ok(())
+}
 
 /// 请求头字节（TCP/UDP 共用，G0-4）：Version(0x00) + UUID + OptLen(0) +
 /// Command（0x01 TCP / 0x02 UDP，xray RequestCommand）+ Port(BE) + Address。
@@ -74,6 +92,9 @@ pub struct VlessConnector {
     port: u16,
     uuid: String,
     flow: Option<String>,
+    /// REALITY 选项（G1-6 配置保留面；Some = 拨号期点名拒绝——rustls 无
+    /// ClientHello 字节级控制，拒绝静默降级为普通 TLS）
+    reality: Option<RealityConfig>,
     network: String,
     path: Option<String>,
     host: Option<Vec<String>>,
@@ -99,6 +120,7 @@ impl VlessConnector {
         port: u16,
         uuid: String,
         flow: Option<String>,
+        reality: Option<RealityConfig>,
         network: String,
         path: Option<String>,
         host: Option<Vec<String>>,
@@ -116,6 +138,7 @@ impl VlessConnector {
             port,
             uuid,
             flow,
+            reality,
             network,
             path,
             host,
@@ -132,6 +155,13 @@ impl VlessConnector {
 
     fn server_addr(&self) -> String {
         format!("{}:{}", self.server, self.port)
+    }
+
+    /// REALITY/Vision 不支持面点名拒绝（G1-6 配置保留面）：配置保留至拨号
+    /// 期在此拦——拒绝静默降级（普通 TLS 会被 REALITY 服务端回落伪装站点，
+    /// 普通 VLESS 连不上期望 Vision 分帧的服务端且无报错）。
+    fn gate_reality_and_flow(&self) -> Result<()> {
+        gate_reality_flow(&self.reality, &self.flow)
     }
 
     /// 传输键（§4.2）：TLS 走五元组键（sni = 实际握手 SNI，tcp/ws 分支各异），
@@ -236,11 +266,7 @@ impl VlessConnector {
             TargetProto::Tcp => {}
             _ => return Err(anyhow!("VLESS 暂仅支持 TCP 转发")),
         }
-        if self.flow.is_some() {
-            return Err(anyhow!(
-                "VLESS 暂不支持 flow（例如 xtls-rprx-vision），请设置为 null/省略"
-            ));
-        }
+        self.gate_reality_and_flow()?;
 
         let target = format!("{}:{}", flow.target.host, flow.target.port);
         let server_addr = self.server_addr();
@@ -459,11 +485,7 @@ impl VlessConnector {
             TargetProto::Tcp => {}
             _ => return Err(anyhow!("VLESS 暂仅支持 TCP 转发")),
         }
-        if self.flow.is_some() {
-            return Err(anyhow!(
-                "VLESS 暂不支持 flow（例如 xtls-rprx-vision），请设置为 null/省略"
-            ));
-        }
+        self.gate_reality_and_flow()?;
 
         let target = format!("{}:{}", flow.target.host, flow.target.port);
         let server_addr = self.server_addr();
@@ -688,6 +710,7 @@ pub struct VlessUdpConnector {
     port: u16,
     uuid: String,
     flow: Option<String>,
+    reality: Option<RealityConfig>,
     tls: bool,
     skip_cert_verify: bool,
     sni: Option<String>,
@@ -704,6 +727,7 @@ impl VlessUdpConnector {
             port: conn.port,
             uuid: conn.uuid.clone(),
             flow: conn.flow.clone(),
+            reality: conn.reality.clone(),
             tls: conn.tls,
             skip_cert_verify: conn.skip_cert_verify,
             sni: conn.sni.clone(),
@@ -755,11 +779,7 @@ impl EgressUdpConnector for VlessUdpConnector {
         ctx: FlowContext,
         _decision: &RouteDecision,
     ) -> Result<Arc<dyn UdpRelay>> {
-        if self.flow.is_some() {
-            return Err(anyhow!(
-                "VLESS UDP 暂不支持 flow（例如 xtls-rprx-vision），请设置为 null/省略"
-            ));
-        }
+        gate_reality_flow(&self.reality, &self.flow)?;
         let mut stream = self.open_transport().await?;
         let req = self.build_vless_udp_request(&ctx.target.host, ctx.target.port)?;
         stream.write_all(&req).await?;
@@ -1041,6 +1061,7 @@ mod tests {
             port,
             TEST_UUID.to_string(),
             None,
+            None,
             "tcp".to_string(),
             None,
             None,
@@ -1258,6 +1279,7 @@ mod tests {
             port,
             TEST_UUID.to_string(),
             None,
+            None,
             "httpupgrade".to_string(),
             Some("/hp".to_string()),
             Some(vec!["h.test".to_string()]),
@@ -1308,5 +1330,122 @@ mod tests {
         let report = report.expect("forward 失败");
         assert!(report.upstream >= 40 * 1024 + 23);
         assert!(report.downstream >= 40 * 1024 + 23);
+    }
+
+    /// G1-6 拨号期门（防静默降级）：REALITY 连接器 forward 必须在任何网络
+    /// I/O 前点名报错——若静默降级为普通 TLS，REALITY 服务端会按非 REALITY
+    /// 握手回落伪装站点，流量不走向代理且无任何报错。duplex io 足以证明
+    /// 门先于 connect 触发（端口不可达，真 connect 必报连接错而非点名）。
+    #[tokio::test]
+    async fn forward_rejects_reality_named_before_io() {
+        let connector = VlessConnector::new(
+            "127.0.0.1".to_string(),
+            1, // 不可达端口：门未先拦时必然是连接失败而非点名 REALITY
+            TEST_UUID.to_string(),
+            None,
+            Some(RealityConfig {
+                public_key: "PBQh7j2tWxQmZHVub3RUYXJnZXQ".to_string(),
+                short_id: Some("0123ac".to_string()),
+            }),
+            "tcp".to_string(),
+            None,
+            None,
+            None,
+            true,
+            true, // skip_cert_verify 亦不绕过门
+            None,
+            None,
+            TlsFingerprint::None,
+            None,
+            None,
+        );
+        let (client, _peer) = tokio::io::duplex(64);
+        let flow = Flow {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "example.com".to_string(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            io: Box::new(client),
+            metadata: FlowMetadata::default(),
+        };
+        let err = connector.forward(flow).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("REALITY"), "应点名 REALITY: {msg}");
+        assert!(msg.contains("未实现"), "应说明未实现而非连接失败: {msg}");
+    }
+
+    /// G1-6 拨号期门：flow（XTLS-Vision）连接器 forward 点名报错——
+    /// 静默降级为普通 VLESS 连不上期望 Vision 分帧的服务端且无报错。
+    #[tokio::test]
+    async fn forward_rejects_flow_named_before_io() {
+        let connector = VlessConnector::new(
+            "127.0.0.1".to_string(),
+            1, // 不可达端口：门未先拦时必然是连接失败而非点名 flow
+            TEST_UUID.to_string(),
+            Some("xtls-rprx-vision".to_string()),
+            None,
+            "tcp".to_string(),
+            None,
+            None,
+            None,
+            true,
+            true,
+            None,
+            None,
+            TlsFingerprint::None,
+            None,
+            None,
+        );
+        let (client, _peer) = tokio::io::duplex(64);
+        let flow = Flow {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "example.com".to_string(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            io: Box::new(client),
+            metadata: FlowMetadata::default(),
+        };
+        let err = connector.forward(flow).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("xtls-rprx-vision"), "应点名 flow 值: {msg}");
+    }
+
+    /// G1-6 UDP 面（command 0x02）同门：REALITY UDP 关联在 associate 期点名拒绝。
+    #[tokio::test]
+    async fn udp_associate_rejects_reality_named() {
+        let conn = VlessConnector::new(
+            "127.0.0.1".to_string(),
+            1,
+            TEST_UUID.to_string(),
+            None,
+            Some(RealityConfig {
+                public_key: "PBQh7j2tWxQmZHVub3RUYXJnZXQ".to_string(),
+                short_id: None,
+            }),
+            "tcp".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+            None,
+            TlsFingerprint::None,
+            None,
+            None,
+        );
+        let udp = VlessUdpConnector::from_connector(&conn);
+        let (ctx, decision) = test_ctx();
+        let err = udp
+            .associate(ctx, &decision)
+            .await
+            .err()
+            .expect("REALITY UDP 应被点名拒绝");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("REALITY"), "应点名 REALITY: {msg}");
     }
 }

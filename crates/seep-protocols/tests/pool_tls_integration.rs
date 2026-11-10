@@ -970,6 +970,7 @@ async fn vless_h2_inline_roundtrip_raw_stream() {
         addr.port(),
         "b831381d-6324-4d2a-b1e7-1bf75a1db7b3".to_string(),
         None,
+        None,
         "h2".to_string(),
         Some("/h2-echo".to_string()),
         None,

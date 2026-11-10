@@ -1,33 +1,43 @@
 # G1-6 design: REALITY + XTLS-Vision outbound
 
-> Status: **M1 landed (capture + import-time explicit reject, 2026-11-10)** · M2–M4 blocked (§5) · Maps to [todo.md](../../todo.md) G1-6 · Related: [tls-fingerprint.md](tls-fingerprint.md) (ClientHello assembler decision space) · [udp-relay-path.md](udp-relay-path.md) (egress capability table)
+> Status: **M1 landed (capture + import reject, 2026-11-10) · M1.5 landed (keep config, dial-time named gate, 2026-11-10)** · M2–M4 blocked (§5) · Maps to [todo.md](../../todo.md) G1-6 · Related: [tls-fingerprint.md](tls-fingerprint.md) (ClientHello assembler decision space) · [udp-relay-path.md](udp-relay-path.md) (egress capability table)
 
 ## Executive Summary
 
 Mainstream commercial subscriptions carry VLESS nodes with `reality-opts` (REALITY) and `flow: xtls-rprx-vision` (XTLS-Vision). Seep's node models previously had no fields for either key, so serde silently dropped them and the node degraded into an ordinary TLS VLESS: against a REALITY server the non-REALITY handshake gets the camouflage site (traffic never reaches the proxy, no error anywhere); against a Vision server the connection fails because the server expects Vision framing. Both outcomes are silent and undiagnosable — worse than a loud import failure.
 
-This batch lands **M1**: all three import surfaces capture the keys into explicit fields and the node is rejected at import time, naming the node — the same convention as the plugin-without-conversion-table rejection. The full REALITY client transport (M2) is blocked on ClientHello byte-level control that rustls does not provide (§4.3) and on a real xray REALITY node for interop acceptance; Vision (M3) additionally needs the Vision framing realized plus the same real-node acceptance.
+M1 landed capture + import-time reject; **M1.5 (same day) flipped the policy by decision**: all three import surfaces keep the captured fields in `EgressConfig::Vless` (serde no longer silently drops the keys), and the reject moved to **dial time** — `VlessConnector::gate_reality_and_flow` names REALITY/Vision before any network I/O. Rationale: node-level failure beats import-level failure (one REALITY node must not fail a whole bulk subscription; url-test marks it unhealthy while the rest works), and a loud dial-time error beats the silent degradation M1 existed to prevent. The full REALITY client transport (M2) remains blocked on ClientHello byte-level control that rustls does not provide (§4.3) and on a real xray REALITY node for interop acceptance; Vision (M3) additionally needs the Vision framing realized plus the same real-node acceptance.
 
 ## 1. Behavior matrix
 
-| Node carries | Before | After (M1) |
+| Node carries | Before | After (M1.5, current) |
 |---|---|---|
-| `reality-opts` (Clash YAML / Seep DSL) | key silently dropped → plain TLS VLESS → camouflage site served, no error | import-time `Err` naming the node and REALITY (G1-6) |
-| `pbk`/`sid`/`security=reality` (vless:// link) | params silently dropped → same silent degradation | link captured → node skipped with a warning naming it (bulk-path convention) |
-| `flow: xtls-rprx-vision` | key silently dropped → plain VLESS → server expects Vision framing, connection fails | import-time reject naming the flow value (YAML/DSL) or warning + skip (link) |
+| `reality-opts` (Clash YAML / Seep DSL) | key silently dropped → plain TLS VLESS → camouflage site served, no error | fields parsed & kept in `EgressConfig::Vless.reality`; dial-time `Err` naming REALITY before any I/O |
+| `pbk`/`sid`/`security=reality` (vless:// link) | params silently dropped → same silent degradation | link captured into the node, imported normally; dial-time named `Err` (TCP + UDP `associate`) |
+| `flow: xtls-rprx-vision` | key silently dropped → plain VLESS → server expects Vision framing, connection fails | kept in `EgressConfig::Vless.flow`; dial-time `Err` naming the flow value |
 | neither | normal VLESS (unchanged) | normal VLESS (unchanged) |
 
-Error-policy split (matches existing per-surface conventions):
+(M1's import-time reject is superseded — see the executive summary for why. `reality-opts` missing `public-key` still fails conversion loudly: half-configured REALITY is never silently turned into something else.)
 
-- **Clash YAML / Seep DSL** (authored config files): hard `Err` from the converter — one bad node surfaces at import, consistent with "VLESS 缺少 UUID" hard-failing.
-- **vless:// bulk links**: the node is dropped and a warning is recorded in `ConversionResult.warnings` — consistent with the per-line warning convention of `convert_v2ray`; the other lines still import. Gating happens in `convert_v2ray` right after link parsing, because the default url-test group references every parsed node and a late rejection would fail the whole subscription.
+Error policy (M1.5):
+
+- **Import time**: keys are captured, never dropped; only an incomplete REALITY block (missing `public-key`) errors, naming the node.
+- **Dial time** (TCP `forward` and UDP `associate`): a REALITY/flow node fails its own connection with a named error explaining why silent degradation is refused — before any network I/O. The rest of the subscription keeps working; url-test health marks the node unhealthy.
 
 ## 2. Landed surface (M1)
 
 - `crates/seep-subscription/src/clash.rs` — `ClashProxy` gains `flow: Option<String>` and `reality_opts: Option<serde_yaml::Value>` (aliases `reality-opts` / `reality_opts`); the VLESS convert arm rejects with a message naming the node.
 - `crates/seep-subscription/src/seep_dsl.rs` — `SeepNode` gains `flow` / `reality` (aliases `reality-opts` / `reality_opts`); the VLESS arm rejects likewise.
 - `crates/seep-subscription/src/converter.rs` — `parse_vless` captures `pbk` (public-key), `sid` (short-id), `security=reality` into `reality_opts` and `flow` into `flow`; `convert_v2ray` gates captured nodes into warnings + skip.
-- Tests: reject paths on both converters (plain VLESS unaffected), serde capture proof (kebab + snake aliases), link param capture, bulk-import warning + skip.
+- Tests: serde capture proof (kebab + snake aliases), link param capture, bulk-import preserves the REALITY line.
+
+### 2.1 Landed surface (M1.5, dial-time gate)
+
+- `crates/seep-config/src/lib.rs` — `RealityConfig { public_key, short_id }` (kebab aliases on the inner keys) + `EgressConfig::Vless.reality: Option<RealityConfig>`; `flow` already carried.
+- `crates/seep-subscription` — Clash/DSL/vless:// arms convert REALITY nodes successfully and preserve fields; only missing `public-key` errors.
+- `crates/seep-protocols/src/outbound/vless.rs` — `gate_reality_flow` fires at the top of `forward_pooled`/`forward_inline` and in `VlessUdpConnector::associate`, before any network I/O.
+- `crates/seep-runtime/src/runtime_builder.rs` — build no longer rejects flow/reality (build-time reject removed; both arms pass `reality` into the connector); clash export round-trips `reality-opts`.
+- Tests: `build_egress_outputs_carries_vless_flow_and_reality` (runtime), `forward_rejects_reality_named_before_io` / `forward_rejects_flow_named_before_io` / `udp_associate_rejects_reality_named` (protocols), preserved-on-convert (clash + dsl), `test_v2ray_bulk_import_preserves_reality_line` (converter), `reality_config.rs` (config serde roundtrip).
 
 ## 3. Protocol analysis
 
@@ -59,11 +69,13 @@ None is selectable without a user-level stack decision, and none can be acceptan
 | Milestone | Content | Status |
 |---|---|---|
 | M1 | Capture `reality-opts`/`flow` on all three import surfaces + import-time explicit reject/warning + tests | **Landed (2026-11-10)** |
+| M1.5 | Keep captured config in `EgressConfig::Vless`; move the reject to dial time (TCP + UDP), naming REALITY/Vision before any I/O; clash export round-trips `reality-opts` | **Landed (2026-11-10)** |
 | M2 | REALITY outbound transport (dial-level) | BLOCKED: ClientHello-control approach needs a stack decision (§4.3); needs a real xray REALITY node for interop acceptance |
 | M3 | Vision `flow` support over the VLESS egress | BLOCKED: depends on the M2 transport shape; needs a real Vision node; loopback vectors first (VMess xray-vector precedent) |
 | M4 | Real-node acceptance for both | BLOCKED: external node credentials |
 
 ## 5. Acceptance mapping
 
-- M1: `cargo test -p seep-subscription` — `test_vless_reality_and_flow_nodes_rejected_on_convert` (clash + dsl), `test_seep_node_captures_reality_and_flow_keys`, `test_vless_reality_link_params_captured`, `test_v2ray_bulk_import_warns_and_skips_reality_line`.
+- M1: `cargo test -p seep-subscription` — `test_vless_reality_and_flow_nodes_preserved_on_convert` (clash + dsl, M1.5 flip), `test_seep_node_captures_reality_and_flow_keys`, `test_vless_reality_link_params_captured`, `test_v2ray_bulk_import_preserves_reality_line` (M1.5 flip).
+- M1.5: `cargo test -p seep-config --test reality_config` (serde no-drop + roundtrip), `cargo test -p seep-protocols` gate tests (dial-time named errors, TCP + UDP), `build_egress_outputs_carries_vless_flow_and_reality` (runtime build carries both).
 - M2–M4: real-node interop only (xray/sing-box server with REALITY enabled), plus a ClientHello-capture assertion once the transport exists (same technique as tls-fingerprint.md's distinguishability test).

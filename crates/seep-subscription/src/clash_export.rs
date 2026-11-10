@@ -290,6 +290,7 @@ fn proxy_mapping(
             port,
             uuid,
             flow,
+            reality,
             network,
             path,
             host,
@@ -306,6 +307,15 @@ fn proxy_mapping(
             ins(&mut m, "uuid", uuid);
             if let Some(f) = flow {
                 ins(&mut m, "flow", f);
+            }
+            // G1-6：REALITY 选项导出为 reality-opts（Clash 键位），配置不丢
+            if let Some(r) = reality {
+                let mut ropts = Mapping::new();
+                ins(&mut ropts, "public-key", r.public_key.as_str());
+                if let Some(sid) = &r.short_id {
+                    ins(&mut ropts, "short-id", sid.as_str());
+                }
+                ins(&mut m, "reality-opts", ropts);
             }
             if *tls {
                 ins(&mut m, "tls", true);

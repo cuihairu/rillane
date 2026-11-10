@@ -1435,6 +1435,19 @@ pub struct Credential {
     pub password: String,
 }
 
+/// REALITY 出站选项（G1-6）：XTLS/Xray REALITY 伪装 TLS 的客户端参数。
+/// 仅承载配置（serde 保留键不再静默丢弃）；拨号期由 VLESS 连接器点名
+/// 拒绝（rustls 无 ClientHello 字节级控制，见设计文档 §4.3 栈决策）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RealityConfig {
+    /// 服务端 REALITY 公钥（x25519；Clash `reality-opts.public-key`）
+    #[serde(alias = "public-key")]
+    pub public_key: String,
+    /// short-id（服务端允许列表内的认证标识；可空）
+    #[serde(alias = "short-id", skip_serializing_if = "Option::is_none")]
+    pub short_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EgressConfig {
@@ -1513,6 +1526,10 @@ pub enum EgressConfig {
         uuid: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         flow: Option<String>,
+        /// REALITY 选项（G1-6）：Some = REALITY 节点（配置保留，拨号期
+        /// 点名拒绝——rustls 无 ClientHello 字节级控制，防静默降级）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reality: Option<RealityConfig>,
         #[serde(default = "default_network")]
         network: String,
         #[serde(skip_serializing_if = "Option::is_none")]
