@@ -1295,6 +1295,29 @@ impl Runtime {
             }));
         }
 
+        // G1-9 审核发现（2026-11-10）：url-test 周期探活任务此前从未在运行时
+        // 启动——`RoutingEngine::start_health_check_task`（seep-routing
+        // lib.rs:437）在 start() 任务区无调用点，仅 ChainManager 健康任务与
+        // mesh→routing 质量桥被 spawn；探测句柄虽在 build 期注入
+        // （set_probe_handler），url_test 组运行时永不周期探活，健康/延迟表
+        // 恒空、组退化默认健康兜底。此处为唯一启动点（detached 内层同
+        // ChainManager 健康任务模式：运行期守护，shutdown 由 runtime drop
+        // 收回；外层 running 门控随停止信号退出）。
+        {
+            let router = self.router.clone();
+            let running = self.running.clone();
+            tasks.push(tokio::spawn(async move {
+                let router = router.clone();
+                tokio::spawn(async move {
+                    router.start_health_check_task().await;
+                });
+                while *running.read().expect("running lock poisoned") {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Ok::<(), anyhow::Error>(())
+            }));
+        }
+
         // P2-2 §4：mesh→routing 质量桥（D-4）——周期聚合 MeshRegistry 链路
         // 质量（节点 p95 = 相邻链路最差跳 max；loss = Σerrors/Σconnections）
         // 推进组策略（seep-routing 零 seep-mesh 依赖，数据推进式）。10s 周期
@@ -4760,6 +4783,64 @@ mod tests {
                 .is_none(),
             "无 hosts 键应零装配"
         );
+    }
+
+    /// G1-9 审核发现（2026-11-10）修复验证：url-test 周期探活任务已接入
+    /// start()——此前 `RoutingEngine::start_health_check_task`（seep-routing
+    /// lib.rs:437）在 start() 任务区无调用点，探测句柄虽注入（runtime_builder
+    /// :199）仍永不探活，健康/延迟表恒空。start 后首轮 tick（interval 首拍
+    /// 立即）即探活：无出口成员经探测句柄 Err → 标不健康（此前恒默认健康
+    /// true），不产生真实探测流量。
+    #[tokio::test]
+    async fn urltest_health_task_wired_into_start() {
+        let mut cfg = s5_udp_config(false);
+        cfg.routing = seep_config::RoutingConfig {
+            default_node: "direct".to_string(),
+            groups: vec![seep_config::PolicyGroup {
+                name: "auto".to_string(),
+                strategy: seep_config::Strategy::Latency,
+                members: vec![seep_config::GroupMember::Node {
+                    name: "no-such-node".to_string(),
+                }],
+                slo: None,
+                url_test: Some(seep_config::UrlTestConfig {
+                    probe: "127.0.0.1:80".to_string(),
+                    path: "/generate_204".to_string(),
+                    interval_secs: 300,
+                    timeout_ms: 500,
+                }),
+            }],
+            rules: vec![],
+            ..Default::default()
+        };
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(RuntimeConfig {
+                enable_network_virtualization: false,
+                network_config: None,
+                ..RuntimeConfig::default()
+            })
+            .build()
+            .expect("url_test 组应装配");
+        let tasks = runtime.start().await.expect("start 应成功");
+
+        // 首轮 tick 立即执行：无出口成员被探活标不健康（此前 bug 健康表恒空
+        // ——get_health_stats 总为 (0,0)）。探活 Err → 标不健康：(healthy, total)
+        // = (0,1) 即表非空且该成员不健康。
+        let mut marked = false;
+        for _ in 0..100 {
+            if runtime.router.get_health_stats() == (0, 1) {
+                marked = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            marked,
+            "url_test 周期探活应标记无出口成员不健康（健康表不再恒空）"
+        );
+        for t in tasks {
+            t.abort();
+        }
     }
 
     /// build 期拦截：enabled 块 + 双空 domestic 引用（无 tun 回落）→ Err
