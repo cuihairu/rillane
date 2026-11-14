@@ -1,7 +1,7 @@
-# SEEP OpenWrt 包（P3-3）
+# RILLANE OpenWrt 包（P3-3）
 
-musl 静态交叉编译 + ipk 组装。目标形态：路由器上 `opkg install seep_*.ipk`，
-`/etc/init.d/seep start` 即起 daemon（procd 托管，配置 `/etc/seep.yaml`）。
+musl 静态交叉编译 + ipk 组装。目标形态：路由器上 `opkg install rillane_*.ipk`，
+`/etc/init.d/rillane start` 即起 daemon（procd 托管，配置 `/etc/rillane.yaml`）。
 
 ## 构建矩阵
 
@@ -42,15 +42,15 @@ cat dist/openwrt/.build-log.txt   # file/readelf 静态核验 + ar 结构
 装机：
 
 ```sh
-scp dist/openwrt/seep_*_<arch>.ipk root@router:/tmp/
-ssh root@router opkg install /tmp/seep_*.ipk
-# 首次：模板落地 /etc/seep.yaml（postinst），按需编辑后
-/etc/init.d/seep enable && /etc/init.d/seep start
+scp dist/openwrt/rillane_*_<arch>.ipk root@router:/tmp/
+ssh root@router opkg install /tmp/rillane_*.ipk
+# 首次：模板落地 /etc/rillane.yaml（postinst），按需编辑后
+/etc/init.d/rillane enable && /etc/init.d/rillane start
 ```
 
-ipk 内容：`/usr/bin/seepd`、`/usr/bin/seepctl`、`/etc/init.d/seep`（procd，
-respawn + UCI `seep.@general[0].enabled` 预留开关）、`/usr/share/seep/seep.yaml.example`
-（首装复制为 `/etc/seep.yaml`，conffile 语义——升级保留本地改动）。
+ipk 内容：`/usr/bin/rillaned`、`/usr/bin/rillanectl`、`/etc/init.d/rillane`（procd，
+respawn + UCI `rillane.@general[0].enabled` 预留开关）、`/usr/share/rillane/rillane.yaml.example`
+（首装复制为 `/etc/rillane.yaml`，conffile 语义——升级保留本地改动）。
 Depends：`libc, kmod-tun`（TUN 虚拟化面；仅 socks 入口 + DNS 监听可不装 kmod-tun，
 `network` 块缺席即可）。LuCI 页面后置（见 todo P3-3 注记）。
 
@@ -71,5 +71,5 @@ Depends：`libc, kmod-tun`（TUN 虚拟化面；仅 socks 入口 + DNS 监听可
 - procd 托管下的起停/respawn 行为；
 - TUN 数据面在 MIPS/ARM 内核上的吞吐与 kmod-tun 交互。
 
-宿主机有 qemu-user 时可加跑冒烟（`qemu-aarch64-static target/aarch64-.../release/seepd --version`）；
+宿主机有 qemu-user 时可加跑冒烟（`qemu-aarch64-static target/aarch64-.../release/rillaned --version`）；
 CI/真机到位后在 todo P3-3 注记回填。

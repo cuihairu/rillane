@@ -1,7 +1,7 @@
 # P1-1 Linux TUN real implementation -- implementation landing design (T0-T2)
 
-> Upstream: [tun-dataplane.md](tun-dataplane.md) §1/§4/§5 (the design final draft -- device interface, data flow, error paths, test strategy, step-by-step checklist). This document is its **P1-1 half (T0-T2) implementation companion**: the TUNSETIFF interface, the packet read/write loop, the `platform.rs` placeholder replacement plan, `LinuxRouteManager` and the actual state of tests, with deviations backfilled in §6. T3+ (the `TunIngress` packet loop / UDP NAT / smoltcp TCP side) belongs to P1-2; the `network` config block and `seepctl route` belong to P1-3 ([network-route.md](network-route.md)).
-> Landing points: `crates/seep-platform/src/network/linux.rs` (single file, skeleton started at T0, now 1757 lines including tests) · module wiring and the four factories in `network/mod.rs` · trait pruning in `network/tun.rs`.
+> Upstream: [tun-dataplane.md](tun-dataplane.md) §1/§4/§5 (the design final draft -- device interface, data flow, error paths, test strategy, step-by-step checklist). This document is its **P1-1 half (T0-T2) implementation companion**: the TUNSETIFF interface, the packet read/write loop, the `platform.rs` placeholder replacement plan, `LinuxRouteManager` and the actual state of tests, with deviations backfilled in §6. T3+ (the `TunIngress` packet loop / UDP NAT / smoltcp TCP side) belongs to P1-2; the `network` config block and `rillanectl route` belong to P1-3 ([network-route.md](network-route.md)).
+> Landing points: `crates/rillane-platform/src/network/linux.rs` (single file, skeleton started at T0, now 1757 lines including tests) · module wiring and the four factories in `network/mod.rs` · trait pruning in `network/tun.rs`.
 
 ## 1. Overview and commit anchors
 
@@ -91,7 +91,7 @@ The replacement is a **three-layer closure** rather than rewriting `platform.rs`
 | factories (`mod.rs`) | The four factories go from always-Err to cfg dispatch: `#[cfg(target_os = "linux")] pub mod linux;`, with the tun/route factories returning real implementations on Linux and other platforms keeping Err; the filter/dns factories keep Err but change the wording -- filter=in-process rules (§2.7) / dns=P2-8. The dispatch is the single source of truth: the `create_tun_interface` convenience function is changed to delegate to the factory and no longer carries its own always-Err placeholder |
 | dead draft (`platform.rs`) | Remains uncompiled (not in the module tree), with a pointing note added at the top: the real implementation lands in `linux.rs` per tun-dataplane.md §1.4, and its `packet_stream` signature became stale with the trait pruning, so do not restore from it |
 
-Dependency surface: `nix` moved into `[target.'cfg(target_os = "linux")'.dependencies]` (features `ioctl`+`fs`); tokio gains the `process` feature (the `ip` subprocess). Existing consumption points are unaware -- seep-runtime goes only through the four factories, and `enable_network_virtualization` defaults to false so it is never reached.
+Dependency surface: `nix` moved into `[target.'cfg(target_os = "linux")'.dependencies]` (features `ioctl`+`fs`); tokio gains the `process` feature (the `ip` subprocess). Existing consumption points are unaware -- rillane-runtime goes only through the four factories, and `enable_network_virtualization` defaults to false so it is never reached.
 
 ## 5. LinuxRouteManager (T2)
 
@@ -105,7 +105,7 @@ pub enum AppliedStep {                       // linux.rs:498
 }
 ```
 
-apply/clear read and write `applied: Mutex<Vec<AppliedStep>>`; the `Display` impl serves `remove_route`'s name lookup. Idempotency relies on `ip`'s `replace` semantics; **"full restoration" = undoing the steps seep added** (same stance as P1-3 §5), not a snapshot rollback.
+apply/clear read and write `applied: Mutex<Vec<AppliedStep>>`; the `Display` impl serves `remove_route`'s name lookup. Idempotency relies on `ip`'s `replace` semantics; **"full restoration" = undoing the steps rillane added** (same stance as P1-3 §5), not a snapshot rollback.
 
 ### 5.2 apply / clear / rollback (`linux.rs:1000/1007`)
 
@@ -154,7 +154,7 @@ apply/clear read and write `applied: Mutex<Vec<AppliedStep>>`; the `Display` imp
 
 `device_lifecycle_and_capture` (`linux.rs:1530`) -- guard at two points: `tun_device_available()` (no `/dev/net/tun` -> print skip) / `is_permission_skip` (error chain contains CAP_NET_ADMIN -> skip); **skip is not counted as failure**, so a non-privileged CI is unaffected:
 
-- **Cycle A (forced name)**: create `seepT1<pid>` -> name read-back assertion -> up/addr/mtu read-back assertions via `ip addr|link show` (10.66.0.1/24, mtu) -> **the capture pin (the core of P1-1 acceptance, the provider half)**: a `UdpSocket` bound to `10.66.0.1:0` sends to `10.66.0.2:9999` -> the kernel injects into the tun fd over the connected route -> the `read_packet` loop filters by the target 5-tuple (send before read; the tun queue buffers so nothing is lost; non-target packets ignored) -> assertions on src/dst IP+port, proto, length, payload tail, and the receive counter -> down/destroy -> `ip link show` asserts the kernel reclaimed the interface;
+- **Cycle A (forced name)**: create `rillaneT1<pid>` -> name read-back assertion -> up/addr/mtu read-back assertions via `ip addr|link show` (10.66.0.1/24, mtu) -> **the capture pin (the core of P1-1 acceptance, the provider half)**: a `UdpSocket` bound to `10.66.0.1:0` sends to `10.66.0.2:9999` -> the kernel injects into the tun fd over the connected route -> the `read_packet` loop filters by the target 5-tuple (send before read; the tun queue buffers so nothing is lost; non-target packets ignored) -> assertions on src/dst IP+port, proto, length, payload tail, and the receive counter -> down/destroy -> `ip link show` asserts the kernel reclaimed the interface;
 - **Cycle B (automatic name)**: create with `TunConfig::default()` (name=None) -> assert the read-back name is of the form `tun%d` -> destroy.
 
 The FlowRouter half of "capturing IP packets **entering FlowRouter**" has landed with T3's `TunIngress` -- `tun_ingress.rs` (`mod tests` from :855) already has ingress-loop wiring tests (including the `tun_udp_e2e_capture_route_attribution_echo` real-device e2e, see the landing note in tun-dataplane.md §4.2); the provider half (packets actually reaching `read_packet`'s return value from the kernel) is demonstrated as before.
@@ -167,4 +167,4 @@ The FlowRouter half of "capturing IP packets **entering FlowRouter**" has landed
 ## 8. Seams with P1-2/P1-3 (closed)
 
 - **P1-2 (T3/T4/T5) has landed** (a9f11dc/b5785c2/7a3024d): `TunIngress` takes ownership of `LinuxTunProvider`+`LinuxRouteManager` (creation/addressing/route setup complete at `run()` startup, teardown on exit); the `(Bytes, PacketInfo)` returned by `read_packet` is the packet loop's input; the full auto-bypass set is assembled there (§5.3);
-- **P1-3 (R1-R4) has landed** (1e1a7c0/1befbe7): the `network` block -> `TunConfig`/`RoutingConfig` conversion is in `seep-runtime/src/network_config.rs` (including the auto-bypass removal half); `seepctl route apply/clear` reuse the same `apply_routing`/`rollback_all` mechanism (idempotent / full restoration / failure rollback are consistent in stance), and the three control-plane endpoints `/network/route/{apply,clear,status}` are in place.
+- **P1-3 (R1-R4) has landed** (1e1a7c0/1befbe7): the `network` block -> `TunConfig`/`RoutingConfig` conversion is in `rillane-runtime/src/network_config.rs` (including the auto-bypass removal half); `rillanectl route apply/clear` reuse the same `apply_routing`/`rollback_all` mechanism (idempotent / full restoration / failure rollback are consistent in stance), and the three control-plane endpoints `/network/route/{apply,clear,status}` are in place.

@@ -10,11 +10,11 @@
 
 当前数据通路是纯 TCP：入站 socks5 显式拒绝 UDP ASSOCIATE（`inbound/socks5.rs` 仅接受 cmd=0x01），出站 hy2/wg 按 `TargetProto` 分派后对非 TCP 报错，mesh 数据面 `MeshStream` 绑定 `AsyncRead+AsyncWrite`。本稿给出不破坏 TCP 面的 UDP 平行面设计：
 
-1. **`seep-core` 新增 UDP 会话层**（NAT 式会话表 + 粘滞键 + 平行 trait `EgressUdpConnector`）——因为 `Flow.io: BoxedIo` 是流语义，UDP 无法复用；
+1. **`rillane-core` 新增 UDP 会话层**（NAT 式会话表 + 粘滞键 + 平行 trait `EgressUdpConnector`）——因为 `Flow.io: BoxedIo` 是流语义，UDP 无法复用；
 2. **socks5 入站补 0x03 命令**，复用现有认证/解析框架；
 3. **四个 UDP-capable 出站**（direct/ss/hy2/wg），其余类型 UDP 路由时构建期报错；
 4. **mesh UDP 面**：首包携带路径、后续包仅 flow_id 的跳间缓存转发，envelope 二进制化从 UDP 面开始（MTU 硬约束），与 P2-6 合流；
-5. **观测/配置**：顶层 `udp:` 区块 + `/metrics` 新增 `seep_udp_*` 指标序列。
+5. **观测/配置**：顶层 `udp:` 区块 + `/metrics` 新增 `rillane_udp_*` 指标序列。
 
 设计原则：UDP 面与 TCP 面在同一进程内**并行共存**，共享 Flow 会话模型、路由引擎、控制面与订阅；不存在分支产品路径（positioning.md §2.5）。
 
@@ -61,14 +61,14 @@
 
 | 现有资产 | 用途 |
 |---------|------|
-| `seep-core::TargetProto::{Udp, Quic}` | 枚举已存在，直接作为会话目标协议标记（TUN 阶段 Quic 识别时区分标记，转发面同为 UDP 数据报） |
-| `seep-core::FlowTarget` | 会话内每个目标映射复用该结构 |
-| `seep-core::FlowSession`/`SessionUsage`/`FailureStats` | 会话统计与失败记录字段直接挂到 UDP 会话上 |
-| `seep-core::FlowRouter`/`FlowMiddleware` | 路由决策与中间件对 UDP 面同样生效（传输无关） |
+| `rillane-core::TargetProto::{Udp, Quic}` | 枚举已存在，直接作为会话目标协议标记（TUN 阶段 Quic 识别时区分标记，转发面同为 UDP 数据报） |
+| `rillane-core::FlowTarget` | 会话内每个目标映射复用该结构 |
+| `rillane-core::FlowSession`/`SessionUsage`/`FailureStats` | 会话统计与失败记录字段直接挂到 UDP 会话上 |
+| `rillane-core::FlowRouter`/`FlowMiddleware` | 路由决策与中间件对 UDP 面同样生效（传输无关） |
 | workspace 依赖 `dashmap 6.0` | 会话表容器 |
-| `seep-routing::RoutingEngine` | 不改；UDP 会话首包走同一路由决策 |
+| `rillane-routing::RoutingEngine` | 不改；UDP 会话首包走同一路由决策 |
 
-### 1.2 新增（`seep-core` 新模块 `udp.rs`）
+### 1.2 新增（`rillane-core` 新模块 `udp.rs`）
 
 ```rust
 pub struct UdpSessionKey {           // 粘滞键
@@ -105,7 +105,7 @@ pub trait UdpRelay: Send {
 
 **粘滞语义**：同一 `UdpSessionKey` 的所有包命中同一 `RouteDecision`（缓存于会话），游戏会话不因逐包重新路由而跳链路。粘滞键的**进程维度**（todo P0-1 提及"进程/五元组"）依赖 P1 TUN 才能取得进程信息，S1 落地为 `client addr + 可选用户名`，结构体预留 `process_id: Option<u32>` 字段，P1 填充——已在结构上兼容，不需二次迁移。
 
-**超时回收**：后台 tokio interval 任务扫描（复用 `seep-runtime` 现有后台任务模式，参照 `ChainManager::start_health_check_task`）。默认值：会话空闲 180s 回收；会话内单目标映射空闲 60s 移除（游戏心跳间隔远小于此）；单节点最大并发会话默认 4096，超限拒收并计数（见 §5 指标）。
+**超时回收**：后台 tokio interval 任务扫描（复用 `rillane-runtime` 现有后台任务模式，参照 `ChainManager::start_health_check_task`）。默认值：会话空闲 180s 回收；会话内单目标映射空闲 60s 移除（游戏心跳间隔远小于此）；单节点最大并发会话默认 4096，超限拒收并计数（见 §5 指标）。
 
 ### 1.3 与 TCP 面共存
 
@@ -117,7 +117,7 @@ pub trait UdpRelay: Send {
 
 - 会话创建/查询/超时回收有单元测试：空闲超 `session_timeout` 后表项消失；活跃会话不回收；
 - 同一粘滞键连续发包复用同一 `RouteDecision` 与映射，不重建（断言表内映射计数不变）；
-- 超限拒收有计数指标（`seep_udp_dropped_total{reason="session_limit"}`）。
+- 超限拒收有计数指标（`rillane_udp_dropped_total{reason="session_limit"}`）。
 
 ### 1.5 风险与未决项
 
@@ -131,9 +131,9 @@ pub trait UdpRelay: Send {
 
 | 现有资产 | 用途 |
 |---------|------|
-| `seep-protocols::inbound::socks5` 整体框架 | `negotiate_method`/`perform_auth`/地址解析（ATYP 0x01/0x03/0x04）原样复用 |
+| `rillane-protocols::inbound::socks5` 整体框架 | `negotiate_method`/`perform_auth`/地址解析（ATYP 0x01/0x03/0x04）原样复用 |
 | `IngressEndpoint` trait | `SocksInbound::run` 增加并行 UDP 监听分支，trait 不改 |
-| `seep-core::UdpSessionTable`/`EgressUdpConnector`（§1） | 中继 socket 收包后走会话表 → 路由 → 出站 |
+| `rillane-core::UdpSessionTable`/`EgressUdpConnector`（§1） | 中继 socket 收包后走会话表 → 路由 → 出站 |
 | `Credential` 认证 | `client_id` 粘滞键维度来源 |
 
 ### 2.2 新增
@@ -153,7 +153,7 @@ pub trait UdpRelay: Send {
 ### 2.4 验收标准（对齐 todo P0-2）
 
 - 标准客户端经 socks5 入站 + direct 出站完成 DNS UDP 查询往返（如 `dig @8.8.8.8 example.com` over socks5 udp）；
-- `seepctl stats` 可见 UDP 会话与字节数（依赖 §5 指标）；
+- `rillanectl stats` 可见 UDP 会话与字节数（依赖 §5 指标）；
 - `udp_enabled=false` 时 0x03 请求收到 0x07 错误，TCP CONNECT 行为无回归（现有 socks5 测试全绿）。
 
 ### 2.5 风险与未决项
@@ -166,7 +166,7 @@ pub trait UdpRelay: Send {
 
 ### 3.0 通用机制
 
-`seep-protocols::outbound` 增 UDP-capable 连接器（`DirectUdpConnector` 在 `seep_core::udp::relay`，`ShadowsocksUdpConnector` 在 `outbound/shadowsocks.rs`，`WireguardUdpConnector` 在 `outbound/wireguard.rs`；hy2 归 V2）；构建期（`RuntimeBuilder`/seepd 启动）扫描 `routing` 可达出站类型：UDP 流量被路由到 **trojan/vless/socks5/http** 等无 UDP 能力类型时，**启动即报错并列出冲突节点名**（对齐 todo 验收"不支持的出站类型在构建期明确报错"）——不采用运行期静默丢包。现有 hy2/wg 出站已有 `TargetProto` 分派骨架（`Tcp => {}` + 兜底报错），UDP 分支直接落入同一 match。
+`rillane-protocols::outbound` 增 UDP-capable 连接器（`DirectUdpConnector` 在 `rillane_core::udp::relay`，`ShadowsocksUdpConnector` 在 `outbound/shadowsocks.rs`，`WireguardUdpConnector` 在 `outbound/wireguard.rs`；hy2 归 V2）；构建期（`RuntimeBuilder`/rillaned 启动）扫描 `routing` 可达出站类型：UDP 流量被路由到 **trojan/vless/socks5/http** 等无 UDP 能力类型时，**启动即报错并列出冲突节点名**（对齐 todo 验收"不支持的出站类型在构建期明确报错"）——不采用运行期静默丢包。现有 hy2/wg 出站已有 `TargetProto` 分派骨架（`Tcp => {}` + 兜底报错），UDP 分支直接落入同一 match。
 
 ### 3.1 direct（`outbound/direct.rs`）
 
@@ -203,7 +203,7 @@ pub trait UdpRelay: Send {
 
 - QUIC 站点（HTTP/3，如 `curl --http3`）经 **wg** 出站可访问（**可验口径**：QUIC 即普通 UDP 不特判，P0-3 wg 载体可达）；经 **hy2** 的半边**维持改判 V2**（P0-4 §0.1-③，随 quinn 载具另立工单）；
 - DNS UDP 查询经 ss 出站往返成功（AEAD 每包语义验证）；
-- 将某 UDP 流量规则指向 trojan/vless 节点：seepd **启动报错**并指名冲突节点；
+- 将某 UDP 流量规则指向 trojan/vless 节点：rillaned **启动报错**并指名冲突节点；
 - direct 出站 UDP 有独立收发计数（§5）。
 
 ### 3.7 风险与未决项
@@ -222,7 +222,7 @@ pub trait UdpRelay: Send {
 |---------|------|
 | `MeshEnvelope` 的 path 剥离语义（`path[0]` 自剥 → 转发 `path[1]`） | UDP 跳行为完全同构 |
 | `MeshRegistry`（节点寻址/角色/配额/ACL） | 下一跳解析与准入检查原样复用 |
-| `MeshTlsConfig` 证书材质（`seepctl mtls` 产物） | §4.4 加密方案复用同一套 CA/节点证书 |
+| `MeshTlsConfig` 证书材质（`rillanectl mtls` 产物） | §4.4 加密方案复用同一套 CA/节点证书 |
 | `ChainManager` 链路构建/健康检查/`handle_chain_failure` | UDP 链路故障切换复用（§1.5 R2） |
 
 ### 4.2 新增：UdpEnvelope（二进制头）
@@ -243,7 +243,7 @@ magic(2)="SU" | ver(1) | flags(1) | flow_id(16, UUID bytes)
 - 跳缓存过期 = 会话过期（同 §1 超时），`flow_id` 碰撞概率可忽略（UUIDv4）；
 - **与 P2-6 的关系**：P2-6（TCP 面 envelope 二进制化）直接采用本格式为统一协议 v2，TCP 面迁移时 UDP 面已是该格式——本节即 P2-6 的格式定义稿。
 
-### 4.3 转发行为（`seep-runtime::mesh_transport` 扩展）
+### 4.3 转发行为（`rillane-runtime::mesh_transport` 扩展）
 
 - `MeshDataPlane` 并行持有 TCP listener（现状）与 UDP socket（**同端口号**，TCP/UDP 双栈同端口，`MeshConfig.listen_address` 复用）；
 - `MeshStream` trait 是 `AsyncRead+AsyncWrite`（TCP 专属），UDP 面用 `tokio::net::UdpSocket + §4.2 编解码` 直写，不强行抽象统一流接口；
@@ -252,7 +252,7 @@ magic(2)="SU" | ver(1) | flags(1) | flow_id(16, UUID bytes)
 
 ### 4.4 加密（与 TCP 面 mTLS 语义对齐）
 
-TCP 面已实现"chain 启用时默认强制 mTLS、`SEEP_MESH_ALLOW_PLAINTEXT=1` 仅限开发"（mesh.md）。UDP 面按同等安全水位设计，三个候选：
+TCP 面已实现"chain 启用时默认强制 mTLS、`RILLANE_MESH_ALLOW_PLAINTEXT=1` 仅限开发"（mesh.md）。UDP 面按同等安全水位设计，三个候选：
 
 | 方案 | 说明 | 评估 |
 |------|------|------|
@@ -260,19 +260,19 @@ TCP 面已实现"chain 启用时默认强制 mTLS、`SEEP_MESH_ALLOW_PLAINTEXT=1
 | B | DTLS | Rust 生态无成熟维护栈，排除 |
 | C | 每包 AEAD + 自管重放窗口，密钥从 mTLS 证书材质派生 | 零新依赖但自担密码工程风险 |
 
-**MVP 兜底**：实施轮未定案前，UDP 面仅明文可用且由 `SEEP_MESH_UDP_ALLOW_PLAINTEXT=1` 显式开启（语义镜像 TCP 面），`chain+udp` 组合在未配置加密时拒绝启动。最终选型为**未决项 V2**，倾向 A。
+**MVP 兜底**：实施轮未定案前，UDP 面仅明文可用且由 `RILLANE_MESH_UDP_ALLOW_PLAINTEXT=1` 显式开启（语义镜像 TCP 面），`chain+udp` 组合在未配置加密时拒绝启动。最终选型为**未决项 V2**，倾向 A。
 
 ### 4.5 与 TCP 面共存
 
 - 同端口双栈、同 registry、同链路健康检查；TCP 面代码路径零改动；
-- `RouteDecision::Chain` 对 UDP 流量同样由 `ChainManager` 升级产生（首包路由时），链路元数据（`seep.chain.path` annotation 语义）对 UDP 会话同样记录。
+- `RouteDecision::Chain` 对 UDP 流量同样由 `ChainManager` 升级产生（首包路由时），链路元数据（`rillane.chain.path` annotation 语义）对 UDP 会话同样记录。
 
 ### 4.6 验收标准（对齐 todo P0-4）
 
 - 两跳链路（client → relay → exit）UDP 双向转发：客户端经链路完成 DNS 查询往返；
 - 对端不可达/会话空闲超时：relay 跳缓存与会话表条目按超时回收（断言内存回落 + 回收计数）；
 - 首包 FULL/后续 CACHED 抓包验证：第 2 个包起不携带路径字段；
-- `SEEP_MESH_UDP_ALLOW_PLAINTEXT` 未设且未配置加密时，`chain+udp` 拒绝启动（报错信息指明开关）。
+- `RILLANE_MESH_UDP_ALLOW_PLAINTEXT` 未设且未配置加密时，`chain+udp` 拒绝启动（报错信息指明开关）。
 
 ### 4.7 风险与未决项
 
@@ -286,10 +286,10 @@ TCP 面已实现"chain 启用时默认强制 mTLS、`SEEP_MESH_ALLOW_PLAINTEXT=1
 
 | 现有资产 | 用途 |
 |---------|------|
-| `SeepConfig` 顶层结构（`seep-config`） | 新增 `udp:` 区块，与 `control/telemetry/ingress/egress/routing` 平级 |
+| `RillaneConfig` 顶层结构（`rillane-config`） | 新增 `udp:` 区块，与 `control/telemetry/ingress/egress/routing` 平级 |
 | `IngressConfig::Socks5`（tagged enum） | 变体新增 `udp_enabled` 字段，serde 向后兼容（缺省 false） |
-| seepd 控制面 `/metrics` 手写 Prometheus 渲染（`apps/seepd/src/control_plane.rs`） | 追加 `seep_udp_*` 序列，与 `seep_mesh_link_bytes_total` 同一渲染路径 |
-| `docs/grafana/seep-dashboard.json` | 追加 UDP 面板行 |
+| rillaned 控制面 `/metrics` 手写 Prometheus 渲染（`apps/rillaned/src/control_plane.rs`） | 追加 `rillane_udp_*` 序列，与 `rillane_mesh_link_bytes_total` 同一渲染路径 |
+| `docs/grafana/rillane-dashboard.json` | 追加 UDP 面板行 |
 
 ### 5.2 新增配置（示意，随实现定稿）
 
@@ -310,16 +310,16 @@ egress 无开关：UDP 能力由类型静态决定（direct/ss/hy2/wg 有，其�
 ### 5.3 新增指标
 
 ```
-seep_udp_sessions_active            # 会话表当前大小
-seep_udp_sessions_total             # 累计创建
-seep_udp_relay_bytes_total{direction=up|down}
-seep_udp_dropped_total{reason=…}    # frag/source/malformed 另立独立序列
-seep_udp_relay_handshake_errors_total   # mesh UDP 面（预留）
+rillane_udp_sessions_active            # 会话表当前大小
+rillane_udp_sessions_total             # 累计创建
+rillane_udp_relay_bytes_total{direction=up|down}
+rillane_udp_dropped_total{reason=…}    # frag/source/malformed 另立独立序列
+rillane_udp_relay_handshake_errors_total   # mesh UDP 面（预留）
 ```
 
-> 落地指标名以 [udp-observability.md](udp-observability.md) §2.4（落地定稿）与 `apps/seepd/src/control_plane.rs` 渲染为准。
+> 落地指标名以 [udp-observability.md](udp-observability.md) §2.4（落地定稿）与 `apps/rillaned/src/control_plane.rs` 渲染为准。
 
-`/flows` 控制面接口保留 TCP 方向计数；**UDP 面不并入 `/flows`**（UDP 从不进 `FlowOutputRouter`，故无 proto 维度——UDP 经 `/udp/stats` 与 `seep_udp_*` 指标族观测，见 [udp-observability.md](udp-observability.md) §2.6；`seepctl stats` 尾部携带 UDP 段）。
+`/flows` 控制面接口保留 TCP 方向计数；**UDP 面不并入 `/flows`**（UDP 从不进 `FlowOutputRouter`，故无 proto 维度——UDP 经 `/udp/stats` 与 `rillane_udp_*` 指标族观测，见 [udp-observability.md](udp-observability.md) §2.6；`rillanectl stats` 尾部携带 UDP 段）。
 
 ### 5.4 与 TCP 面共存
 
@@ -327,14 +327,14 @@ seep_udp_relay_handshake_errors_total   # mesh UDP 面（预留）
 
 ### 5.5 验收标准（对齐 todo P0-5）
 
-- `config/seep.yaml` 示例含 §5.2 区块且 `cargo` 校验通过（schema 往返：旧配置文件不含 `udp:` 仍可解析）；
+- `config/rillane.yaml` 示例含 §5.2 区块且 `cargo` 校验通过（schema 往返：旧配置文件不含 `udp:` 仍可解析）；
 - Grafana 面板可见 UDP 会话/字节/丢包序列（dashboard json 已更新）；
 - `udp.enabled=false` 全链路无 UDP socket 监听（端口扫描验证）。
 
 ### 5.6 风险与未决项
 
 - **R11 指标基数**：`per-target` 维度标签基数不可控，MVP 指标不带 target 标签（会话级聚合），per-link 细分属 P2-1；
-- **O4 已决（关闭，2026-09-30）**：`/chains/stats` **不为** UDP 分列——链路维度 UDP 流量已由 P0-4 `record_link_bytes` 进入既有 `seep_mesh_link_bytes_total` 序列，重复分列无增量信息（裁决见 [udp-observability.md](udp-observability.md) §2.6）。
+- **O4 已决（关闭，2026-09-30）**：`/chains/stats` **不为** UDP 分列——链路维度 UDP 流量已由 P0-4 `record_link_bytes` 进入既有 `rillane_mesh_link_bytes_total` 序列，重复分列无增量信息（裁决见 [udp-observability.md](udp-observability.md) §2.6）。
 
 ## 6. 实施顺序与依赖
 
@@ -360,7 +360,7 @@ P0-1 会话表(trait+表+回收) ──► P0-2 socks5 入站 ──► P0-3 出
 | R6/V1 | 已决（2026-09） | `hysteria2` crate **无** UDP 出口 → 分支 (c) 采纳、移 P0-4 后维持改判、终态 V2（§3.3） | §3.3 |
 | R7 | 风险 | ss UDP 开放解析器风险 → 目标白名单化 | §3.2 |
 | R8 | 风险 | WG MTU 预算标注 | §3.4 |
-| R9/V2 | 未决（MVP 明文门已落地） | mesh UDP 加密选型（倾向 quinn/QUIC + 复用 mTLS 材质）——P0-4 已落 §4.4 MVP 兜底（`SEEP_MESH_UDP_ALLOW_PLAINTEXT` ∪ `MeshConfig.udp_allow_plaintext_data_plane`，未配加密时构建期拒绝），选型本身仍归 V2 | §4.4 |
+| R9/V2 | 未决（MVP 明文门已落地） | mesh UDP 加密选型（倾向 quinn/QUIC + 复用 mTLS 材质）——P0-4 已落 §4.4 MVP 兜底（`RILLANE_MESH_UDP_ALLOW_PLAINTEXT` ∪ `MeshConfig.udp_allow_plaintext_data_plane`，未配加密时构建期拒绝），选型本身仍归 V2 | §4.4 |
 | R10 | 风险 | relay flow 缓存全局上界（默认 65536 LRU） | §4.3 |
 | R11 | 风险 | 指标基数控制（MVP 无 target 标签） | §5 |
 | O1 | 未决 | 无认证 socks5 下粘滞键退化 | §1 |

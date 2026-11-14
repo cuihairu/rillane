@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitepress'
 
-// Seep docs site (VitePress). Site root = docs/ (parent of this .vitepress dir).
+// Rillane docs site (VitePress). Site root = docs/ (parent of this .vitepress dir).
 // Locale layout (fleet convention): English at the site root, Simplified Chinese
 // under /zh/. Both trees hold the same page set (1:1), so VitePress's own locale
 // switcher links root <-> /zh/ without any hand-written banner.
@@ -10,7 +10,7 @@ import { defineConfig } from 'vitepress'
 // internal link stays under dead-link checking (build-time gate).
 export default defineConfig({
   lang: 'en-US',
-  title: 'Seep',
+  title: 'Rillane',
   description:
     'One proxy kernel, three scenarios -- general proxy / game acceleration / web acceleration sharing a single datapath (ingress -> routing -> egress/transport); obfuscation is a cross-cutting layer. Rust monorepo, inspired by sing-box / Clash / Surge.',
   head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/logo.svg' }]],
@@ -21,7 +21,7 @@ export default defineConfig({
   },
   themeConfig: {
     logo: '/logo.svg',
-    siteTitle: 'Seep',
+    siteTitle: 'Rillane',
     locales: {
       root: {
         nav: [
@@ -31,7 +31,7 @@ export default defineConfig({
           {
             text: 'Guides',
             items: [
-              { text: 'seepctl CLI reference', link: '/cli' },
+              { text: 'rillanectl CLI reference', link: '/cli' },
               { text: 'Mesh & Chain', link: '/mesh' },
               { text: 'System routing and network takeover', link: '/networking' },
               { text: 'Subscription guide', link: '/subscription' },
@@ -51,7 +51,7 @@ export default defineConfig({
               },
             ],
           },
-          { text: 'GitHub', link: 'https://github.com/cuihairu/seep' },
+          { text: 'GitHub', link: 'https://github.com/cuihairu/rillane' },
         ],
         sidebar: [
           {
@@ -67,7 +67,7 @@ export default defineConfig({
           {
             text: 'Guides',
             items: [
-              { text: 'seepctl CLI reference', link: '/cli' },
+              { text: 'rillanectl CLI reference', link: '/cli' },
               { text: 'Mesh & Chain Guide (MVP)', link: '/mesh' },
               {
                 text: 'System routing and network takeover',
@@ -128,7 +128,7 @@ export default defineConfig({
                 link: '/design/tun-linux-impl',
               },
               {
-                text: 'P1-3 network config block + seepctl route',
+                text: 'P1-3 network config block + rillanectl route',
                 link: '/design/network-route',
               },
             ],
@@ -208,7 +208,7 @@ export default defineConfig({
           {
             text: '指南',
             items: [
-              { text: 'seepctl CLI 参考', link: '/zh/cli' },
+              { text: 'rillanectl CLI 参考', link: '/zh/cli' },
               { text: 'Mesh & Chain', link: '/zh/mesh' },
               { text: '系统路由与网络接管', link: '/zh/networking' },
               { text: '订阅指南', link: '/zh/subscription' },
@@ -231,7 +231,7 @@ export default defineConfig({
               },
             ],
           },
-          { text: 'GitHub', link: 'https://github.com/cuihairu/seep' },
+          { text: 'GitHub', link: 'https://github.com/cuihairu/rillane' },
         ],
         sidebar: [
           {
@@ -247,7 +247,7 @@ export default defineConfig({
           {
             text: '指南',
             items: [
-              { text: 'seepctl CLI 参考', link: '/zh/cli' },
+              { text: 'rillanectl CLI 参考', link: '/zh/cli' },
               { text: 'Mesh & Chain Guide (MVP)', link: '/zh/mesh' },
               { text: '系统路由与网络接管', link: '/zh/networking' },
               { text: 'Grafana 仪表板模板', link: '/zh/grafana/README' },
@@ -302,7 +302,7 @@ export default defineConfig({
                 link: '/zh/design/tun-linux-impl',
               },
               {
-                text: 'P1-3 network 配置区块 + seepctl route',
+                text: 'P1-3 network 配置区块 + rillanectl route',
                 link: '/zh/design/network-route',
               },
             ],

@@ -1,10 +1,10 @@
-# Seep 产品定位与技术底座
+# Rillane 产品定位与技术底座
 
 > 状态：设计文档（2026-09）· 上游参考：[architecture.md](../architecture.md)、[PROTOCOLS.md](../PROTOCOLS.md)、[mesh.md](../mesh.md)
 
 ## 执行摘要
 
-Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游戏加速、网页加速**。三者不是三个产品，而是同一条数据通路（ingress → routing → egress/transport）上的三种策略组合：
+Rillane 是**一个代理内核**，同时服务三个场景：**通用代理、游戏加速、网页加速**。三者不是三个产品，而是同一条数据通路（ingress → routing → egress/transport）上的三种策略组合：
 
 - **加速 = 优化路由 + 流量伪装**：绕过 QoS 限速与 DPI 干扰，选择低延迟路径；
 - **混淆 = 让流量渗过识别**：协议伪装与流量特征打散，是加速的前置条件，也是代理的生存能力；
@@ -34,7 +34,7 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
  (TUN/socks/  (socks5/     (五元组+进程     (规则+组策略   (direct/ss/trojan/
   http/redir)  http/mixed)  +域名+geoip)    +mesh 链路)    hy2/vless/wg/mesh)
                      │                                          │
-                     └────────── Control Plane (seepd API + seepctl) ──────────┘
+                     └────────── Control Plane (rillaned API + rillanectl) ──────────┘
                      └────────── Telemetry (/metrics · /flows · /nodes) ───────┘
 ```
 
@@ -42,14 +42,14 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 
 | 层 | 职责 | 现状（crate） |
 |----|------|--------------|
-| 入站 | 流量接管：本地代理（socks5/http/mixed）+ 系统级（TUN/redir） | `seep-protocols` 入站已就绪（TCP）；TUN 见缺口清单 |
-| Flow 会话 | 统一会话模型：目标、路由历史、用量、失败统计 | `seep-core` `Flow/FlowSession/ChainContext` 已就绪 |
-| 路由引擎 | 规则匹配（domain/geoip/ipcidr/port/process）+ 组策略选路 | `seep-routing` 已就绪（latency/bandwidth/weighted/consistent-hash 等策略） |
-| 多跳链路 | mesh 组网、chain 构建/预检/故障回退 | `seep-mesh` + `seep-runtime::chain` 已就绪（TCP） |
-| 出站协议栈 | direct/ss/trojan/hy2/vless/vmess/wg/socks/http + ws/grpc/h2 传输 | `seep-protocols` 出站已就绪（TCP） |
-| 订阅 | Clash 导入 + 自有 DSL + 热更新 | `seep-subscription` 已就绪 |
-| 控制面 | REST API + seepctl + mTLS 工具 | `apps/seepd`、`apps/seepctl` 已就绪 |
-| 观测 | per-flow/per-link 指标、诊断采集 | `seep-telemetry` 基础就绪，细化中 |
+| 入站 | 流量接管：本地代理（socks5/http/mixed）+ 系统级（TUN/redir） | `rillane-protocols` 入站已就绪（TCP）；TUN 见缺口清单 |
+| Flow 会话 | 统一会话模型：目标、路由历史、用量、失败统计 | `rillane-core` `Flow/FlowSession/ChainContext` 已就绪 |
+| 路由引擎 | 规则匹配（domain/geoip/ipcidr/port/process）+ 组策略选路 | `rillane-routing` 已就绪（latency/bandwidth/weighted/consistent-hash 等策略） |
+| 多跳链路 | mesh 组网、chain 构建/预检/故障回退 | `rillane-mesh` + `rillane-runtime::chain` 已就绪（TCP） |
+| 出站协议栈 | direct/ss/trojan/hy2/vless/vmess/wg/socks/http + ws/grpc/h2 传输 | `rillane-protocols` 出站已就绪（TCP） |
+| 订阅 | Clash 导入 + 自有 DSL + 热更新 | `rillane-subscription` 已就绪 |
+| 控制面 | REST API + rillanectl + mTLS 工具 | `apps/rillaned`、`apps/rillanectl` 已就绪 |
+| 观测 | per-flow/per-link 指标、诊断采集 | `rillane-telemetry` 基础就绪，细化中 |
 
 ### 2.2 游戏加速特化（叠加在共用底座上）
 
@@ -64,8 +64,8 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 ### 2.3 网页加速特化
 
 1. **连接复用**：出站连接池与 keep-alive 复用（对同出口同 SNI 的短连接聚合握手），TLS 会话恢复/0-RTT；
-2. **分流精度**：域名/geoip/ruleset 分流决定"谁走代理、谁直连"，直接决定网页体验（现有 `seep-routing` 规则 + 订阅 ruleset 转换已覆盖大部分）；
-3. **DNS 优化**：分流感知的解析（国内外 DNS 分流、缓存、防污染），`seep-platform::network::dns` 的设计目标即此；
+2. **分流精度**：域名/geoip/ruleset 分流决定"谁走代理、谁直连"，直接决定网页体验（现有 `rillane-routing` 规则 + 订阅 ruleset 转换已覆盖大部分）；
+3. **DNS 优化**：分流感知的解析（国内外 DNS 分流、缓存、防污染），`rillane-platform::network::dns` 的设计目标即此；
 4. **复用而非新建**：以上全部作用在共用数据通路上，不引入独立的"网页加速模块"。
 
 ### 2.4 混淆：横切层，不是协议
@@ -88,7 +88,7 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 
 这三者作为 `FlowMiddleware` 实现挂在 egress 之前/之后，**对三种场景统一生效**：代理用它过 DPI，游戏加速用它过 QoS，网页加速用它维持 TLS 正常形态。
 
-> **现状（2026-10，P1-4/P2-4/P2-5 落地）**：三者均已以 `FlowMiddleware` 落地——`padding`（P1-4 M0–M4，策略/执行分离：`PaddingSpec` 策略引擎纯函数 + 帧载体执行侧，MVP 帧载体 = mesh chain 的 `MeshEnvelope` 帧，fixed/bucket/range 三形态、overhead 比例闸门、`seep_obfs_*` 指标族恒渲染 + `scripts/obfs_padding_dist.py` 分布检查脚本）；`timing`/`shaping`（P2-4：`TimingMiddleware` 启动抖动 + `ShapingMiddleware` 写网格归一）。单跳 TCP 无自有帧 no-op；UDP 数据报填充载体（`UdpEnvelope`）已就绪而执行钩子未接（裁决见 udp-mesh-dataplane.md D-15）。TLS 指纹模拟已随 P2-5 落地（chrome/ios/safari 预设，见 [tls-fingerprint.md](tls-fingerprint.md)）；SS SIP003 插件桥已覆盖 simple-obfs 生态（`plugin`/`plugin_opts` + obfs-local，见 [PROTOCOLS.md](../PROTOCOLS.md) 与 todo「SS 出站 SIP003 插件桥」）；salamander（hy2）兼容未做。详见 [obfuscation-middleware.md](obfuscation-middleware.md)。
+> **现状（2026-10，P1-4/P2-4/P2-5 落地）**：三者均已以 `FlowMiddleware` 落地——`padding`（P1-4 M0–M4，策略/执行分离：`PaddingSpec` 策略引擎纯函数 + 帧载体执行侧，MVP 帧载体 = mesh chain 的 `MeshEnvelope` 帧，fixed/bucket/range 三形态、overhead 比例闸门、`rillane_obfs_*` 指标族恒渲染 + `scripts/obfs_padding_dist.py` 分布检查脚本）；`timing`/`shaping`（P2-4：`TimingMiddleware` 启动抖动 + `ShapingMiddleware` 写网格归一）。单跳 TCP 无自有帧 no-op；UDP 数据报填充载体（`UdpEnvelope`）已就绪而执行钩子未接（裁决见 udp-mesh-dataplane.md D-15）。TLS 指纹模拟已随 P2-5 落地（chrome/ios/safari 预设，见 [tls-fingerprint.md](tls-fingerprint.md)）；SS SIP003 插件桥已覆盖 simple-obfs 生态（`plugin`/`plugin_opts` + obfs-local，见 [PROTOCOLS.md](../PROTOCOLS.md) 与 todo「SS 出站 SIP003 插件桥」）；salamander（hy2）兼容未做。详见 [obfuscation-middleware.md](obfuscation-middleware.md)。
 
 ### 2.5 数据通路视角的结论
 
@@ -101,12 +101,12 @@ Seep 是**一个代理内核**，同时服务三个场景：**通用代理、游
 
 | # | 缺口（2026-09 时点结论） | 影响 | 现状（2026-10-04） | 详见 |
 |---|------|------|------|------|
-| G1 | 协议层零 UDP（`seep-protocols` 无任何 UDP 转发路径） | 游戏加速不可用 | **已闭合**——P0-2/P0-3：UDP ASSOCIATE 入站 + direct/ss/wg 出站载荷 | roadmap S1 |
-| G2 | TUN/系统路由为占位实现（`seep-platform::network::platform.rs` 各 Provider 均返回"未实现"，runtime 未接线） | 系统级接管/进程分流不可用 | **已闭合**——P1-1/P1-2/P1-3：linux.rs 真实现 + TunIngress 接线 + network 配置区块与 `seepctl route` | roadmap S2 |
+| G1 | 协议层零 UDP（`rillane-protocols` 无任何 UDP 转发路径） | 游戏加速不可用 | **已闭合**——P0-2/P0-3：UDP ASSOCIATE 入站 + direct/ss/wg 出站载荷 | roadmap S1 |
+| G2 | TUN/系统路由为占位实现（`rillane-platform::network::platform.rs` 各 Provider 均返回"未实现"，runtime 未接线） | 系统级接管/进程分流不可用 | **已闭合**——P1-1/P1-2/P1-3：linux.rs 真实现 + TunIngress 接线 + network 配置区块与 `rillanectl route` | roadmap S2 |
 | G3 | 无独立混淆横切层（仅协议自带伪装） | 抗 QoS/DPI 能力受限 | **已闭合**——P1-4 padding、P2-4 timing/shaping 落地；simple-obfs 经 SS SIP003 插件桥可用（2026-10-07，仅 SS TCP 面），salamander 归 V2 备选 | roadmap S3 |
 | G4 | 无出站连接复用/池化 | 网页短连接开销高 | **已闭合**——P1-5 M0–M5 连接池 + TLS 会话恢复 | roadmap S3 |
 | G5 | mesh data-plane 仅 TCP（JSON envelope 明文头） | 多跳 UDP 不可用；envelope 可优化为二进制 | **已闭合**——P0-4 UDP 多跳 + P2-6 二进制 envelope | roadmap S1/S3 |
-| G6 | per-link 时延分布/切换原因等细粒度指标缺失 | 调度缺少数据闭环 | **已闭合**——P2-1 `seep_mesh_link_*`/`seep_mesh_switch_total` + `GET /mesh/switches` | roadmap S4 |
+| G6 | per-link 时延分布/切换原因等细粒度指标缺失 | 调度缺少数据闭环 | **已闭合**——P2-1 `rillane_mesh_link_*`/`rillane_mesh_switch_total` + `GET /mesh/switches` | roadmap S4 |
 
 ## 4. 文档索引
 

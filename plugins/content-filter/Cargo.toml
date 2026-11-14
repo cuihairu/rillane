@@ -1,5 +1,5 @@
 [package]
-name = "seep-plugin-content-filter"
+name = "rillane-plugin-content-filter"
 description = "P3-2 示例插件：首块关键词内容过滤（plugin-loader.md §1.2 ABI）"
 version = "0.1.0"
 edition = "2021"

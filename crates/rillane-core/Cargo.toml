@@ -1,0 +1,33 @@
+[package]
+name = "rillane-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytes.workspace = true
+dashmap.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+# 出站 fwmark（net_mark.rs，Linux cfg 内使用；set_mark 在 "all" feature 下）
+socket2 = { version = "0.5", features = ["all"] }
+
+[dev-dependencies]
+# P3-5 performance-io.md §5：基准仅本地实跑回填文档，不入 CI 门禁
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+# net_mark：SO_MARK 面收 EINPROGRESS（raw_os_error）与 root 守卫测试读 geteuid（Linux cfg 内）
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[[bench]]
+name = "relay_throughput"
+harness = false
+
+[[bench]]
+name = "write_frame"
+harness = false

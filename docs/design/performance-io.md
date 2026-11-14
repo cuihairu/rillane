@@ -7,8 +7,8 @@
 > buffer parameter,
 > frame-write vectorization, benchmark plan, step checklist**. Deviations are backfilled into section 7 after
 > landing.
-> **Status: R0-R4 all landed** (2026-10-05. R1: seep-core `performance`
-> module + seep-config `performance:` block + RuntimeBuilder wiring + 16
+> **Status: R0-R4 all landed** (2026-10-05. R1: rillane-core `performance`
+> module + rillane-config `performance:` block + RuntimeBuilder wiring + 16
 > relay points on `copy_bidirectional_with_sizes`; R2: `write_frame`
 > vectorized + short-write advance + ShortWriter dedicated tests; R3: criterion
 > benches actually run, numbers in the section 5 results table; R4: the
@@ -39,12 +39,12 @@ throughput/latency gains with benchmark tests, and backfill the PROTOCOLS.md per
 
 ## 1. Current state and structural constraints
 
-- All TCP relay goes through `tokio::io::copy_bidirectional`: 12 sites in seep-protocols egress
-  (direct/socks5/http x 3/trojan x 2/ss/hysteria2/vless x 2/wireguard) + 3 sites on the seep-runtime mesh plane
+- All TCP relay goes through `tokio::io::copy_bidirectional`: 12 sites in rillane-protocols egress
+  (direct/socks5/http x 3/trojan x 2/ss/hysteria2/vless x 2/wireguard) + 3 sites on the rillane-runtime mesh plane
   (`mesh_transport.rs:1419/1481` and dial_and_tunnel) -- a fixed internal tokio 8192-byte x bidirectional
   userspace copy loop;
 - **No config channel for connectors**: the `EgressConnector::forward(&self, Flow)` signature has no runtime
-  parameters (seep-core lib.rs:766) -- passing parameters per connector would touch 12+ implementations and the
+  parameters (rillane-core lib.rs:766) -- passing parameters per connector would touch 12+ implementations and the
   trait; the same for `IngressEndpoint`;
 - The mesh frame write `write_frame` (mesh_transport.rs:1961) = `write_u32(len)` + `write_all(payload)`, two
   writes -- two syscalls on plaintext segments, two record wrappings on TLS segments;
@@ -54,13 +54,13 @@ throughput/latency gains with benchmark tests, and backfill the PROTOCOLS.md per
 - **No real vectored on TLS segments**: rustls 0.23 `TlsStream` does not implement `poll_write_vectored`
   (`is_write_vectored()=false`), and tokio `write_all_vectored` automatically falls back to per-segment
   `write_all` for such streams -- behavior equivalent to the status quo;
-- The production mesh data plane mandates mTLS (dev only via `SEEP_MESH_ALLOW_PLAINTEXT=1`), and TLS-family
+- The production mesh data plane mandates mTLS (dev only via `RILLANE_MESH_ALLOW_PLAINTEXT=1`), and TLS-family
   egress protocols make up the majority -- **the plaintext direct-connect segment (socks5/http in ->
   direct/socks5 out) is the main beneficiary of vectorized writes and large buffers**.
 
 ## 2. Design decisions
 
-- **D-1 Process-level relay buffer parameter (AtomicUsize)**: a new `performance` module in `seep-core` --
+- **D-1 Process-level relay buffer parameter (AtomicUsize)**: a new `performance` module in `rillane-core` --
   `set_relay_buffer(usize)` (once at startup, only allowed to change away from the default; tests may reset) +
   `relay_buffer() -> usize` (default `DEFAULT_RELAY_BUFFER = 8192`). The 15 relay points switch to
   `tokio::io::copy_bidirectional_with_sizes(io_a, io_b, n, n)`. Rationale for process-level rather than
@@ -89,7 +89,7 @@ throughput/latency gains with benchmark tests, and backfill the PROTOCOLS.md per
 ## 3. Data structures and wiring points
 
 ```rust
-// seep-core/src/performance.rs (new)
+// rillane-core/src/performance.rs (new)
 pub const DEFAULT_RELAY_BUFFER: usize = 8192;
 static RELAY_BUFFER: AtomicUsize = AtomicUsize::new(DEFAULT_RELAY_BUFFER);
 pub fn set_relay_buffer(n: usize) -> Result<()>;   // invalid values (0 / over upper bound) error
@@ -97,7 +97,7 @@ pub fn relay_buffer() -> usize;                    // read by all relay points
 ```
 
 ```rust
-// seep-config: new top-level block (deny_unknown_fields, Option default)
+// rillane-config: new top-level block (deny_unknown_fields, Option default)
 pub struct PerformanceBlock {
     pub relay_buffer: Option<u32>,   // bytes; 8192..=1 MiB validation
 }
@@ -105,14 +105,14 @@ pub struct PerformanceBlock {
 
 | # | Point | Action |
 |---|----|------|
-| 1 | 12 seep-protocols egress sites + 3 mesh_transport sites | `copy_bidirectional` -> `copy_bidirectional_with_sizes(n, n)` (D-1) |
+| 1 | 12 rillane-protocols egress sites + 3 mesh_transport sites | `copy_bidirectional` -> `copy_bidirectional_with_sizes(n, n)` (D-1) |
 | 2 | `mesh_transport::write_frame` | vectored two-segment combination (D-2) |
 | 3 | `runtime_builder` | read the `performance:` block -> `set_relay_buffer` (once at build time) |
-| 4 | seepd config schema pass-through | `PerformanceConfig` enters the `SeepConfig` top level |
+| 4 | rillaned config schema pass-through | `PerformanceConfig` enters the `RillaneConfig` top level |
 
 ## 4. Errors and boundaries
 
-- E1 invalid `relay_buffer` value (0 or > 1 MiB): seep-config validate errors with the original value
+- E1 invalid `relay_buffer` value (0 or > 1 MiB): rillane-config validate errors with the original value
   (network/obfs precedent); `set_relay_buffer` performs the same error as second-line defense;
 - E2 vectored fallback: rustls segment behavior = the current two-segment write (section 1), no regression
   surface;
@@ -134,7 +134,7 @@ pub struct PerformanceBlock {
   CI gate (run locally, high-noise environments are unstable and are not judged in CI).
 
 **Results (2026-10-05 actual runs, median over multiple rounds)**. Actual-run landing points:
-`seep-core/benches/{relay_throughput,write_frame}.rs`; one iteration of the relay group = 32 MiB unidirectional
+`rillane-core/benches/{relay_throughput,write_frame}.rs`; one iteration of the relay group = 32 MiB unidirectional
 bulk write relayed through `copy_bidirectional_with_sizes` and drained to completion; one iteration of the
 frame-write group = 2048 frames written consecutively, with the read end draining the full volume to
 convergence. The environment is a shared multi-session dev machine (load avg 19-45 during benches), so
@@ -169,7 +169,7 @@ guaranteed by the existing frame tests and the ShortWriter short-write dedicated
 | Step | Content and landing points | Acceptance |
 |----|-----------|------|
 | R0 | This design draft | -- |
-| R1 | seep-core `performance` module + seep-config `performance:` block (validate E1) + runtime_builder/seepd wiring + 15 relay points switched to `copy_bidirectional_with_sizes` + unit tests (set/get, invalid values, default zero difference) | all gates green; with no config, behavior matches the status quo byte for byte |
+| R1 | rillane-core `performance` module + rillane-config `performance:` block (validate E1) + runtime_builder/rillaned wiring + 15 relay points switched to `copy_bidirectional_with_sizes` + unit tests (set/get, invalid values, default zero difference) | all gates green; with no config, behavior matches the status quo byte for byte |
 | R2 | `write_frame` vectorized + zero regression on existing frame tests | all mesh frame tests green |
 | R3 | criterion benches (the two section 5 groups) + actual runs + numbers backfilled into the section 5 results table of this document | benchmarks produce real numbers (landed, see the section 5 results table) |
 | R4 | PROTOCOLS.md performance section backfill ("implemented (scoped)" + out-of-scope item registration) + todo.md P3-5 checked off + this document's status line | docs aligned with the implementation (landed) |

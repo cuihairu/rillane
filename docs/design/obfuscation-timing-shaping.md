@@ -6,8 +6,8 @@
 > reusing the "policy/execution separation" of obfuscation-middleware.md §2 and the config mirror +
 > conversion pattern of §3.
 >
-> **Landing status**: implemented (M0 `7d56d06`: design draft + seep-config mirror +
-> seep-runtime conversion + tests; M1 `16d9eb2`: the two middlewares + PacedIo +
+> **Landing status**: implemented (M0 `7d56d06`: design draft + rillane-config mirror +
+> rillane-runtime conversion + tests; M1 `16d9eb2`: the two middlewares + PacedIo +
 > whitelist extension + wiring + §7-3/4/5 tests; M2 this commit: an inline timing demo
 > in the game preset + profile test updates + documentation backfill).
 
@@ -20,8 +20,8 @@ latency cost must be quantifiable (p95 increase <= the configured cap).
 **Measurable wording (explicit rewrite, not shrinking)**:
 
 1. **Decision observability** (aligned with the P1-4 "annotation visible" wording): a flow hit by
-   `TimingMiddleware` / `ShapingMiddleware` writes its decision into the `seep.obfs.timing` /
-   `seep.obfs.shaping` annotation (millisecond value), asserted in unit tests; chain statistics are
+   `TimingMiddleware` / `ShapingMiddleware` writes its decision into the `rillane.obfs.timing` /
+   `rillane.obfs.shaping` annotation (millisecond value), asserted in unit tests; chain statistics are
    observable through the existing `MiddlewareChain` invocation counts;
 2. **Timing-feature shift provable**: the timing decision range is a subset of [min_ms, max_ms] and is
    deterministic (the same flow_id always yields the same value, pinned by unit tests); under bursty
@@ -34,7 +34,7 @@ latency cost must be quantifiable (p95 increase <= the configured cap).
 
 ## 1. Current state and structural constraints
 
-- P1-4 landed: `MiddlewareChain` (seep-core, executes in declaration order, empty-chain bypass),
+- P1-4 landed: `MiddlewareChain` (rillane-core, executes in declaration order, empty-chain bypass),
   `PaddingMiddleware` (policy side only writes annotations, the frame execution side does the
   padding), `obfs_config.rs` (`to_padding_policy` + `build_middleware_chain`), the §3.3-5 whitelist
   (currently `padding|latency_probe`; timing/shaping are registered in the whitelist text as
@@ -77,15 +77,15 @@ latency cost must be quantifiable (p95 increase <= the configured cap).
   shaping's first grid point is counted from the start of shaping, which is semantically
   consistent).
 - **D-7 metrics**: no new family; the observability surface = writing annotations (§0-1) + the
-  existing `MiddlewareChain` invocation counts (the `seep_obfs_*` families registered in the
+  existing `MiddlewareChain` invocation counts (the `rillane_obfs_*` families registered in the
   control plane are `padding_frames_total` / `padding_bytes_total` / `padding_skipped_total` /
-  `middleware_invocations_total` only; no `seep_obfs_shaping_writes_total` exists in the code --
+  `middleware_invocations_total` only; no `rillane_obfs_shaping_writes_total` exists in the code --
   `PacedIo` has no write counter, so timing/shaping are observed via `MIDDLEWARE_INVOCATIONS`).
 
 ## 3. Data structures
 
 ```rust
-// seep-config (mirror, deny_unknown_fields)
+// rillane-config (mirror, deny_unknown_fields)
 pub struct TimingBlockConfig {
     pub mode: String,          // "fixed" | "uniform"
     pub fixed_ms: u64,         // fixed-mode value (must be nonzero)
@@ -100,7 +100,7 @@ pub struct ShapingBlockConfig {
     pub max_delay_ms: u64,     // hard gate
 }
 
-// seep-core (runtime spec, same file and family as PaddingSpec, serde)
+// rillane-core (runtime spec, same file and family as PaddingSpec, serde)
 pub enum TimingMode { Fixed, Uniform }
 pub struct TimingSpec {
     pub mode: TimingMode, pub fixed_ms: u64, pub min_ms: u64, pub max_ms: u64,
@@ -113,7 +113,7 @@ pub struct ShapingSpec {
 }
 ```
 
-Conversion layer (seep-runtime `obfs_config.rs`):
+Conversion layer (rillane-runtime `obfs_config.rs`):
 `to_timing_policy(cfg, known_egress) -> Option<TimingPolicy>` /
 `to_shaping_policy(...)` -- the same semantics as `to_padding_policy` (shared enabled master switch,
 E5 downgrade, default_* vs inline mutual exclusion, nested profile resolution).
@@ -123,8 +123,8 @@ E5 downgrade, default_* vs inline mutual exclusion, nested profile resolution).
 
 | # | Point | Action |
 |---|----|------|
-| 1 | new `timing.rs` in `seep-protocols/middleware/` | `TimingMiddleware`: decide inside handle (deterministic by hash) -> annotation `seep.obfs.timing` -> sleep(d). The pure decision function `decide_timing` is pinned by unit tests for range/determinism/gate clamping |
-| 2 | new `shaping.rs` in `seep-protocols/middleware/` | `ShapingMiddleware`: decide -> annotation `seep.obfs.shaping` -> wrap `flow.io` (`PacedWriter`: sleep until the grid point before a write, seq increments). The `decide_shaping_delay` pure function + `PacedIo` unit tests pin >= interval |
+| 1 | new `timing.rs` in `rillane-protocols/middleware/` | `TimingMiddleware`: decide inside handle (deterministic by hash) -> annotation `rillane.obfs.timing` -> sleep(d). The pure decision function `decide_timing` is pinned by unit tests for range/determinism/gate clamping |
+| 2 | new `shaping.rs` in `rillane-protocols/middleware/` | `ShapingMiddleware`: decide -> annotation `rillane.obfs.shaping` -> wrap `flow.io` (`PacedWriter`: sleep until the grid point before a write, seq increments). The `decide_shaping_delay` pure function + `PacedIo` unit tests pin >= interval |
 | 3 | `obfs_config::build_middleware_chain` | add timing/shaping to the whitelist and construct the matching middleware (selector closures of the same shape) |
 | 4 | config validate | extend the §3.3-5 text to four names; the TimingBlockConfig/ShapingBlockConfig validate E2 matrix |
 
@@ -143,7 +143,7 @@ automatically collects the two invocation names `timing`/`shaping`.
 
 ## 7. Test strategy
 
-1. seep-config: timing/shaping block parsing/deny/roundtrip/validate E2 matrix
+1. rillane-config: timing/shaping block parsing/deny/roundtrip/validate E2 matrix
    (following the padding test series);
 2. obfs_config: the two-state matrix of to_timing_policy / to_shaping_policy (enabled
    short-circuit/reference resolution/inline/E5 downgrade/semantics aligned with the symmetric to_padding_policy);

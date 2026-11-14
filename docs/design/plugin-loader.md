@@ -2,7 +2,7 @@
 
 > Upstream: [roadmap.md](roadmap.md) S4 (the "plugin dynamic loading: WASM/dynamic library `FlowMiddleware` loader + rate limiting/content filtering samples" errata-downgraded item) | [obfuscation-middleware.md](obfuscation-middleware.md) sections 1.2/1.5 (static chain + "P3-2 dynamic loading extends on top of this container, the trait does not move").
 > This document is the landing finalization: **scope rulings, carrier and ABI, isolation mechanism, config surface, sample plugins, counter surface, test strategy, step-by-step checklist**. Deviations are backfilled into section 9 after landing.
-> Reuse baseline: the `FlowMiddleware` trait (seep-core, two methods name/handle) | the `MiddlewareChain` static container (order fixed at build time, read-only at runtime, P1-4 section 1.2 C1) | the `FlowOutputRouter::forward` E8 error path (any middleware Err aborts) | the `ObfuscationConfig` schema + validate (E1/E2 precedent) | the P1-5 pool/factory process-level singleton (D-10) singleton precedent.
+> Reuse baseline: the `FlowMiddleware` trait (rillane-core, two methods name/handle) | the `MiddlewareChain` static container (order fixed at build time, read-only at runtime, P1-4 section 1.2 C1) | the `FlowOutputRouter::forward` E8 error path (any middleware Err aborts) | the `ObfuscationConfig` schema + validate (E1/E2 precedent) | the P1-5 pool/factory process-level singleton (D-10) singleton precedent.
 
 ## 0. Scope ruling
 
@@ -10,7 +10,7 @@
 |-----------|-------------|
 | **WASM carrier** (wasmtime): loader + `FlowMiddleware` adapter + process-level engine singleton; crash (trap) and timeout (fuel instruction budget) isolation | **Direct dynamic library loading** (libloading in-process): cannot deliver the "crash has isolation" acceptance (no isolation boundary in the same address space), a separate item is opened when there is a real need (section 9 deviation 1) |
 | **Two sample plugins**: rate limiting (token bucket, instance in-memory state) + content filtering (first-chunk keyword scan); the `plugins/` directory builds independently (not a workspace member, cross-compiled to wasm32-unknown-unknown) | Plugin I/O surface (network/file/clock): MVP plugins are pure computation, zero WASI (the host injects `now_ms` -- wasm32-unknown-unknown has no clock); asynchronous host functions deferred to V2 |
-| **Config surface**: the `obfuscation.plugins` block (path + fuel budget), appended to build_middleware_chain; seepd currently reads config once at startup (config hot reload is not wired), the plugin chain is static in-process and regenerates on process restart | Plugin hot-plug/runtime load-unload (no separate load/unload API) |
+| **Config surface**: the `obfuscation.plugins` block (path + fuel budget), appended to build_middleware_chain; rillaned currently reads config once at startup (config hot reload is not wired), the plugin chain is static in-process and regenerates on process restart | Plugin hot-plug/runtime load-unload (no separate load/unload API) |
 | **First-chunk probing content filtering**: `wants_payload` export declaration + `Flow.io` first-chunk probe/replay wrapping | Payload **rewriting** (the MVP only issues a binary allow/deny ruling, it does not rewrite stream bytes -- HTTP-level rewrite semantics deferred to V2) |
 | **Counter surface**: per-plugin atomic counters (calls/denied/traps/fuel_exhausted) + tracing logs; **the control plane `GET /plugins/stats` is wired** (2026-10-05 observability round: the runtime bypasses concrete-type handles + a getter snapshot) | /metrics metric family form (the endpoint JSON is already usable; prometheus series deferred to later on demand) |
 
@@ -21,7 +21,7 @@
 ### 1.1 Carrier ruling: WASM (wasmtime)
 
 - The acceptance "crash/timeout has isolation" **can only be delivered by WASM**: a trap (unreachable/OOM/stack overflow) is converted to Err at the wasmtime layer, whereas an in-process dynamic library crash is a process crash with no isolation to speak of; the fuel instruction budget is the only hard-abort mechanism for synchronous calls (section 3);
-- Dependency cost documented as-is: wasmtime enters the workspace (the seep-plugins crate), a one-time first-build cost (cranelift), with `default-features = false` keeping only `cranelift + runtime + wat` (wat for inline WAT in tests, production loads binary .wasm);
+- Dependency cost documented as-is: wasmtime enters the workspace (the rillane-plugins crate), a one-time first-build cost (cranelift), with `default-features = false` keeping only `cranelift + runtime + wat` (wat for inline WAT in tests, production loads binary .wasm);
 - Engine as a process-level singleton (same technique as D-10): one global compiler/JIT, shared across plugins; each plugin has its own `Instance`/`Store` (state isolation).
 
 ### 1.2 Plugin ABI (wasm32-unknown-unknown, custom exports, no WASI)
@@ -42,7 +42,7 @@ Host -> plugin (`FlowContext` JSON):
 
 ```json
 {"flow_id":"<uuid>","host":"example.com","port":443,"proto":"tcp",
- "now_ms":1760000000000,"annotations":{"seep.route.kind":"chain"},
+ "now_ms":1760000000000,"annotations":{"rillane.route.kind":"chain"},
  "first_chunk":"<base64, carried when wants_payload=1; capped at 4096B>"}
 ```
 
@@ -57,11 +57,11 @@ Plugin -> host (decision JSON):
 ```
 
 - `deny` -> the adapter `bail!` (the existing E8 semantics: this flow aborts, the error bubbles up);
-- `set_annotations`/`remove_annotations`: a plugin may write `metadata.annotations` (the same contract as section 1.4 -- carrier keys `seep.*` are written by the built-in chain, plugins are advised to use their own namespace such as `plugin.<name>.*`, a documented convention not enforced).
+- `set_annotations`/`remove_annotations`: a plugin may write `metadata.annotations` (the same contract as section 1.4 -- carrier keys `rillane.*` are written by the built-in chain, plugins are advised to use their own namespace such as `plugin.<name>.*`, a documented convention not enforced).
 
 ## 2. Host side
 
-### 2.1 Loader (crates/seep-plugins)
+### 2.1 Loader (crates/rillane-plugins)
 
 ```rust
 pub struct PluginLoadOptions { pub fuel: u64 }        // per-call fuel budget
@@ -74,10 +74,10 @@ pub fn load_plugin(path: &Path, opts: PluginLoadOptions) -> Result<Arc<dyn FlowM
 
 ### 2.2 First-chunk probe and replay (`wants_payload=1`)
 
-- Inside `handle()`: `flow.io.read()` a single read of up to 4096B -> into the ctx -> call the plugin -> **deny means `bail!`** (the probed bytes are discarded with the flow, the connection closes) -> **allow means replay the probed bytes**: `ReplayIo { replay: Vec<u8>, inner: Box<dyn IoStream> }` implements `AsyncRead` (replay first, then pass through) + `AsyncWrite` (direct passthrough) -- the `IoStream` blanket impl adapts it automatically (seep-core lib.rs:18);
+- Inside `handle()`: `flow.io.read()` a single read of up to 4096B -> into the ctx -> call the plugin -> **deny means `bail!`** (the probed bytes are discarded with the flow, the connection closes) -> **allow means replay the probed bytes**: `ReplayIo { replay: Vec<u8>, inner: Box<dyn IoStream> }` implements `AsyncRead` (replay first, then pass through) + `AsyncWrite` (direct passthrough) -- the `IoStream` blanket impl adapts it automatically (rillane-core lib.rs:18);
 - Timing assumption (documented as-is): `forward()` only hands the flow to the egress connector after the chain runs (section 2.1 runtime_builder.rs:1740), so probing inside the chain is the first reader; there is no prior observability violation.
 
-### 2.3 Config surface (seep-config `ObfuscationConfig.plugins`)
+### 2.3 Config surface (rillane-config `ObfuscationConfig.plugins`)
 
 ```yaml
 obfuscation:
@@ -101,7 +101,7 @@ obfuscation:
 
 ## 4. Test strategy
 
-### 4.1 Unit tests (seep-plugins, inline WAT, zero external files, CI-deterministic)
+### 4.1 Unit tests (rillane-plugins, inline WAT, zero external files, CI-deterministic)
 
 - **noop**: name / allow / annotation set+remove round trip;
 - **trap**: an `unreachable` module -> Err convergence, `traps=1`, **and the next call to the same plugin still succeeds** (the Store is not poisoned -- the core assertion of the isolation semantics);
@@ -115,7 +115,7 @@ obfuscation:
 - Host integration verification (executed locally, results into the todo progress): rate limiting -- the N+1 flow is denied and the note is visible; content filtering -- a first chunk containing the keyword is denied, a clean payload is allowed through;
 - trap/infinite-loop isolation is pinned by the 4.1 WAT unit tests (WAT and plugins share the same ABI surface).
 
-### 4.3 Config surface (seep-config / seep-runtime)
+### 4.3 Config surface (rillane-config / rillane-runtime)
 
 - The plugins block has deny_unknown_fields + a validate matrix (a non-existent path is E1, a disabled state tolerates half-finished pieces);
 - `build_middleware_chain` assembly test: plugins come after the built-in chain, chain name-order assertion, a bad path errors at build time.
@@ -127,7 +127,7 @@ Commit cadence follows the P0-4 section 9.1.1 hard rule: each step build/test al
 | Step | Content and landing points | Acceptance |
 |----|-----------|------|
 | R0 | This design document | -- |
-| R1 | loader + adapter + first-chunk replay + config surface: crates/seep-plugins (engine singleton/ABI/isolation/counters) + the seep-config plugins block + seep-runtime assembly + the 4.1/4.3 unit tests | all green |
+| R1 | loader + adapter + first-chunk replay + config surface: crates/rillane-plugins (engine singleton/ABI/isolation/counters) + the rillane-config plugins block + rillane-runtime assembly + the 4.1/4.3 unit tests | all green |
 | R2 | Sample plugins + acceptance in practice + doc backfill: the two samples in plugins/ (independent build script) + the 4.2 practice + checking off todo P3-2 + a note in obfuscation-middleware.md section 1.5 + section 9 deviations | all green + the practice |
 
 ## 6. Deviations and assumptions
@@ -143,15 +143,15 @@ Commit cadence follows the P0-4 section 9.1.1 hard rule: each step build/test al
 
 ## 7. Risks and open items
 
-- **P-load**: the wasmtime first-build cost enters the workspace (documented as-is); at build time `plugins/` is not in workspace members (wasm-only crates cannot be compiled by the host), so the seepd release contains the loader but not the sample artifacts (the README records how to build);
+- **P-load**: the wasmtime first-build cost enters the workspace (documented as-is); at build time `plugins/` is not in workspace members (wasm-only crates cannot be compiled by the host), so the rillaned release contains the loader but not the sample artifacts (the README records how to build);
 - **R-name**: `plugin_name()` returns the host `Box::leak` fixup -- leak amount = number of plugins x name length (loaded once, process-level lifetime, acceptable; recorded in a source comment);
-- **R-state**: plugin instance state (token bucket) lives with the Store until process exit -- seepd has no config hot-reload wiring (one read at startup), the chain is not rebuilt in-process, so the token bucket actually clears with process exit; if hot reload is wired later and rebuilds the chain, the old instances die with the `MiddlewareChain` Arc and the state clears under the same semantics.
+- **R-state**: plugin instance state (token bucket) lives with the Store until process exit -- rillaned has no config hot-reload wiring (one read at startup), the chain is not rebuilt in-process, so the token bucket actually clears with process exit; if hot reload is wired later and rebuilds the chain, the old instances die with the `MiddlewareChain` Arc and the state clears under the same semantics.
 
 ## 9. Landing backfill (2026-10-04, R1/R2 all delivered)
 
-**R1** (loader + config surface): `crates/seep-plugins` (lib.rs/abi.rs/loader.rs/plugin.rs/replay.rs) + seep-config `ObfsPluginConfig` + seep-runtime `build_middleware_chain` assembly -- sections 2/3/4.1/4.3 delivered item by item; all 10 unit tests green (noop annotation round trip / deny bail / trap isolation + Store not poisoned / fuel exhaustion / first-chunk replay + passthrough / deny after probing / lying decision length / bad magic / missing exports / ReplayIo poll semantics).
+**R1** (loader + config surface): `crates/rillane-plugins` (lib.rs/abi.rs/loader.rs/plugin.rs/replay.rs) + rillane-config `ObfsPluginConfig` + rillane-runtime `build_middleware_chain` assembly -- sections 2/3/4.1/4.3 delivered item by item; all 10 unit tests green (noop annotation round trip / deny bail / trap isolation + Store not poisoned / fuel exhaustion / first-chunk replay + passthrough / deny after probing / lying decision length / bad magic / missing exports / ReplayIo poll semantics).
 
-**R2** (samples + practice): `plugins/rate-limit` (token bucket capacity 3, replenish 1 per second, `now_ms` advanced by host injection) and `plugins/content-filter` (built-in blocklist with case-insensitive substring matching after base64 decoding) -- independent `[workspace]`, not in members (section 7 P-load), `plugins/build.sh` produces `plugins/output/*.wasm` (gitignored, not committed); host-side pure-logic unit tests run inside the crate (replenishment cap / case-insensitive hits). **Acceptance in practice**: `cargo run -p seep-plugins --example plugins_smoke` -- rate limiting lets 3 through and denies 1 (note visible), `/wp-admin` hits and is denied, a clean payload is allowed with the first-chunk replay intact + subsequent passthrough, and the per-plugin counters are evidenced.
+**R2** (samples + practice): `plugins/rate-limit` (token bucket capacity 3, replenish 1 per second, `now_ms` advanced by host injection) and `plugins/content-filter` (built-in blocklist with case-insensitive substring matching after base64 decoding) -- independent `[workspace]`, not in members (section 7 P-load), `plugins/build.sh` produces `plugins/output/*.wasm` (gitignored, not committed); host-side pure-logic unit tests run inside the crate (replenishment cap / case-insensitive hits). **Acceptance in practice**: `cargo run -p rillane-plugins --example plugins_smoke` -- rate limiting lets 3 through and denies 1 (note visible), `/wp-admin` hits and is denied, a clean payload is allowed with the first-chunk replay intact + subsequent passthrough, and the per-plugin counters are evidenced.
 
 Implementation-time corrections (differences from the section 1/section 2 drafts, none crossing the section 0 scope ruling):
 
@@ -160,7 +160,7 @@ Implementation-time corrections (differences from the section 1/section 2 drafts
 | 1 | wasmtime 49 has its own `Error` type (not an anyhow re-export) | Cargo.toml explicitly keeps the `anyhow` feature (a `From<wasmtime::Error> for anyhow::Error` bridge); host-side context goes through `map_err(anyhow::Error::from)` and then attaches an anyhow `context` |
 | 2 | wasmtime 49 export-lookup API | `get_typed_func` returns `Result` (a missing export is an Err carrying "failed to find function export"); optional exports (wants_payload) first probe existence with `get_export` (Option) |
 | 3 | Missing fuel for probe calls at load time | Under the `consume_fuel(true)` engine the Store starts with fuel=0 -- raise `set_fuel(u64::MAX)` before probing `wants_payload`/`plugin_name` at load time (the per-call budget reset semantics still belong to invoke, section 2.1 unchanged) |
-| 4 | Sample plugin linear memory growth | `alloc` uses `memory_size`/`memory_grow` to grow pages on demand (gated by `#[cfg(target_arch = "wasm32")]` -- the host `cargo test` only exercises the pure-logic surface and never touches alloc); the cdylib artifact name follows the package name (`seep_plugin_<name>.wasm`), and build.sh copies it to the outward-facing name |
+| 4 | Sample plugin linear memory growth | `alloc` uses `memory_size`/`memory_grow` to grow pages on demand (gated by `#[cfg(target_arch = "wasm32")]` -- the host `cargo test` only exercises the pure-logic surface and never touches alloc); the cdylib artifact name follows the package name (`rillane_plugin_<name>.wasm`), and build.sh copies it to the outward-facing name |
 | 5 | Infinite-loop WAT form | `(loop br)` must be followed by `unreachable` to pass wasm type checking (the static reachability requirement for an i32 function result) |
 | 6 | Counter-surface observability carrier | The section 0 counter surface's "control endpoint wiring deferred to a later observability round" is delivered in two steps: `WasmPluginMiddleware::stats()` (`Debug` rendering + the `plugins_smoke` evidence); the 2026-10-05 observability round adds the control plane `GET /plugins/stats` (a runtime `get_plugin_stats()` snapshot bypass, `load_plugin_with_stats` gives the same instance two handles -- a trait object in the chain, a concrete type for observability, no second JIT); the /metrics metric family form is deferred to later on demand |
 

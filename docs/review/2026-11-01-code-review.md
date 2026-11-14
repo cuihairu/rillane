@@ -1,7 +1,7 @@
-# 2026-11-01 代码深审报告（seep 全仓）
+# 2026-11-01 代码深审报告（rillane 全仓）
 
 > 依据：审计任务书 `/tmp/brief-audit.txt` 第二段「代码深审」+ `requesting-code-review` / `code-review` 技能流程。
-> 范围：`crates/*`（11 crate）+ `apps/*`（seepd/seepctl）+ `plugins/*`，全部非测试源码（`#[cfg(test)]`/`tests/`/`benches/`/`examples`/`target` 排除）。
+> 范围：`crates/*`（11 crate）+ `apps/*`（rillaned/rillanectl）+ `plugins/*`，全部非测试源码（`#[cfg(test)]`/`tests/`/`benches/`/`examples`/`target` 排除）。
 > 方法：安全静态扫描 + 隐藏 bug 猎捕（panics/越界/资源泄漏/off-by-one/竞态/并发锁序）+ 质量门（lint/类型检查/测试基线）。每条发现经本人复核（技能要求：先验证后报告，不通过即驳回）。
 
 ---
@@ -31,7 +31,7 @@
 | 4 | P1 | chain 失败切换持 DashMap 分片写锁（RefMut）跨 `stats.write().await`，与 `get_or_create_chain` 的 `stats→len()` 锁序反转 → 死锁 | `chain.rs:840-878` vs `chain.rs:823-827` | `91a93b0` |
 | 5 | P1 | pool 水位补充 `inflight_refill` 只减不加，防风暴门失效；并发 release 各自见满余量都补拨，超出 `max_idle_per_key` 拨号风暴 | `pool.rs:575-591,652` | `5bc8dad` |
 | 6 | P1 | 订阅合并从不写回 `current_config`（router/磁盘已合并而内存仍旧），陈旧副本 + `routing.rules` 无条件追加 → 每次订阅刷新重复累积节点/规则，配置无界增长 | `hot_reload.rs:564-606` | `362bb75` |
-| 7 | P2（顺手修） | mesh 健康检查 TOCTOU：读锁快照后写锁无条件标离线，快照间到达的心跳被误杀致拓扑抖动 | `seep-mesh/lib.rs:957-980` | `7527fd0` |
+| 7 | P2（顺手修） | mesh 健康检查 TOCTOU：读锁快照后写锁无条件标离线，快照间到达的心跳被误杀致拓扑抖动 | `rillane-mesh/lib.rs:957-980` | `7527fd0` |
 | 8 | P1 | tokio 依赖过旧（RUSTSEC-2026-0386 AsyncFd unsound）→ 1.54.1 | `Cargo.toml`/`Cargo.lock`/README 徽章 | `16c7c13` |
 
 **P0/P1 合计 8 项，全部落地；每项对应独立 commit，测试/裁剪全绿。**
@@ -72,7 +72,7 @@
 - 路径穿越：缓存路径由 `DefaultHasher` 哈希文件名（`{:016x}.cache`）派生，非用户输入直拼；插件路径经配置校验。
 - 硬编码密钥：config 样例仅 demo/占位值；无仓库内真实凭据。
 - crypto 与规范一致：vmess v2ray KDF/AES-GCM、shadowsocks crate、mesh mTLS（rustls 验证默认开启，`NoVerifier` 仅 `skip_cert_verify` 显式 opt-in）。
-- FFI：`seep_ffi_start` `from_raw_parts` 契约 + 文档化 `#Safety`；wasmtime 插件 fuel + zero-import 沙箱。
+- FFI：`rillane_ffi_start` `from_raw_parts` 契约 + 文档化 `#Safety`；wasmtime 插件 fuel + zero-import 沙箱。
 
 ## 四段式总账（对齐 docs 审计惯例）
 
@@ -129,8 +129,8 @@
 | `stats.active_chains = active_chains.len() - 1` 在 `drop(chain)` 后；并发 `terminate_chain` 移除 → 0-1 下溢（release 裹成 usize::MAX 指标污染） | `chain.rs:907` |
 | exit 建流归零下行序号而客户端窗口仍在（last>63）→ 序号 0..36 判回退拒、≥37 自愈。**瞬态 ~37 包突发丢包，非「永久静默拒收」**（首轮转述修正） | `mesh_transport.rs:1877` |
 | 缓存满（65536）时每次插入全 O(n) `min_by_key` 驱逐扫描；文档化权衡（"O(n) 无新依赖"），需认证 peer + 6.5 万流触发 | `mesh_transport.rs:868-876` |
-| 订阅转换配置硬编码 `admin_token: "seep"`（回环绑定约束暴露面） | `clash.rs:768-771` / `seep_dsl.rs:413-418` |
-| shaping 抖动 `jitter_ms + 1` 在 jitter_ms=interval_ms=u64::MAX 时裹 0 → `% 0` panic；validate 无上界 | `shaping.rs:45` / `seep-config:908-918` |
+| 订阅转换配置硬编码 `admin_token: "rillane"`（回环绑定约束暴露面） | `clash.rs:768-771` / `rillane_dsl.rs:413-418` |
+| shaping 抖动 `jitter_ms + 1` 在 jitter_ms=interval_ms=u64::MAX 时裹 0 → `% 0` panic；validate 无上界 | `shaping.rs:45` / `rillane-config:908-918` |
 | `save_to_disk` 固定 `{hash}.tmp` 路径，并发 `set()` 同键交错写 → 损坏缓存条目（重取可恢复） | `cache.rs:588-601` |
 
 （首轮 P3 已含 `trojan.rs:99` `as u8` 截断、padding range span 下溢、loop 任务无 stop、lock-poison 级联、非常量时间比对、FFI 裸指针——本会话复核一致，不重复列。）
@@ -139,10 +139,10 @@
 
 - `interval(ttl/4)` 零周期 panic：ttl/4==0 仅 ttl<4ns，YAML Duration ≥1ms → 不可达，**排除**。
 - mesh UDP 下行序号重启「永久拒收」：经 `ReplayWindow::check_and_advance` 逐档推演为**瞬态**（回退>63 拒、63 内按历史位收、追平后前进），降级 P3 并修正转述。
-- `seep-routing` 一致哈希 `% len` 与空表守卫、`seep-telemetry/plugins/config` 生产路径（unwrap 均测试面）、`seepd/main.rs` `?` 传播、`udp_associate.rs`（tests 面）——**净**。
+- `rillane-routing` 一致哈希 `% len` 与空表守卫、`rillane-telemetry/plugins/config` 生产路径（unwrap 均测试面）、`rillaned/main.rs` `?` 传播、`udp_associate.rs`（tests 面）——**净**。
 
 ### 本会话复核净检面（首轮未覆盖或补强）
 
-- `seep-protocols` outbound/inbound 全量、`seep-core/udp`、`seep-subscription`（fetcher 50MiB 上限+重定向 10 界、clash `parse_ports` 4096 上限、converter/seep_dsl 无界分配）——净。
+- `rillane-protocols` outbound/inbound 全量、`rillane-core/udp`、`rillane-subscription`（fetcher 50MiB 上限+重定向 10 界、clash `parse_ports` 4096 上限、converter/rillane_dsl 无界分配）——净。
 - `shadowsocks` SIP003：`Command::new(plugin)` + `args(opts.split_whitespace())` 为 argv 直传，**无 shell 注入**（复核确认）。
 - `inbound/http.rs` httparse 按 CRLF 切分，authority 结构上不能携带 CRLF——净（与 SOCKS5 域名字符串不同源）。

@@ -4,8 +4,8 @@
 > [PROTOCOLS.md](../PROTOCOLS.md) 性能节。
 > 本文是落地定稿：**范围裁决（splice/recvmmsg 出界）、进程级 relay 缓冲参数、
 > 帧写 vectored 化、基准方案、分步清单**。落地后偏差回填 §7。
-> **状态：R0–R4 已全部落地**（2026-10-05。R1：seep-core `performance`
-> 模块 + seep-config `performance:` 块 + RuntimeBuilder 接线 + 16 处
+> **状态：R0–R4 已全部落地**（2026-10-05。R1：rillane-core `performance`
+> 模块 + rillane-config `performance:` 块 + RuntimeBuilder 接线 + 16 处
 > relay 点 `copy_bidirectional_with_sizes`；R2：`write_frame` vectored
 > 化 + 短写推进 + ShortWriter 专项测试；R3：criterion benches 实跑，
 > 数字见 §5 结果表；R4：PROTOCOLS.md 性能节「已实现（范围）」回填 +
@@ -32,12 +32,12 @@
 
 ## 1. 现状与结构约束
 
-- TCP relay 全部经 `tokio::io::copy_bidirectional`：seep-protocols 出站
+- TCP relay 全部经 `tokio::io::copy_bidirectional`：rillane-protocols 出站
   12 处（direct/socks5/http×3/trojan×2/ss/hysteria2/vless×2/wireguard）+
-  seep-runtime mesh 面 3 处（`mesh_transport.rs:1419/1481` 与
+  rillane-runtime mesh 面 3 处（`mesh_transport.rs:1419/1481` 与
   dial_and_tunnel）——tokio 内部固定 8192 字节 × 双向用户态拷贝循环；
 - **connector 无 config 通道**：`EgressConnector::forward(&self, Flow)`
-  签名无运行参数（seep-core lib.rs:766）——逐 connector 传参需动 12+
+  签名无运行参数（rillane-core lib.rs:766）——逐 connector 传参需动 12+
   实现与 trait；`IngressEndpoint` 同理；
 - mesh 帧写 `write_frame`（mesh_transport.rs:1961）= `write_u32(len)` +
   `write_all(payload)` 两次写——明文段两次 syscall，TLS 段两次 record 封装；
@@ -47,13 +47,13 @@
 - **TLS 段无真 vectored**：rustls 0.23 `TlsStream` 未实现
   `poll_write_vectored`（`is_write_vectored()=false`）；落地实现为
   `write_vectored` + 短写推进循环，对 false 流自动回落逐段 `write_all`——行为等价现状；
-- 生产 mesh 数据面强制 mTLS（dev 才可 `SEEP_MESH_ALLOW_PLAINTEXT=1`），
+- 生产 mesh 数据面强制 mTLS（dev 才可 `RILLANE_MESH_ALLOW_PLAINTEXT=1`），
   出站 TLS 系协议占比高——**明文直连段（socks5/http 入 → direct/socks5
   出）是 vectored 与大缓冲的主要收益面**。
 
 ## 2. 设计决策
 
-- **D-1 进程级 relay 缓冲参数（AtomicUsize）**：`seep-core` 新增
+- **D-1 进程级 relay 缓冲参数（AtomicUsize）**：`rillane-core` 新增
   `performance` 模块——`set_relay_buffer(usize)`（启动期一次，仅允许
   从缺省改出；测试可 reset）+ `relay_buffer() -> usize`（缺省
   `DEFAULT_RELAY_BUFFER = 8192`）。15 处 relay 点改用
@@ -85,7 +85,7 @@
 ## 3. 数据结构与接线点
 
 ```rust
-// seep-core/src/performance.rs（新）
+// rillane-core/src/performance.rs（新）
 pub const DEFAULT_RELAY_BUFFER: usize = 8192;
 static RELAY_BUFFER: AtomicUsize = AtomicUsize::new(DEFAULT_RELAY_BUFFER);
 pub fn set_relay_buffer(n: usize) -> Result<()>;   // 非法值(0/超上界)报错
@@ -93,7 +93,7 @@ pub fn relay_buffer() -> usize;                    // 全部 relay 点读取
 ```
 
 ```rust
-// seep-config：顶层新块（deny_unknown_fields，Option 缺省）
+// rillane-config：顶层新块（deny_unknown_fields，Option 缺省）
 pub struct PerformanceBlock {
     pub relay_buffer: Option<u32>,   // 字节；8192..=1 MiB 校验
 }
@@ -101,14 +101,14 @@ pub struct PerformanceBlock {
 
 | # | 点 | 动作 |
 |---|----|------|
-| 1 | seep-protocols 出站 12 处 + mesh_transport 3 处 | `copy_bidirectional` → `copy_bidirectional_with_sizes(n, n)`（D-1） |
+| 1 | rillane-protocols 出站 12 处 + mesh_transport 3 处 | `copy_bidirectional` → `copy_bidirectional_with_sizes(n, n)`（D-1） |
 | 2 | `mesh_transport::write_frame` | vectored 两段合一（D-2） |
 | 3 | `runtime_builder` | `performance:` 块读取 → `set_relay_buffer`（构建期一次） |
-| 4 | seepd config schema 透传 | `PerformanceBlock` 进 `SeepConfig` 顶层 |
+| 4 | rillaned config schema 透传 | `PerformanceBlock` 进 `RillaneConfig` 顶层 |
 
 ## 4. 错误与边界
 
-- E1 `relay_buffer` 非法值（0 或 > 1 MiB）：seep-config validate 报错
+- E1 `relay_buffer` 非法值（0 或 > 1 MiB）：rillane-config validate 报错
   带原值（network/obfs 先例）；`set_relay_buffer` 二次防御同样报错；
 - E2 vectored 回落：rustls 段行为 = 现状两段写（§1），无回归面；
 - E3 缓冲上调的内存代价：每流 2×n 字节——1 MiB 上界 × 千流 = 2 GiB
@@ -129,7 +129,7 @@ pub struct PerformanceBlock {
   （本地跑，噪声大环境不稳定不判 CI）。
 
 **结果（2026-10-05 实跑，多轮取中位）**。实跑落点：
-`seep-core/benches/{relay_throughput,write_frame}.rs`；relay 组单迭代
+`rillane-core/benches/{relay_throughput,write_frame}.rs`；relay 组单迭代
 = 32 MiB 单向灌包经 `copy_bidirectional_with_sizes` 中继收毕；帧写组
 单迭代 = 2048 帧连续写、读端读满总量收敛。环境为多会话共用开发机
 （bench 期间 load avg 19–45），run-to-run 波动显著，故每配置跑
@@ -161,7 +161,7 @@ syscall 次数占比趋零，与 §2-D2「明文段收益、TLS 段等价回落�
 | 步 | 内容与落点 | 验收 |
 |----|-----------|------|
 | R0 | 本设计稿 | — |
-| R1 | seep-core `performance` 模块 + seep-config `performance:` 块（validate E1）+ runtime_builder/seepd 接线 + 15 处 relay 点换 `copy_bidirectional_with_sizes` + 单测（set/get、非法值、缺省零差异） | 门禁全绿；无配置时行为与现状逐字节一致 |
+| R1 | rillane-core `performance` 模块 + rillane-config `performance:` 块（validate E1）+ runtime_builder/rillaned 接线 + 15 处 relay 点换 `copy_bidirectional_with_sizes` + 单测（set/get、非法值、缺省零差异） | 门禁全绿；无配置时行为与现状逐字节一致 |
 | R2 | `write_frame` vectored 化 + 既有帧测试零回归 | mesh 帧测试全绿 |
 | R3 | criterion benches（§5 两组）+ 实跑 + 数字回填本文 §5 结果表 | 基准产出真实数字（已落地，见 §5 结果表） |
 | R4 | PROTOCOLS.md 性能节回填（「已实现（范围）」+ 范围外项登记）+ todo.md P3-5 勾选 + 本文状态行 | 文档与实现对齐（已落地） |

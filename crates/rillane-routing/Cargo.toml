@@ -1,0 +1,22 @@
+[package]
+name = "rillane-routing"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+tracing.workspace = true
+rillane-config = { path = "../rillane-config" }
+rillane-core = { path = "../rillane-core" }
+rand.workspace = true
+sha2.workspace = true
+dashmap.workspace = true
+tokio.workspace = true
+regex.workspace = true
+maxminddb.workspace = true
+geosite-rs.workspace = true
+
+[dev-dependencies]
+maxminddb-writer.workspace = true

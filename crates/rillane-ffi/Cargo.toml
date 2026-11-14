@@ -1,0 +1,24 @@
+[package]
+name = "rillane-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "RILLANE 移动端 FFI：C ABI 最小通路（P3-4）——cdylib 供 Android JNI / iOS NEPacketTunnel 接入"
+
+[lib]
+# cdylib：Android/iOS 侧动态库；rlib：宿主机测试与复用
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rillane-config = { path = "../rillane-config" }
+rillane-runtime = { path = "../rillane-runtime" }
+anyhow.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+libc = "0.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# JNI 桥（Kotlin System.loadLibrary 直连）；仅 android 目标编译，宿主面零负担
+jni = "0.21"

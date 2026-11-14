@@ -1,12 +1,12 @@
-# P0-1 implementation-level design: seep-core NAT-style UDP session table
+# P0-1 implementation-level design: rillane-core NAT-style UDP session table
 
 > Status: **Landed (todo P0-1 complete, 2026-09)** · This document expands [udp-dataplane.md](udp-dataplane.md) §1 and is that item's implementation framing · Maps to [todo.md](../../todo.md) P0-1 · Upstream: [roadmap.md](roadmap.md) S1 · Gap origin [positioning.md](positioning.md) G1
-> Implementation surface = `crates/seep-core/src/udp/` (`table.rs`/`inner.rs`/`reclaim.rs` etc.) · Interface draft (transcribable signatures/algorithm pseudocode): [udp-session-table-api.md](udp-session-table-api.md) (implemented; differences are authoritative per §9).
+> Implementation surface = `crates/rillane-core/src/udp/` (`table.rs`/`inner.rs`/`reclaim.rs` etc.) · Interface draft (transcribable signatures/algorithm pseudocode): [udp-session-table-api.md](udp-session-table-api.md) (implemented; differences are authoritative per §9).
 > The design text is preserved; implementation differences and the real metric state are in the api draft §9 and [udp-observability.md](udp-observability.md) §2.4.
 
 ## Executive Summary
 
-Gives the implementation-level design of the UDP session table in the `seep-core::udp` module: a **two-level mapping** (global session table → in-session target mappings) carries the NAT semantics; the **sticky key** degrades by the priority process > auth user + five-tuple > five-tuple > source IP; **timeout reclaim** uses a single-task periodic sweep (mappings 60s / sessions 180s / sweep 15s) and refuses new rather than evicting old when full; integration with `FlowSession` is by **composition**, field by field, handling two existing semantic differences (`record_failure` setting Failed, `new()` discarding the target parameter). The end gives the test checklist aligned with the todo P0-1 acceptance.
+Gives the implementation-level design of the UDP session table in the `rillane-core::udp` module: a **two-level mapping** (global session table → in-session target mappings) carries the NAT semantics; the **sticky key** degrades by the priority process > auth user + five-tuple > five-tuple > source IP; **timeout reclaim** uses a single-task periodic sweep (mappings 60s / sessions 180s / sweep 15s) and refuses new rather than evicting old when full; integration with `FlowSession` is by **composition**, field by field, handling two existing semantic differences (`record_failure` setting Failed, `new()` discarding the target parameter). The end gives the test checklist aligned with the todo P0-1 acceptance.
 
 ## 1. Conceptual model: three identities
 
@@ -20,7 +20,7 @@ The TCP plane unifies the three into one `Flow` (`Flow{id, target, io: BoxedIo}`
 
 ## 2. Mapping structure: a two-level table
 
-### 2.1 Structure definition (`seep-core::udp`, refined from udp-dataplane.md §1.2)
+### 2.1 Structure definition (`rillane-core::udp`, refined from udp-dataplane.md §1.2)
 
 ```rust
 /// Level-1: the global session table (concurrently sharded)
@@ -160,17 +160,17 @@ first packet ──► Active ──(mapping_idle expiry evicts mappings)──�
 
 ### 4.4 Full-capacity admission: refuse new, never evict old
 
-Once `max_sessions` is reached: a new client's first packet is **dropped** and counted `seep_udp_dropped_total{reason="session_limit"}`, and **active sessions are never evicted** (kicking a game offline is far worse than dropping a new session). Capacity planning should be tuned from observed metrics; automatic scaling is out of scope (non-goal).
+Once `max_sessions` is reached: a new client's first packet is **dropped** and counted `rillane_udp_dropped_total{reason="session_limit"}`, and **active sessions are never evicted** (kicking a game offline is far worse than dropping a new session). Capacity planning should be tuned from observed metrics; automatic scaling is out of scope (non-goal).
 
 ### 4.5 Reclaim action list
 
-When a session/mapping expires, run in order: ① drop the `UdpBinding` (the relay handle/socket closes; the §2.3 forwarder task exits with it); ② move the session out of Level-1; ③ close the `downlink` channel; after the inbound side notices, it cleans up the ASSOCIATE association state; ④ metrics: `seep_udp_expired_total{reason=idle|lifetime|revoked}` increments and `seep_udp_sessions_active` decrements. Reclaim sends no peer notification (UDP has no such semantics).
+When a session/mapping expires, run in order: ① drop the `UdpBinding` (the relay handle/socket closes; the §2.3 forwarder task exits with it); ② move the session out of Level-1; ③ close the `downlink` channel; after the inbound side notices, it cleans up the ASSOCIATE association state; ④ metrics: `rillane_udp_expired_total{reason=idle|lifetime|revoked}` increments and `rillane_udp_sessions_active` decrements. Reclaim sends no peer notification (UDP has no such semantics).
 
 ## 5. FlowSession integration (field by field)
 
 ### 5.1 Integration style: composition
 
-`UdpSessionInner` embeds `session: RwLock<FlowSession>` (`FlowSession` is defined in `seep-core::lib.rs`: `id/created_at/last_active/status/client_info/current_path/route_history/usage/failure_stats`). **The `FlowSession` structure itself is not modified** -- all integration goes through its existing methods, with zero impact on the TCP plane.
+`UdpSessionInner` embeds `session: RwLock<FlowSession>` (`FlowSession` is defined in `rillane-core::lib.rs`: `id/created_at/last_active/status/client_info/current_path/route_history/usage/failure_stats`). **The `FlowSession` structure itself is not modified** -- all integration goes through its existing methods, with zero impact on the TCP plane.
 
 ### 5.2 Field/method mapping table
 
@@ -203,11 +203,11 @@ When a session/mapping expires, run in order: ① drop the `UdpBinding` (the rel
 Metrics (authoritative framing = [udp-observability.md](udp-observability.md) §2.4 landed final; the table below is synchronized to the real names):
 
 ```
-seep_udp_sessions_active / seep_udp_sessions_total
-seep_udp_expired_total{reason=idle|lifetime|revoked}
-seep_udp_dropped_total{reason=…}    # frag/source/malformed get their own separate series
-seep_udp_mappings_active                       # new: total Level-2 mapping count
-seep_udp_reroutes_total                        # new: decision-invalidation reroute counter (no labels)
+rillane_udp_sessions_active / rillane_udp_sessions_total
+rillane_udp_expired_total{reason=idle|lifetime|revoked}
+rillane_udp_dropped_total{reason=…}    # frag/source/malformed get their own separate series
+rillane_udp_mappings_active                       # new: total Level-2 mapping count
+rillane_udp_reroutes_total                        # new: decision-invalidation reroute counter (no labels)
 ```
 
 Unit tests (acceptance original text → test item):

@@ -76,7 +76,7 @@ fingerprint detection tools can distinguish them.
 ## 3. Data structures
 
 ```rust
-// seep-protocols/src/fingerprint.rs
+// rillane-protocols/src/fingerprint.rs
 pub enum TlsFingerprint { None, Chrome, Ios, Safari }
 
 impl TlsFingerprint {
@@ -96,7 +96,7 @@ impl TlsFingerprint {
 }
 ```
 
-seep-config surface (M1): the four TLS-carrying egress variants (http/vmess/vless/trojan) gain `tls_fingerprint:
+rillane-config surface (M1): the four TLS-carrying egress variants (http/vmess/vless/trojan) gain `tls_fingerprint:
 Option<String>` (none by default; the conversion layer validates legal values).
 
 ## 4. Wiring points
@@ -106,7 +106,7 @@ Option<String>` (none by default; the conversion layer validates legal values).
 | 1 | `tls.rs::build_client_config` | add a profile parameter -- install provider/versions/verifier per preset |
 | 2 | `create_tls_connector*` / `TlsConnectorFactory` | pass through + cache key extension (D-2) |
 | 3 | trojan/vless/http connector construction | pass through (M1, including the pool `TransportKey` field D-4) |
-| 4 | seep-config egress variants + conversion | config surface (M1) |
+| 4 | rillane-config egress variants + conversion | config surface (M1) |
 
 ## 5. Errors and boundaries
 
@@ -125,7 +125,7 @@ Option<String>` (none by default; the conversion layer validates legal values).
 
 ## 6. Control plane
 
-No new endpoints/metric families (D-6). `seep_obfs_*`/`seep_tls_handshakes_total` are unaffected (the factory
+No new endpoints/metric families (D-6). `rillane_obfs_*`/`rillane_tls_handshakes_total` are unaffected (the factory
 observability surface counts under the same key).
 
 ## 7. Test strategy
@@ -145,8 +145,8 @@ observability surface counts under the same key).
 
 | Step | Content and landing points | Dependency | Acceptance |
 |----|-----------|------|------|
-| M0 | Design draft + seep-protocols fingerprint.rs (preset tables/shape_material/single-funnel mounting) + sections 7-1..3/5 tests | -- | all of section 7 green; none zero difference |
-| M1 | seep-config four-variant config surface + conversion validation (E1) + connector/pool key/factory wiring (sections 4-2/3) + section 7-4 + doc backfill | M0 | section 7-4 green; the pool does not lend across different fingerprints |
+| M0 | Design draft + rillane-protocols fingerprint.rs (preset tables/shape_material/single-funnel mounting) + sections 7-1..3/5 tests | -- | all of section 7 green; none zero difference |
+| M1 | rillane-config four-variant config surface + conversion validation (E1) + connector/pool key/factory wiring (sections 4-2/3) + section 7-4 + doc backfill | M0 | section 7-4 green; the pool does not lend across different fingerprints |
 
 ## 9. Deviations and assumptions
 
@@ -175,8 +175,8 @@ observability surface counts under the same key).
 - **R-tfp1**: the fingerprint shape itself becomes a new feature ("a deformable rustls") -- the MVP targets
   "dispersing same-shape multi-instances", and simulation-grade countermeasures are re-evaluated after the V2
   stack switch;
-- **O-tfp1**: ~~`seepctl` debug subcommand printing a shape_material comparison table for each preset~~
-  (**landed 2026-10-10**: `seepctl tls-fingerprint` prints the four presets (none/chrome/ios/safari) and their
+- **O-tfp1**: ~~`rillanectl` debug subcommand printing a shape_material comparison table for each preset~~
+  (**landed 2026-10-10**: `rillanectl tls-fingerprint` prints the four presets (none/chrome/ios/safari) and their
   shape_material four-dimension shape strings -- none is `default`, the others exported as
   version|suite|group|signature scheme, with pairwise distinctness across presets guaranteed by the section 7-3
   construction);

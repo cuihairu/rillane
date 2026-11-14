@@ -2,7 +2,7 @@
 
 > 上游：[roadmap.md](roadmap.md) S2/S3（"出站连接池：同出口 keep-alive 复用 + TLS 会话恢复，服务于网页短连接"）· [PROTOCOLS.md](../PROTOCOLS.md) 总表与性能节（连接池未实现 → P1-5）· [positioning.md](positioning.md) §2（三场景共享数据通路，网页加速核心项）。
 > 本文是落地定稿：**镜像类型与 schema、装配与热更新、控制面、状态机、测试策略、分步实施清单**。落地后偏差回填 §10。
-> 复用基线：`EgressConnector` 接管式契约（`seep-core/src/lib.rs:625-628`）· `ConnectorFlowOutput` 适配层（`runtime_builder.rs:1466`）· `build_egress_outputs` 装配（`runtime_builder.rs:1635`，调用点 :158 / :720 / :933）· `RuntimeConfig.connection_pool_size`（`runtime_builder.rs:311`，缺省 `Some(1024)`，全仓零消费孤儿字段）· `tls.rs:10-47` 每流重建 `ClientConfig`（调用点 trojan.rs:101 / http.rs:92 / vless.rs:190、:228）· `perform_connect<S>` 泛型（http.rs:126）· rustls 0.23.35 公开面（`Resumption::in_memory_sessions` 为默认恢复策略、`HandshakeKind` 经 `CommonState::handshake_kind()` 可观测，源码核对见 §2.4）· `UdpConfig` 镜像 + runtime 转换先例（[udp-dataplane.md](udp-dataplane.md) §5.2）· 新块 `deny_unknown_fields` 定向收口（[network-route.md](network-route.md) §1.5）· MockClock（P0-1）· 封闭标签（R11）· 控制面 getter 模式（`control_plane.rs:23`/`:259`/`:386`）与手写 `/metrics`（`:245`）。
+> 复用基线：`EgressConnector` 接管式契约（`rillane-core/src/lib.rs:625-628`）· `ConnectorFlowOutput` 适配层（`runtime_builder.rs:1466`）· `build_egress_outputs` 装配（`runtime_builder.rs:1635`，调用点 :158 / :720 / :933）· `RuntimeConfig.connection_pool_size`（`runtime_builder.rs:311`，缺省 `Some(1024)`，全仓零消费孤儿字段）· `tls.rs:10-47` 每流重建 `ClientConfig`（调用点 trojan.rs:101 / http.rs:92 / vless.rs:190、:228）· `perform_connect<S>` 泛型（http.rs:126）· rustls 0.23.35 公开面（`Resumption::in_memory_sessions` 为默认恢复策略、`HandshakeKind` 经 `CommonState::handshake_kind()` 可观测，源码核对见 §2.4）· `UdpConfig` 镜像 + runtime 转换先例（[udp-dataplane.md](udp-dataplane.md) §5.2）· 新块 `deny_unknown_fields` 定向收口（[network-route.md](network-route.md) §1.5）· MockClock（P0-1）· 封闭标签（R11）· 控制面 getter 模式（`control_plane.rs:23`/`:259`/`:386`）与手写 `/metrics`（`:245`）。
 
 ## 0. 范围与验收口径
 
@@ -10,19 +10,19 @@
 
 | 在本条目内 | 归其他条目 |
 |-----------|-----------|
-| `egress_pool:` 配置区块（seep-config 镜像类型）+ `PoolPolicy`/`TransportPool`/`TlsConnectorFactory`（seep-protocols） | 多路复用（一条连接内并发多流，含 hy2/QUIC 会话复用）= V2——总拨号数不降的结构原因见 §0.2 注记 |
+| `egress_pool:` 配置区块（rillane-config 镜像类型）+ `PoolPolicy`/`TransportPool`/`TlsConnectorFactory`（rillane-protocols） | 多路复用（一条连接内并发多流，含 hy2/QUIC 会话复用）= V2——总拨号数不降的结构原因见 §0.2 注记 |
 | MVP 矩阵出站接入：trojan / http（含 tls）/ vless（tcp+ws，含 tls）/ vmess（2026-10-02 出站落地随池透传）/ direct（`pre_dial_direct` 选通） | socks5 / shadowsocks 池化 = 扩展（crate 合并拨号+绑定，D-6）；wg = 系统接口无用户态拨号 |
 | TLS 会话恢复（进程级共享 `ClientConfig`）+ `HandshakeKind` 观测计数 | uTLS 指纹模拟 = P2-5（`tls.rs` 同一挂点，工厂为其收敛注入面，互指 §2.4） |
 | `connection_pool_size` 孤儿字段收编（全局容量缺省，D-8） | mesh hop 拨号复用（`connect_next` 每流拨号）= O 项非承诺（§11） |
-| `/metrics` `seep_pool_*`/`seep_tls_*` 序列 + `GET /egress/pool/stats` + 验收统计脚本 | UDP 面 = P0-4/P0-5（无连接建立语义，零交叠 §1.3）；混淆中间件 = P1-4（Flow 级，严格上下游 §1.3） |
+| `/metrics` `rillane_pool_*`/`rillane_tls_*` 序列 + `GET /egress/pool/stats` + 验收统计脚本 | UDP 面 = P0-4/P0-5（无连接建立语义，零交叠 §1.3）；混淆中间件 = P1-4（Flow 级，严格上下游 §1.3） |
 
 ### 0.2 验收口径（显式）
 
 todo P1-5 验收原文："重复请求同目标握手次数下降，`/metrics` 有连接复用率指标；现有配置无破坏性变更"。结合本条目标题口径（同出口同 SNI keep-alive 复用 + TLS 会话恢复），四条判据：
 
-1. **同出口同 SNI keep-alive 复用（可测）**：同一 (egress, SNI) 连续 N≥10 次串行请求 → `seep_pool_acquires_total{result="hit"}` ≥ N−1（装配预热后首请求即命中，miss 可为 0）、`seep_pool_reuse_ratio` ≥ (N−1)/N；
-2. **握手次数下降（口径注记，对齐 P0-3/P1-4 显式改写做法，不静默缩水）**：可测口径 = **请求路径阻塞握手次数**——命中借出的请求零拨号零握手（前台 dial 计数不增）；叠加会话恢复使预热/补充拨号的全量握手被 `HandshakeKind::Resumed` 取代（`seep_tls_handshakes_total{type}` 对比）。**总拨号次数 ≈ 流数，不降**——每个流消耗一条连接（§1.2 结构约束），真降总连接数需多路复用（V2）。验收统计脚本同时输出三组数（前台握手 / 恢复占比 / 总拨号）避免歧义；
-3. **连接复用率指标**：`seep_pool_reuse_ratio`（gauge）+ `seep_pool_acquires_total{result}` 计数，`/metrics` 可见；
+1. **同出口同 SNI keep-alive 复用（可测）**：同一 (egress, SNI) 连续 N≥10 次串行请求 → `rillane_pool_acquires_total{result="hit"}` ≥ N−1（装配预热后首请求即命中，miss 可为 0）、`rillane_pool_reuse_ratio` ≥ (N−1)/N；
+2. **握手次数下降（口径注记，对齐 P0-3/P1-4 显式改写做法，不静默缩水）**：可测口径 = **请求路径阻塞握手次数**——命中借出的请求零拨号零握手（前台 dial 计数不增）；叠加会话恢复使预热/补充拨号的全量握手被 `HandshakeKind::Resumed` 取代（`rillane_tls_handshakes_total{type}` 对比）。**总拨号次数 ≈ 流数，不降**——每个流消耗一条连接（§1.2 结构约束），真降总连接数需多路复用（V2）。验收统计脚本同时输出三组数（前台握手 / 恢复占比 / 总拨号）避免歧义；
+3. **连接复用率指标**：`rillane_pool_reuse_ratio`（gauge）+ `rillane_pool_acquires_total{result}` 计数，`/metrics` 可见；
 4. **现有配置无破坏性变更**：无 `egress_pool:` 块 → 解析与行为零差异（serde 往返 + 行为对照断言）；`connection_pool_size` 仅在块存在且未写 `max_idle_global` 时被消费（此前它零消费）。
 
 ## 1. 现状与结构约束（决策的事实输入）
@@ -41,7 +41,7 @@ todo P1-5 验收原文："重复请求同目标握手次数下降，`/metrics` �
 
 ### 1.2 结构性约束：绑定即消费（池形态的推导前提）
 
-- `EgressConnector::forward(Flow) -> FlowReport`（`seep-core/src/lib.rs:625-628`）为**接管式**：连接在 forward 内建立、随流终结。`copy_bidirectional` 返回 = 双向 EOF（任一侧先关，另一侧被 shutdown 写半部）——**连接终态，不可归还复用**。这是隧道协议语义而非实现缺陷：目标连接关闭后，代理服务器随即关闭隧道连接；
+- `EgressConnector::forward(Flow) -> FlowReport`（`rillane-core/src/lib.rs:625-628`）为**接管式**：连接在 forward 内建立、随流终结。`copy_bidirectional` 返回 = 双向 EOF（任一侧先关，另一侧被 shutdown 写半部）——**连接终态，不可归还复用**。这是隧道协议语义而非实现缺陷：目标连接关闭后，代理服务器随即关闭隧道连接；
 - 推论：**"借出后归还"式连接池在当前架构下不可实现**（需改转发语义或 mux，均出界）。可实现的形态 = **预建立（warm）池**：预先拨好 TCP[+TLS]、**零协议字节写入**的传输层连接，按键缓存；流到来时借出（checkout），协议头在借出后写入；流结束连接消耗掉；借出触发后台水位补充；
 - 收益定位（§0.2 注记的事实基础）：前台（阻塞请求路径的）握手 → 0（命中时）；TLS 会话恢复使池自身拨号的全量握手 → Resumed；**总拨号 ≈ 流数不变**。
 
@@ -51,7 +51,7 @@ todo P1-5 验收原文："重复请求同目标握手次数下降，`/metrics` �
 |----|------|------|--------|---------------|
 | Flow 级处理 | P1-4 混淆中间件 | `FlowOutputRouter::forward` ①②③（分派**前**，[obfuscation-middleware.md](obfuscation-middleware.md) §1.3） | Flow 的流字节形态（padding spec 注解 + 帧载体执行） | **严格上下游**：池在 connector.forward 内部（分派**后**，传输级）。P1-4 MVP 帧载体仅 chain `MeshEnvelope`（其 §2.3），与池零交叠；未来若出站侧填充，填充作用于借出后的流字节——池管连接生命周期、不管字节内容，正交 |
 | TCP 传输 | **本条目** | `build_egress_outputs` 装配进 connector（§4） | 到出站服务器的 TCP[+TLS] 会话建立成本 | — |
-| UDP 会话 | P0-1/P0-4/P0-5 | `UdpSessionTable` / `UdpEnvelope` / `seep_udp_*` | NAT 式数据报会话（粘滞/回收） | **零交叠**：UDP 无连接建立语义（无 TCP/TLS 握手可消），`EgressUdpConnector`/`RoutingUdpConnector`/`UdpSessionTable` 一概不动；三层各管一段（IP 会话 / Flow 处理 / TCP 传输） |
+| UDP 会话 | P0-1/P0-4/P0-5 | `UdpSessionTable` / `UdpEnvelope` / `rillane_udp_*` | NAT 式数据报会话（粘滞/回收） | **零交叠**：UDP 无连接建立语义（无 TCP/TLS 握手可消），`EgressUdpConnector`/`RoutingUdpConnector`/`UdpSessionTable` 一概不动；三层各管一段（IP 会话 / Flow 处理 / TCP 传输） |
 
 mesh 面：`connect_next` 每流 hop 拨号（`mesh_transport.rs:406`）本条目**不动**——mesh hop 的 `MeshEnvelope` 首写即协议绑定，形状与池兼容（键=hop 地址），未来复用记 §11 O-pool1，非承诺。
 
@@ -83,17 +83,17 @@ mesh 面：`connect_next` 每流 hop 拨号（`mesh_transport.rs:406`）本条�
 
 | 侧 | 载体 | 职责 | 不做什么 |
 |----|------|------|---------|
-| 策略侧（配置/装配期） | `EgressPoolBlock`（seep-config）→ `PoolPolicy`（转换在 seep-runtime，先例 `to_padding_policy()`） | 谁参与（`enabled`/`pre_dial_direct`）、容量（per-key/global）、水位、超时、会话缓存容量 | 不含任何运行期状态 |
-| 执行侧（运行期） | `TransportPool`（seep-protocols/src/pool.rs） | 拨号/缓存/借出/水位补充/回收/退避/计数 | **零协议知识**（只认识 `TransportKey`，不见协议字节） |
+| 策略侧（配置/装配期） | `EgressPoolBlock`（rillane-config）→ `PoolPolicy`（转换在 rillane-runtime，先例 `to_padding_policy()`） | 谁参与（`enabled`/`pre_dial_direct`）、容量（per-key/global）、水位、超时、会话缓存容量 | 不含任何运行期状态 |
+| 执行侧（运行期） | `TransportPool`（rillane-protocols/src/pool.rs） | 拨号/缓存/借出/水位补充/回收/退避/计数 | **零协议知识**（只认识 `TransportKey`，不见协议字节） |
 | 协议绑定侧 | 既有连接器（trojan/http/vless/direct） | 借出后写协议头 + `copy_bidirectional`（现状语义不变） | 不感知池内部（只见 `acquire` API） |
 
-对齐 P1-4 §2.1 的同款裁决逻辑：P1-4 因 `handle(Flow)` 流签名不承载帧语义而分离策略与执行；本条目因连接器绑定语义各异而把"传输会话"从连接器中分离——两次分离共同点：**零 trait 变更**（D-4，seep-core 面完全不动）。
+对齐 P1-4 §2.1 的同款裁决逻辑：P1-4 因 `handle(Flow)` 流签名不承载帧语义而分离策略与执行；本条目因连接器绑定语义各异而把"传输会话"从连接器中分离——两次分离共同点：**零 trait 变更**（D-4，rillane-core 面完全不动）。
 
 ### 2.4 TLS 会话恢复（D-5）
 
-**根因（源码核对，rustls 0.23.35）**：`Resumption::in_memory_sessions(num)` 是 rustls 的**默认恢复策略**（`client/client_conn.rs`："This is the default `Resumption` choice"，内部即 `handy::ClientSessionMemoryCache`）——即默认配置本就支持会话恢复；失效根因在 seep 侧：`tls.rs:10-47` 每次 `create_tls_connector[_with_alpn]` 新建 `ClientConfig`，会话缓存（`Arc<dyn ClientSessionStore>`）活在实例内，**随流销毁**——ticket 存不进下一次握手。调用点：trojan.rs:101、http.rs:92、vless.rs:190/:228。
+**根因（源码核对，rustls 0.23.35）**：`Resumption::in_memory_sessions(num)` 是 rustls 的**默认恢复策略**（`client/client_conn.rs`："This is the default `Resumption` choice"，内部即 `handy::ClientSessionMemoryCache`）——即默认配置本就支持会话恢复；失效根因在 rillane 侧：`tls.rs:10-47` 每次 `create_tls_connector[_with_alpn]` 新建 `ClientConfig`，会话缓存（`Arc<dyn ClientSessionStore>`）活在实例内，**随流销毁**——ticket 存不进下一次握手。调用点：trojan.rs:101、http.rs:92、vless.rs:190/:228。
 
-**修复**：`TlsConnectorFactory`（seep-protocols/src/tls.rs 内扩展）：
+**修复**：`TlsConnectorFactory`（rillane-protocols/src/tls.rs 内扩展）：
 
 ```rust
 pub struct TlsConnectorFactory {
@@ -106,7 +106,7 @@ impl TlsConnectorFactory {
 ```
 
 - 共享实例上默认恢复策略即刻生效（缓存跨流存活）；显式 `config.resumption = Resumption::in_memory_sessions(session_cache_size)` 钉容量（配置项 §3）；
-- **观测（公开 API，已核对）**：`CommonState::handshake_kind() -> Option<HandshakeKind>`（`common_state.rs:188`），变体 `Full` / `FullWithHelloRetryRequest` / `Resumed`（`rustls` lib.rs:545 公开导出）；tokio-rustls `TlsStream::get_ref().1` 可达——拨号完成即读，驱动 `seep_tls_handshakes_total{type}`；
+- **观测（公开 API，已核对）**：`CommonState::handshake_kind() -> Option<HandshakeKind>`（`common_state.rs:188`），变体 `Full` / `FullWithHelloRetryRequest` / `Resumed`（`rustls` lib.rs:545 公开导出）；tokio-rustls `TlsStream::get_ref().1` 可达——拨号完成即读，驱动 `rillane_tls_handshakes_total{type}`；
 - 生效门：块存在且 `tls_resumption: true`（默认）即注入工厂——**独立于 `enabled`**（enabled=false 只关池，会话恢复是纯增益单独留开，见 §2.6 零差异边界）；无块 → 工厂不注入，连接器走今天每流路径（D-9）；
 - 与 P2-5 互指：uTLS 的挂点就是 `tls.rs`（todo P2-5 明示）；工厂把 `ClientConfig` 构造收敛到一处后，恰为指纹替换的注入面——本条目为其铺路不越界。
 
@@ -127,7 +127,7 @@ impl TlsConnectorFactory {
 - 块存在 `enabled: false`：仅 `tls_resumption`（默认 true）生效——共享工厂注入（恢复跨流生效），池不构造；
 - 上述两态均有行为对照断言（§8.1）——"零差异"可证，非口头承诺。
 
-## 3. 镜像类型与 schema（seep-config）
+## 3. 镜像类型与 schema（rillane-config）
 
 ### 3.1 区块形状
 
@@ -146,12 +146,12 @@ egress_pool:
 
 ### 3.2 镜像与转换（裁决：镜像而非加依赖，先例 udp-dataplane §5.2）
 
-seep-config 零依赖 seep-core/protocols（现状 deps 仅 anyhow/serde 系）：**seep-config 定义镜像 serde 类型，seep-runtime 增 `to_pool_policy()` 转换**（`PoolPolicy` 类型定义在 seep-protocols/src/pool.rs——该 crate 需 tokio 拨号；seep-protocols 已依赖 seep-config，无新依赖边）。
+rillane-config 零依赖 rillane-core/protocols（现状 deps 仅 anyhow/serde 系）：**rillane-config 定义镜像 serde 类型，rillane-runtime 增 `to_pool_policy()` 转换**（`PoolPolicy` 类型定义在 rillane-protocols/src/pool.rs——该 crate 需 tokio 拨号；rillane-protocols 已依赖 rillane-config，无新依赖边）。
 
-| config 镜像类型（seep-config） | 转换产物 |
+| config 镜像类型（rillane-config） | 转换产物 |
 |-------------------------------|---------|
 | `EgressPoolBlock { enabled, tls_resumption: Option<bool>, max_idle_per_key: Option<usize>, max_idle_global: Option<usize>, low_watermark: Option<usize>, idle_timeout_secs: Option<u64>, dial_timeout_secs: Option<u64>, session_cache_size: Option<usize>, pre_dial_direct: Option<bool> }` | `PoolPolicy { …全字段具值 }`（`to_pool_policy(default_global: usize)`，default_global = `runtime_config.connection_pool_size`，D-8） |
-| `SeepConfig.egress_pool: Option<EgressPoolBlock>`（`#[serde(default)]`） | `None` → 不构池不注工厂（零差异）；`Some` 且 enabled → `Some(Arc<TransportPool>)`；`Some` 且 tls_resumption → `Some(Arc<TlsConnectorFactory>)` |
+| `RillaneConfig.egress_pool: Option<EgressPoolBlock>`（`#[serde(default)]`） | `None` → 不构池不注工厂（零差异）；`Some` 且 enabled → `Some(Arc<TransportPool>)`；`Some` 且 tls_resumption → `Some(Arc<TlsConnectorFactory>)` |
 
 ### 3.3 校验（构建期，`EgressPoolBlock::validate`）
 
@@ -163,7 +163,7 @@ seep-config 零依赖 seep-core/protocols（现状 deps 仅 anyhow/serde 系）�
 ### 3.4 兼容
 
 - 存量配置无 `egress_pool:` → None 缺省，行为零差异（serde 往返钉住，同 udp 块先例）；
-- **`EgressPoolBlock` 加 `#[serde(deny_unknown_fields)]`**（新块无存量负担，拼错子字段立刻报错，对齐 network-route §1.5）；全局 `SeepConfig` 维持宽松。
+- **`EgressPoolBlock` 加 `#[serde(deny_unknown_fields)]`**（新块无存量负担，拼错子字段立刻报错，对齐 network-route §1.5）；全局 `RillaneConfig` 维持宽松。
 
 ## 4. 装配与热更新
 
@@ -244,16 +244,16 @@ async fn forward(&self, flow: Flow) -> Result<FlowReport> {
 
 ## 6. 控制面
 
-### 6.1 `/metrics` 新序列（封闭标签，R11；渲染挂 `handle_metrics` :245，与 `seep_mesh_*` :319 同族）
+### 6.1 `/metrics` 新序列（封闭标签，R11；渲染挂 `handle_metrics` :245，与 `rillane_mesh_*` :319 同族）
 
 ```
-seep_pool_acquires_total{result="hit|miss|stale_redial"}
-seep_pool_dials_total{origin="foreground|warm|refill", result="ok|error"}
-seep_pool_idle_connections        # gauge
-seep_pool_leased_connections      # gauge
-seep_pool_reuse_ratio             # gauge = hits/(hits+miss)，启动至今
-seep_pool_evicted_total{reason="idle_timeout|capacity|shutdown"}
-seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；HandshakeKind 三变体直映
+rillane_pool_acquires_total{result="hit|miss|stale_redial"}
+rillane_pool_dials_total{origin="foreground|warm|refill", result="ok|error"}
+rillane_pool_idle_connections        # gauge
+rillane_pool_leased_connections      # gauge
+rillane_pool_reuse_ratio             # gauge = hits/(hits+miss)，启动至今
+rillane_pool_evicted_total{reason="idle_timeout|capacity|shutdown"}
+rillane_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；HandshakeKind 三变体直映
 ```
 
 ### 6.2 `GET /egress/pool/stats`（match 臂对齐 `/chains/dry-run` 先例）
@@ -265,7 +265,7 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；Ha
  "reuse_ratio": 0.9}
 ```
 
-数据源 = `Runtime::get_transport_pool()` 快照方法（§4.1 getter 先例）；鉴权继承控制面现状。`seepctl pool status` 子命令已随 O-pool3 落地（2026-10-11，见 §11）。
+数据源 = `Runtime::get_transport_pool()` 快照方法（§4.1 getter 先例）；鉴权继承控制面现状。`rillanectl pool status` 子命令已随 O-pool3 落地（2026-10-11，见 §11）。
 
 ## 7. 错误路径
 
@@ -296,7 +296,7 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；Ha
 
 - **验收主场景**：mock trojan TLS 服务端（自签证书：rcgen dev-dep 或内嵌静态 PEM，实施时二选一记 §10）+ `egress_pool: {enabled: true}` → N=10 串行同目标请求 → 断言 `acquires{hit}≥9`、`{miss}≤1`、`reuse_ratio≥0.9`、**前台 dial 计数增量 ≤1**（判据 1/2）；
 - **会话恢复**：同工厂两次拨号 → 第二次 `handshake_kind() == Resumed`（公开 API 直断，§2.4；服务端握手字节量对比作交叉验证可选项）；
-- **对照关闭态**：同场景 `enabled: false`（无块）→ 前台 dial = N、无 `seep_pool_*` 序列、行为与主干基线一致（判据 4）；
+- **对照关闭态**：同场景 `enabled: false`（无块）→ 前台 dial = N、无 `rillane_pool_*` 序列、行为与主干基线一致（判据 4）；
 - **stale**：服务端主动关 idle 连接 → 下一请求 `stale_redial` 计数 +1 且请求成功（E3）；
 - **热更新**：换 egress server 触发 :933 路径 → 新请求拨新键、旧键条目 idle 超时回收（短超时配置 + MockClock 或真实等待）；池单例不重建（实例 ptr 断言，warmth 存活）。
 
@@ -313,8 +313,8 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；Ha
 
 | 步 | 内容与落点 | 依赖 | 验收 |
 |----|-----------|------|------|
-| M0 | seep-protocols `pool.rs`：`PoolPolicy`/`TransportKey`/`TransportPool`（acquire/acquire_fresh/水位补充/idle sweep/驱逐/退避/计数/LeaseGuard）+ `tls.rs` `TlsConnectorFactory`（共享 ClientConfig + `in_memory_sessions` + HandshakeKind 计数） | — | 8.1 池核心与工厂全绿 |
-| M1 | seep-config：`EgressPoolBlock` + deny + validate + `SeepConfig.egress_pool`；seep-runtime：`to_pool_policy()`（D-8 映射） | M0 | 8.1 schema/转换全绿；旧配置零差异 |
+| M0 | rillane-protocols `pool.rs`：`PoolPolicy`/`TransportKey`/`TransportPool`（acquire/acquire_fresh/水位补充/idle sweep/驱逐/退避/计数/LeaseGuard）+ `tls.rs` `TlsConnectorFactory`（共享 ClientConfig + `in_memory_sessions` + HandshakeKind 计数） | — | 8.1 池核心与工厂全绿 |
+| M1 | rillane-config：`EgressPoolBlock` + deny + validate + `RillaneConfig.egress_pool`；rillane-runtime：`to_pool_policy()`（D-8 映射） | M0 | 8.1 schema/转换全绿；旧配置零差异 |
 | M2 | 连接器接入：trojan/http/vless/direct(选通) 构造签名增两 `Option`，forward 拨号点改 acquire + stale 一次性重拨（None 路径 = 旧行为） | M0 | 8.1 连接器两态全绿；既有出站测试零回归 |
 | M3 | 装配与热更新：build() 构池/工厂、`build_egress_outputs` 增参（:158/:720/:933 三调用点）、Runtime 持有 + getter、装配尾 warm() | M0–M2 | 8.1 装配两态；热更新键自失效与单例存续断言 |
 | M4 | 控制面 + 验收脚本：`/metrics` 渲染 + `GET /egress/pool/stats` + 统计脚本（§0.2 三组数）+ 8.2 集成全套 | M3 | 8.2 全绿；判据 1–3 可复现 |
@@ -334,7 +334,7 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；Ha
 | 8 | 裁决 | stale = 一次性前台重拨，不做主动探活（D-11）：预建立连接上主动 read 有消费边界歧义（TLS post-handshake 消息），重试以更低复杂度覆盖同场景 |
 | 9 | 假设（已收口） | 集成测试自签证书生成方式 → **实施选定 rcgen dev-dep**（`generate_simple_self_signed` + rustls-pemfile 解析，M4 `54df7cc`；2026-10-10 起 rustls-pemfile 出仓 RUSTSEC-2025-0134，解析改 rustls-pki-types `PemObject`）；并发验收面（判据 1–3 串行形态）已可复现 |
 | 10 | 假设（部分收口） | 预热/补充拨号的并发有界性由每键不变式保证（§5.2），不做全局拨号速率限流——串行验收已过（M4）；真并发压测依赖真实出口流量形态，本仓 loopback 集成测不构造，R-pool3 观测面（dials/idle/leased gauge）已备，登记待真实流量期核 |
-| 11 | 偏差 | §6.2 `keys[]` 不含 per-key `leased`：D-1 借出即消费下 leased 归全局 gauge 记账（`seep_pool_leased_connections`），分键 leased 无运营动作，`KeySnapshot{key,idle}` 即终形（M4） |
+| 11 | 偏差 | §6.2 `keys[]` 不含 per-key `leased`：D-1 借出即消费下 leased 归全局 gauge 记账（`rillane_pool_leased_connections`），分键 leased 无运营动作，`KeySnapshot{key,idle}` 即终形（M4） |
 | 12 | 偏差 | `acquire_bound` 的 bind 闭包取 `FnMut(&mut dyn IoStream) -> Pin<Box<dyn Future>>` 装箱形而非 `AsyncFnMut`：当前 rustc（1.99）对 async 闭包 HRTB 泛化不过（"AsyncFnMut is not general enough"），装箱 future + `&mut dyn`（非 `&mut BoxedIo`——Box 内层 'static 固定）为稳定习语（tower service 同形，M2） |
 | 13 | 裁决 | direct 无 stale 一次性重拨：bind 语义 = 首写首读，direct 无协议握手期 → 无 stale 判定点，死闲连接暴露为流错误由 idle_timeout 兜底（M2 注释载明） |
 | 14 | 偏差 | warm 预热 + 周期 sweeper 挂 `Runtime::start()` 而非 `build()`：build() 为同步装配无 tokio 上下文，spawn/prewarm 须运行时在位（M3） |
@@ -351,8 +351,8 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # 工厂启用时；Ha
 - **R-pool4**：池化改变连接-请求时序（连接先于请求存在）——对 trojan/http/vless 服务端无协议差异（首字节仍是协议头）；DPI 视角的时序相关性分析归混淆层讨论，本条目不声称；
 - **O-pool1**：mesh hop 拨号复用（`connect_next` 形状兼容：键=hop 地址、MeshEnvelope 首写即绑定）——非承诺，需求出现再议；
 - **O-pool2**：socks5/shadowsocks 接入（crate 外部流注入口核查后同 vless 形状）；
-- **O-pool3**：~~`seepctl pool status` 子命令~~（**已落地 2026-10-11**：
-  `seepctl pool status`——`GET /egress/pool/stats` 的 CLI 取数面，渲染
+- **O-pool3**：~~`rillanectl pool status` 子命令~~（**已落地 2026-10-11**：
+  `rillanectl pool status`——`GET /egress/pool/stats` 的 CLI 取数面，渲染
   开关/TLS 复会话/复用率/计数族（hit/miss/stale_redial/dials）与每键
   idle；块未启用 = `enabled:false` 零值形态照常渲染）；
 - **O-pool4**：hy2/QUIC 会话复用（与 V2 多路复用统一设计，本条目明确不降总连接数的另一半答案）。

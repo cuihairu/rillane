@@ -1,12 +1,12 @@
-# P0-1 实现级设计：seep-core NAT 式 UDP 会话表
+# P0-1 实现级设计：rillane-core NAT 式 UDP 会话表
 
 > 状态：**已落地（todo P0-1 完成，2026-09）**· 本文是 [udp-dataplane.md](udp-dataplane.md) §1 的展开，是该条目的实现口径 · 对应 [todo.md](../../../todo.md) P0-1 · 上游：[roadmap.md](roadmap.md) S1 · 缺口来源 [positioning.md](positioning.md) G1
-> 实施面 = `crates/seep-core/src/udp/`（`table.rs`/`inner.rs`/`reclaim.rs` 等）· 接口草案（可转录签名/算法伪码）：[udp-session-table-api.md](udp-session-table-api.md)（已实施，差异以 §9 为准）。
+> 实施面 = `crates/rillane-core/src/udp/`（`table.rs`/`inner.rs`/`reclaim.rs` 等）· 接口草案（可转录签名/算法伪码）：[udp-session-table-api.md](udp-session-table-api.md)（已实施，差异以 §9 为准）。
 > 设计原文保留；实施差异与指标实况见 api 稿 §9 与 [udp-observability.md](udp-observability.md) §2.4。
 
 ## 执行摘要
 
-给出 `seep-core::udp` 模块中 UDP 会话表的实现级设计：**两级映射**（全局会话表 → 会话内目标映射）承担 NAT 语义；**粘滞键**按 进程 > 认证用户+五元组 > 五元组 > 源 IP 的优先级退化；**超时回收**用单任务周期扫描（映射 60s / 会话 180s / 扫描 15s），满员拒新不逐旧；与 `FlowSession` 按**组合**集成，逐字段映射，并处理两处现有语义差异（`record_failure` 置 Failed、`new()` 丢弃 target 参数）。文末给出对齐 todo P0-1 验收的测试清单。
+给出 `rillane-core::udp` 模块中 UDP 会话表的实现级设计：**两级映射**（全局会话表 → 会话内目标映射）承担 NAT 语义；**粘滞键**按 进程 > 认证用户+五元组 > 五元组 > 源 IP 的优先级退化；**超时回收**用单任务周期扫描（映射 60s / 会话 180s / 扫描 15s），满员拒新不逐旧；与 `FlowSession` 按**组合**集成，逐字段映射，并处理两处现有语义差异（`record_failure` 置 Failed、`new()` 丢弃 target 参数）。文末给出对齐 todo P0-1 验收的测试清单。
 
 ## 1. 概念模型：三种身份
 
@@ -20,7 +20,7 @@ TCP 面三者合一于一条 `Flow`（`Flow{id, target, io: BoxedIo}`，见 [arc
 
 ## 2. 映射结构：两级表
 
-### 2.1 结构定义（`seep-core::udp`，细化自 udp-dataplane.md §1.2）
+### 2.1 结构定义（`rillane-core::udp`，细化自 udp-dataplane.md §1.2）
 
 ```rust
 /// Level-1：全局会话表（并发分片）
@@ -160,17 +160,17 @@ ASSOCIATE 控制连接（TCP）与 UDP 数据报同源：MVP 按 udp-dataplane.m
 
 ### 4.4 满员准入：拒新不逐旧
 
-`max_sessions` 达到后：新客户端首包**丢弃**并计 `seep_udp_dropped_total{reason="session_limit"}`，**绝不驱逐活跃会话**（游戏被挤下线比丢新会话严重得多）。容量规划建议随指标观察调整，非自动扩缩（非目标）。
+`max_sessions` 达到后：新客户端首包**丢弃**并计 `rillane_udp_dropped_total{reason="session_limit"}`，**绝不驱逐活跃会话**（游戏被挤下线比丢新会话严重得多）。容量规划建议随指标观察调整，非自动扩缩（非目标）。
 
 ### 4.5 回收动作清单
 
-会话/映射到期时按序执行：① drop `UdpBinding`（relay 句柄/socket 关闭，§2.3 的 forwarder task 随之退出）；② 会话移出 Level-1；③ `downlink` 通道关闭，入站侧感知后清理 ASSOCIATE 关联状态；④ 指标：`seep_udp_expired_total{reason=idle|lifetime|revoked}` 自增、`seep_udp_sessions_active` 递减。回收不发送任何对端通知（UDP 无此语义）。
+会话/映射到期时按序执行：① drop `UdpBinding`（relay 句柄/socket 关闭，§2.3 的 forwarder task 随之退出）；② 会话移出 Level-1；③ `downlink` 通道关闭，入站侧感知后清理 ASSOCIATE 关联状态；④ 指标：`rillane_udp_expired_total{reason=idle|lifetime|revoked}` 自增、`rillane_udp_sessions_active` 递减。回收不发送任何对端通知（UDP 无此语义）。
 
 ## 5. FlowSession 集成（逐字段映射）
 
 ### 5.1 集成方式：组合
 
-`UdpSessionInner` 内嵌 `session: RwLock<FlowSession>`（`FlowSession` 定义于 `seep-core::lib.rs`：`id/created_at/last_active/status/client_info/current_path/route_history/usage/failure_stats`）。**不改动 `FlowSession` 结构本身**——所有集成走其现有方法，TCP 面零影响。
+`UdpSessionInner` 内嵌 `session: RwLock<FlowSession>`（`FlowSession` 定义于 `rillane-core::lib.rs`：`id/created_at/last_active/status/client_info/current_path/route_history/usage/failure_stats`）。**不改动 `FlowSession` 结构本身**——所有集成走其现有方法，TCP 面零影响。
 
 ### 5.2 字段/方法映射表
 
@@ -203,11 +203,11 @@ ASSOCIATE 控制连接（TCP）与 UDP 数据报同源：MVP 按 udp-dataplane.m
 指标（权威口径 = [udp-observability.md](udp-observability.md) §2.4 落地定稿；下表已按实况名同步）：
 
 ```
-seep_udp_sessions_active / seep_udp_sessions_total
-seep_udp_expired_total{reason=idle|lifetime|revoked}
-seep_udp_dropped_total{reason=…}    # frag/source/malformed 另立独立序列
-seep_udp_mappings_active                       # 新增：Level-2 总映射数
-seep_udp_reroutes_total                        # 新增：决策失效重路由计数（无标签）
+rillane_udp_sessions_active / rillane_udp_sessions_total
+rillane_udp_expired_total{reason=idle|lifetime|revoked}
+rillane_udp_dropped_total{reason=…}    # frag/source/malformed 另立独立序列
+rillane_udp_mappings_active                       # 新增：Level-2 总映射数
+rillane_udp_reroutes_total                        # 新增：决策失效重路由计数（无标签）
 ```
 
 单元测试（验收原文 → 测试项）：

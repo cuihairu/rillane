@@ -1,0 +1,21 @@
+[package]
+name = "rillanectl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+rillane-config = { path = "../../crates/rillane-config" }
+rillane-core = { path = "../../crates/rillane-core" }
+rillane-protocols = { path = "../../crates/rillane-protocols" }
+rillane-runtime = { path = "../../crates/rillane-runtime" }
+rillane-subscription = { path = "../../crates/rillane-subscription" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+rcgen.workspace = true
+time.workspace = true

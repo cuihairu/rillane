@@ -2,13 +2,13 @@
 
 > 上游：[roadmap.md](roadmap.md) S2 · [networking.md](../networking.md) §3 目标形态 · [status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §5 实施影响（platform.rs 未编译/占位假写成功/挂载点缺失等核对结论均以该报告为准）。
 > 本文是落地定稿：**设备接口、数据流、错误路径、测试策略、分步实施清单**。落地后偏差回填 §6。
-> 复用基线：P0-1 会话语义（粘滞键/空闲回收/错误分类，**镜像而非调用**，见 §2.2）· P0-3 `EgressUdpConnector`/能力扫描 · TCP mesh 数据面（`mesh_transport`，既有）· `socket2`（已在 seep-platform 依赖）· 注解匹配先例（`geoip.country`/`client.cidr`，`seep-routing::matches_rule`）。
+> 复用基线：P0-1 会话语义（粘滞键/空闲回收/错误分类，**镜像而非调用**，见 §2.2）· P0-3 `EgressUdpConnector`/能力扫描 · TCP mesh 数据面（`mesh_transport`，既有）· `socket2`（已在 rillane-platform 依赖）· 注解匹配先例（`geoip.country`/`client.cidr`，`rillane-routing::matches_rule`）。
 
 ## 0. 范围与 P1-3 边界
 
 | 在本条目内 | 归 P1-3 / 其他条目 |
 |-----------|-------------------|
-| `LinuxTunProvider`（真设备 I/O）+ 最小 `LinuxRouteManager`（addr/route 幂等 + 回滚） | `SeepConfig.network` 配置区块 schema、`seepctl route apply/clear` CLI、include/bypass 完整语义、全局接管（fwmark/ip rule/SO_MARK） |
+| `LinuxTunProvider`（真设备 I/O）+ 最小 `LinuxRouteManager`（addr/route 幂等 + 回滚） | `RillaneConfig.network` 配置区块 schema、`rillanectl route apply/clear` CLI、include/bypass 完整语义、全局接管（fwmark/ip rule/SO_MARK） |
 | `TunIngress`（UDP NAT 面 + TCP 用户态栈面）、runtime 程序化接线（`RuntimeConfig.network_config`） | redir/transparent 模式（nftables/iptables） |
 | 进程归因（best-effort，注解承载）+ `MatchCondition::Process` | DnsHandler 实现（P2-8）、PacketFilter 内核态实现（不存在，进程内规则即 §2.7 的 bypass 匹配） |
 | Linux（含 OpenWrt musl 同路径） | Windows(Wintun)/macOS(utun)/Android/iOS（后续按本形状填空） |
@@ -27,7 +27,7 @@
 ### 1.2 接口签名
 
 ```rust
-// crates/seep-platform/src/network/linux.rs（新增单文件，设计估约 400 行；落地现 1757 行含测试）
+// crates/rillane-platform/src/network/linux.rs（新增单文件，设计估约 400 行；落地现 1757 行含测试）
 pub struct LinuxTunProvider {
     config: TunConfig,
     fd: Option<AsyncFd<OwnedFd>>,
@@ -47,8 +47,8 @@ pub struct LinuxRouteManager { config: RoutingConfig, applied: Mutex<Vec<Applied
 
 ### 1.3 接口属性与系统路由（最小 `LinuxRouteManager`）
 
-- **MVP 路由范围 = main 表显式路由（include 语义）**：只对纳入集（配置 CIDR / 进程规则配套端口段不可表达于路由层，仍走进程内）执行 `ip route replace <cidr> dev <tun> metric 0`。特定前缀天然优先于默认路由 → 流量入 tun；**不改默认路由**，seep 自身出站连 relay 地址不受影响（relay 地址同时进 §2.7 auto-bypass 集）。**fwmark 逃逸面已落地（2026-10-05 出站 fwmark 批）**：`network.egress_fwmark` 配置 + 出站 TCP socket 统一 `SO_MARK`（`seep_core::net_mark::connect_tcp`，缺省 0 零差异）+ apply 期 `ip rule fwmark` escape 表/逃逸规则（AppliedStep 回滚入账，EEXIST 容忍）——配置了 fwmark 时 apply 即使用 ip rule；默认路由改写的全局接管仍归 V2。
-- 工具：`ip` 命令子进程（`tokio::process::Command`）。理由：Linux/OpenWrt 普适（busybox ip 子集够用）；netlink（`rtnetlink` crate）为 V2。注：这是仓库**首次库级写操作 shell-out**（既有先例仅 seepctl diagnose 只读采集），见 §6 偏差 #2。
+- **MVP 路由范围 = main 表显式路由（include 语义）**：只对纳入集（配置 CIDR / 进程规则配套端口段不可表达于路由层，仍走进程内）执行 `ip route replace <cidr> dev <tun> metric 0`。特定前缀天然优先于默认路由 → 流量入 tun；**不改默认路由**，rillane 自身出站连 relay 地址不受影响（relay 地址同时进 §2.7 auto-bypass 集）。**fwmark 逃逸面已落地（2026-10-05 出站 fwmark 批）**：`network.egress_fwmark` 配置 + 出站 TCP socket 统一 `SO_MARK`（`rillane_core::net_mark::connect_tcp`，缺省 0 零差异）+ apply 期 `ip rule fwmark` escape 表/逃逸规则（AppliedStep 回滚入账，EEXIST 容忍）——配置了 fwmark 时 apply 即使用 ip rule；默认路由改写的全局接管仍归 V2。
+- 工具：`ip` 命令子进程（`tokio::process::Command`）。理由：Linux/OpenWrt 普适（busybox ip 子集够用）；netlink（`rtnetlink` crate）为 V2。注：这是仓库**首次库级写操作 shell-out**（既有先例仅 rillanectl diagnose 只读采集），见 §6 偏差 #2。
 - **幂等**：`ip addr replace`/`ip link set up` 天然幂等；路由 `replace` 同。`AppliedStep` 日志记录已执行步骤；
 - **回滚**：apply 中途失败 → 逆序撤销已执行步骤再 bail（启动失败不静默）；`clear_routing` = 逆序撤销全部 AppliedStep（P1-3 的 `route clear` 将复用同一机制）。
 
@@ -96,13 +96,13 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 
 - 上行：`FlowTarget{host: dst.ip 字符串, port, proto: Udp}`（dst 为 IP 字面量，无域名解析环节）；
 - associate 走 P0-3 `RoutingUdpConnector`（direct/ss/wg）；**决策为 `RoutePath::Chain` 时**：已随 **P0-4 S5 落地（2026-09）**统一换 `UdpChainRouter`（chain 决策 → mesh 桥，其余落 inner）——设计期所设"未接线前首包 bail"过渡态已随 S5 消失，本设计零改动兼容；
-- **下行写回**（新纯函数，seep-platform 内，单测钉住）：构造 `IP(dst=src.ip, src=dst.ip) + UDP 头 + payload`；IPv4 校验和可为 0 但 **IPv6 UDP 校验和强制**——统一实现真校验和（全量计算，约 20 行，golden vector 钉住）；IP id 自增、TTL 64、置 DF（不做分片）。
+- **下行写回**（新纯函数，rillane-platform 内，单测钉住）：构造 `IP(dst=src.ip, src=dst.ip) + UDP 头 + payload`；IPv4 校验和可为 0 但 **IPv6 UDP 校验和强制**——统一实现真校验和（全量计算，约 20 行，golden vector 钉住）；IP id 自增、TTL 64、置 DF（不做分片）。
 
 ### 2.4 TCP 面：smoltcp 用户态栈
 
 - 依赖假设：`smoltcp`（新依赖，版本实施时定；tun2proxy 成熟先例）；
 - 模型：单个 smoltcp `Interface`（phy 层 = `LinuxTunProvider` 的 Rx/TxToken 适配器）承载全部连接，每 TCP 五元组一个 `TcpSocket`；smoltcp 对本机应用扮演"对端"（应答 SYN-ACK/ACK/窗口），**不监听**——本机 SYN 即主动接入；
-- `SmolTcpStream`：smoltcp socket ↔ tokio `IoStream` 适配（双缓冲 + waker；实现 `seep_core::IoStream`）；
+- `SmolTcpStream`：smoltcp socket ↔ tokio `IoStream` 适配（双缓冲 + waker；实现 `rillane_core::IoStream`）；
 - 交接：握手完成即 `Flow{id, target, io: Box::new(SmolTcpStream), metadata(+process 注解)}` → `output.forward(decision, flow)`，决策取自该流首 SYN 的粘滞缓存；
 - 窗口/MTU：smoltcp 缓冲按 tun MTU−40−20；不启用 keep-alive（游戏长连接敏感）。
 
@@ -111,14 +111,14 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 - 时机：每流**首包归因一次**，`(src ip:port) → (pid, comm)` 缓存 TTL 30s；
 - 方法：`/proc/net/{tcp,udp}` 取 inode → `/proc/<pid>/fd` 扫描（贵：仅当路由配置存在 `MatchCondition::Process` 规则时才做 fd 扫描，否则跳过）；netlink sock_diag 归 V2；
 - 承载：annotation 键 **`process.name` / `process.pid`**（与 `geoip.country`/`client.cidr` 同族先例，`Flow::context()` 已透传 metadata，零结构体破坏）；
-- 规则侧：`seep-config` 增 `MatchCondition::Process { values: Vec<String> }`，`matches_rule`（`seep-routing/src/lib.rs:494`）增臂读 `process.name` 注解（精确匹配 comm，或绝对路径后缀匹配，实施时二选一并钉测试）。
+- 规则侧：`rillane-config` 增 `MatchCondition::Process { values: Vec<String> }`，`matches_rule`（`rillane-routing/src/lib.rs:494`）增臂读 `process.name` 注解（精确匹配 comm，或绝对路径后缀匹配，实施时二选一并钉测试）。
 
 ### 2.6 runtime 接线
 
 - **所有权裁决**：`TunIngress` 是 TUN 模式的属主——内部组合 `LinuxTunProvider` + `LinuxRouteManager`（创建设备/设址/起路由在 `run()` 启动时完成，退出时 teardown），**不经 `NetworkManager`**（其通用容器形状面向其他模式；P1-3 [network-route.md](network-route.md) §2.2 已裁决不收编，TunIngress 属主延续）；
 - 落点：`runtime_builder::build()` 在 UDP 块旁增 TUN 块——条件 `runtime_config.enable_network_virtualization && network_config.mode == Tun`，构造 `TunIngress` 插入 `ingress_endpoints["tun"]`；依赖仅 router + egress 描述符（UDP 连接器表与 `scan_udp_capability` **与 P0-3 UDP 块共享同一次构建结果**），无 build() 时序问题（不像 P0-4 §9.1——`run()` 时才取 `flow_router()`，start() 已统一注入 RuntimeFlowRouter）；
 - `TunIngress: IngressEndpoint`：`run(self: Arc<Self>, router, output)` = 设备就绪门 → 包循环 + per-flow 任务族；与 socks5 入口同构，`start()` 的统一循环零改动。
-- **与既有 ingress 的共存与选择边界**（P0-4 §1 同款缺口补全）：TUN ingress 与 socks5/mixed ingress 在 `ingress_endpoints` 中并列共存，两者**注入同一 `FlowRouter`**（chain 启用时即 `RuntimeFlowRouter`），共享 egress 连接器表与 `scan_udp_capability` 结果；**选择边界由内核/应用配置决定、不由 seep 选择**——socks5 流量是应用显式走代理监听口，TUN 流量是系统路由把应用包导入 tun 设备，两路互不重叠（一个包不会同时进两个 ingress）；UDP 侧 TUN 流的 `Arc<dyn UdpRelay>` 归 `TunFlowEntry` 持有，**不注册进 P0-1 `UdpSessionTable`**（该表与 socks5 控制连接绑定），故 TUN 会话不计入 `seep_udp_sessions_active`，见 §2.8。
+- **与既有 ingress 的共存与选择边界**（P0-4 §1 同款缺口补全）：TUN ingress 与 socks5/mixed ingress 在 `ingress_endpoints` 中并列共存，两者**注入同一 `FlowRouter`**（chain 启用时即 `RuntimeFlowRouter`），共享 egress 连接器表与 `scan_udp_capability` 结果；**选择边界由内核/应用配置决定、不由 rillane 选择**——socks5 流量是应用显式走代理监听口，TUN 流量是系统路由把应用包导入 tun 设备，两路互不重叠（一个包不会同时进两个 ingress）；UDP 侧 TUN 流的 `Arc<dyn UdpRelay>` 归 `TunFlowEntry` 持有，**不注册进 P0-1 `UdpSessionTable`**（该表与 socks5 控制连接绑定），故 TUN 会话不计入 `rillane_udp_sessions_active`，见 §2.8。
 - **TUN-only 启动已放行（2026-10-05 兑现，原 MVP 拒启约束撤销）**：`runtime_builder::validate()` 在 `ingress` 为空时仅当 `network.mode=tun` 且启用网络虚拟化放行——TUN 即入口（`build()` 注入 `ingress_endpoints["tun"]`，`start()` 同一循环 spawn，无常规入口特判）；其余空 ingress 仍拒（错误文案注记豁免面）。build 级钉子 `tun_only_config_builds_with_tun_as_sole_ingress`；TUN-only start 真机面未单独走查（与常规形态差异仅少 socks5 监听，start 循环同构）。
 
 ### 2.7 bypass 与防环
@@ -126,12 +126,12 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 - **auto-bypass 集**（构建期自动，不需用户配置）：全部 egress `server`/`endpoint` 解析地址 ∪ mesh `listen_address` 与已注册 peer 地址 ∪ `control.api_bind` ∪ tun 自身网段——这些前缀**不写入** include 路由，且进进程内兜底名单；
 - 默认 bypass：复用 `route.rs::default_bypass_rules()`（private_ip/loopback/multicast → Direct 语义 = 不进 tun）；
 - 进程内兜底：包循环②处 `BypassRule::matches(dst_ip, iface)` 命中即丢 + 计数（路由层本不该放行，双保险）；
-- 防环：include 显式路由模式下 seep 出站 socket 走 main 表默认路由且目标已在 auto-bypass，天然无环。
+- 防环：include 显式路由模式下 rillane 出站 socket 走 main 表默认路由且目标已在 auto-bypass，天然无环。
 
-### 2.8 指标（最小集，命名入 P0-5 `seep_*` 家族）
+### 2.8 指标（最小集，命名入 P0-5 `rillane_*` 家族）
 
-`seep_tun_packets_total{direction}`、`seep_tun_bytes_total{direction}`、`seep_tun_flows_active`、`seep_tun_bypass_dropped_total`、`seep_tun_parse_errors_total`、`seep_tun_unknown_flow_total`、`seep_tun_process_attr_miss_total`。原子量 + `/metrics` 渲染挂到 P0-5 §7 落点清单（该文档验收时一并出现）。
-- **计量边界**：TUN 流量**不进 `seep_udp_sessions_active`/`seep_udp_relay_bytes_total`**——TunFlowTable 独立于 P0-1 `UdpSessionTable`（§2.2 镜像不复用）；P0-5 `seep_udp_*` 序列仅反映 socks5 入站 UDP，TUN 的会话/字节只走本文 `seep_tun_*` 家族。操作者勿把 TUN 有流量时 `seep_udp_*` 为零误读为故障（两侧口径不同，分属两条序列族）。
+`rillane_tun_packets_total{direction}`、`rillane_tun_bytes_total{direction}`、`rillane_tun_flows_active`、`rillane_tun_bypass_dropped_total`、`rillane_tun_parse_errors_total`、`rillane_tun_unknown_flow_total`、`rillane_tun_process_attr_miss_total`。原子量 + `/metrics` 渲染挂到 P0-5 §7 落点清单（该文档验收时一并出现）。
+- **计量边界**：TUN 流量**不进 `rillane_udp_sessions_active`/`rillane_udp_relay_bytes_total`**——TunFlowTable 独立于 P0-1 `UdpSessionTable`（§2.2 镜像不复用）；P0-5 `rillane_udp_*` 序列仅反映 socks5 入站 UDP，TUN 的会话/字节只走本文 `rillane_tun_*` 家族。操作者勿把 TUN 有流量时 `rillane_udp_*` 为零误读为故障（两侧口径不同，分属两条序列族）。
 
 ### 2.9 smoltcp poll 驱动与下行注入（T4 主路径补全）
 
@@ -192,7 +192,7 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 
 | 步 | 内容与落点 | 依赖 | 验收 | 落地 |
 |----|-----------|------|------|------|
-| T0 | trait 裁剪（删 `packet_stream`/`TunPacketStream`/`TunInterface`）+ `network/linux.rs` 骨架 + 四工厂 cfg 分派 + nix 启用 | — | 编译绿；全仓基线持平；既有 seep-platform 消费点零感知 | `c076fb8` |
+| T0 | trait 裁剪（删 `packet_stream`/`TunPacketStream`/`TunInterface`）+ `network/linux.rs` 骨架 + 四工厂 cfg 分派 + nix 启用 | — | 编译绿；全仓基线持平；既有 rillane-platform 消费点零感知 | `c076fb8` |
 | T1 | `LinuxTunProvider`：open/TUNSETIFF/AsyncFd 读写循环 + `PacketInfo` 联动 | T0 | 4.2 设备生命周期 + 「捕获 IP 包进入 FlowRouter」钉子（P1-1 验收核心） | `75c7747` |
 | T2 | `LinuxRouteManager`：ip helper（构造/执行分离）+ addr/route 幂等 + AppliedStep 回滚 + auto-bypass 集 | T0（独立于 T1） | 4.2 路由幂等/还原/回滚 | `92f12ba` |
 | T3 | UDP 面：头编解码纯函数 + `TunFlowTable` + `TunIngress` UDP 循环 + connector 接线 + build() TUN 块 | T1（+T2 供路由） | 4.1 编解码/流表 + 4.2 UDP 全链路 echo | `a9f11dc` |
@@ -225,7 +225,7 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 
 - **R-tun1（最大项，已消除）**：smoltcp 集成（phy 适配/waker/窗口调优）是 T4 主工作量——**T4 已落地 @b5785c2**（`tun_tcp.rs` SmolTcpStream 接管，回退路径未启用）；
 - **R-tun2**：`/proc` fd 扫描成本——仅新流 + 仅存在 Process 规则时触发；采样与开关留实施期调；
-- **R-tun3**：tun 全局接管场景下 seep 自身控制面/metrics 回流——include 模式天然豁免；fwmark 逃逸面已落地（出站 socket `SO_MARK` + `ip rule fwmark` escape 表），默认路由改写的全局模式仍归 V2；
+- **R-tun3**：tun 全局接管场景下 rillane 自身控制面/metrics 回流——include 模式天然豁免；fwmark 逃逸面已落地（出站 socket `SO_MARK` + `ip rule fwmark` escape 表），默认路由改写的全局模式仍归 V2；
 - **O-icmp**：ICMP（PMTUD/ping）不支持的补偿 = MTU 建议 1400；游戏场景是否需要 ICMP 透传待实测；
 - **O-quic**：QUIC 流量是否需要识别为 `TargetProto::Quic` 参与规则（枚举已留）——MVP 不做，规则需求出现时再议；
 - **O-netlink**：`ip` 命令 → rtnetlink 迁移窗口（P1-3 或 V2）。

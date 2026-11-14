@@ -39,7 +39,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "seep-plugin-content-filter"
+name = "rillane-plugin-content-filter"
 version = "0.1.0"
 dependencies = [
  "base64",

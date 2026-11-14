@@ -1,24 +1,24 @@
 [workspace]
 members = [
-    "crates/seep-core",
-    "crates/seep-config",
-    "crates/seep-routing",
-    "crates/seep-protocols",
-    "crates/seep-telemetry",
-    "crates/seep-platform",
-    "crates/seep-runtime",
-    "apps/seepd",
-    "apps/seepctl",
-    "crates/seep-mesh",
-    "crates/seep-subscription",
-    "crates/seep-ffi",
-    "crates/seep-plugins",
+    "crates/rillane-core",
+    "crates/rillane-config",
+    "crates/rillane-routing",
+    "crates/rillane-protocols",
+    "crates/rillane-telemetry",
+    "crates/rillane-platform",
+    "crates/rillane-runtime",
+    "apps/rillaned",
+    "apps/rillanectl",
+    "crates/rillane-mesh",
+    "crates/rillane-subscription",
+    "crates/rillane-ffi",
+    "crates/rillane-plugins",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
-authors = ["Seep Contributors"]
+authors = ["Rillane Contributors"]
 license = "Apache-2.0"
 version = "0.1.0"
 

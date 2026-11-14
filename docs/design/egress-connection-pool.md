@@ -2,7 +2,7 @@
 
 > Upstream: [roadmap.md](roadmap.md) S2/S3 ("egress connection pool: same-egress keep-alive reuse + TLS session resumption, serving web short connections") · [PROTOCOLS.md](../PROTOCOLS.md) master table and performance section (connection pool not implemented -> P1-5) · [positioning.md](positioning.md) §2 (shared datapath for the three scenarios, a core item of web acceleration).
 > This document is the finalized landing design: **mirror types and schema, assembly and hot reload, control plane, state machine, test strategy, step-by-step implementation checklist**. Deviations are backfilled into §10 after landing.
-> Reuse baseline: `EgressConnector` takeover-style contract (`seep-core/src/lib.rs:625-628`) · `ConnectorFlowOutput` adapter (`runtime_builder.rs:1466`) · `build_egress_outputs` assembly (`runtime_builder.rs:1635`, call sites :158 / :720 / :933) · `RuntimeConfig.connection_pool_size` (`runtime_builder.rs:311`, default `Some(1024)`, a zero-consumer orphan field repo-wide) · `tls.rs:10-47` rebuilding `ClientConfig` per flow (call sites trojan.rs:101 / http.rs:92 / vless.rs:190, :228) · the `perform_connect<S>` generic (http.rs:126) · the rustls 0.23.35 public surface (`Resumption::in_memory_sessions` is the default resumption policy, `HandshakeKind` observable via `CommonState::handshake_kind()`, source-verified, see §2.4) · the `UdpConfig` mirror + runtime conversion precedent ([udp-dataplane.md](udp-dataplane.md) §5.2) · targeted `deny_unknown_fields` closure for new blocks ([network-route.md](network-route.md) §1.5) · MockClock (P0-1) · closed label set (R11) · the control-plane getter pattern (`control_plane.rs:23`/`:259`/`:386`) and the hand-written `/metrics` (`:245`).
+> Reuse baseline: `EgressConnector` takeover-style contract (`rillane-core/src/lib.rs:625-628`) · `ConnectorFlowOutput` adapter (`runtime_builder.rs:1466`) · `build_egress_outputs` assembly (`runtime_builder.rs:1635`, call sites :158 / :720 / :933) · `RuntimeConfig.connection_pool_size` (`runtime_builder.rs:311`, default `Some(1024)`, a zero-consumer orphan field repo-wide) · `tls.rs:10-47` rebuilding `ClientConfig` per flow (call sites trojan.rs:101 / http.rs:92 / vless.rs:190, :228) · the `perform_connect<S>` generic (http.rs:126) · the rustls 0.23.35 public surface (`Resumption::in_memory_sessions` is the default resumption policy, `HandshakeKind` observable via `CommonState::handshake_kind()`, source-verified, see §2.4) · the `UdpConfig` mirror + runtime conversion precedent ([udp-dataplane.md](udp-dataplane.md) §5.2) · targeted `deny_unknown_fields` closure for new blocks ([network-route.md](network-route.md) §1.5) · MockClock (P0-1) · closed label set (R11) · the control-plane getter pattern (`control_plane.rs:23`/`:259`/`:386`) and the hand-written `/metrics` (`:245`).
 
 ## 0. Scope and acceptance criteria
 
@@ -10,19 +10,19 @@
 
 | In this item | Belongs to other items |
 |-----------|-----------|
-| `egress_pool:` config block (seep-config mirror types) + `PoolPolicy`/`TransportPool`/`TlsConnectorFactory` (seep-protocols) | Multiplexing (concurrent streams within one connection, including hy2/QUIC session reuse) = V2 -- for the structural reason total dials do not drop, see the §0.2 note |
+| `egress_pool:` config block (rillane-config mirror types) + `PoolPolicy`/`TransportPool`/`TlsConnectorFactory` (rillane-protocols) | Multiplexing (concurrent streams within one connection, including hy2/QUIC session reuse) = V2 -- for the structural reason total dials do not drop, see the §0.2 note |
 | MVP matrix egress onboarding: trojan / http (incl. tls) / vless (tcp+ws, incl. tls) / vmess (2026-10-02 egress landing, passes through with the pool) / direct (`pre_dial_direct` opt-in) | socks5 / shadowsocks pooling = extension (the crate merges dial+bind, D-6); wg = system interface, no userspace dial |
 | TLS session resumption (process-level shared `ClientConfig`) + `HandshakeKind` observability counters | uTLS fingerprint emulation = P2-5 (the same `tls.rs` mount point; the factory converges its injection surface, cross-referenced in §2.4) |
 | `connection_pool_size` orphan-field adoption (global capacity default, D-8) | mesh hop dial reuse (`connect_next` dials per flow) = O item, non-commitment (§11) |
-| `/metrics` `seep_pool_*`/`seep_tls_*` series + `GET /egress/pool/stats` + the acceptance statistics script | UDP side = P0-4/P0-5 (no connection-establishment semantics, zero overlap §1.3); obfuscation middleware = P1-4 (Flow level, strictly upstream/downstream §1.3) |
+| `/metrics` `rillane_pool_*`/`rillane_tls_*` series + `GET /egress/pool/stats` + the acceptance statistics script | UDP side = P0-4/P0-5 (no connection-establishment semantics, zero overlap §1.3); obfuscation middleware = P1-4 (Flow level, strictly upstream/downstream §1.3) |
 
 ### 0.2 Acceptance criteria (explicit)
 
 The original todo P1-5 acceptance text: "repeated requests to the same target see fewer handshakes, `/metrics` has a connection-reuse-ratio metric; no breaking changes for existing configs". Combined with this item's title stance (same egress same SNI keep-alive reuse + TLS session resumption), four criteria:
 
-1. **Same-egress same-SNI keep-alive reuse (measurable)**: N>=10 serial requests to the same (egress, SNI) -> `seep_pool_acquires_total{result="hit"}` >= N-1 (after assembly prewarm the first request already hits, miss may be 0), `seep_pool_reuse_ratio` >= (N-1)/N;
-2. **Fewer handshakes (scope note, aligned with the P0-3/P1-4 practice of explicit rewriting, no silent shrinkage)**: the measurable scope = **handshakes blocking the request path** -- a request served from a hit does zero dials and zero handshakes (the foreground dial count does not grow); on top of that, session resumption replaces the full handshakes of prewarm/refill dials with `HandshakeKind::Resumed` (compare `seep_tls_handshakes_total{type}`). **Total dials ~= flow count, no reduction** -- every flow consumes one connection (§1.2 structural constraint); truly reducing total connections requires multiplexing (V2). The acceptance statistics script emits all three groups at once (foreground handshakes / resumed share / total dials) to avoid ambiguity;
-3. **Connection reuse ratio metric**: `seep_pool_reuse_ratio` (gauge) + `seep_pool_acquires_total{result}` counters, visible in `/metrics`;
+1. **Same-egress same-SNI keep-alive reuse (measurable)**: N>=10 serial requests to the same (egress, SNI) -> `rillane_pool_acquires_total{result="hit"}` >= N-1 (after assembly prewarm the first request already hits, miss may be 0), `rillane_pool_reuse_ratio` >= (N-1)/N;
+2. **Fewer handshakes (scope note, aligned with the P0-3/P1-4 practice of explicit rewriting, no silent shrinkage)**: the measurable scope = **handshakes blocking the request path** -- a request served from a hit does zero dials and zero handshakes (the foreground dial count does not grow); on top of that, session resumption replaces the full handshakes of prewarm/refill dials with `HandshakeKind::Resumed` (compare `rillane_tls_handshakes_total{type}`). **Total dials ~= flow count, no reduction** -- every flow consumes one connection (§1.2 structural constraint); truly reducing total connections requires multiplexing (V2). The acceptance statistics script emits all three groups at once (foreground handshakes / resumed share / total dials) to avoid ambiguity;
+3. **Connection reuse ratio metric**: `rillane_pool_reuse_ratio` (gauge) + `rillane_pool_acquires_total{result}` counters, visible in `/metrics`;
 4. **No breaking changes for existing configs**: no `egress_pool:` block -> zero parsing and behavior difference (serde roundtrip + behavior-comparison assertions); `connection_pool_size` is consumed only when the block exists and `max_idle_global` is unwritten (before this it had zero consumers).
 
 ## 1. Current state and structural constraints (the factual inputs for the decisions)
@@ -41,7 +41,7 @@ The original todo P1-5 acceptance text: "repeated requests to the same target se
 
 ### 1.2 Structural constraint: binding is consumption (the derivation premise for the pool's shape)
 
-- `EgressConnector::forward(Flow) -> FlowReport` (`seep-core/src/lib.rs:625-628`) is **takeover-style**: the connection is established inside forward and ends with the flow. `copy_bidirectional` returning = bidirectional EOF (whichever side closes first, the other gets its write half shutdown) -- **a terminal connection state, not returnable for reuse**. This is tunnel-protocol semantics, not an implementation flaw: after the target connection closes, the proxy server closes the tunnel connection shortly after;
+- `EgressConnector::forward(Flow) -> FlowReport` (`rillane-core/src/lib.rs:625-628`) is **takeover-style**: the connection is established inside forward and ends with the flow. `copy_bidirectional` returning = bidirectional EOF (whichever side closes first, the other gets its write half shutdown) -- **a terminal connection state, not returnable for reuse**. This is tunnel-protocol semantics, not an implementation flaw: after the target connection closes, the proxy server closes the tunnel connection shortly after;
 - Corollary: **a "check out then return" connection pool is unrealizable under the current architecture** (it would need changed forwarding semantics or mux, both out of bounds). The realizable shape = a **pre-established (warm) pool**: transport-layer connections pre-dialed as TCP[+TLS] with **zero protocol bytes written**, cached by key; on a flow's arrival one is checked out, the protocol header is written after checkout; when the flow ends the connection is consumed; a checkout triggers background watermark refill;
 - Benefit position (the factual basis of the §0.2 note): foreground (request-path-blocking) handshakes -> 0 (on a hit); TLS session resumption turns the pool's own dials' full handshakes -> Resumed; **total dials ~= flow count, unchanged**.
 
@@ -51,7 +51,7 @@ The original todo P1-5 acceptance text: "repeated requests to the same target se
 |----|------|------|--------|---------------|
 | Flow-level processing | P1-4 obfuscation middleware | `FlowOutputRouter::forward` steps ①②③ (**before** dispatch, [obfuscation-middleware.md](obfuscation-middleware.md) §1.3) | the flow's byte shape (padding spec annotations + frame-carrier execution) | **strictly upstream/downstream**: the pool sits inside connector.forward (**after** dispatch, at the transport level). The P1-4 MVP frame carrier is only the chain `MeshEnvelope` (its §2.3), zero overlap with the pool; if an egress-side filler appears later, the filler acts on the post-checkout flow bytes -- the pool governs connection lifecycle, not byte content, orthogonal |
 | TCP transport | **this item** | `build_egress_outputs` assembly into the connector (§4) | the TCP[+TLS] session-establishment cost to the egress server | — |
-| UDP session | P0-1/P0-4/P0-5 | `UdpSessionTable` / `UdpEnvelope` / `seep_udp_*` | NAT-style datagram sessions (sticky/reclamation) | **zero overlap**: UDP has no connection-establishment semantics (no TCP/TLS handshake to eliminate), `EgressUdpConnector`/`RoutingUdpConnector`/`UdpSessionTable` are untouched; the three layers each govern one segment (IP session / Flow processing / TCP transport) |
+| UDP session | P0-1/P0-4/P0-5 | `UdpSessionTable` / `UdpEnvelope` / `rillane_udp_*` | NAT-style datagram sessions (sticky/reclamation) | **zero overlap**: UDP has no connection-establishment semantics (no TCP/TLS handshake to eliminate), `EgressUdpConnector`/`RoutingUdpConnector`/`UdpSessionTable` are untouched; the three layers each govern one segment (IP session / Flow processing / TCP transport) |
 
 mesh side: `connect_next` dials a hop per flow (`mesh_transport.rs:406`) -- this item **does not touch it** -- the mesh hop's `MeshEnvelope` first write is itself the protocol binding, and its shape is pool-compatible (key = hop address); future reuse is recorded as §11 O-pool1, non-commitment.
 
@@ -83,17 +83,17 @@ mesh side: `connect_next` dials a hop per flow (`mesh_transport.rs:406`) -- this
 
 | Side | Carrier | Duties | What it does not do |
 |----|------|------|---------|
-| Policy side (config/assembly time) | `EgressPoolBlock` (seep-config) -> `PoolPolicy` (conversion in seep-runtime, precedent `to_padding_policy()`) | who participates (`enabled`/`pre_dial_direct`), capacity (per-key/global), watermark, timeouts, session cache size | contains no runtime state |
-| Execution side (runtime) | `TransportPool` (seep-protocols/src/pool.rs) | dial/cache/checkout/watermark refill/reclaim/backoff/counting | **zero protocol knowledge** (knows only `TransportKey`, never sees protocol bytes) |
+| Policy side (config/assembly time) | `EgressPoolBlock` (rillane-config) -> `PoolPolicy` (conversion in rillane-runtime, precedent `to_padding_policy()`) | who participates (`enabled`/`pre_dial_direct`), capacity (per-key/global), watermark, timeouts, session cache size | contains no runtime state |
+| Execution side (runtime) | `TransportPool` (rillane-protocols/src/pool.rs) | dial/cache/checkout/watermark refill/reclaim/backoff/counting | **zero protocol knowledge** (knows only `TransportKey`, never sees protocol bytes) |
 | Protocol binding side | existing connectors (trojan/http/vless/direct) | write the protocol header after checkout + `copy_bidirectional` (current semantics unchanged) | unaware of pool internals (sees only the `acquire` API) |
 
-Aligned with the same ruling logic as P1-4 §2.1: P1-4 split policy from execution because the `handle(Flow)` flow signature carries no frame semantics; this item splits "transport session" out of the connectors because their binding semantics all differ -- what the two splits share: **zero trait changes** (D-4, the seep-core surface is untouched).
+Aligned with the same ruling logic as P1-4 §2.1: P1-4 split policy from execution because the `handle(Flow)` flow signature carries no frame semantics; this item splits "transport session" out of the connectors because their binding semantics all differ -- what the two splits share: **zero trait changes** (D-4, the rillane-core surface is untouched).
 
 ### 2.4 TLS session resumption (D-5)
 
-**Root cause (source-verified, rustls 0.23.35)**: `Resumption::in_memory_sessions(num)` is rustls's **default resumption policy** (`client/client_conn.rs`: "This is the default `Resumption` choice", internally `handy::ClientSessionMemoryCache`) -- i.e. the default config already supports session resumption; the root cause of failure is on seep's side: `tls.rs:10-47` builds a new `ClientConfig` on every `create_tls_connector[_with_alpn]`, and the session cache (`Arc<dyn ClientSessionStore>`) lives inside the instance and **dies with the flow** -- the ticket cannot survive into the next handshake. Call sites: trojan.rs:101, http.rs:92, vless.rs:190/:228.
+**Root cause (source-verified, rustls 0.23.35)**: `Resumption::in_memory_sessions(num)` is rustls's **default resumption policy** (`client/client_conn.rs`: "This is the default `Resumption` choice", internally `handy::ClientSessionMemoryCache`) -- i.e. the default config already supports session resumption; the root cause of failure is on rillane's side: `tls.rs:10-47` builds a new `ClientConfig` on every `create_tls_connector[_with_alpn]`, and the session cache (`Arc<dyn ClientSessionStore>`) lives inside the instance and **dies with the flow** -- the ticket cannot survive into the next handshake. Call sites: trojan.rs:101, http.rs:92, vless.rs:190/:228.
 
-**Fix**: `TlsConnectorFactory` (an extension inside seep-protocols/src/tls.rs):
+**Fix**: `TlsConnectorFactory` (an extension inside rillane-protocols/src/tls.rs):
 
 ```rust
 pub struct TlsConnectorFactory {
@@ -106,7 +106,7 @@ impl TlsConnectorFactory {
 ```
 
 - On the shared instance the default resumption policy takes effect immediately (the cache survives across flows); an explicit `config.resumption = Resumption::in_memory_sessions(session_cache_size)` pins the capacity (config item §3);
-- **Observability (public API, verified)**: `CommonState::handshake_kind() -> Option<HandshakeKind>` (`common_state.rs:188`), variants `Full` / `FullWithHelloRetryRequest` / `Resumed` (publicly exported at `rustls` lib.rs:545); reachable via tokio-rustls `TlsStream::get_ref().1` -- read right after dialing completes, driving `seep_tls_handshakes_total{type}`;
+- **Observability (public API, verified)**: `CommonState::handshake_kind() -> Option<HandshakeKind>` (`common_state.rs:188`), variants `Full` / `FullWithHelloRetryRequest` / `Resumed` (publicly exported at `rustls` lib.rs:545); reachable via tokio-rustls `TlsStream::get_ref().1` -- read right after dialing completes, driving `rillane_tls_handshakes_total{type}`;
 - Effective gate: block exists and `tls_resumption: true` (the default) -> the factory is injected -- **independent of `enabled`** (enabled=false turns off only the pool; session resumption is pure gain and stays on separately, see the §2.6 zero-difference boundary); no block -> no factory injection, connectors take today's per-flow path (D-9);
 - Cross-reference with P2-5: uTLS's mount point is exactly `tls.rs` (todo P2-5 states it); once the factory converges `ClientConfig` construction into one place, that is precisely the injection surface for fingerprint replacement -- this item paves the way without crossing the line.
 
@@ -127,7 +127,7 @@ Prewarm (D-7): with `enabled=true`, the tail of assembly dials `min(max_idle_per
 - Block exists with `enabled: false`: only `tls_resumption` (default true) is effective -- the shared factory is injected (resumption works across flows), the pool is not constructed;
 - Both states above carry behavior-comparison assertions (§8.1) -- "zero difference" is provable, not a verbal promise.
 
-## 3. Mirror types and schema (seep-config)
+## 3. Mirror types and schema (rillane-config)
 
 ### 3.1 Block shape
 
@@ -146,12 +146,12 @@ egress_pool:
 
 ### 3.2 Mirroring and conversion (ruling: mirror rather than add a dependency, precedent udp-dataplane §5.2)
 
-seep-config has zero dependency on seep-core/protocols (current deps only anyhow/serde family): **seep-config defines mirror serde types, and seep-runtime adds a `to_pool_policy()` conversion** (the `PoolPolicy` type is defined in seep-protocols/src/pool.rs -- that crate needs tokio dialing; seep-protocols already depends on seep-config, so no new dependency edge).
+rillane-config has zero dependency on rillane-core/protocols (current deps only anyhow/serde family): **rillane-config defines mirror serde types, and rillane-runtime adds a `to_pool_policy()` conversion** (the `PoolPolicy` type is defined in rillane-protocols/src/pool.rs -- that crate needs tokio dialing; rillane-protocols already depends on rillane-config, so no new dependency edge).
 
-| config mirror type (seep-config) | Conversion product |
+| config mirror type (rillane-config) | Conversion product |
 |-------------------------------|---------|
 | `EgressPoolBlock { enabled, tls_resumption: Option<bool>, max_idle_per_key: Option<usize>, max_idle_global: Option<usize>, low_watermark: Option<usize>, idle_timeout_secs: Option<u64>, dial_timeout_secs: Option<u64>, session_cache_size: Option<usize>, pre_dial_direct: Option<bool> }` | `PoolPolicy { ... all fields valued }` (`to_pool_policy(default_global: usize)`, default_global = `runtime_config.connection_pool_size`, D-8) |
-| `SeepConfig.egress_pool: Option<EgressPoolBlock>` (`#[serde(default)]`) | `None` -> no pool, no factory (zero difference); `Some` and enabled -> `Some(Arc<TransportPool>)`; `Some` and tls_resumption -> `Some(Arc<TlsConnectorFactory>)` |
+| `RillaneConfig.egress_pool: Option<EgressPoolBlock>` (`#[serde(default)]`) | `None` -> no pool, no factory (zero difference); `Some` and enabled -> `Some(Arc<TransportPool>)`; `Some` and tls_resumption -> `Some(Arc<TlsConnectorFactory>)` |
 
 ### 3.3 Validation (at build time, `EgressPoolBlock::validate`)
 
@@ -163,7 +163,7 @@ seep-config has zero dependency on seep-core/protocols (current deps only anyhow
 ### 3.4 Compatibility
 
 - Existing configs without `egress_pool:` -> None default, zero behavior difference (pinned by serde roundtrip, same as the udp block precedent);
-- **`EgressPoolBlock` gets `#[serde(deny_unknown_fields)]`** (a new block carries no legacy burden, a misspelled sub-field errors immediately, aligned with network-route §1.5); the global `SeepConfig` stays permissive.
+- **`EgressPoolBlock` gets `#[serde(deny_unknown_fields)]`** (a new block carries no legacy burden, a misspelled sub-field errors immediately, aligned with network-route §1.5); the global `RillaneConfig` stays permissive.
 
 ## 4. Assembly and hot reload
 
@@ -249,16 +249,16 @@ async fn forward(&self, flow: Flow) -> Result<FlowReport> {
 
 ## 6. Control plane
 
-### 6.1 New `/metrics` series (closed label set, R11; rendering hooked at `handle_metrics` :245, same family as `seep_mesh_*` :319)
+### 6.1 New `/metrics` series (closed label set, R11; rendering hooked at `handle_metrics` :245, same family as `rillane_mesh_*` :319)
 
 ```
-seep_pool_acquires_total{result="hit|miss|stale_redial"}
-seep_pool_dials_total{origin="foreground|warm|refill", result="ok|error"}
-seep_pool_idle_connections        # gauge
-seep_pool_leased_connections      # gauge
-seep_pool_reuse_ratio             # gauge = hits/(hits+miss), since startup
-seep_pool_evicted_total{reason="idle_timeout|capacity|shutdown"}
-seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # when the factory is enabled; maps the three HandshakeKind variants directly
+rillane_pool_acquires_total{result="hit|miss|stale_redial"}
+rillane_pool_dials_total{origin="foreground|warm|refill", result="ok|error"}
+rillane_pool_idle_connections        # gauge
+rillane_pool_leased_connections      # gauge
+rillane_pool_reuse_ratio             # gauge = hits/(hits+miss), since startup
+rillane_pool_evicted_total{reason="idle_timeout|capacity|shutdown"}
+rillane_tls_handshakes_total{type="full|resumed|full_hrr"}   # when the factory is enabled; maps the three HandshakeKind variants directly
 ```
 
 ### 6.2 `GET /egress/pool/stats` (match arm aligned with the `/chains/dry-run` precedent)
@@ -270,7 +270,7 @@ seep_tls_handshakes_total{type="full|resumed|full_hrr"}   # when the factory is 
  "reuse_ratio": 0.9}
 ```
 
-Data source = the `Runtime::get_transport_pool()` snapshot method (the §4.1 getter precedent); auth inherits the control-plane status quo. The `seepctl pool status` subcommand has landed with O-pool3 (2026-10-11, see §11).
+Data source = the `Runtime::get_transport_pool()` snapshot method (the §4.1 getter precedent); auth inherits the control-plane status quo. The `rillanectl pool status` subcommand has landed with O-pool3 (2026-10-11, see §11).
 
 ## 7. Error paths
 
@@ -301,7 +301,7 @@ Data source = the `Runtime::get_transport_pool()` snapshot method (the §4.1 get
 
 - **Main acceptance scenario**: mock trojan TLS server (self-signed cert: rcgen dev-dep or an embedded static PEM, one of the two chosen at implementation time and recorded in §10) + `egress_pool: {enabled: true}` -> N=10 serial same-target requests -> assert `acquires{hit}>=9`, `{miss}<=1`, `reuse_ratio>=0.9`, **foreground dial count increment <=1** (criteria 1/2);
 - **Session resumption**: two dials through the same factory -> the second `handshake_kind() == Resumed` (direct assertion via the public API, §2.4; comparing the server-side handshake byte count is an optional cross-check);
-- **Off-state comparison**: the same scenario with `enabled: false` (no block) -> foreground dials = N, no `seep_pool_*` series, behavior consistent with the mainline baseline (criterion 4);
+- **Off-state comparison**: the same scenario with `enabled: false` (no block) -> foreground dials = N, no `rillane_pool_*` series, behavior consistent with the mainline baseline (criterion 4);
 - **stale**: the server actively closes an idle connection -> the next request counts `stale_redial` +1 and succeeds (E3);
 - **Hot reload**: switching the egress server triggers the :933 path -> new requests dial the new key, old-key entries reclaimed by idle timeout (short-timeout config + MockClock or a real wait); the pool singleton is not rebuilt (instance ptr assertion, warmth survives).
 
@@ -318,8 +318,8 @@ Commit cadence follows the hard rule of P0-4 §9.1.1 / tun-dataplane §5: each s
 
 | Step | Content and landing point | Depends on | Acceptance |
 |----|-----------|------|------|
-| M0 | seep-protocols `pool.rs`: `PoolPolicy`/`TransportKey`/`TransportPool` (acquire/acquire_fresh/watermark refill/idle sweep/eviction/backoff/counting/LeaseGuard) + `tls.rs` `TlsConnectorFactory` (shared ClientConfig + `in_memory_sessions` + HandshakeKind counting) | — | 8.1 pool core and factory fully green |
-| M1 | seep-config: `EgressPoolBlock` + deny + validate + `SeepConfig.egress_pool`; seep-runtime: `to_pool_policy()` (D-8 mapping) | M0 | 8.1 schema/conversion fully green; old configs zero difference |
+| M0 | rillane-protocols `pool.rs`: `PoolPolicy`/`TransportKey`/`TransportPool` (acquire/acquire_fresh/watermark refill/idle sweep/eviction/backoff/counting/LeaseGuard) + `tls.rs` `TlsConnectorFactory` (shared ClientConfig + `in_memory_sessions` + HandshakeKind counting) | — | 8.1 pool core and factory fully green |
+| M1 | rillane-config: `EgressPoolBlock` + deny + validate + `RillaneConfig.egress_pool`; rillane-runtime: `to_pool_policy()` (D-8 mapping) | M0 | 8.1 schema/conversion fully green; old configs zero difference |
 | M2 | Connector onboarding: trojan/http/vless/direct(opt-in) constructor signatures gain two `Option`s, the forward dial site switches to acquire + the stale one-shot redial (the None path = old behavior) | M0 | 8.1 connectors fully green in both states; existing egress tests zero regressions |
 | M3 | Assembly and hot reload: build() constructs pool/factory, `build_egress_outputs` gains parameters (the three call sites :158/:720/:933), Runtime holds + getters, tail-of-assembly warm() | M0-M2 | 8.1 assembly both states; hot-reload key self-invalidation and singleton survival assertions |
 | M4 | Control plane + acceptance script: `/metrics` rendering + `GET /egress/pool/stats` + the statistics script (the three §0.2 groups) + the full §8.2 integration set | M3 | 8.2 fully green; criteria 1-3 reproducible |
@@ -339,7 +339,7 @@ Commit cadence follows the hard rule of P0-4 §9.1.1 / tun-dataplane §5: each s
 | 8 | Ruling | stale = one-shot foreground redial, no active probing (D-11): actively reading on a pre-established connection has a consumption-boundary ambiguity (TLS post-handshake messages), and retry covers the same scenario at lower complexity |
 | 9 | Assumption (closed) | How integration tests generate self-signed certs -> **implementation chose the rcgen dev-dep** (`generate_simple_self_signed` + rustls-pemfile parsing, M4 `54df7cc`; from 2026-10-10 rustls-pemfile is out of the tree per RUSTSEC-2025-0134, parsing switched to the rustls-pki-types `PemObject`); the concurrent acceptance surface (criteria 1-3 in serial form) is now reproducible |
 | 10 | Assumption (partially closed) | The bounded concurrency of prewarm/refill dials is guaranteed by the per-key invariant (§5.2); no global dial rate limiting -- serial acceptance has passed (M4); true-concurrency stress tests depend on real egress traffic shapes, which this repo's loopback integration tests do not construct; the R-pool3 observability surface (dials/idle/leased gauges) is in place, registered as pending verification during a real-traffic period |
-| 11 | Deviation | §6.2 `keys[]` carries no per-key `leased`: under D-1 checkout-is-consumption, leased is accounted in the global gauge (`seep_pool_leased_connections`); per-key leased has no operational action, and `KeySnapshot{key,idle}` is the final shape (M4) |
+| 11 | Deviation | §6.2 `keys[]` carries no per-key `leased`: under D-1 checkout-is-consumption, leased is accounted in the global gauge (`rillane_pool_leased_connections`); per-key leased has no operational action, and `KeySnapshot{key,idle}` is the final shape (M4) |
 | 12 | Deviation | `acquire_bound`'s bind closure takes the boxed `FnMut(&mut dyn IoStream) -> Pin<Box<dyn Future>>` form rather than `AsyncFnMut`: the current rustc (1.99) does not generalize async closures over HRTBs ("AsyncFnMut is not general enough"); a boxed future + `&mut dyn` (not `&mut BoxedIo` -- the Box's inner 'static is fixed) is the stable idiom (same shape as tower services, M2) |
 | 13 | Ruling | direct gets no stale one-shot redial: the bind semantics = first write first read; direct has no protocol handshake phase -> no stale detection point; a dead idle connection surfaces as a flow error, backstopped by idle_timeout (stated in an M2 comment) |
 | 14 | Deviation | warm prewarm + the periodic sweeper hook `Runtime::start()` rather than `build()`: build() is synchronous assembly with no tokio context, and spawn/prewarm require the runtime in place (M3) |
@@ -356,8 +356,8 @@ Commit cadence follows the hard rule of P0-4 §9.1.1 / tun-dataplane §5: each s
 - **R-pool4**: pooling changes the connection-request timing (the connection exists before the request) -- no protocol difference for trojan/http/vless servers (the first bytes are still the protocol header); timing-correlation analysis from a DPI perspective belongs to the obfuscation-layer discussion, not claimed by this item;
 - **O-pool1**: mesh hop dial reuse (`connect_next` shape-compatible: key = hop address, the MeshEnvelope first write is the binding) -- non-commitment, to be discussed when a need appears;
 - **O-pool2**: socks5/shadowsocks onboarding (same vless shape after verifying the crate's external stream injection point);
-- **O-pool3**: ~~`seepctl pool status` subcommand~~ (**landed 2026-10-11**:
-  `seepctl pool status` -- the CLI fetch surface of `GET /egress/pool/stats`,
+- **O-pool3**: ~~`rillanectl pool status` subcommand~~ (**landed 2026-10-11**:
+  `rillanectl pool status` -- the CLI fetch surface of `GET /egress/pool/stats`,
   rendering the switch/TLS resumption/reuse ratio/counter family
   (hit/miss/stale_redial/dials) and per-key idle; with the block disabled =
   `enabled:false`, the zero-value shape still renders);

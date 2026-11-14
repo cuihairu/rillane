@@ -3517,7 +3517,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "seep-config"
+name = "rillane-config"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3530,7 +3530,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "seep-core"
+name = "rillane-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3548,21 +3548,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "seep-ffi"
+name = "rillane-ffi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "jni 0.21.1",
  "libc",
- "seep-config",
- "seep-runtime",
+ "rillane-config",
+ "rillane-runtime",
  "serde_json",
  "serde_yaml_ng",
  "tokio",
 ]
 
 [[package]]
-name = "seep-mesh"
+name = "rillane-mesh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3579,7 +3579,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "seep-platform"
+name = "rillane-platform"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3594,8 +3594,8 @@ dependencies = [
  "regex",
  "reqwest",
  "rustls",
- "seep-config",
- "seep-core",
+ "rillane-config",
+ "rillane-core",
  "serde",
  "serde_json",
  "socket2 0.5.10",
@@ -3609,13 +3609,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "seep-plugins"
+name = "rillane-plugins"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
- "seep-core",
+ "rillane-core",
  "serde",
  "serde_json",
  "tokio",
@@ -3625,7 +3625,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "seep-protocols"
+name = "rillane-protocols"
 version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
@@ -3646,8 +3646,8 @@ dependencies = [
  "rand 0.8.6",
  "rcgen",
  "rustls",
- "seep-config",
- "seep-core",
+ "rillane-config",
+ "rillane-core",
  "serde",
  "serde_json",
  "sha1 0.10.6",
@@ -3664,7 +3664,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "seep-routing"
+name = "rillane-routing"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3675,8 +3675,8 @@ dependencies = [
  "maxminddb-writer",
  "rand 0.8.6",
  "regex",
- "seep-config",
- "seep-core",
+ "rillane-config",
+ "rillane-core",
  "serde",
  "sha2",
  "tokio",
@@ -3684,7 +3684,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "seep-runtime"
+name = "rillane-runtime"
 version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
@@ -3703,15 +3703,15 @@ dependencies = [
  "rcgen",
  "regex",
  "rustls",
- "seep-config",
- "seep-core",
- "seep-mesh",
- "seep-platform",
- "seep-plugins",
- "seep-protocols",
- "seep-routing",
- "seep-subscription",
- "seep-telemetry",
+ "rillane-config",
+ "rillane-core",
+ "rillane-mesh",
+ "rillane-platform",
+ "rillane-plugins",
+ "rillane-protocols",
+ "rillane-routing",
+ "rillane-subscription",
+ "rillane-telemetry",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -3727,7 +3727,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "seep-subscription"
+name = "rillane-subscription"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3737,9 +3737,9 @@ dependencies = [
  "md-5 0.10.6",
  "regex",
  "reqwest",
- "seep-config",
- "seep-core",
- "seep-telemetry",
+ "rillane-config",
+ "rillane-core",
+ "rillane-telemetry",
  "serde",
  "serde_json",
  "serde_with",
@@ -3753,7 +3753,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "seep-telemetry"
+name = "rillane-telemetry"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3765,18 +3765,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "seepctl"
+name = "rillanectl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "rcgen",
  "reqwest",
- "seep-config",
- "seep-core",
- "seep-protocols",
- "seep-runtime",
- "seep-subscription",
+ "rillane-config",
+ "rillane-core",
+ "rillane-protocols",
+ "rillane-runtime",
+ "rillane-subscription",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -3786,7 +3786,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "seepd"
+name = "rillaned"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3795,13 +3795,13 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rcgen",
- "seep-config",
- "seep-core",
- "seep-mesh",
- "seep-platform",
- "seep-runtime",
- "seep-subscription",
- "seep-telemetry",
+ "rillane-config",
+ "rillane-core",
+ "rillane-mesh",
+ "rillane-platform",
+ "rillane-runtime",
+ "rillane-subscription",
+ "rillane-telemetry",
  "serde",
  "serde_json",
  "tokio",

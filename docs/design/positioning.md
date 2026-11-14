@@ -1,13 +1,13 @@
-# Seep Product Positioning and Technical Foundation
+# Rillane Product Positioning and Technical Foundation
 
 > Status: design doc (2026-09) | upstream references: [architecture.md](../architecture.md), [PROTOCOLS.md](../PROTOCOLS.md), [mesh.md](../mesh.md)
 
 ## Executive Summary
 
-Seep is **a single proxy kernel** serving three scenarios: **general proxy, game acceleration, web acceleration**. They are not three products but three strategy combinations over the same data path (ingress -> routing -> egress/transport):
+Rillane is **a single proxy kernel** serving three scenarios: **general proxy, game acceleration, web acceleration**. They are not three products but three strategy combinations over the same data path (ingress -> routing -> egress/transport):
 
 - **Acceleration = routing optimization + traffic obfuscation**: bypass QoS rate limiting and DPI interference, choose low-latency paths;
-- **Obfuscation = letting traffic seep past detection**: protocol impersonation and traffic feature dispersion, a precondition for acceleration and also a proxy's survival capability;
+- **Obfuscation = letting traffic rillane past detection**: protocol impersonation and traffic feature dispersion, a precondition for acceleration and also a proxy's survival capability;
 - **Web acceleration = connection efficiency + steering precision**: connection reuse and rule-based steering, reusing the same routing engine.
 
 This document breaks down which layers are fully shared, which are scenario-specific, how obfuscation is injected as a cross-cutting layer, and gives the mapping conclusions against the current crates. The phased landing plan is in [roadmap.md](roadmap.md); actionable items are in the root [todo.md](../../todo.md).
@@ -35,7 +35,7 @@ The three scenarios share >70% of the technical surface: ingress takeover, the F
  (TUN/socks5/    (socks5/      (5-tuple + process   (rules + group policy   (direct/ss/trojan/
   http/redir)     http/mixed)   + domain + geoip)    + mesh links)           hy2/vless/wg/mesh)
                      |                                          |
-                     +----------- Control Plane (seepd API + seepctl) -------------+
+                     +----------- Control Plane (rillaned API + rillanectl) -------------+
                      +----------- Telemetry (/metrics, /flows, /nodes) -------------+
 ```
 
@@ -43,14 +43,14 @@ The three scenarios share >70% of the technical surface: ingress takeover, the F
 
 | Layer | Responsibility | Current state (crate) |
 |----|------|--------------|
-| Ingress | Traffic takeover: local proxy (socks5/http/mixed) + system-level (TUN/redir) | `seep-protocols` ingress ready (TCP); TUN see the gap list |
-| Flow session | Unified session model: target, routing history, usage, failure stats | `seep-core` `Flow/FlowSession/ChainContext` ready |
-| Routing engine | Rule matching (domain/geoip/ipcidr/port/process) + group policy for route selection | `seep-routing` ready (latency/bandwidth/weighted/consistent-hash and other strategies) |
-| Multi-hop link | mesh networking, chain build/precheck/failure fallback | `seep-mesh` + `seep-runtime::chain` ready (TCP) |
-| Egress protocol stack | direct/ss/trojan/hy2/vless/vmess/wg/socks/http + ws/grpc/h2 transports | `seep-protocols` egress ready (TCP) |
-| Subscription | Clash import + own DSL + hot reload | `seep-subscription` ready |
-| Control plane | REST API + seepctl + mTLS tooling | `apps/seepd`, `apps/seepctl` ready |
-| Observability | per-flow/per-link metrics, diagnostic collection | `seep-telemetry` basically ready, refining |
+| Ingress | Traffic takeover: local proxy (socks5/http/mixed) + system-level (TUN/redir) | `rillane-protocols` ingress ready (TCP); TUN see the gap list |
+| Flow session | Unified session model: target, routing history, usage, failure stats | `rillane-core` `Flow/FlowSession/ChainContext` ready |
+| Routing engine | Rule matching (domain/geoip/ipcidr/port/process) + group policy for route selection | `rillane-routing` ready (latency/bandwidth/weighted/consistent-hash and other strategies) |
+| Multi-hop link | mesh networking, chain build/precheck/failure fallback | `rillane-mesh` + `rillane-runtime::chain` ready (TCP) |
+| Egress protocol stack | direct/ss/trojan/hy2/vless/vmess/wg/socks/http + ws/grpc/h2 transports | `rillane-protocols` egress ready (TCP) |
+| Subscription | Clash import + own DSL + hot reload | `rillane-subscription` ready |
+| Control plane | REST API + rillanectl + mTLS tooling | `apps/rillaned`, `apps/rillanectl` ready |
+| Observability | per-flow/per-link metrics, diagnostic collection | `rillane-telemetry` basically ready, refining |
 
 ### 2.2 Game acceleration specialization (layered on the shared foundation)
 
@@ -65,8 +65,8 @@ The three scenarios share >70% of the technical surface: ingress takeover, the F
 ### 2.3 Web acceleration specialization
 
 1. **Connection reuse**: egress connection pool and keep-alive reuse (aggregating handshakes for short connections to the same exit and same SNI), TLS session resumption/0-RTT;
-2. **Steering precision**: domain/geoip/ruleset steering decides "who goes through the proxy, who goes direct", directly determining the web experience (the existing `seep-routing` rules + subscription ruleset conversion cover most of it);
-3. **DNS optimization**: steering-aware resolution (domestic/foreign DNS steering, caching, pollution prevention); the design goal of `seep-platform::network::dns` is exactly this;
+2. **Steering precision**: domain/geoip/ruleset steering decides "who goes through the proxy, who goes direct", directly determining the web experience (the existing `rillane-routing` rules + subscription ruleset conversion cover most of it);
+3. **DNS optimization**: steering-aware resolution (domestic/foreign DNS steering, caching, pollution prevention); the design goal of `rillane-platform::network::dns` is exactly this;
 4. **Reuse rather than build new**: all of the above operate on the shared data path and introduce no independent "web acceleration module".
 
 ### 2.4 Obfuscation: a cross-cutting layer, not a protocol
@@ -89,7 +89,7 @@ Obfuscation is not a feature of some egress protocol but a **cross-cutting capab
 
 These three are implemented as `FlowMiddleware` and hung before/after egress, **uniformly effective across the three scenarios**: proxy uses it to pass DPI, game acceleration uses it to pass QoS, web acceleration uses it to keep TLS in normal form.
 
-> **Current state (2026-10, P1-4/P2-4/P2-5 landed)**: all three have landed as `FlowMiddleware` -- `padding` (P1-4 M0-M4, strategy/execution split: `PaddingSpec` policy engine pure functions + a frame-carrier execution side, MVP frame carrier = the mesh chain's `MeshEnvelope` frames, three forms fixed/bucket/range, an overhead-ratio gate, the `seep_obfs_*` metric family always rendered + the `scripts/obfs_padding_dist.py` distribution-check script); `timing`/`shaping` (P2-4: `TimingMiddleware` startup jitter + `ShapingMiddleware` write-grid normalization). Single-hop TCP with no own frame is a no-op; the UDP datagram padding carrier (`UdpEnvelope`) is ready but its execution hook is not wired (ruling in udp-mesh-dataplane.md D-15). TLS fingerprint emulation landed with P2-5 (chrome/ios/safari presets, see [tls-fingerprint.md](tls-fingerprint.md)); the SS SIP003 plugin bridge covers the simple-obfs ecosystem (`plugin`/`plugin_opts` + obfs-local, see [PROTOCOLS.md](../PROTOCOLS.md) and todo "SS 出站 SIP003 插件桥"); salamander (hy2) compatibility is not implemented. Details in [obfuscation-middleware.md](obfuscation-middleware.md).
+> **Current state (2026-10, P1-4/P2-4/P2-5 landed)**: all three have landed as `FlowMiddleware` -- `padding` (P1-4 M0-M4, strategy/execution split: `PaddingSpec` policy engine pure functions + a frame-carrier execution side, MVP frame carrier = the mesh chain's `MeshEnvelope` frames, three forms fixed/bucket/range, an overhead-ratio gate, the `rillane_obfs_*` metric family always rendered + the `scripts/obfs_padding_dist.py` distribution-check script); `timing`/`shaping` (P2-4: `TimingMiddleware` startup jitter + `ShapingMiddleware` write-grid normalization). Single-hop TCP with no own frame is a no-op; the UDP datagram padding carrier (`UdpEnvelope`) is ready but its execution hook is not wired (ruling in udp-mesh-dataplane.md D-15). TLS fingerprint emulation landed with P2-5 (chrome/ios/safari presets, see [tls-fingerprint.md](tls-fingerprint.md)); the SS SIP003 plugin bridge covers the simple-obfs ecosystem (`plugin`/`plugin_opts` + obfs-local, see [PROTOCOLS.md](../PROTOCOLS.md) and todo "SS 出站 SIP003 插件桥"); salamander (hy2) compatibility is not implemented. Details in [obfuscation-middleware.md](obfuscation-middleware.md).
 
 ### 2.5 Conclusions from the data-path perspective
 
@@ -102,12 +102,12 @@ These three are implemented as `FlowMiddleware` and hung before/after egress, **
 
 | # | Gap (2026-09 point-in-time conclusion) | Impact | Current state (2026-10-04) | See |
 |---|------|------|------|------|
-| G1 | Zero UDP at the protocol layer (`seep-protocols` has no UDP forwarding path) | Game acceleration unavailable | **Closed** -- P0-2/P0-3: UDP ASSOCIATE ingress + direct/ss/wg egress payload | roadmap S1 |
-| G2 | TUN/system routing is a placeholder implementation (each Provider in `seep-platform::network::platform.rs` returns "not implemented", runtime not wired) | System-level takeover / process steering unavailable | **Closed** -- P1-1/P1-2/P1-3: real linux.rs implementation + TunIngress wiring + network config block and `seepctl route` | roadmap S2 |
+| G1 | Zero UDP at the protocol layer (`rillane-protocols` has no UDP forwarding path) | Game acceleration unavailable | **Closed** -- P0-2/P0-3: UDP ASSOCIATE ingress + direct/ss/wg egress payload | roadmap S1 |
+| G2 | TUN/system routing is a placeholder implementation (each Provider in `rillane-platform::network::platform.rs` returns "not implemented", runtime not wired) | System-level takeover / process steering unavailable | **Closed** -- P1-1/P1-2/P1-3: real linux.rs implementation + TunIngress wiring + network config block and `rillanectl route` | roadmap S2 |
 | G3 | No independent obfuscation cross-cutting layer (only protocol-builtin impersonation) | QoS/DPI resistance limited | **Closed** -- P1-4 padding, P2-4 timing/shaping landed; simple-obfs usable via the SS SIP003 plugin bridge (2026-10-07, SS TCP side only), salamander deferred to V2 as an option | roadmap S3 |
 | G4 | No egress connection reuse / pooling | High cost for short web connections | **Closed** -- P1-5 M0-M5 connection pool + TLS session resumption | roadmap S3 |
 | G5 | mesh data-plane TCP only (JSON envelope with plaintext header) | Multi-hop UDP unavailable; envelope optimizable to binary | **Closed** -- P0-4 UDP multi-hop + P2-6 binary envelope | roadmap S1/S3 |
-| G6 | Fine-grained metrics missing (per-link latency distribution, switch reason, etc.) | Scheduling lacks a data closed loop | **Closed** -- P2-1 `seep_mesh_link_*`/`seep_mesh_switch_total` + `GET /mesh/switches` | roadmap S4 |
+| G6 | Fine-grained metrics missing (per-link latency distribution, switch reason, etc.) | Scheduling lacks a data closed loop | **Closed** -- P2-1 `rillane_mesh_link_*`/`rillane_mesh_switch_total` + `GET /mesh/switches` | roadmap S4 |
 
 ## 4. Document index
 

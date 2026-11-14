@@ -1,5 +1,5 @@
 [package]
-name = "seep-plugin-rate-limit"
+name = "rillane-plugin-rate-limit"
 description = "P3-2 示例插件：令牌桶限速（plugin-loader.md §1.2 ABI）"
 version = "0.1.0"
 edition = "2021"

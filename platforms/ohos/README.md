@@ -1,6 +1,6 @@
-# SEEP HarmonyOS（鸿蒙）适配（P3-4 填空；aarch64 编译面 2026-10-10、x86_64/armv7 2026-10-11）
+# RILLANE HarmonyOS（鸿蒙）适配（P3-4 填空；aarch64 编译面 2026-10-10、x86_64/armv7 2026-10-11）
 
-Rust 核心（`crates/seep-ffi` cdylib，C ABI 面）在三个
+Rust 核心（`crates/rillane-ffi` cdylib，C ABI 面）在三个
 `*-unknown-linux-ohos` 目标下编译面打通：aarch64 与 x86_64 走真实
 wireguard 面，armv7 因上游 `defguard_boringtun` 阻塞改走 wireguard 恒
 Err 桩（其余出站/入口不受影响，见「依赖链要点」第 4 条）。与
@@ -28,18 +28,18 @@ Android/iOS 共享同一 C ABI 层（`lib.rs`/`tun.rs`，unix 家族零改动）
 ## 验收（aarch64 已实证 2026-10-10；x86_64/armv7 已实证 2026-10-11）
 
 ```sh
-cargo check -p seep-ffi --target aarch64-unknown-linux-ohos   # 验收口径：编译过
-cargo build  -p seep-ffi --target aarch64-unknown-linux-ohos  # 实测亦过：链接出 cdylib
-cargo check -p seep-ffi --target x86_64-unknown-linux-ohos    # 2026-10-11 实测过（真实 wireguard 面）
-cargo build  -p seep-ffi --target x86_64-unknown-linux-ohos   # 实测过：链接出 cdylib
-cargo check -p seep-ffi --target armv7-unknown-linux-ohos     # 2026-10-11 实测过（wireguard 桩面）
-cargo build  -p seep-ffi --target armv7-unknown-linux-ohos    # 实测过：链接出 cdylib
+cargo check -p rillane-ffi --target aarch64-unknown-linux-ohos   # 验收口径：编译过
+cargo build  -p rillane-ffi --target aarch64-unknown-linux-ohos  # 实测亦过：链接出 cdylib
+cargo check -p rillane-ffi --target x86_64-unknown-linux-ohos    # 2026-10-11 实测过（真实 wireguard 面）
+cargo build  -p rillane-ffi --target x86_64-unknown-linux-ohos   # 实测过：链接出 cdylib
+cargo check -p rillane-ffi --target armv7-unknown-linux-ohos     # 2026-10-11 实测过（wireguard 桩面）
+cargo build  -p rillane-ffi --target armv7-unknown-linux-ohos    # 实测过：链接出 cdylib
 ```
 
-L2 静态核验：产物 `libseep_ffi.so` 经 SDK `llvm-readelf -h` 确认
+L2 静态核验：产物 `librillane_ffi.so` 经 SDK `llvm-readelf -h` 确认
 DYN 共享对象——aarch64/x86_64 为 ELF64（AArch64/X86-64），armv7 为
 ELF32（ARM）。cfg 门改写后的 android 复归核验：
-`cargo check -p seep-ffi --target aarch64-linux-android`（NDK clang 在
+`cargo check -p rillane-ffi --target aarch64-linux-android`（NDK clang 在
 PATH）实测仍过——stub 路径语义不变。
 
 ## 依赖链要点（踩坑实录）
@@ -59,7 +59,7 @@ PATH）实测仍过——stub 路径语义不变。
   ohos libc 的 timespec 多一个私有 `__pad0`（32 位 arm time64 padding）→
   E0451 private fields；aarch64/x86_64-ohos 的 timespec 无此字段、实测
   可编。处置：armv7-ohos 下 wireguard 出站整体剥离为恒 Err 桩（同
-  android 先例——`seep-protocols` 的 Cargo.toml target cfg 门 +
+  android 先例——`rillane-protocols` 的 Cargo.toml target cfg 门 +
   `outbound/mod.rs` 双分支），aarch64/x86_64-ohos 不回退。
 
 ## 边界（如实登记）

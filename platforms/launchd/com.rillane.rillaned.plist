@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.rillane.rillaned —— RILLANE macOS LaunchDaemon（P3-3，platform-packaging.md §4.2）
+  装载：sudo launchctl bootstrap system /Library/LaunchDaemons/com.rillane.rillaned.plist
+  配置路径经 RILLANE_CONFIG 环境变量注入（rillaned 无 config 命令行旗标）；
+  /usr/local/* 惯例路径对齐 Homebrew 口径（与 Linux /etc/rillane 分叉系有意选择）。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rillane.rillaned</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/rillaned</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RILLANE_CONFIG</key>
+        <string>/usr/local/etc/rillane/rillane.yaml</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 对齐 systemd Restart=on-failure 语义：异常退出才拉起，干净退出不扯皮 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/rillaned.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/rillaned.log</string>
+</dict>
+</plist>

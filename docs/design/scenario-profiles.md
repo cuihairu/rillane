@@ -20,25 +20,25 @@
 **Measurable wording (explicit rewrite, not shrinking)**:
 
 1. **Pick one of three and run**: `examples/profile-{proxy,game,web}.yaml`, three self-contained
-   examples; pick any one and `SEEP_CONFIG=<path> seepd` passes config parsing and runtime construction
+   examples; pick any one and `RILLANE_CONFIG=<path> rillaned` passes config parsing and runtime construction
    (the integration test reads the three files and asserts the full chain through `load_from_path`);
 2. **Only policy differences**: the diff of the three examples falls only on routing (groups/rules),
    obfuscation, egress_pool, udp (carried explicitly in the game example, §9-1) and the one `profile:`
    line -- ingress/egress/control/telemetry are isomorphic (pinned by the integration test asserting
    full equality);
-3. **No separate code paths**: a profile is a **build-time expansion** (a pure function in seep-config
+3. **No separate code paths**: a profile is a **build-time expansion** (a pure function in rillane-config
    fills the presets into the existing blocks); at runtime the `profile` field does not appear and no
    runtime branch is added -- the expansion output and an equivalently hand-written config go through
    exactly the same build()/conversion chain.
 
 ## 1. Current state and structural constraints
 
-- `SeepConfig` (seep-config): `routing.groups/rules`, `obfuscation` (P1-4 M0) and `egress_pool`
+- `RillaneConfig` (rillane-config): `routing.groups/rules`, `obfuscation` (P1-4 M0) and `egress_pool`
   (P1-5) are all in shape; `udp` is a non-Option `UdpConfig` (default `enabled: false`) -- **an
   "explicit false" cannot be distinguished from a "default false"**, so the profile mechanism cannot
   safely rewrite it (see the §9 deviation);
 - the single config loading entry: `load_from_path` -> `from_str` (the only production call at
-  seepd main.rs:47; the subscription conversion constructs a `SeepConfig` literal programmatically, without going through from_str);
+  rillaned main.rs:47; the subscription conversion constructs a `RillaneConfig` literal programmatically, without going through from_str);
 - obfuscation-middleware.md §3.5 already designs `obfuscation.profiles` as "the landing-point container
   of the P2-3 three-scenario presets" -- this draft lands **scenario-level** presets (one top-level
   field), while `obfuscation.profiles` keeps its original meaning (a named padding policy set); the two are orthogonal;
@@ -55,7 +55,7 @@
   obfuscation explicit Some / egress_pool explicit Some) are never touched -- no overwrite, no
   deletion, no merge. The expansion is therefore naturally idempotent (once filled it is non-empty, and
   a second expansion is a no-op).
-- **D-3 the expansion point = the tail of `SeepConfig::from_str`**: a single-entry `apply_profile` pure
+- **D-3 the expansion point = the tail of `RillaneConfig::from_str`**: a single-entry `apply_profile` pure
   function (`&mut self`), covered automatically by `load_from_path` through from_str; programmatic
   constructions such as the subscription conversion do not trigger it (the same precedent as
   obfuscation's "subscription does not produce an obfuscation block").
@@ -69,7 +69,7 @@
 - **D-6 scenario = a row of the policy matrix** (§4); the three rows are each other's proof of "only
   policy differences"; game is the only row carrying a scheduling target (the group-level `slo`) and an
   obfuscation switch, web is the only row carrying a connection pool, and the proxy row = the policy
-  shape of the existing config/seep.yaml (the baseline).
+  shape of the existing config/rillane.yaml (the baseline).
 
 ## 3. Data structures
 
@@ -79,10 +79,10 @@
 #[serde(rename_all = "snake_case")]
 pub enum ProfileKind { Proxy, Game, Web }
 
-// added to SeepConfig:
+// added to RillaneConfig:
 #[serde(default)]
 pub profile: Option<ProfileKind>,
-// Does SeepConfig already hand-write Default? (it does -- existing fields come along); None default as per the precedent
+// Does RillaneConfig already hand-write Default? (it does -- existing fields come along); None default as per the precedent
 ```
 
 ## 4. Filling matrix (D-6)
@@ -102,7 +102,7 @@ and the templates place only scenario-specific entries.
 
 | # | Point | Action |
 |---|----|------|
-| 1 | the tail of `SeepConfig::from_str` | `config.apply_profile();` (the single entry; the subscription/programmatic construction does not trigger it) |
+| 1 | the tail of `RillaneConfig::from_str` | `config.apply_profile();` (the single entry; the subscription/programmatic construction does not trigger it) |
 | 2 | at runtime | **zero contact** -- the expansion output is an ordinary config; build()/hot update/control plane are unaware of the profile |
 | 3 | `examples/` | three self-contained examples (M1); the integration test reads the three through `load_from_path` |
 
@@ -140,12 +140,12 @@ and the templates place only scenario-specific entries.
 
 | Step | Content and landing points | Depends on | Acceptance |
 |----|-----------|------|------|
-| M0 | the seep-config ProfileKind + SeepConfig.profile + apply_profile + the §7-1..5 unit tests | - | §7-1..5 green; zero regression over existing tests |
+| M0 | the rillane-config ProfileKind + RillaneConfig.profile + apply_profile + the §7-1..5 unit tests | - | §7-1..5 green; zero regression over existing tests |
 | M1 | three examples under examples/ + the §7-6 integration test + documentation backfill (todo/PROTOCOLS/roadmap/the positioning §2.5 current-state note/landing note in this draft) | M0 | §7-6 green; the wordings 1-3 are reproducible item by item |
 
 ## 9. Deviations and assumptions
 
-1. **udp is not in the filling surface**: `SeepConfig.udp` is not Option, so an explicit/default
+1. **udp is not in the filling surface**: `RillaneConfig.udp` is not Option, so an explicit/default
    false cannot be distinguished; a profile flipping it would overwrite an explicit disable (violating
    D-2). The game's UDP need (G1 already solved, a long session does not drop) is carried explicitly by
    the example YAML, and the mechanism does not touch the udp block;
@@ -163,8 +163,8 @@ and the templates place only scenario-specific entries.
 
 - **R-prof1**: preset values drift with the ecosystem (the game domain list, the slo thresholds) -- a
   preset is configuration-layer, and the example YAML can be revised independently without a release;
-- **O-prof1**: ~~the `seepctl profile` subcommand generates a scenario skeleton config~~ (**landed
-  2026-10-10**: `seepctl profile <proxy|game|web> [--out <path>]` parses and validates through
+- **O-prof1**: ~~the `rillanectl profile` subcommand generates a scenario skeleton config~~ (**landed
+  2026-10-10**: `rillanectl profile <proxy|game|web> [--out <path>]` parses and validates through
   `from_str` with the scenario expansion inlined, then outputs YAML -- pick one of three and run; an
   out-of-whitelist scenario name is an error listing the legal values);
 - **O-prof2**: the merge semantics of profile and subscription (a subscription pushes egress, the main

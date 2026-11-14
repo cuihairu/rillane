@@ -10,11 +10,11 @@
 
 The current datapath is pure TCP: inbound socks5 explicitly rejects UDP ASSOCIATE (`inbound/socks5.rs` accepts only cmd=0x01), egress hy2/wg dispatch by `TargetProto` and error on non-TCP, and the mesh data plane binds `MeshStream` to `AsyncRead+AsyncWrite`. This draft gives a parallel UDP plane that does not disturb the TCP plane:
 
-1. **`seep-core` gains a UDP session layer** (NAT-style session table + sticky key + parallel trait `EgressUdpConnector`) -- because `Flow.io: BoxedIo` is stream semantics and cannot be reused for UDP;
+1. **`rillane-core` gains a UDP session layer** (NAT-style session table + sticky key + parallel trait `EgressUdpConnector`) -- because `Flow.io: BoxedIo` is stream semantics and cannot be reused for UDP;
 2. **socks5 inbound adds the 0x03 command**, reusing the existing auth/parsing framework;
 3. **Four UDP-capable egress types** (direct/ss/hy2/wg); other types error at build time when UDP is routed to them;
 4. **mesh UDP plane**: the first packet carries the path, later packets carry only flow_id with hop-to-hop cached forwarding; envelope binarization starts on the UDP plane (MTU is a hard constraint) and merges with P2-6;
-5. **Observability/config**: top-level `udp:` block + new `seep_udp_*` metric series under `/metrics`.
+5. **Observability/config**: top-level `udp:` block + new `rillane_udp_*` metric series under `/metrics`.
 
 Design principle: the UDP plane and the TCP plane **coexist in parallel** inside the same process, sharing the Flow session model, routing engine, control plane, and subscriptions; there is no branched product path (positioning.md §2.5).
 
@@ -61,14 +61,14 @@ app ──► socks5/http/mixed ─┐          app ──► socks5 UDP ASSOCIA
 
 | Existing asset | Use |
 |---------|------|
-| `seep-core::TargetProto::{Udp, Quic}` | The enum already exists, used directly as the session target protocol marker (in the TUN phase Quic gets a distinct marker at identification; the forwarding plane is UDP datagrams either way) |
-| `seep-core::FlowTarget` | Each target mapping within a session reuses this structure |
-| `seep-core::FlowSession`/`SessionUsage`/`FailureStats` | Session statistics and failure record fields hang directly off the UDP session |
-| `seep-core::FlowRouter`/`FlowMiddleware` | Routing decisions and middleware apply equally to the UDP plane (transport-agnostic) |
+| `rillane-core::TargetProto::{Udp, Quic}` | The enum already exists, used directly as the session target protocol marker (in the TUN phase Quic gets a distinct marker at identification; the forwarding plane is UDP datagrams either way) |
+| `rillane-core::FlowTarget` | Each target mapping within a session reuses this structure |
+| `rillane-core::FlowSession`/`SessionUsage`/`FailureStats` | Session statistics and failure record fields hang directly off the UDP session |
+| `rillane-core::FlowRouter`/`FlowMiddleware` | Routing decisions and middleware apply equally to the UDP plane (transport-agnostic) |
 | workspace dependency `dashmap 6.0` | Session table container |
-| `seep-routing::RoutingEngine` | Unchanged; a UDP session's first packet goes through the same routing decision |
+| `rillane-routing::RoutingEngine` | Unchanged; a UDP session's first packet goes through the same routing decision |
 
-### 1.2 New additions (`seep-core` new module `udp.rs`)
+### 1.2 New additions (`rillane-core` new module `udp.rs`)
 
 ```rust
 pub struct UdpSessionKey {           // sticky key
@@ -105,7 +105,7 @@ pub trait UdpRelay: Send {
 
 **Sticky semantics**: every packet with the same `UdpSessionKey` hits the same `RouteDecision` (cached in the session); a game session does not jump links because of per-packet rerouting. The **process dimension** of the sticky key (todo P0-1 mentions "process/five-tuple") depends on P1 TUN to obtain process info; S1 lands as `client addr + optional username`, the struct reserves a `process_id: Option<u32>` field, and P1 fills it -- structurally compatible already, no second migration needed.
 
-**Timeout reclaim**: a background tokio interval task scans (reusing the existing `seep-runtime` background task pattern, cf. `ChainManager::start_health_check_task`). Defaults: a session is reclaimed after 180s idle; a single target mapping inside a session is removed after 60s idle (game heartbeat intervals are far below this); max concurrent sessions per node defaults to 4096, over-limit packets are rejected and counted (see §5 metrics).
+**Timeout reclaim**: a background tokio interval task scans (reusing the existing `rillane-runtime` background task pattern, cf. `ChainManager::start_health_check_task`). Defaults: a session is reclaimed after 180s idle; a single target mapping inside a session is removed after 60s idle (game heartbeat intervals are far below this); max concurrent sessions per node defaults to 4096, over-limit packets are rejected and counted (see §5 metrics).
 
 ### 1.3 Coexistence with the TCP plane
 
@@ -117,7 +117,7 @@ pub trait UdpRelay: Send {
 
 - Session create/query/timeout reclaim have unit tests: after idle exceeds `session_timeout` the table entry disappears; active sessions are not reclaimed;
 - Consecutive packets with the same sticky key reuse the same `RouteDecision` and mapping without rebuilding (assert the mapping count in the table stays unchanged);
-- Over-limit rejection has a counted metric (`seep_udp_dropped_total{reason="session_limit"}`).
+- Over-limit rejection has a counted metric (`rillane_udp_dropped_total{reason="session_limit"}`).
 
 ### 1.5 Risks and open items
 
@@ -131,9 +131,9 @@ pub trait UdpRelay: Send {
 
 | Existing asset | Use |
 |---------|------|
-| `seep-protocols::inbound::socks5` overall framework | `negotiate_method`/`perform_auth`/address parsing (ATYP 0x01/0x03/0x04) reused as-is |
+| `rillane-protocols::inbound::socks5` overall framework | `negotiate_method`/`perform_auth`/address parsing (ATYP 0x01/0x03/0x04) reused as-is |
 | `IngressEndpoint` trait | `SocksInbound::run` adds a parallel UDP listen branch; the trait is unchanged |
-| `seep-core::UdpSessionTable`/`EgressUdpConnector` (§1) | After the relay socket receives a packet it goes session table → routing → egress |
+| `rillane-core::UdpSessionTable`/`EgressUdpConnector` (§1) | After the relay socket receives a packet it goes session table → routing → egress |
 | `Credential` auth | Source of the `client_id` sticky key dimension |
 
 ### 2.2 New additions
@@ -153,7 +153,7 @@ Same port, same process: the TCP listener handles the CONNECT control flow (curr
 ### 2.4 Acceptance criteria (aligned to todo P0-2)
 
 - A standard client completes a DNS UDP query round trip via socks5 inbound + direct egress (e.g. `dig @8.8.8.8 example.com` over socks5 udp);
-- `seepctl stats` shows UDP sessions and byte counts (depends on §5 metrics);
+- `rillanectl stats` shows UDP sessions and byte counts (depends on §5 metrics);
 - With `udp_enabled=false`, a 0x03 request receives a 0x07 error, and TCP CONNECT behavior has no regression (existing socks5 tests all green).
 
 ### 2.5 Risks and open items
@@ -166,7 +166,7 @@ Same port, same process: the TCP listener handles the CONNECT control flow (curr
 
 ### 3.0 General mechanism
 
-`seep-protocols::outbound` gains the UDP-capable connectors (`DirectUdpConnector` in `seep_core::udp::relay`, `ShadowsocksUdpConnector` in `outbound/shadowsocks.rs`, `WireguardUdpConnector` in `outbound/wireguard.rs`; hy2 is deferred to V2); at build time (`RuntimeBuilder`/seepd startup) it scans the egress types reachable from `routing`: when UDP traffic is routed to a **trojan/vless/socks5/http** or other type with no UDP capability, **startup fails immediately and lists the conflicting node names** (aligned to todo acceptance "unsupported egress types error clearly at build time") -- runtime silent dropping is not used. The existing hy2/wg egress already has a `TargetProto` dispatch skeleton (`Tcp => {}` + fallback error); the UDP branch falls straight into the same match.
+`rillane-protocols::outbound` gains the UDP-capable connectors (`DirectUdpConnector` in `rillane_core::udp::relay`, `ShadowsocksUdpConnector` in `outbound/shadowsocks.rs`, `WireguardUdpConnector` in `outbound/wireguard.rs`; hy2 is deferred to V2); at build time (`RuntimeBuilder`/rillaned startup) it scans the egress types reachable from `routing`: when UDP traffic is routed to a **trojan/vless/socks5/http** or other type with no UDP capability, **startup fails immediately and lists the conflicting node names** (aligned to todo acceptance "unsupported egress types error clearly at build time") -- runtime silent dropping is not used. The existing hy2/wg egress already has a `TargetProto` dispatch skeleton (`Tcp => {}` + fallback error); the UDP branch falls straight into the same match.
 
 ### 3.1 direct (`outbound/direct.rs`)
 
@@ -203,7 +203,7 @@ Same port, same process: the TCP listener handles the CONNECT control flow (curr
 
 - A QUIC site (HTTP/3, e.g. `curl --http3`) is reachable via the **wg** egress (**verifiable framing**: QUIC is ordinary UDP with no special-casing; the P0-3 wg vehicle is reachable); the **hy2** half **keeps the revision to V2** (P0-4 §0.1-③; separate ticket with the quinn vehicle);
 - A DNS UDP query round-trips successfully via the ss egress (verifying AEAD per-packet semantics);
-- Point a UDP traffic rule at a trojan/vless node: seepd **fails at startup** and names the conflicting node;
+- Point a UDP traffic rule at a trojan/vless node: rillaned **fails at startup** and names the conflicting node;
 - direct egress UDP has independent send/recv counters (§5).
 
 ### 3.7 Risks and open items
@@ -222,7 +222,7 @@ Same port, same process: the TCP listener handles the CONNECT control flow (curr
 |---------|------|
 | `MeshEnvelope`'s path-stripping semantics (`path[0]` strips itself → forwards `path[1]`) | UDP hop behavior is fully isomorphic |
 | `MeshRegistry` (node addressing/roles/quotas/ACL) | Next-hop resolution and admission checks reused as-is |
-| `MeshTlsConfig` certificate material (`seepctl mtls` output) | The §4.4 encryption scheme reuses the same CA/node certificates |
+| `MeshTlsConfig` certificate material (`rillanectl mtls` output) | The §4.4 encryption scheme reuses the same CA/node certificates |
 | `ChainManager` link building/health check/`handle_chain_failure` | UDP link failover reuses it (§1.5 R2) |
 
 ### 4.2 New: UdpEnvelope (binary header)
@@ -243,7 +243,7 @@ magic(2)="SU" | ver(1) | flags(1) | flow_id(16, UUID bytes)
 - Hop cache expiry = session expiry (same as the §1 timeout); `flow_id` collision probability is negligible (UUIDv4);
 - **Relation to P2-6**: P2-6 (TCP plane envelope binarization) adopts this format directly as unified protocol v2; by the time the TCP plane migrates, the UDP plane already uses this format -- this section is P2-6's format definition draft.
 
-### 4.3 Forwarding behavior (`seep-runtime::mesh_transport` extension)
+### 4.3 Forwarding behavior (`rillane-runtime::mesh_transport` extension)
 
 - `MeshDataPlane` holds in parallel a TCP listener (current) and a UDP socket (**same port number**, TCP/UDP dual stack on one port, `MeshConfig.listen_address` reused);
 - The `MeshStream` trait is `AsyncRead+AsyncWrite` (TCP-specific); the UDP plane writes directly with `tokio::net::UdpSocket + §4.2 codecs`, without forcing a unified stream-interface abstraction;
@@ -252,7 +252,7 @@ magic(2)="SU" | ver(1) | flags(1) | flow_id(16, UUID bytes)
 
 ### 4.4 Encryption (aligned with the TCP plane's mTLS semantics)
 
-The TCP plane already implements "when a chain is enabled mTLS is enforced by default; `SEEP_MESH_ALLOW_PLAINTEXT=1` is dev-only" (mesh.md). The UDP plane is designed at an equivalent security level, three candidates:
+The TCP plane already implements "when a chain is enabled mTLS is enforced by default; `RILLANE_MESH_ALLOW_PLAINTEXT=1` is dev-only" (mesh.md). The UDP plane is designed at an equivalent security level, three candidates:
 
 | Scheme | Description | Assessment |
 |------|------|------|
@@ -260,19 +260,19 @@ The TCP plane already implements "when a chain is enabled mTLS is enforced by de
 | B | DTLS | No mature maintained stack in the Rust ecosystem, excluded |
 | C | Per-packet AEAD + self-managed replay window, keys derived from the mTLS certificate material | Zero new dependencies but carries crypto-engineering risk yourself |
 
-**MVP fallback**: until the implementation round decides, the UDP plane is usable in plaintext only and must be explicitly enabled by `SEEP_MESH_UDP_ALLOW_PLAINTEXT=1` (semantics mirror the TCP plane); a `chain+udp` combination refuses to start when encryption is not configured. The final choice is **open item V2**, leaning toward A.
+**MVP fallback**: until the implementation round decides, the UDP plane is usable in plaintext only and must be explicitly enabled by `RILLANE_MESH_UDP_ALLOW_PLAINTEXT=1` (semantics mirror the TCP plane); a `chain+udp` combination refuses to start when encryption is not configured. The final choice is **open item V2**, leaning toward A.
 
 ### 4.5 Coexistence with the TCP plane
 
 - Same port dual stack, same registry, same link health check; zero changes to the TCP plane code path;
-- `RouteDecision::Chain` for UDP traffic is likewise produced by the `ChainManager` upgrade (at first-packet routing); link metadata (`seep.chain.path` annotation semantics) is recorded for UDP sessions as well.
+- `RouteDecision::Chain` for UDP traffic is likewise produced by the `ChainManager` upgrade (at first-packet routing); link metadata (`rillane.chain.path` annotation semantics) is recorded for UDP sessions as well.
 
 ### 4.6 Acceptance criteria (aligned to todo P0-4)
 
 - Two-hop link (client → relay → exit) UDP bidirectional forwarding: the client completes a DNS query round trip through the link;
 - Peer unreachable / session idle timeout: the relay hop cache and session table entries are reclaimed on timeout (assert memory returns + reclaim counters);
 - First-packet FULL / later CACHED verified by packet capture: from the 2nd packet on no path field is carried;
-- With `SEEP_MESH_UDP_ALLOW_PLAINTEXT` unset and no encryption configured, `chain+udp` refuses to start (the error names the switch).
+- With `RILLANE_MESH_UDP_ALLOW_PLAINTEXT` unset and no encryption configured, `chain+udp` refuses to start (the error names the switch).
 
 ### 4.7 Risks and open items
 
@@ -286,10 +286,10 @@ The TCP plane already implements "when a chain is enabled mTLS is enforced by de
 
 | Existing asset | Use |
 |---------|------|
-| `SeepConfig` top-level structure (`seep-config`) | Adds a `udp:` block, a peer of `control/telemetry/ingress/egress/routing` |
+| `RillaneConfig` top-level structure (`rillane-config`) | Adds a `udp:` block, a peer of `control/telemetry/ingress/egress/routing` |
 | `IngressConfig::Socks5` (tagged enum) | The variant gains a `udp_enabled` field; serde backward-compatible (default false) |
-| seepd control plane `/metrics` hand-written Prometheus rendering (`apps/seepd/src/control_plane.rs`) | Appends the `seep_udp_*` series through the same rendering path as `seep_mesh_link_bytes_total` |
-| `docs/grafana/seep-dashboard.json` | Appends UDP panel rows |
+| rillaned control plane `/metrics` hand-written Prometheus rendering (`apps/rillaned/src/control_plane.rs`) | Appends the `rillane_udp_*` series through the same rendering path as `rillane_mesh_link_bytes_total` |
+| `docs/grafana/rillane-dashboard.json` | Appends UDP panel rows |
 
 ### 5.2 New config (illustrative, finalized with the implementation)
 
@@ -310,16 +310,16 @@ No switch on egress: UDP capability is statically determined by type (direct/ss/
 ### 5.3 New metrics
 
 ```
-seep_udp_sessions_active            # current session table size
-seep_udp_sessions_total             # cumulative created
-seep_udp_relay_bytes_total{direction=up|down}
-seep_udp_dropped_total{reason=…}    # frag/source/malformed get their own separate series
-seep_udp_relay_handshake_errors_total   # mesh UDP plane (reserved)
+rillane_udp_sessions_active            # current session table size
+rillane_udp_sessions_total             # cumulative created
+rillane_udp_relay_bytes_total{direction=up|down}
+rillane_udp_dropped_total{reason=…}    # frag/source/malformed get their own separate series
+rillane_udp_relay_handshake_errors_total   # mesh UDP plane (reserved)
 ```
 
-> The as-landed metric names are authoritative per [udp-observability.md](udp-observability.md) §2.4 (landed final) and the `apps/seepd/src/control_plane.rs` rendering.
+> The as-landed metric names are authoritative per [udp-observability.md](udp-observability.md) §2.4 (landed final) and the `apps/rillaned/src/control_plane.rs` rendering.
 
-The `/flows` control plane interface keeps the TCP direction counters; **the UDP plane is NOT folded into `/flows`** (UDP never enters `FlowOutputRouter`, so there is no proto dimension -- UDP is observed through `/udp/stats` and the `seep_udp_*` metric family, see [udp-observability.md](udp-observability.md) §2.6; the `seepctl stats` tail carries the UDP section).
+The `/flows` control plane interface keeps the TCP direction counters; **the UDP plane is NOT folded into `/flows`** (UDP never enters `FlowOutputRouter`, so there is no proto dimension -- UDP is observed through `/udp/stats` and the `rillane_udp_*` metric family, see [udp-observability.md](udp-observability.md) §2.6; the `rillanectl stats` tail carries the UDP section).
 
 ### 5.4 Coexistence with the TCP plane
 
@@ -327,14 +327,14 @@ Same `/metrics` endpoint, same `/flows` snapshot, same Grafana dashboard file wi
 
 ### 5.5 Acceptance criteria (aligned to todo P0-5)
 
-- The `config/seep.yaml` example contains the §5.2 block and `cargo` validation passes (schema round trip: an old config file without `udp:` still parses);
+- The `config/rillane.yaml` example contains the §5.2 block and `cargo` validation passes (schema round trip: an old config file without `udp:` still parses);
 - The Grafana panel shows UDP session/byte/drop series (dashboard json updated);
 - With `udp.enabled=false`, no UDP socket is listening anywhere in the chain (verified by port scan).
 
 ### 5.6 Risks and open items
 
 - **R11 Metric cardinality**: the `per-target` label dimension has unbounded cardinality, so MVP metrics carry no target label (session-level aggregation); per-link breakdown belongs to P2-1;
-- **O4 decided (closed, 2026-09-30)**: `/chains/stats` does **not** split out UDP -- link-dimension UDP traffic already entered the existing `seep_mesh_link_bytes_total` series via P0-4 `record_link_bytes`; a duplicate split adds no information (ruling see [udp-observability.md](udp-observability.md) §2.6).
+- **O4 decided (closed, 2026-09-30)**: `/chains/stats` does **not** split out UDP -- link-dimension UDP traffic already entered the existing `rillane_mesh_link_bytes_total` series via P0-4 `record_link_bytes`; a duplicate split adds no information (ruling see [udp-observability.md](udp-observability.md) §2.6).
 
 ## 6. Implementation Order and Dependencies
 
@@ -360,7 +360,7 @@ P0-1 session table (trait+table+reclaim) ──► P0-2 socks5 inbound ──►
 | R6/V1 | Decided (2026-09) | `hysteria2` crate has **no** UDP egress → branch (c) adopted, moved to P0-4 with the revision upheld, final state V2 (§3.3) | §3.3 |
 | R7 | Risk | ss UDP open resolver risk → target whitelisting | §3.2 |
 | R8 | Risk | WG MTU budget annotation | §3.4 |
-| R9/V2 | Open (MVP plaintext gate landed) | mesh UDP encryption choice (leaning quinn/QUIC + reusing mTLS material) -- P0-4 landed the §4.4 MVP fallback (`SEEP_MESH_UDP_ALLOW_PLAINTEXT` union `MeshConfig.udp_allow_plaintext_data_plane`, build-time refusal when no encryption configured); the choice itself remains V2 | §4.4 |
+| R9/V2 | Open (MVP plaintext gate landed) | mesh UDP encryption choice (leaning quinn/QUIC + reusing mTLS material) -- P0-4 landed the §4.4 MVP fallback (`RILLANE_MESH_UDP_ALLOW_PLAINTEXT` union `MeshConfig.udp_allow_plaintext_data_plane`, build-time refusal when no encryption configured); the choice itself remains V2 | §4.4 |
 | R10 | Risk | relay flow cache global ceiling (default 65536 LRU) | §4.3 |
 | R11 | Risk | Metric cardinality control (MVP has no target label) | §5 |
 | O1 | Open | Sticky key degrades under unauthenticated socks5 | §1 |

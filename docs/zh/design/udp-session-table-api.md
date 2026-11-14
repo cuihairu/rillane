@@ -1,16 +1,16 @@
 # P0-1 接口草案：UDP 会话表 API 与回收算法
 
-> 状态：**已实施（todo P0-1 完成，2026-09）**· 实施面 = `crates/seep-core/src/udp/`（下文 §2.2 草案签名与实施的差异以 §9 裁决表为准）· 设计依据：[udp-session-table.md](udp-session-table.md)（本文不重复论证，只给可转录的 API/算法）· 总设计：[udp-dataplane.md](udp-dataplane.md) · 中继路径契约：[udp-relay-path.md](udp-relay-path.md) §4 · 对应 [todo.md](../../../todo.md) P0-1
+> 状态：**已实施（todo P0-1 完成，2026-09）**· 实施面 = `crates/rillane-core/src/udp/`（下文 §2.2 草案签名与实施的差异以 §9 裁决表为准）· 设计依据：[udp-session-table.md](udp-session-table.md)（本文不重复论证，只给可转录的 API/算法）· 总设计：[udp-dataplane.md](udp-dataplane.md) · 中继路径契约：[udp-relay-path.md](udp-relay-path.md) §4 · 对应 [todo.md](../../../todo.md) P0-1
 > 假设（如与实施冲突需回改本稿）：A1 时基用进程单调时钟秒值（免 NTP 跳变）；A2 下行通道容量 64 沿用 udp-relay-path.md §4.3；A3 `FlowSession` 结构不改（O7 走 wrapper，见 §4.4）；A4 指标命名沿 [udp-observability.md](udp-observability.md) §2.4（落地定稿）。
 
 ## 执行摘要
 
-给出 `seep-core::udp` 的**完整公共 API 草案**：模块布局与可见性、`UdpSessionTable`/`SessionRef`/`SessionLedger` 全部签名、超时回收的可转录伪码（epoch 时基 + 二次确认移除 + 锁外 teardown）、并发锁序与内存序契约、测试用时钟注入。目标：实施时可按本稿逐签名转录，设计权衡回看 udp-session-table.md 对应节。
+给出 `rillane-core::udp` 的**完整公共 API 草案**：模块布局与可见性、`UdpSessionTable`/`SessionRef`/`SessionLedger` 全部签名、超时回收的可转录伪码（epoch 时基 + 二次确认移除 + 锁外 teardown）、并发锁序与内存序契约、测试用时钟注入。目标：实施时可按本稿逐签名转录，设计权衡回看 udp-session-table.md 对应节。
 
 ## 1. 模块布局与可见性
 
 ```
-crates/seep-core/src/udp/
+crates/rillane-core/src/udp/
 ├── mod.rs          # pub use 公共面；模块文档（本文摘要）
 ├── key.rs          # UdpSessionKey / ProcessIdentity          （全 pub）
 ├── config.rs       # UdpSessionConfig + Default + validate     （pub）
@@ -22,7 +22,7 @@ crates/seep-core/src/udp/
 └── clock.rs        # Clock trait + RealClock（pub）/ MockClock（cfg(test)）
 ```
 
-依赖方向：`table → inner/ledger/reclaim/metrics`；`reclaim → inner`；无环。`UdpBinding` 中 `Relay(Box<dyn UdpRelay>)` 需要 `UdpRelay`（udp-dataplane.md §1.2）— trait 定义留在 `seep-core::udp`，避免 protocols 反向依赖 runtime。
+依赖方向：`table → inner/ledger/reclaim/metrics`；`reclaim → inner`；无环。`UdpBinding` 中 `Relay(Box<dyn UdpRelay>)` 需要 `UdpRelay`（udp-dataplane.md §1.2）— trait 定义留在 `rillane-core::udp`，避免 protocols 反向依赖 runtime。
 
 ## 2. 公共 API 草案
 
@@ -77,7 +77,7 @@ impl UdpSessionTable {
     /// 启动周期回收任务（sweep_interval；单一任务，重复调用 no-op）
     pub fn spawn_reclaimer(self: &Arc<Self>) -> JoinHandle<()>;
 
-    /// /flows 与 seepctl stats 快照
+    /// /flows 与 rillanectl stats 快照
     pub fn snapshot(&self) -> TableSnapshot;
 }
 
@@ -274,7 +274,7 @@ forwarder task 持 `Arc<Inner>` + 自己的 `UdpBinding` 一半；teardown 先 `
 - 实施若发现签名不适配（如 `forward_up` 同步化不可行——`Relay` 出站需要 async send），允许放宽为 `async fn forward_up`，但 §5 锁序与锁外 IO 原则不可让步；
 - 本文完成后 P0-1 的三份文档链：总设计（udp-dataplane.md §1）→ 设计依据（udp-session-table.md）→ **接口草案（本稿）**。
 
-## 9. 实施注记（P0-1 落地裁决，代码位于 `crates/seep-core/src/udp/`）
+## 9. 实施注记（P0-1 落地裁决，代码位于 `crates/rillane-core/src/udp/`）
 
 实施时与草案的偏差与澄清，均已按 §8 的放宽许可裁决，锁序与锁外 IO 未动：
 
@@ -297,4 +297,4 @@ forwarder task 持 `Arc<Inner>` + 自己的 `UdpBinding` 一半；teardown 先 `
 | 15 | 独立 `live_count` 原子量（§3.5 准入控制） | 无此变量：容量门直读 `sessions.len()`（`table.rs:180`），active 计数 = `TableMetrics` 原子量 | 独立计数与 DashMap 长度天然漂移、需 sweep 周期对账；直读零维护成本，软门语义（§8 放宽）允许并发窗口内极小超卖 |
 | 16 | `on_link_failure` 切换 fallback + `reconnect_count += 1`（§4.1/§4.2） | 只 `on_error(FailureType::Route)` + 原样返回 `failed_nodes`（`ledger.rs:63-73`） | fallback 切换属 TCP `add_fallback_path` 面（UDP 无调用点）；UDP 重路由由 runtime 侧 ChainFailureEvent 驱动下一包重路由；`reconnect_count` 无自增点 |
 
-测试锚点：`crates/seep-core/tests/udp_session_table.rs`（**26 项**：生命周期 2、快路径与映射复用 3、超时回收 4、容量与 LRU 2、决策失效与重路由 1、吊销/关停 2、上行失败与下行满载 5、并发契约 2、ledger 直测 3、chain_id 口径 1、表级聚合 1）。
+测试锚点：`crates/rillane-core/tests/udp_session_table.rs`（**26 项**：生命周期 2、快路径与映射复用 3、超时回收 4、容量与 LRU 2、决策失效与重路由 1、吊销/关停 2、上行失败与下行满载 5、并发契约 2、ledger 直测 3、chain_id 口径 1、表级聚合 1）。

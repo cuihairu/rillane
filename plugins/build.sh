@@ -10,14 +10,14 @@ rustup target list --installed | grep -q wasm32-unknown-unknown || {
 }
 
 mkdir -p output
-# cdylib 产物名随包名（seep_plugin_<name>.wasm）——复制为对外名 <name>.wasm
+# cdylib 产物名随包名（rillane_plugin_<name>.wasm）——复制为对外名 <name>.wasm
 build_one() {
   local dir="$1" out="$2"
   (cd "$dir" && cargo build --release --target wasm32-unknown-unknown)
-  cp "$dir/target/wasm32-unknown-unknown/release/seep_plugin_${dir//-/_}.wasm" "output/${out}.wasm"
+  cp "$dir/target/wasm32-unknown-unknown/release/rillane_plugin_${dir//-/_}.wasm" "output/${out}.wasm"
   echo "built output/${out}.wasm"
 }
 build_one rate-limit rate_limit
 build_one content-filter content_filter
 
-echo "宿主侧验收实况：cargo run -p seep-plugins --example plugins_smoke"
+echo "宿主侧验收实况：cargo run -p rillane-plugins --example plugins_smoke"

@@ -5,8 +5,8 @@
 > timing（微抖动注入）与 shaping（流形状归一），沿用 obfuscation-
 > middleware.md §2 的「策略/执行分离」与 §3 的配置镜像 + 转换模式。
 >
-> **落地状态**：已实现（M0 `7d56d06`：设计稿 + seep-config 镜像 +
-> seep-runtime 转换 + 测试；M1 `16d9eb2`：两 middleware + PacedIo +
+> **落地状态**：已实现（M0 `7d56d06`：设计稿 + rillane-config 镜像 +
+> rillane-runtime 转换 + 测试；M1 `16d9eb2`：两 middleware + PacedIo +
 > 白名单扩 + 链接线 + §7-3/4/5 测；M2 本提交：game 预设内联 timing 演示
 > + profile 测试更新 + 文档回填）。
 
@@ -19,8 +19,8 @@
 **可测口径（显式改写，非缩水）**：
 
 1. **决策可观测**（对齐 P1-4「注解可见」口径）：`TimingMiddleware` /
-   `ShapingMiddleware` 命中流把决策写入 `seep.obfs.timing` /
-   `seep.obfs.shaping` 注解（毫秒值），单测断言；链统计经既有
+   `ShapingMiddleware` 命中流把决策写入 `rillane.obfs.timing` /
+   `rillane.obfs.shaping` 注解（毫秒值），单测断言；链统计经既有
    `MiddlewareChain` 调用计数可观测；
 2. **时序特征偏移可证**：timing 决策值域 ⊂ [min_ms, max_ms] 且确定性
    （同 flow_id 恒同值，单测钉住）；shaping 在 burst 写入下产出相邻
@@ -31,7 +31,7 @@
 
 ## 1. 现状与结构约束
 
-- P1-4 已落：`MiddlewareChain`（seep-core，声明序执行、空链旁路）、
+- P1-4 已落：`MiddlewareChain`（rillane-core，声明序执行、空链旁路）、
   `PaddingMiddleware`（策略侧只写注解，帧执行侧填充）、`obfs_config.rs`
   （`to_padding_policy` + `build_middleware_chain`）、§3.3-5 白名单
   （当前 `padding|latency_probe`，timing/shaping 在白名单文案登记为
@@ -69,15 +69,15 @@
   执行，padding/timing/shaping 任意组合——timing 先于 shaping 时
   shaping 的首个网格点从 shaping 开始起算，语义自洽）。
 - **D-7 指标**：不新族；可观测性面 = 写入注解（§0-1）+ 既有
-  `MiddlewareChain` 调用计数（控制面注册的 `seep_obfs_*` 族仅
+  `MiddlewareChain` 调用计数（控制面注册的 `rillane_obfs_*` 族仅
   `padding_frames_total` / `padding_bytes_total` / `padding_skipped_total` /
-  `middleware_invocations_total`，代码中不存在 `seep_obfs_shaping_writes_total`——
+  `middleware_invocations_total`，代码中不存在 `rillane_obfs_shaping_writes_total`——
   `PacedIo` 无写计数，timing/shaping 经 `MIDDLEWARE_INVOCATIONS` 观测）。
 
 ## 3. 数据结构
 
 ```rust
-// seep-config（镜像，deny_unknown_fields）
+// rillane-config（镜像，deny_unknown_fields）
 pub struct TimingBlockConfig {
     pub mode: String,          // "fixed" | "uniform"
     pub fixed_ms: u64,         // fixed 模式值（须非 0）
@@ -92,7 +92,7 @@ pub struct ShapingBlockConfig {
     pub max_delay_ms: u64,     // 硬闸门
 }
 
-// seep-core（运行期 spec，与 PaddingSpec 同文件同族 serde）
+// rillane-core（运行期 spec，与 PaddingSpec 同文件同族 serde）
 pub enum TimingMode { Fixed, Uniform }
 pub struct TimingSpec {
     pub mode: TimingMode, pub fixed_ms: u64, pub min_ms: u64, pub max_ms: u64,
@@ -105,7 +105,7 @@ pub struct ShapingSpec {
 }
 ```
 
-转换层（seep-runtime `obfs_config.rs`）：
+转换层（rillane-runtime `obfs_config.rs`）：
 `to_timing_policy(cfg, known_egress) -> Option<TimingPolicy>` /
 `to_shaping_policy(...)`——与 `to_padding_policy` 同语义（enabled 总开关
 共享、E5 降级、default_* 与内联互斥、profile 内嵌解析）。
@@ -115,8 +115,8 @@ pub struct ShapingSpec {
 
 | # | 点 | 动作 |
 |---|----|------|
-| 1 | `seep-protocols/middleware/` 新 `timing.rs` | `TimingMiddleware`：handle 内 decide（hash 确定）→ 注解 `seep.obfs.timing` → sleep(d)。纯决策函数 `decide_timing` 单测钉值域/确定性/闸门截断 |
-| 2 | `seep-protocols/middleware/` 新 `shaping.rs` | `ShapingMiddleware`：decide → 注解 `seep.obfs.shaping` → wrap `flow.io`（`PacedWriter`：write 前 sleep 至网格点，seq 递增）。`decide_shaping_delay` 纯函数 + `PacedIo` 单测钉 ≥ interval |
+| 1 | `rillane-protocols/middleware/` 新 `timing.rs` | `TimingMiddleware`：handle 内 decide（hash 确定）→ 注解 `rillane.obfs.timing` → sleep(d)。纯决策函数 `decide_timing` 单测钉值域/确定性/闸门截断 |
+| 2 | `rillane-protocols/middleware/` 新 `shaping.rs` | `ShapingMiddleware`：decide → 注解 `rillane.obfs.shaping` → wrap `flow.io`（`PacedWriter`：write 前 sleep 至网格点，seq 递增）。`decide_shaping_delay` 纯函数 + `PacedIo` 单测钉 ≥ interval |
 | 3 | `obfs_config::build_middleware_chain` | 白名单加 timing/shaping，构造对应 middleware（selector 同形闭包固化） |
 | 4 | 配置 validate | §3.3-5 文案扩为四名字；TimingBlockConfig/ShapingBlockConfig validate E2 矩阵 |
 
@@ -135,7 +135,7 @@ pub struct ShapingSpec {
 
 ## 7. 测试策略
 
-1. seep-config：timing/shaping 块解析/deny/往返/validate E2 矩阵
+1. rillane-config：timing/shaping 块解析/deny/往返/validate E2 矩阵
    （参照 padding 系列测）；
 2. obfs_config：to_timing_policy / to_shaping_policy 两态矩阵
    （enabled 短路/引用解析/内联/E5 降级/对称 to_padding_policy 语义对齐）；

@@ -7,7 +7,7 @@
 
 ## 0. 范围与验收口径
 
-**todo 原文**：国内外 DNS 分流、缓存、防污染，对接 `seep-platform::network::dns`
+**todo 原文**：国内外 DNS 分流、缓存、防污染，对接 `rillane-platform::network::dns`
 设计。
 **验收原文**：分流解析正确且缓存命中率有指标；被污染域名返回可信结果。
 
@@ -26,9 +26,9 @@
 - `dns.rs` 是**数据模型层**（DnsConfig/DnsServer/DnsStats/DnsHandler
   trait，991 行），引擎面零实现——`mod.rs::create_dns_handler` 恒 Err
   「真实现归 P2-8」，T0 钉测在位；
-- seep-platform 依赖已含 tokio/socket2/regex/thiserror——**MVP 零新依赖**，
+- rillane-platform 依赖已含 tokio/socket2/regex/thiserror——**MVP 零新依赖**，
   wire format 手写（RFC 1035 A/AAAA/CNAME 最小面）；
-- seep-config 镜像不加依赖（network-route.md §1.2 裁决先例）；
+- rillane-config 镜像不加依赖（network-route.md §1.2 裁决先例）；
 - `TunBlockConfig.dns_servers` 注记「仅记录（消费归 P2-8）」；
 - `DnsConfig` 平台类型无 domestic/trusted 分组概念——分组与规则是
   **配置镜像 + 转换层**的职责（M1），引擎只收「两组上游 + 规则表」。
@@ -121,8 +121,8 @@ impl LocalDnsServer {
 |---|----|------|----|
 | 1 | `network/dns_engine.rs` 新文件 | 引擎全量（wire/cache/partition/resolver/server/stats） | M0 |
 | 2 | `network/mod.rs` | pub mod + re-export；`create_dns_handler` 切真实现；T0 测改口径（D-6） | M0 |
-| 3 | seep-config `NetworkBlockConfig.dns` 子块镜像 + validate | deny_unknown_fields；规则/组/缓存/防污染面 | M1 |
-| 4 | seep-runtime 转换 + runtime_builder 接线 + listener 启停 | `DnsBlockConfig → ResolverConfig`；`TunBlockConfig.dns_servers` 消费落地 | M1 |
+| 3 | rillane-config `NetworkBlockConfig.dns` 子块镜像 + validate | deny_unknown_fields；规则/组/缓存/防污染面 | M1 |
+| 4 | rillane-runtime 转换 + runtime_builder 接线 + listener 启停 | `DnsBlockConfig → ResolverConfig`；`TunBlockConfig.dns_servers` 消费落地 | M1 |
 | 5 | 控制面 `/stats` dns 段 | `stats_snapshot()` 暴露（验收「命中率有指标」） | M1 |
 
 ## 5. 错误与边界
@@ -169,7 +169,7 @@ pollution_suspected/组内 per-server 计数）。无新端点（复用 stats �
 | 步 | 内容与落点 | 依赖 | 验收 |
 |----|-----------|------|------|
 | M0 已完成 750de34 | 设计稿 + dns_engine.rs 全量（§3）+ mod.rs 工厂切换 + §7-1..7 测 | — | §7 全绿；mock 双上游防污染三面成立（17 测） |
-| M1 已完成 | seep-config dns 子块（`DnsBlockConfig`/groups/rules/cache/listen，deny_unknown_fields + validate E1）+ runtime `dns_config.rs` 转换（domestic 缺省回落 tun.dns_servers:53——dns_servers 消费兑现）/`DnsService` 监听启停 + runtime_builder 装配（独立于网络虚拟化开关，§9-4）+ 控制面 `GET /dns/stats` + 文档回填 | M0 | 控制面可见命中率（端点测试钉暴露面）；dig 形端到端（dns_config 生命周期测钉） |
+| M1 已完成 | rillane-config dns 子块（`DnsBlockConfig`/groups/rules/cache/listen，deny_unknown_fields + validate E1）+ runtime `dns_config.rs` 转换（domestic 缺省回落 tun.dns_servers:53——dns_servers 消费兑现）/`DnsService` 监听启停 + runtime_builder 装配（独立于网络虚拟化开关，§9-4）+ 控制面 `GET /dns/stats` + 文档回填 | M0 | 控制面可见命中率（端点测试钉暴露面）；dig 形端到端（dns_config 生命周期测钉） |
 
 ## 8.1 M1 落地补充（2026-10-02）
 
@@ -223,14 +223,14 @@ pollution_suspected/组内 per-server 计数）。无新端点（复用 stats �
 - **R-dns1**：trusted 组可信性由部署者保证（明文 UDP 链路仍可被
   链路级污染）——文档注明；加密通道归 V2（§9-1）；
 - **O-dns1**：~~geosite/chnroutes 批量规则源导入~~（**已落地
-  2026-10-10**：`seepctl import-rules <source> --target <name>
+  2026-10-10**：`rillanectl import-rules <source> --target <name>
   [--face routing|dns] [--name <n>] [--out <p>]`——v2fly 文本清单行集
   逐行解析；routing 面产 `routing.rules` 片段（域 → DomainSuffix 联合、
   keyword → DomainKeyword、CIDR → Network，AND 语义故各类型分列）、
   dns 面产 `network.dns.rules` 片段（裸域/`domain:` → exact + suffix
   双 pattern，D-2 前导点口径；`full:` → exact）；`regexp:`/`include:`/
   `@attr`/坏行逐条入跳过报告不阻塞，keyword/CIDR 在 dns 面显式报错
-  不静默降级；转换器在 seep-subscription `rule_source`）；
+  不静默降级；转换器在 rillane-subscription `rule_source`）；
 - **O-dns2**：~~DoH/DoT 上游、EDNS0、TCP 面归 V2~~（DoH/DoT 已于
   G1-8 M1 落地 2026-11-10，见 §9-1；EDNS0、TCP 面归 V2 不变；真实上游
   互操作验收待加密上游部署）。

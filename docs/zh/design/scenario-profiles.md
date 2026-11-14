@@ -19,23 +19,23 @@
 **可测口径（显式改写，非缩水）**：
 
 1. **三选一可运行**：`examples/profile-{proxy,game,web}.yaml` 三份自包含
-   示例，任选一份 `SEEP_CONFIG=<path> seepd` 即通过配置解析与运行时
+   示例，任选一份 `RILLANE_CONFIG=<path> rillaned` 即通过配置解析与运行时
    构建（集成测读取三份文件走 `load_from_path` 全链路断言）；
 2. **仅策略差异**：三份示例 diff 仅落在 routing（组/规则）、obfuscation、
    egress_pool、udp（game 显式承载，§9-1）、`profile:` 一行——
    ingress/egress/control/telemetry 同构（集成测全等钉住）；
-3. **无独立代码路径**：profile 是**配置期展开**（seep-config 纯函数把
+3. **无独立代码路径**：profile 是**配置期展开**（rillane-config 纯函数把
    预设填入既有块），运行期不出现 `profile` 字段、不加任何运行时分支——
    展开产物与手写等价配置走完全相同的 build()/转换链。
 
 ## 1. 现状与结构约束
 
-- `SeepConfig`（seep-config）：`routing.groups/rules`、`obfuscation`
+- `RillaneConfig`（rillane-config）：`routing.groups/rules`、`obfuscation`
   （P1-4 M0）、`egress_pool`（P1-5）均已成型；`udp` 是非 Option 的
   `UdpConfig`（缺省 `enabled: false`）——**无法区分「显式 false」与
   「缺省 false」**，profile 机制不能安全改写（见 §9 偏差）；
-- 配置加载单入口：`load_from_path` → `from_str`（seepd main.rs:47 唯一
-  生产调用；订阅转换是程序化构造 `SeepConfig` 字面量，不经 from_str）；
+- 配置加载单入口：`load_from_path` → `from_str`（rillaned main.rs:47 唯一
+  生产调用；订阅转换是程序化构造 `RillaneConfig` 字面量，不经 from_str）；
 - obfuscation-middleware.md §3.5 已把 `obfuscation.profiles` 设计为
   「P2-3 三场景预设的落点容器」——本稿落**场景级**预设（顶层单字段），
   `obfuscation.profiles` 维持其原义（命名 padding 策略集），两者正交；
@@ -51,7 +51,7 @@
   预设，用户显式给出的块（groups 非空 / rules 非空 / obfuscation 显式
   Some / egress_pool 显式 Some）一律不动——不覆盖、不删除、不合并。
   因此展开天然幂等（填过即非空，再展开是 no-op）。
-- **D-3 展开点 = `SeepConfig::from_str` 尾部**：单入口 `apply_profile`
+- **D-3 展开点 = `RillaneConfig::from_str` 尾部**：单入口 `apply_profile`
   纯函数（`&mut self`），`load_from_path` 经 from_str 自动覆盖；订阅
   转换等程序化构造不触发（同 obfuscation「订阅不产混淆块」先例）。
 - **D-4「未指定」判定面**（能用 Option/空判的面才算）：
@@ -63,7 +63,7 @@
   （用户把节点填进组即获得完整 SLO 选路面）。
 - **D-6 场景 = 策略矩阵行**（§4），三行互为「仅策略差异」的证明；
   game 是唯一带调度目标（组级 `slo`）与混淆开关的行，web 是唯一带
-  连接池的行，proxy 行 = 既有 config/seep.yaml 的策略形（基线）。
+  连接池的行，proxy 行 = 既有 config/rillane.yaml 的策略形（基线）。
 
 ## 3. 数据结构
 
@@ -73,10 +73,10 @@
 #[serde(rename_all = "snake_case")]
 pub enum ProfileKind { Proxy, Game, Web }
 
-// SeepConfig 增：
+// RillaneConfig 增：
 #[serde(default)]
 pub profile: Option<ProfileKind>,
-// SeepConfig 手写 Default 已有？（有——存量字段连带）；None 缺省同先例
+// RillaneConfig 手写 Default 已有？（有——存量字段连带）；None 缺省同先例
 ```
 
 ## 4. 填充矩阵（D-6）
@@ -96,7 +96,7 @@ pub profile: Option<ProfileKind>,
 
 | # | 点 | 动作 |
 |---|----|------|
-| 1 | `SeepConfig::from_str` 尾部 | `config.apply_profile();`（唯一入口，订阅/程序化构造不触发） |
+| 1 | `RillaneConfig::from_str` 尾部 | `config.apply_profile();`（唯一入口，订阅/程序化构造不触发） |
 | 2 | 运行期 | **零接触**——展开产物即普通配置，build()/热更新/控制面不感知 profile |
 | 3 | `examples/` | 三份自包含示例（M1）；集成测读三份走 `load_from_path` |
 
@@ -130,12 +130,12 @@ pub profile: Option<ProfileKind>,
 
 | 步 | 内容与落点 | 依赖 | 验收 |
 |----|-----------|------|------|
-| M0 | seep-config ProfileKind + SeepConfig.profile + apply_profile + 单测 §7-1..5 | — | §7-1..5 绿；存量测试零回归 |
+| M0 | rillane-config ProfileKind + RillaneConfig.profile + apply_profile + 单测 §7-1..5 | — | §7-1..5 绿；存量测试零回归 |
 | M1 | examples/ 三份示例 + §7-6 集成测 + 文档回填（todo/PROTOCOLS/roadmap/positioning §2.5 现状注记/本稿落地注记） | M0 | §7-6 绿；口径 1–3 逐条可复现 |
 
 ## 9. 偏差与假设
 
-1. **udp 不在填充面**：`SeepConfig.udp` 非 Option，无法区分显式/缺省
+1. **udp 不在填充面**：`RillaneConfig.udp` 非 Option，无法区分显式/缺省
    false；profile 翻转它会覆盖显式关闭（违反 D-2）。game 的 UDP 需求
    （G1 已解，长局不断流）由示例 YAML 显式承载，机制不碰 udp 块；
 2. **组模板单成员**是可运行最低形，不等于场景最佳实践——多成员 +
@@ -149,8 +149,8 @@ pub profile: Option<ProfileKind>,
 
 - **R-prof1**：预设值随生态漂移（游戏域清单、slo 阈值）——预设属
   配置层，示例 YAML 可独立修订不发版；
-- **O-prof1**：~~`seepctl profile` 子命令生成场景骨架配置~~（**已落地
-  2026-10-10**：`seepctl profile <proxy|game|web> [--out <path>]` 经
+- **O-prof1**：~~`rillanectl profile` 子命令生成场景骨架配置~~（**已落地
+  2026-10-10**：`rillanectl profile <proxy|game|web> [--out <path>]` 经
   `from_str` 解析校验并内联场景展开后输出 YAML——三选一即运行；白名单
   外场景名报错并列合法值）；
 - **O-prof2**：profile 与订阅合并语义（订阅推 egress、主配置产策略，

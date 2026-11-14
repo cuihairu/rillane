@@ -1,0 +1,29 @@
+[package]
+name = "rillaned"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+rillane-config = { path = "../../crates/rillane-config" }
+rillane-core = { path = "../../crates/rillane-core" }
+rillane-platform = { path = "../../crates/rillane-platform" }
+rillane-runtime = { path = "../../crates/rillane-runtime" }
+rillane-telemetry = { path = "../../crates/rillane-telemetry" }
+rillane-mesh = { path = "../../crates/rillane-mesh" }
+rillane-subscription = { path = "../../crates/rillane-subscription" }
+
+[dev-dependencies]
+rcgen.workspace = true
+# 观测轮（plugin-loader.md §0）：/plugins/stats 启用形测试以最小 wat 内联
+# 模块产出 .wasm 落盘；版本随 wasmtime 所引（Cargo.lock wat 1.261.0）
+wat = "1.261"

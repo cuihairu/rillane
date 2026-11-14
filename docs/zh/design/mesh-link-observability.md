@@ -9,14 +9,14 @@
 > `a9c7e11`、M2（控制面三族 + `/mesh/switches` + 文档回填）本提交。实施期
 > 修缮三处存量缺陷（M1 账本测试首度覆盖暴露）：①`handle_chain_failure`
 > 备用耗尽分支 RefMut 持有下调 `active_chains.len()`——DashMap 全分片读锁
-> 与本线程分片写锁互斥即自锁，修 = 先 drop 分片守卫；②seep-core
+> 与本线程分片写锁互斥即自锁，修 = 先 drop 分片守卫；②rillane-core
 > `ChainContext` 路径语义——fallback 非空时 `get_current_path()` 恒读
 > `fallback_paths[idx]`：从未切换链路谎报 fallback[0] 为当前路径（路由决策
 > 同源污染）且首跳跳过 fallback[0]，修 = 单口径 current_path + 按声明序
 > 提升（`switch_fallback_path` 复用 update_path 升主）；③
 > `check_chains_health` 归因顺序——状态先于 TTL（ZERO TTL 巡检下已终止链
 > 两因同时成立，旧序冤枉死因为 TtlExpired）。§10-1（主动探测源）、
-> §10-2（seepctl 包装）、§10-3（事件持久化）维持未决。
+> §10-2（rillanectl 包装）、§10-3（事件持久化）维持未决。
 
 ## 0. 范围与验收口径
 
@@ -25,25 +25,25 @@
 
 **可测口径（对齐 P0-3/P1-5 显式改写做法，非缩水）**：
 
-1. **p50/p95 RTT**：`seep_mesh_link_rtt_ms{from,to,quantile="p50"|"p95"}`
+1. **p50/p95 RTT**：`rillane_mesh_link_rtt_ms{from,to,quantile="p50"|"p95"}`
    ——样本环分位数就地处（§3.1），`from`/`to` 标签 = 链路方向，Grafana 按
    link 维度直接查询；
 2. **最近 N 次切换原因**：`GET /mesh/switches`（最近 100 事件 JSON）+
-   `seep_mesh_switch_total{reason}` 计数族——原因枚举化（§2 D-3），自由文本
+   `rillane_mesh_switch_total{reason}` 计数族——原因枚举化（§2 D-3），自由文本
    降为 `detail` 字段；
-3. **丢包**：观测形派生 `seep_mesh_link_loss_ratio{from,to}`
+3. **丢包**：观测形派生 `rillane_mesh_link_loss_ratio{from,to}`
    = `errors_total / connections_total`（连接失败即丢；§2 D-2），上报形
-   `seep_mesh_packet_loss_rate`（全局均值，既有）保留不动；
-4. **节点间流量**：既有 `seep_mesh_link_{bytes,connections,errors}_total`
+   `rillane_mesh_packet_loss_rate`（全局均值，既有）保留不动；
+4. **节点间流量**：既有 `rillane_mesh_link_{bytes,connections,errors}_total`
    （P0-5 已交付）即验收面，本文不重复建设。
 
 ## 1. 现状与结构约束（决策的事实输入）
 
-- `MeshRegistry`（seep-mesh/src/lib.rs）已有：`link_states`（上报形单值
+- `MeshRegistry`（rillane-mesh/src/lib.rs）已有：`link_states`（上报形单值
   latency_ms/bandwidth/packet_loss_rate，控制面 `/mesh/link-states` 写入）、
   `link_traffic`（按方向 connections/bytes/errors 计数，P0-5 暴露）——
   **单值延迟无分布**、**丢包只有上报值无观测值**、**无切换事件账本**；
-- `ChainManager`（seep-runtime/src/chain.rs）`handle_chain_failure` 切换
+- `ChainManager`（rillane-runtime/src/chain.rs）`handle_chain_failure` 切换
   备用路径仅递增全局 `failover_count`，原因以自由文本日志即弃；健康巡检
   TTL/状态终止无原因留痕；
 - 真探测源（主动 ping 帧 / LatencyProbe 注解回灌）尚不存在：P1-4 M2 后
@@ -67,11 +67,11 @@
   derive）；UDP 侧 `table.handle_chain_failure`（P0-1 机制）不混入。
 - **D-5 关闭态对照**：mesh 未启用 → 三个新族与 `/mesh/switches` 均不渲染
   （区别于 udp/obfs 恒渲染纪律：链路观测随 mesh 能力存在性开落，无链路
-  无序列名可立；与 P1-5 seep_pool_* 同判）。
+  无序列名可立；与 P1-5 rillane_pool_* 同判）。
 
 ## 3. 数据结构
 
-### 3.1 RttRing（seep-mesh）
+### 3.1 RttRing（rillane-mesh）
 
 ```rust
 pub struct RttRing { samples: VecDeque<u32> }   // cap = RTT_RING_CAP = 256
@@ -82,7 +82,7 @@ record(ms: u32)；quantile(p: f64) -> Option<u32> // 最近秩：sort 后
 `LinkRttSnapshot { from, to, p50_ms, p95_ms, samples }`（Serialize，控制面
 DTO 与端点共用）。
 
-### 3.2 SwitchEvent / 账本（seep-runtime chain.rs）
+### 3.2 SwitchEvent / 账本（rillane-runtime chain.rs）
 
 ```rust
 pub enum SwitchReason { FailureReported, FallbackExhausted, TtlExpired, TerminatedUnhealthy }
@@ -106,9 +106,9 @@ pub struct SwitchEvent { chain_id, from_path: Vec<String>,
 
 ## 5. 控制面暴露
 
-- `/metrics`（mesh 块内）：`seep_mesh_link_rtt_ms{from,to,quantile}`（p50/
-  p95 两序列/链路，环空不出）、`seep_mesh_link_loss_ratio{from,to}`、
-  （chain 块内）`seep_mesh_switch_total{reason}`（恒渲染——计数器族零值
+- `/metrics`（mesh 块内）：`rillane_mesh_link_rtt_ms{from,to,quantile}`（p50/
+  p95 两序列/链路，环空不出）、`rillane_mesh_link_loss_ratio{from,to}`、
+  （chain 块内）`rillane_mesh_switch_total{reason}`（恒渲染——计数器族零值
   也在，账本空时无事件端点条目）；
 - `GET /mesh/switches`：`{ events: [...] }` 最近 100（mesh 启用门内，
   未启用 503 同 `/nodes` 先例）。
@@ -135,8 +135,8 @@ pub struct SwitchEvent { chain_id, from_path: Vec<String>,
 
 | 步 | 内容与落点 | 依赖 | 验收 |
 |----|-----------|------|------|
-| M1 | 设计稿（本文）+ seep-mesh RttRing/采样源/快照 + seep-runtime 切换账本接线 + 单测 | — | §7-1..3 全绿 |
-| M2 | seepd 控制面：/metrics 三族 + /mesh/switches + 测试 + todo/PROTOCOLS/roadmap 回填 | M1 | §7-4..5 全绿；§0 口径逐条可复现 |
+| M1 | 设计稿（本文）+ rillane-mesh RttRing/采样源/快照 + rillane-runtime 切换账本接线 + 单测 | — | §7-1..3 全绿 |
+| M2 | rillaned 控制面：/metrics 三族 + /mesh/switches + 测试 + todo/PROTOCOLS/roadmap 回填 | M1 | §7-4..5 全绿；§0 口径逐条可复现 |
 
 ## 9. 偏差与假设
 
@@ -155,8 +155,8 @@ pub struct SwitchEvent { chain_id, from_path: Vec<String>,
 - **R-obs1**：上报值即样本（D-1）——上报方语义是"当时延迟"非"测得 RTT"，
   分布形受上报方诚实度影响；探测源落地后切真测，序列名不变；
 - **O-link-obs1**：主动探测源接线（LatencyProbe 注解回灌 / mesh ping 帧）；
-- **O-link-obs2**：~~`seepctl switches` 子命令~~（**已落地 2026-10-10**：
-  `seepctl switches` 渲染 `/mesh/switches` 账本——epoch/chain_id/前后路径/
+- **O-link-obs2**：~~`rillanectl switches` 子命令~~（**已落地 2026-10-10**：
+  `rillanectl switches` 渲染 `/mesh/switches` 账本——epoch/chain_id/前后路径/
   原因/细节，终止事件 to_path 缺席渲染 `(terminate)`）；
 - **O-link-obs3**：切换事件持久化（重启即失，MVP 不做——账本定位是
   近因观测非审计）。

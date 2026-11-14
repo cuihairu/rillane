@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# platforms/openwrt/build.sh —— SEEP OpenWrt musl 静态交叉编译 + ipk 组装（P3-3）
+# platforms/openwrt/build.sh —— RILLANE OpenWrt musl 静态交叉编译 + ipk 组装（P3-3）
 #
 # 用法：
 #   platforms/openwrt/build.sh                 # 三目标全量（缺省矩阵）
 #   platforms/openwrt/build.sh aarch64-unknown-linux-musl   # 指定目标
-#   OUT_DIR=/tmp/seep-ipk platforms/openwrt/build.sh        # 产物目录覆盖
+#   OUT_DIR=/tmp/rillane-ipk platforms/openwrt/build.sh        # 产物目录覆盖
 #
 # 依赖：docker（cross 走容器内 C 工具链）、cross、rustup（目标 std 自动装）。
-# 产物：$OUT_DIR/seep_<版本>_<openwrt架构>.ipk（含 seepd + seepctl + init.d +
+# 产物：$OUT_DIR/rillane_<版本>_<openwrt架构>.ipk（含 rillaned + rillanectl + init.d +
 #       示例配置），以及同目录 .build-log.txt（file/readelf 静态核验记录）。
 #
 # 已知边界（README.md「验证边界」节详述）：
@@ -21,7 +21,7 @@ cd "$(dirname "$0")/../.."
 
 TARGETS=(${@:-aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf x86_64-unknown-linux-musl})
 OUT_DIR=${OUT_DIR:-dist/openwrt}
-PKG_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' apps/seepd/Cargo.toml | head -1)"
+PKG_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' apps/rillaned/Cargo.toml | head -1)"
 PKG_RELEASE=1
 
 # rust triple → OpenWrt DISTRIB_ARCH 映射（ABI 族代表值；实际设备按
@@ -48,58 +48,58 @@ for target in "${TARGETS[@]}"; do
     # 交叉产物统一落仓库 ./target（环境 CARGO_TARGET_DIR 剔除——cross 需
     # workspace 内挂载点，外部路径会脱挂）
     env -u CARGO_TARGET_DIR CARGO_PROFILE_RELEASE_STRIP=symbols \
-        cross build --release --target "$target" -p seepd -p seepctl 1>&2
+        cross build --release --target "$target" -p rillaned -p rillanectl 1>&2
 
     bdir="target/$target/release"
-    for bin in seepd seepctl; do
+    for bin in rillaned rillanectl; do
         [ -x "$bdir/$bin" ] || { echo "缺产物 $bdir/$bin" >&2; exit 1; }
     done
 
     # 静态核验：ELF 机器类型 + 无动态依赖（musl 静态面）
     {
         echo "--- $target ---"
-        file "$bdir/seepd" "$bdir/seepctl"
-        (readelf -d "$bdir/seepd" 2>/dev/null || true) | grep -E "NEEDED|Machine" || echo "(no dynamic section — static)"
+        file "$bdir/rillaned" "$bdir/rillanectl"
+        (readelf -d "$bdir/rillaned" 2>/dev/null || true) | grep -E "NEEDED|Machine" || echo "(no dynamic section — static)"
     } >> "$OUT_DIR/.build-log.txt"
 
     # ---- ipk 组装（ar 归档：debian-binary + control.tar.gz + data.tar.gz）----
     stage="$(mktemp -d)"
     trap 'rm -rf "$stage"' EXIT
-    mkdir -p "$stage/control" "$stage/data/etc/init.d" "$stage/data/usr/bin" "$stage/data/usr/share/seep"
+    mkdir -p "$stage/control" "$stage/data/etc/init.d" "$stage/data/usr/bin" "$stage/data/usr/share/rillane"
 
-    installed_size="$(du -sk "$bdir/seepd" "$bdir/seepctl" | awk '{s+=$1}END{print s}')"
+    installed_size="$(du -sk "$bdir/rillaned" "$bdir/rillanectl" | awk '{s+=$1}END{print s}')"
     cat > "$stage/control/control" <<EOF
-Package: seep
+Package: rillane
 Version: ${PKG_VERSION}-${PKG_RELEASE}
 Depends: libc, kmod-tun
 Section: net
 Architecture: ${arch}
 Maintainer: cuihairu <cuihairu@users.noreply.github.com>
 Installed-Size: ${installed_size}
-Source: package/seep
-SourceName: seep
-Description: SEEP proxy daemon (socks/mixed ingress, direct/ss/trojan/vmess egress, mesh chains, DNS partition)
- Static musl build by cross; config at /etc/seep.yaml (SEEP_CONFIG), control API :9090.
+Source: package/rillane
+SourceName: rillane
+Description: RILLANE proxy daemon (socks/mixed ingress, direct/ss/trojan/vmess egress, mesh chains, DNS partition)
+ Static musl build by cross; config at /etc/rillane.yaml (RILLANE_CONFIG), control API :9090.
 EOF
-    echo "/etc/seep.yaml" > "$stage/control/conffiles"
+    echo "/etc/rillane.yaml" > "$stage/control/conffiles"
     cat > "$stage/control/postinst" <<'EOF'
 #!/bin/sh
-[ -f /etc/seep.yaml ] || cp /usr/share/seep/seep.yaml.example /etc/seep.yaml
-/etc/init.d/seep enable 2>/dev/null || true
+[ -f /etc/rillane.yaml ] || cp /usr/share/rillane/rillane.yaml.example /etc/rillane.yaml
+/etc/init.d/rillane enable 2>/dev/null || true
 exit 0
 EOF
     chmod 755 "$stage/control/postinst"
 
-    install -m755 "$bdir/seepd" "$stage/data/usr/bin/seepd"
-    install -m755 "$bdir/seepctl" "$stage/data/usr/bin/seepctl"
-    install -m755 platforms/openwrt/init.d/seep "$stage/data/etc/init.d/seep"
-    install -m644 platforms/openwrt/seep.yaml.example "$stage/data/usr/share/seep/seep.yaml.example"
+    install -m755 "$bdir/rillaned" "$stage/data/usr/bin/rillaned"
+    install -m755 "$bdir/rillanectl" "$stage/data/usr/bin/rillanectl"
+    install -m755 platforms/openwrt/init.d/rillane "$stage/data/etc/init.d/rillane"
+    install -m644 platforms/openwrt/rillane.yaml.example "$stage/data/usr/share/rillane/rillane.yaml.example"
 
     (cd "$stage/control" && tar czf ../control.tar.gz ./control ./conffiles ./postinst)
     (cd "$stage/data" && tar czf "$stage/data.tar.gz" .)
     echo "2.0" > "$stage/debian-binary"
 
-    ipk="$OUT_DIR/seep_${PKG_VERSION}-${PKG_RELEASE}_${arch}.ipk"
+    ipk="$OUT_DIR/rillane_${PKG_VERSION}-${PKG_RELEASE}_${arch}.ipk"
     rm -f "$ipk"
     (cd "$stage" && ar rc "$OLDPWD/$ipk" debian-binary control.tar.gz data.tar.gz)
 

@@ -70,7 +70,7 @@
 ## 3. 数据结构
 
 ```rust
-// seep-protocols/src/fingerprint.rs
+// rillane-protocols/src/fingerprint.rs
 pub enum TlsFingerprint { None, Chrome, Ios, Safari }
 
 impl TlsFingerprint {
@@ -90,7 +90,7 @@ impl TlsFingerprint {
 }
 ```
 
-seep-config 面（M1）：四个 TLS 承载 egress 变体（http/vmess/vless/trojan）
+rillane-config 面（M1）：四个 TLS 承载 egress 变体（http/vmess/vless/trojan）
 增 `tls_fingerprint: Option<String>`（none 缺省；转换层校验合法值）。
 
 ## 4. 接线点
@@ -100,7 +100,7 @@ seep-config 面（M1）：四个 TLS 承载 egress 变体（http/vmess/vless/tro
 | 1 | `tls.rs::build_client_config` | 增 profile 参——按预设装 provider/版本/验证器 |
 | 2 | `create_tls_connector*` / `TlsConnectorFactory` | 透传 + 缓存键扩展（D-2） |
 | 3 | trojan/vless/http 连接器构造 | 透传（M1，含 pool `TransportKey` 字段 D-4） |
-| 4 | seep-config egress 变体 + 转换 | 配置面（M1） |
+| 4 | rillane-config egress 变体 + 转换 | 配置面（M1） |
 
 ## 5. 错误与边界
 
@@ -116,7 +116,7 @@ seep-config 面（M1）：四个 TLS 承载 egress 变体（http/vmess/vless/tro
 
 ## 6. 控制面
 
-无新端点/指标族（D-6）。`seep_obfs_*`/`seep_tls_handshakes_total` 不受
+无新端点/指标族（D-6）。`rillane_obfs_*`/`rillane_tls_handshakes_total` 不受
 影响（工厂观测面同键计数）。
 
 ## 7. 测试策略
@@ -135,8 +135,8 @@ seep-config 面（M1）：四个 TLS 承载 egress 变体（http/vmess/vless/tro
 
 | 步 | 内容与落点 | 依赖 | 验收 |
 |----|-----------|------|------|
-| M0 | 设计稿 + seep-protocols fingerprint.rs（预设表/shape_material/单漏斗挂载）+ §7-1..3/5 测 | — | §7 全绿；none 零差异 |
-| M1 | seep-config 四变体配置面 + 转换校验（E1）+ 连接器/pool 键/工厂接线（§4-2/3）+ §7-4 + 文档回填 | M0 | §7-4 绿；池不互借异指纹 |
+| M0 | 设计稿 + rillane-protocols fingerprint.rs（预设表/shape_material/单漏斗挂载）+ §7-1..3/5 测 | — | §7 全绿；none 零差异 |
+| M1 | rillane-config 四变体配置面 + 转换校验（E1）+ 连接器/pool 键/工厂接线（§4-2/3）+ §7-4 + 文档回填 | M0 | §7-4 绿；池不互借异指纹 |
 
 ## 9. 偏差与假设
 
@@ -163,8 +163,8 @@ seep-config 面（M1）：四个 TLS 承载 egress 变体（http/vmess/vless/tro
 
 - **R-tfp1**：指纹形态本身成为新特征（「会变形的 rustls」）——MVP
   面向「同形多实例打散」，拟真对抗归 V2 换栈后重评；
-- **O-tfp1**：~~`seepctl` 调试子命令输出各预设 shape_material 对照表~~
-  （**已落地 2026-10-10**：`seepctl tls-fingerprint` 打印四预设
+- **O-tfp1**：~~`rillanectl` 调试子命令输出各预设 shape_material 对照表~~
+  （**已落地 2026-10-10**：`rillanectl tls-fingerprint` 打印四预设
   （none/chrome/ios/safari）及其 shape_material 四维形态串——
   none 为 `default`，其余按版本|套件|群|签名方案导出，预设间
   两两互异由 §7-3 构造保证）；

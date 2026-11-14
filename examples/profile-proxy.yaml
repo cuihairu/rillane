@@ -1,5 +1,5 @@
-# Seep 场景示例 —— proxy（代理通用，P2-3 scenario-profiles.md §4 矩阵行）
-# 用法：SEEP_CONFIG=examples/profile-proxy.yaml seepd
+# Rillane 场景示例 —— proxy（代理通用，P2-3 scenario-profiles.md §4 矩阵行）
+# 用法：RILLANE_CONFIG=examples/profile-proxy.yaml rillaned
 #
 # 三份场景示例（profile-proxy / profile-game / profile-web）间仅策略块
 # 差异（routing / obfuscation / egress_pool / udp / profile 行），
@@ -13,7 +13,7 @@
 control:
   api_bind: 127.0.0.1:9090
   uds_path: null
-  admin_token: seep
+  admin_token: rillane
 
 telemetry:
   log_level: info

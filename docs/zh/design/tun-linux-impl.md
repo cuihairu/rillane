@@ -1,7 +1,7 @@
 # P1-1 Linux TUN 真实现 — 实现落定稿（T0–T2）
 
-> 上游：[tun-dataplane.md](tun-dataplane.md) §1/§4/§5（设计定稿——设备接口、数据流、错误路径、测试策略、分步清单）。本文是其 **P1-1 半边（T0–T2）的实现对照文档**：TUNSETIFF 接口、包读写循环、`platform.rs` 占位替换方案、`LinuxRouteManager` 与测试落地实况，偏差回填 §6。T3+（`TunIngress` 包循环/UDP NAT/smoltcp TCP 面）归 P1-2；`network` 配置区块与 `seepctl route` 归 P1-3（[network-route.md](network-route.md)）。
-> 落点：`crates/seep-platform/src/network/linux.rs`（单文件，T0 骨架起步，现 1757 行含测试）· 模块接线与四工厂 `network/mod.rs` · trait 裁剪 `network/tun.rs`。
+> 上游：[tun-dataplane.md](tun-dataplane.md) §1/§4/§5（设计定稿——设备接口、数据流、错误路径、测试策略、分步清单）。本文是其 **P1-1 半边（T0–T2）的实现对照文档**：TUNSETIFF 接口、包读写循环、`platform.rs` 占位替换方案、`LinuxRouteManager` 与测试落地实况，偏差回填 §6。T3+（`TunIngress` 包循环/UDP NAT/smoltcp TCP 面）归 P1-2；`network` 配置区块与 `rillanectl route` 归 P1-3（[network-route.md](network-route.md)）。
+> 落点：`crates/rillane-platform/src/network/linux.rs`（单文件，T0 骨架起步，现 1757 行含测试）· 模块接线与四工厂 `network/mod.rs` · trait 裁剪 `network/tun.rs`。
 
 ## 1. 总览与提交锚点
 
@@ -91,7 +91,7 @@ loop {
 | 工厂（`mod.rs`） | 四工厂由恒 Err 改 cfg 分派：`#[cfg(target_os = "linux")] pub mod linux;`，tun/route 两工厂 Linux 返回真实现、其余平台保留 Err；filter/dns 恒 Err 改口径——filter=进程内规则（§2.7）/dns=P2-8。分派是唯一事实源：`create_tun_interface` 便捷函数改委托工厂，不再自带恒 Err 占位 |
 | 死稿（`platform.rs`） | 维持未编译（不在模块树），头部加指向注记：真实现按 tun-dataplane.md §1.4 落在 `linux.rs`，其 `packet_stream` 签名随 trait 裁剪已过时，勿据此恢复 |
 
-依赖面：`nix` 移入 `[target.'cfg(target_os = "linux")'.dependencies]`（features `ioctl`+`fs`）；tokio 增 `process` feature（`ip` 子进程）。既有消费点零感知——seep-runtime 仅经四工厂，`enable_network_virtualization` 缺省 false 不触达。
+依赖面：`nix` 移入 `[target.'cfg(target_os = "linux")'.dependencies]`（features `ioctl`+`fs`）；tokio 增 `process` feature（`ip` 子进程）。既有消费点零感知——rillane-runtime 仅经四工厂，`enable_network_virtualization` 缺省 false 不触达。
 
 ## 5. LinuxRouteManager（T2）
 
@@ -105,7 +105,7 @@ pub enum AppliedStep {                       // linux.rs:498
 }
 ```
 
-apply/clear 读写 `applied: Mutex<Vec<AppliedStep>>`；`Display` impl 供 `remove_route` 按名查找。幂等靠 `ip` 的 `replace` 语义；**"完全还原" = 撤销 seep 所加步骤**（P1-3 §5 同口径），非快照回滚。
+apply/clear 读写 `applied: Mutex<Vec<AppliedStep>>`；`Display` impl 供 `remove_route` 按名查找。幂等靠 `ip` 的 `replace` 语义；**"完全还原" = 撤销 rillane 所加步骤**（P1-3 §5 同口径），非快照回滚。
 
 ### 5.2 apply / clear / 回滚（`linux.rs:1000/1007`）
 
@@ -154,7 +154,7 @@ apply/clear 读写 `applied: Mutex<Vec<AppliedStep>>`；`Display` impl 供 `remo
 
 `device_lifecycle_and_capture`（`linux.rs:1530`）——守卫双点：`tun_device_available()`（无 `/dev/net/tun` → 打印 skip）/ `is_permission_skip`（错误链含 CAP_NET_ADMIN → skip）；**skip 不算失败**，CI 无特权环境零影响：
 
-- **周期 A（强制名）**：`seepT1<pid>` 创建 → 名读回断言 → up/addr/mtu 经 `ip addr|link show` 读回断言（10.66.0.1/24、mtu）→ **捕获钉子（P1-1 验收核心，provider 半边）**：bind `10.66.0.1:0` 的 `UdpSocket` 发往 `10.66.0.2:9999` → 内核经 connected 路由注入 tun fd → `read_packet` 循环筛目标五元组（先发后读，tun 队列缓冲不丢；非目标包忽略）→ src/dst IP+port、proto、长度、载荷尾、收包计数全断言 → down/destroy → `ip link show` 断言接口已被内核回收；
+- **周期 A（强制名）**：`rillaneT1<pid>` 创建 → 名读回断言 → up/addr/mtu 经 `ip addr|link show` 读回断言（10.66.0.1/24、mtu）→ **捕获钉子（P1-1 验收核心，provider 半边）**：bind `10.66.0.1:0` 的 `UdpSocket` 发往 `10.66.0.2:9999` → 内核经 connected 路由注入 tun fd → `read_packet` 循环筛目标五元组（先发后读，tun 队列缓冲不丢；非目标包忽略）→ src/dst IP+port、proto、长度、载荷尾、收包计数全断言 → down/destroy → `ip link show` 断言接口已被内核回收；
 - **周期 B（自动名）**：`TunConfig::default()`（name=None）创建 → 读回名 `tun%d` 形式断言 → destroy。
 
 「捕获 IP 包**进入 FlowRouter**」的 FlowRouter 半边已随 T3 `TunIngress` 落地——`tun_ingress.rs`（`mod tests` 自 :855 起）已有 ingress 循环接线测试（含 `tun_udp_e2e_capture_route_attribution_echo` 真设备 e2e，见 tun-dataplane.md §4.2 落地注）；provider 半边（包能从内核进到 `read_packet` 返回值）照旧实证。
@@ -167,4 +167,4 @@ apply/clear 读写 `applied: Mutex<Vec<AppliedStep>>`；`Display` impl 供 `remo
 ## 8. 与 P1-2/P1-3 的接缝（已闭合）
 
 - **P1-2（T3/T4/T5）已落地**（a9f11dc/b5785c2/7a3024d）：`TunIngress` 属主化 `LinuxTunProvider`+`LinuxRouteManager`（创建/设址/起路由在 `run()` 启动时完成，退出 teardown）；`read_packet` 返回的 `(Bytes, PacketInfo)` 即包循环输入；auto-bypass 全集在其组装（§5.3）；
-- **P1-3（R1–R4）已落地**（1e1a7c0/1befbe7）：`network` 块 → `TunConfig`/`RoutingConfig` 转换在 `seep-runtime/src/network_config.rs`（含 auto-bypass 剔除半边）；`seepctl route apply/clear` 复用 `apply_routing`/`rollback_all` 同一机制（幂等/完全还原/失败回滚三口径一致），控制面 `/network/route/{apply,clear,status}` 三端点在位。
+- **P1-3（R1–R4）已落地**（1e1a7c0/1befbe7）：`network` 块 → `TunConfig`/`RoutingConfig` 转换在 `rillane-runtime/src/network_config.rs`（含 auto-bypass 剔除半边）；`rillanectl route apply/clear` 复用 `apply_routing`/`rollback_all` 同一机制（幂等/完全还原/失败回滚三口径一致），控制面 `/network/route/{apply,clear,status}` 三端点在位。

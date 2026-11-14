@@ -1,7 +1,7 @@
 # P0-2 / P0-3 implementation-level design: single-hop UDP relay path
 
 > Status: **Landed (todo P0-2/P0-3 complete, 2026-09)** · This document expands [udp-dataplane.md](udp-dataplane.md) §2/§3 and is the implementation framing for both items · Depends on the session table contract: [udp-session-table.md](udp-session-table.md) · Maps to [todo.md](../../todo.md) P0-2/P0-3 · Upstream: [roadmap.md](roadmap.md) S1
-> Implementation surface = `seep-core/src/udp/associate.rs` (inbound) + `seep-protocols` egress underlay connectors; the design text is preserved, and deviations are authoritative per each section's landing note.
+> Implementation surface = `rillane-core/src/udp/associate.rs` (inbound) + `rillane-protocols` egress underlay connectors; the design text is preserved, and deviations are authoritative per each section's landing note.
 
 ## Executive Summary
 
@@ -43,7 +43,7 @@ Auth semantics: with `udp_enabled=false`, 0x03 returns 0x07 (consistent with cur
 Per-packet flow (inside the relay socket's recv loop):
 
 1. Parse the SOCKS5 UDP request header (≥10 bytes; `ATYP` 0x01/0x04 is a 4/16-byte address, 0x03 a variable-length domain);
-2. `FRAG != 0` → drop + `seep_udp_packets_dropped_total{reason="frag"}` (the MVP does no fragment reassembly; upstream O2);
+2. `FRAG != 0` → drop + `rillane_udp_packets_dropped_total{reason="frag"}` (the MVP does no fragment reassembly; upstream O2);
 3. Source verification `strict_udp_source` (on by default): datagram source IP ≠ the control connection's peer IP → drop + count (prevents the relay being borrowed by third parties; the inbound side of upstream R7);
 4. Build `UdpSessionKey{client=(src ip, src port), user, process:None}` and look up the session table; a miss goes to the first-packet path (routing decision → create session/mapping, udp-session-table.md §3.3);
 5. `binding.send_to(target, data)`.
@@ -71,7 +71,7 @@ A second ASSOCIATE from the same `client (ip, port)`: the MVP **refuses** (reply
 | Acceptance original text | Test |
 |---------|------|
 | A standard client completes a DNS UDP query round trip via socks5 inbound + direct egress | Integration: `dig @8.8.8.8 example.com` over socks5 (UDP ASSOCIATE) + direct egress, round-trip assertion |
-| `seepctl stats` shows UDP sessions | presented by `seepctl stats` once the session table metrics feed the `/flows` snapshot (P0-5 linkage) |
+| `rillanectl stats` shows UDP sessions | presented by `rillanectl stats` once the session table metrics feed the `/flows` snapshot (P0-5 linkage) |
 | (udp-dataplane §2.4 supplement) the switch off returns 0x07 | with `udp_enabled=false`, 0x03 → 0x07; CONNECT has no regression |
 | (new in this draft) header parsing and admission | FRAG≠0 drop counter; forged source IP drop counter; a truncated 10-byte header does not panic |
 
@@ -154,12 +154,12 @@ All errors are invisible through the §2.4 downlink channel -- the client only o
 
 ## 6. Implementation notes (P0-2 landing rulings, 2026-09)
 
-Code: `seep-core/src/udp/associate.rs` (service and admission), `seep-protocols/src/inbound/socks5.rs` (command dispatch), `seep-runtime/src/runtime_builder.rs` (wiring), `seep-config` (the `udp:` block). Tests: `seep-core/tests/udp_associate.rs` (13 items) + `udp_session_table.rs` §3.6 staged teardown 4 items.
+Code: `rillane-core/src/udp/associate.rs` (service and admission), `rillane-protocols/src/inbound/socks5.rs` (command dispatch), `rillane-runtime/src/runtime_builder.rs` (wiring), `rillane-config` (the `udp:` block). Tests: `rillane-core/tests/udp_associate.rs` (13 items) + `udp_session_table.rs` §3.6 staged teardown 4 items.
 
 | # | Draft | Implementation | Ruling rationale |
 |---|------|------|---------|
 | 1 | §2.4 downlink full `dropped{reason="no_mapping"}` | `DropReason::DownlinkFull` (named for the table-side semantics) | "mapping exists but the channel is full" and "no mapping" are two different events; conflating them misleads |
-| 2 | the SOCKS5 UDP frame codec's home was undecided | `seep-core::udp::associate` (the `parse_udp_header`/`encode_udp_header` pure functions) | the service loop's per-packet codec needs to sit on the table's side; the protocols→core dependency direction complies |
+| 2 | the SOCKS5 UDP frame codec's home was undecided | `rillane-core::udp::associate` (the `parse_udp_header`/`encode_udp_header` pure functions) | the service loop's per-packet codec needs to sit on the table's side; the protocols→core dependency direction complies |
 | 3 | §2.6 the concurrency gate's key | the control connection's peer (ip, port); datagram sources go into the sticky key as measured | at ASSOCIATE time the datagram source is unknown; same-key judgment lives at the gate layer and the session key at the table layer, each holding on its own level |
 | 4 | §3.6 landing framing | sender-side staged teardown: Route → tear down the mapping + clear the decision cache; Timeout → keep the mapping (the counter returns to zero); Connection → tear down at ≥3 consecutive (success returns to zero); recv-side errors (forwarder) exit the mapping directly | a recv error means the relay is already dead with no recovery path; the send side implements the §3.6 table row by row with tests pinning it |
 | 5 | the reclaim task's start timing was undecided | the first ASSOCIATE's `Once` spawns `spawn_reclaimer` | the build phase has no tokio context; a session cannot exist before an ASSOCIATE |
@@ -168,11 +168,11 @@ Code: `seep-core/src/udp/associate.rs` (service and admission), `seep-protocols/
 | 8 | the mixed ingress was not mentioned | `MixedIngress` shares ASSOCIATE (transparent passthrough by the same service instance) | the socks5 branch reuses the same processing path, at no extra cost |
 | 9 | `perform_auth` had no return | return the authenticated username → the sticky key's `user` dimension | the wiring point for udp-session-table.md §3.1's user dimension |
 
-**Acceptance status (§2.7)**: the DNS-style UDP round trip (real socket, strict source verification on, direct egress, downlink framing) is pinned by `dns_style_roundtrip_via_associate_and_direct`; FRAG≠0 / truncated header / forged source (127.0.0.2) / concurrent ASSOCIATE refusal each have their own independent test. The "standard CLI client (curl/dig) + `seepctl stats` visible" integration test belongs to P0-5 (after the observability wiring).
+**Acceptance status (§2.7)**: the DNS-style UDP round trip (real socket, strict source verification on, direct egress, downlink framing) is pinned by `dns_style_roundtrip_via_associate_and_direct`; FRAG≠0 / truncated header / forged source (127.0.0.2) / concurrent ASSOCIATE refusal each have their own independent test. The "standard CLI client (curl/dig) + `rillanectl stats` visible" integration test belongs to P0-5 (after the observability wiring).
 
 ## 7. Implementation notes (P0-3 landing rulings, 2026-09)
 
-Code: `seep-core/src/udp/relay.rs` (RoutingUdpConnector + trait signature), `seep-protocols/src/outbound/{shadowsocks,wireguard}.rs` (UDP plane), `seep-runtime/src/runtime_builder.rs` (§3.1 capability scan + wiring). Tests: `seep-core/tests/udp_egress_selection.rs` (3 items) + `seep-protocols/tests/udp_egress.rs` (7 items) + 4 `seep-runtime` capability scan items.
+Code: `rillane-core/src/udp/relay.rs` (RoutingUdpConnector + trait signature), `rillane-protocols/src/outbound/{shadowsocks,wireguard}.rs` (UDP plane), `rillane-runtime/src/runtime_builder.rs` (§3.1 capability scan + wiring). Tests: `rillane-core/tests/udp_egress_selection.rs` (3 items) + `rillane-protocols/tests/udp_egress.rs` (7 items) + 4 `rillane-runtime` capability scan items.
 
 | # | Draft | Implementation | Ruling rationale |
 |---|------|------|---------|

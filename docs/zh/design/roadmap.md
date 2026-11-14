@@ -1,4 +1,4 @@
-# Seep 分阶段路线图
+# Rillane 分阶段路线图
 
 > 状态：设计文档（2026-09）· 定位依据：[positioning.md](positioning.md) · 可执行条目：[todo.md](../../../todo.md)
 > 进度速览（2026-10-05）：S0 完成 ｜ S1 完成 5/5（P0-1..P0-5 全部落地）｜ S2 完成（P1-1/P1-2 于 2026-10-03 收口 T0–T5；P1-3 R0–R4 落地）｜ S3 完成（P1-4 M0–M4、P1-5 M0–M5）｜ S4 完成（P2-1..P2-8 全部落地，P2-7 于 2026-10-04 收口；P3 六项全收口——P3-1 文档对齐、VMess 出站 2026-10-02、P3-2 插件动态加载、P3-3 平台打包 2026-10-04、P3-4 移动端 FFI 2026-10-02、P3-5 零拷贝/批量收发 2026-10-05）｜ 条目级统计见 [todo.md](../../../todo.md) 统计节（P0 5/5、P1 5/5、P2 8/8、P3 6/6）。
@@ -23,14 +23,14 @@
 
 | 复用（已实现） | 证据 |
 |---------------|------|
-| Flow/Session/Chain 数据模型 | `seep-core`（`Flow`、`FlowSession`、`ChainContext`、`RouteDecision`） |
-| 规则路由 + 组策略（7 种策略、组嵌套） | `seep-routing::RoutingEngine` |
-| 入站 socks5/http/mixed；出站 direct/ss/trojan/hy2/vless/wg/socks/http | `seep-protocols` |
-| mesh 注册/心跳/link-state/ACL/配额；chain 构建/预检/健康检查/回退 | `seep-mesh`、`seep-runtime::chain` |
-| mesh data-plane（TCP hop-by-hop + mTLS 强制 + CA 轮换/撤销） | `seep-runtime::mesh_transport`，见 [mesh.md](../mesh.md) |
-| Clash 导入 + 自有 DSL + 热更新 | `seep-subscription` |
-| 控制面 REST + seepctl（stats/nodes/chain/diagnose/mtls） | `apps/seepd`、`apps/seepctl` |
-| Prometheus /metrics + Grafana 模板 | `seep-telemetry`、`docs/grafana/` |
+| Flow/Session/Chain 数据模型 | `rillane-core`（`Flow`、`FlowSession`、`ChainContext`、`RouteDecision`） |
+| 规则路由 + 组策略（7 种策略、组嵌套） | `rillane-routing::RoutingEngine` |
+| 入站 socks5/http/mixed；出站 direct/ss/trojan/hy2/vless/wg/socks/http | `rillane-protocols` |
+| mesh 注册/心跳/link-state/ACL/配额；chain 构建/预检/健康检查/回退 | `rillane-mesh`、`rillane-runtime::chain` |
+| mesh data-plane（TCP hop-by-hop + mTLS 强制 + CA 轮换/撤销） | `rillane-runtime::mesh_transport`，见 [mesh.md](../mesh.md) |
+| Clash 导入 + 自有 DSL + 热更新 | `rillane-subscription` |
+| 控制面 REST + rillanectl（stats/nodes/chain/diagnose/mtls） | `apps/rillaned`、`apps/rillanectl` |
+| Prometheus /metrics + Grafana 模板 | `rillane-telemetry`、`docs/grafana/` |
 
 无新增开发；本阶段产物作为 S1–S4 的契约层（`IngressEndpoint`/`EgressConnector`/`FlowMiddleware` trait 不变）。
 
@@ -40,36 +40,36 @@
 
 > **进度（2026-10-02 收口）**：5/5 完成——P0-1 会话表 / P0-2 UDP ASSOCIATE / P0-3 出站载荷（direct/ss/wg）/ P0-4 mesh UDP 面（[udp-mesh-dataplane.md](udp-mesh-dataplane.md) S0–S6 全部落地，27 项测试全绿）/ P0-5 观测与配置（[udp-observability.md](udp-observability.md) S0–S6 落地）均已完成，细节见 todo.md 各条。退出标准勘误：hy2 出站 UDP 承载经 P0-3 核查改判——hysteria2 0.1.6 公开 API 无 UDP 出口，移 P0-4；P0-4 完成时维持改判（终态 V2，载具 quinn 未决）。
 
-- **复用**：`seep-core` 的 `FlowTarget` 结构（`host`/`port`/`proto`，协议为 `TargetProto` 枚举含 `Udp` 变体）与 `FlowSession`；`seep-routing` 不感知传输层，规则原样生效；Hysteria2/WireGuard/Shadowsocks 出站的既有握手/加密栈。
+- **复用**：`rillane-core` 的 `FlowTarget` 结构（`host`/`port`/`proto`，协议为 `TargetProto` 枚举含 `Udp` 变体）与 `FlowSession`；`rillane-routing` 不感知传输层，规则原样生效；Hysteria2/WireGuard/Shadowsocks 出站的既有握手/加密栈。
 - **新增**：
-  1. `seep-core`：UDP 会话语义（NAT 式映射表、超时回收、会话粘滞键 = 进程/五元组）；
-  2. `seep-protocols`：SOCKS5 UDP ASSOCIATE 入站；direct/ss/hy2/wg 出站的 UDP 载荷封装；
-  3. `seep-runtime::mesh_transport`：UDP 数据面转发（envelope over UDP 或 QUIC 数据报），与现有 TCP 面共存；
-  4. `seepd`/config：ingress/egress 的 UDP 开关与超时配置。
+  1. `rillane-core`：UDP 会话语义（NAT 式映射表、超时回收、会话粘滞键 = 进程/五元组）；
+  2. `rillane-protocols`：SOCKS5 UDP ASSOCIATE 入站；direct/ss/hy2/wg 出站的 UDP 载荷封装；
+  3. `rillane-runtime::mesh_transport`：UDP 数据面转发（envelope over UDP 或 QUIC 数据报），与现有 TCP 面共存；
+  4. `rillaned`/config：ingress/egress 的 UDP 开关与超时配置。
 - **退出标准**：SOCKS5 UDP 客户端经 direct 与 hy2 出站完成双向 UDP 代理（**hy2 半边改判 V2**，见上进度注记）；两跳 mesh 链路转发 UDP（P0-4 已达成，T2 真 socket 环回实证）；会话表按超时回收（P0-1）； UDP 路径有独立指标（归 P0-5）。
 
 ## S2：TUN 与系统路由（对应 P1）
 
 **目标**：系统级流量接管 + 进程/端口分流，游戏流量不依赖代理入站即可进入数据通路。
 
-> **进度（2026-10-03 收口）**：P1-1/P1-2（T0–T5 全部落地：设备/路由真实现 + TunIngress UDP/TCP 面接线 + 进程归因，[tun-dataplane.md](tun-dataplane.md) 分步表带提交锚）；P1-3（R0–R4 落地：network 配置区块接线 + 控制面三端点 + `seepctl route`，[network-route.md](network-route.md)）；P1-4 M0–M4 与 P1-5 M0–M5 均完成（见 S3 注记）。
+> **进度（2026-10-03 收口）**：P1-1/P1-2（T0–T5 全部落地：设备/路由真实现 + TunIngress UDP/TCP 面接线 + 进程归因，[tun-dataplane.md](tun-dataplane.md) 分步表带提交锚）；P1-3（R0–R4 落地：network 配置区块接线 + 控制面三端点 + `rillanectl route`，[network-route.md](network-route.md)）；P1-4 M0–M4 与 P1-5 M0–M5 均完成（见 S3 注记）。
 
-- **复用**：`seep-platform::network` 已有的 `TunProvider`/`RouteManager`/`PacketFilter` trait 与 TunConfig/规则模型（trait 与规则模型已成型——编译内约 3588 行；`platform.rs` 237 行未参与编译且仅含 macOS 草稿，见 [status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §1.2）；`seep-core` 路由决策不变——TUN 只是新增一种 ingress。
+- **复用**：`rillane-platform::network` 已有的 `TunProvider`/`RouteManager`/`PacketFilter` trait 与 TunConfig/规则模型（trait 与规则模型已成型——编译内约 3588 行；`platform.rs` 237 行未参与编译且仅含 macOS 草稿，见 [status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §1.2）；`rillane-core` 路由决策不变——TUN 只是新增一种 ingress。
 - **新增**：
   1. Linux 真实现：`/dev/net/tun` + TUNSETIFF、policy routing（ip rule/fwmark）、redir 模式（nftables/iptables）；
   2. OpenWrt 复用 Linux 实现（musl 静态构建）；
-  3. `seep-runtime`：接线 `TunIngress`（IP 包 → 流重组 → `FlowContext` 注入进程/端口信息）；
-  4. `seepctl route apply/clear`（todo 勘误：此前标注完成，实际缺失）；
+  3. `rillane-runtime`：接线 `TunIngress`（IP 包 → 流重组 → `FlowContext` 注入进程/端口信息）；
+  4. `rillanectl route apply/clear`（todo 勘误：此前标注完成，实际缺失）；
   5. Windows(Wintun)/macOS(utun)/Android(VpnService)/iOS(NEPacketTunnel) 按 Linux 模式后续填空（`platform.rs` 为未编译的单平台草稿，P1-1 以新模块重写接入——tun-dataplane.md §1.4）。
-- **退出标准**：Linux 上 TUN 接管后，按进程/端口规则将游戏流量路由至 mesh 链路；`seepctl route apply/clear` 幂等可用；bypass 名单（局域网/DNS/管理口）默认安全。
+- **退出标准**：Linux 上 TUN 接管后，按进程/端口规则将游戏流量路由至 mesh 链路；`rillanectl route apply/clear` 幂等可用；bypass 名单（局域网/DNS/管理口）默认安全。
 
 ## S3：混淆横切层 + 网页加速（对应 P1/P2）
 
 **目标**：流量渗过识别（抗 QoS/DPI）+ 连接效率（网页场景）。
 
-- **复用**：`FlowMiddleware` trait（混淆以中间件形态挂载——P1-4 已建成静态中间件链（`obfs_config.rs::build_middleware_chain`），P3-2 在其上加 WASM 加载器；核对史见 [status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §3）；各协议既有 TLS 伪装能力（Trojan/VLESS/Reality 类）；`seep-routing` 规则分流。
+- **复用**：`FlowMiddleware` trait（混淆以中间件形态挂载——P1-4 已建成静态中间件链（`obfs_config.rs::build_middleware_chain`），P3-2 在其上加 WASM 加载器；核对史见 [status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §3）；各协议既有 TLS 伪装能力（Trojan/VLESS/Reality 类）；`rillane-routing` 规则分流。
 - **新增**：
-  1. 混淆中间件（`seep-protocols::middleware`）：`padding`（包长分布对齐）、`timing`（微抖动）、`shaping`（流形状归一），按 profile 开关（**已完成 2026-10：padding P1-4 M0–M4、timing/shaping P2-4 M0–M2**）；
+  1. 混淆中间件（`rillane-protocols::middleware`）：`padding`（包长分布对齐）、`timing`（微抖动）、`shaping`（流形状归一），按 profile 开关（**已完成 2026-10：padding P1-4 M0–M4、timing/shaping P2-4 M0–M2**）；
   2. 客户端 TLS 指纹模拟（**已完成 2026-10，P2-5**——预设 chrome/ios/safari 形态参数表挂单漏斗 `build_client_config`，池键/工厂键扩展，见 [tls-fingerprint.md](tls-fingerprint.md)）；
   3. obfs 插件兼容（**simple-obfs 已可用**，2026-10-07 SS 出站 SIP003 插件桥——`plugin: obfs-local`，仅 SS TCP 面；salamander 归 V2 备选，hy2 混淆配置未暴露——见 [PROTOCOLS.md](../PROTOCOLS.md) SS 节）；
   4. 出站连接池：同出口 keep-alive 复用 + TLS 会话恢复，服务于网页短连接（**已完成**，2026-10-02 P1-5 M0–M5——[egress-connection-pool.md](egress-connection-pool.md)，验收判据 1–3 经 TLS 集成测复现）；
@@ -82,7 +82,7 @@
 
 - **复用**：`LatencyProbe` 中间件、`latency/bandwidth` 组策略、`ChainManager` 健康检查与 fallback、`/metrics` + Grafana。
 - **新增**：
-  1. per-link 时延分布/丢包/切换原因指标（todo 遗留项收口；**已完成 2026-10，P2-1**——`seep_mesh_link_rtt_ms`/`seep_mesh_link_loss_ratio`/`seep_mesh_switch_total` + `GET /mesh/switches`，见 [mesh-link-observability.md](mesh-link-observability.md)）；
+  1. per-link 时延分布/丢包/切换原因指标（todo 遗留项收口；**已完成 2026-10，P2-1**——`rillane_mesh_link_rtt_ms`/`rillane_mesh_link_loss_ratio`/`rillane_mesh_switch_total` + `GET /mesh/switches`，见 [mesh-link-observability.md](mesh-link-observability.md)）；
   2. 调度策略升级：以 SLO（如 p95 RTT）为目标打分选路，游戏 profile 默认启用（选路/watcher **已完成 2026-10，P2-2**——组策略 `slo:` 门内最低分 + chain `slo_watch` 劣化切换，见 [slo-scoring.md](slo-scoring.md)；游戏 profile 接线归 P2-3）；
   3. 场景 profile：`proxy`/`game`/`web` 三套配置预设（路由模板 + 混淆开关 + 调度目标），见 positioning.md §2.5（**已完成 2026-10，P2-3**——`profile:` 缺省填充展开 + `examples/profile-*.yaml` 三选一，见 [scenario-profiles.md](scenario-profiles.md)）；
   3b. 混淆中间件扩展：timing/shaping 扰动（**已完成 2026-10，P2-4**——`TimingMiddleware` 启动抖动 + `ShapingMiddleware` 写网格归一，见 [obfuscation-timing-shaping.md](obfuscation-timing-shaping.md)）；
@@ -92,7 +92,7 @@
 
 ## 阶段 × crate 映射总览
 
-| 阶段 | seep-core | seep-routing | seep-protocols | seep-platform | seep-runtime | seep-mesh | seep-subscription | apps |
+| 阶段 | rillane-core | rillane-routing | rillane-protocols | rillane-platform | rillane-runtime | rillane-mesh | rillane-subscription | apps |
 |------|-----------|--------------|----------------|---------------|--------------|-----------|-------------------|------|
 | S0（完成） | 会话/链路模型 | 规则+组策略 | TCP 入/出站 | trait 层 | chain+mesh TCP 面 | 注册/ACL/配额 | Clash+DSL+热更 | 控制面+CLI |
 | S1（5/5） | UDP 会话语义 | 不变 | UDP 入/出站 | 不变 | UDP 数据面 | link-state 扩展 | 不变 | UDP 配置 |

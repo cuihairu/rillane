@@ -9,7 +9,7 @@
 > 来源优先级；M2 本提交：mesh→routing 质量桥 + ChainManager SLO
 > watcher + `SwitchReason::SloDegraded` + `slo_watch` 程序化配置面）。
 > YAML 面归 P2-3（D-6/O-slo2）；`slo_watch` 当前仅程序化构造
-> `ChainConfig` 可达（serde 反序列化已支持，`seepd` 不透传）。
+> `ChainConfig` 可达（serde 反序列化已支持，`rillaned` 不透传）。
 > §6 E2 偏差注记：零连接链路 loss 记 0.0（观测 API 无原子
 > 「errors/connections 同快照」面，纯 RTT 节点不应被疑似丢包放大）。
 
@@ -25,7 +25,7 @@
    劣化/优化的 link_quality，断言选择翻转；
 2. **劣化自动切换**：chain SLO watcher 检出当前路径越门 →
    `handle_chain_failure` 触发切换/终止，账本事件
-   `reason="slo_degraded"`（P2-1 `seep_mesh_switch_total{reason}` 计数
+   `reason="slo_degraded"`（P2-1 `rillane_mesh_switch_total{reason}` 计数
    族自动可见，无新指标族）——单测注入劣化数据驱动 watcher；
 3. **fallback 生效**：切换后 `ChainContext` 当前路径 = 备用路径提升
    （P2-1 M1 已修提升语义，get_current_path 单口径）——断言切换后
@@ -33,10 +33,10 @@
 
 ## 1. 现状与结构约束
 
-- `RoutingEngine`（seep-routing）：`latency` 策略 = `latency_stats`
+- `RoutingEngine`（rillane-routing）：`latency` 策略 = `latency_stats`
   最后样本取 min；**样本源是模拟值**（`measure_node_latency` 随机
   10–100ms——既有 `test_health_check_integration` 依赖该路径）；依赖
-  仅 seep-config + seep-core（**不依赖 seep-mesh**——数据只能推进来，
+  仅 rillane-config + rillane-core（**不依赖 rillane-mesh**——数据只能推进来，
   先例 `update_bandwidth_stats`）；
 - P2-1 交付了真数据源：`MeshRegistry.link_rtt`（RttRing p50/p95）+
   `link_traffic`（errors/connections）——键是 `(from,to)` 链路方向，
@@ -44,7 +44,7 @@
 - `ChainManager::handle_chain_failure`（P2-1 修缮后）：切换提升语义
   正确、账本按因留痕——劣化切换可直接复用，缺的只是「检出劣化」的
   触发器与原因枚举值；
-- seep-config 无 chain YAML 块：`RuntimeBuilder.chain_config` 是唯一
+- rillane-config 无 chain YAML 块：`RuntimeBuilder.chain_config` 是唯一
   程序化入口（`Option<ChainConfig>`）。
 
 ## 2. 决策（D-x）
@@ -61,8 +61,8 @@
   `latency` 策略取数优先级 = link_quality（真）→ legacy latency_stats
   （模拟/存量）→ 首个健康成员。语义变化注记：真数据在场时从「最后
   样本」升为「p95 分位」（§9）。
-- **D-4 零依赖零 trait 变更**：seep-routing 不增依赖；mesh→routing
-  桥放 seep-runtime（聚合 RttRing/LinkTraffic：节点 p95 = 相邻链路
+- **D-4 零依赖零 trait 变更**：rillane-routing 不增依赖；mesh→routing
+  桥放 rillane-runtime（聚合 RttRing/LinkTraffic：节点 p95 = 相邻链路
   最差跳 max，节点 loss = Σerrors/Σconnections，有数据才推进）。
 - **D-5 劣化自动切换**：`ChainConfig.slo_watch: Option<SloWatch{
   p95_ms, loss_ratio, interval_secs}>`（缺省 None = watcher 不启）；
@@ -72,19 +72,19 @@
   三处，P2-1 计数族自动获得 `reason="slo_degraded"` 序列）。
 - **D-6 配置面分两步**：组级 `PolicyGroup.slo`（serde default None，
   存量零差异）本步落 YAML；chain 侧 `slo_watch` 本步只落程序化面
-  （`RuntimeBuilder.chain_config`）——seep-config 无 chain 块，YAML
+  （`RuntimeBuilder.chain_config`）——rillane-config 无 chain 块，YAML
   面随 P2-3 profile 一并落（游戏 profile 默认启用 = 该处接线）。
 
 ## 3. 数据结构
 
 ```rust
-// seep-config
+// rillane-config
 pub struct SloPolicy {            // PolicyGroup.slo: Option<...>（serde default）
     pub p95_ms: Option<u32>,      // 目标门（None = 该维不设门）
     pub loss_ratio: Option<f64>,  // 目标门（None = 该维不设门）
     pub loss_penalty_ms: Option<f64>, // 缺省 1000.0
 }
-// seep-runtime chain.rs
+// rillane-runtime chain.rs
 pub struct SloWatch {             // ChainConfig.slo_watch: Option<...>
     pub p95_ms: u32,
     pub loss_ratio: f64,
@@ -96,20 +96,20 @@ pub struct SloWatch {             // ChainConfig.slo_watch: Option<...>
 
 | 点 | 改动 |
 |----|------|
-| `PolicyGroup`（seep-config） | + `slo: Option<SloPolicy>`（default）；validate：loss_ratio ∈ [0,1]、penalty ≥ 0 |
+| `PolicyGroup`（rillane-config） | + `slo: Option<SloPolicy>`（default）；validate：loss_ratio ∈ [0,1]、penalty ≥ 0 |
 | `RoutingEngine::select_latency_member` | 门 + 评分（D-2），取数优先级（D-3） |
 | `RoutingEngine::update_link_quality` | 新公开写点 + TTL |
-| seep-runtime 桥任务 | 周期聚合 MeshRegistry → update_link_quality（节点 = 链路任一端点名） |
+| rillane-runtime 桥任务 | 周期聚合 MeshRegistry → update_link_quality（节点 = 链路任一端点名） |
 | `ChainConfig` / `ChainManager` | + slo_watch 字段 + watcher 任务（start_health_check_task 同法 spawn） |
 | `SwitchReason` | + SloDegraded（三处增量） |
 
 ## 5. 控制面
 
-无新指标族/端点：劣化切换经 P2-1 `seep_mesh_switch_total{reason=
+无新指标族/端点：劣化切换经 P2-1 `rillane_mesh_switch_total{reason=
 "slo_degraded"}` 与 `/mesh/switches` 自动可见（D-5 选枚举化的原因即
 为此）。组策略选择结果属路由内部态，本稿交付时暴露归既有 diagnose
 面；后续 O-slo1（2026-10-10）补了专用观测面：`GET /routing/stats` +
-`seepctl group`（组实时质量快照，选点/门/评分与选择同源）。
+`rillanectl group`（组实时质量快照，选点/门/评分与选择同源）。
 
 ## 6. 错误路径
 
@@ -137,8 +137,8 @@ pub struct SloWatch {             // ChainConfig.slo_watch: Option<...>
 
 | 步 | 内容与落点 | 依赖 | 验收 |
 |----|-----------|------|------|
-| M1 | seep-config SloPolicy + seep-routing 评分核心（update_link_quality/门/评分/取数优先级）+ 单测 §7-1/2 | — | §7-1/2 绿；存量 routing 测试零回归 |
-| M2 | seep-runtime 桥 + SloWatch/watcher + SwitchReason::SloDegraded + 单测 §7-3/4 + 文档回填（todo/PROTOCOLS/roadmap/本稿落地注记） | M1 | §7-3/4 绿；§0 口径逐条可复现 |
+| M1 | rillane-config SloPolicy + rillane-routing 评分核心（update_link_quality/门/评分/取数优先级）+ 单测 §7-1/2 | — | §7-1/2 绿；存量 routing 测试零回归 |
+| M2 | rillane-runtime 桥 + SloWatch/watcher + SwitchReason::SloDegraded + 单测 §7-3/4 + 文档回填（todo/PROTOCOLS/roadmap/本稿落地注记） | M1 | §7-3/4 绿；§0 口径逐条可复现 |
 
 ## 9. 偏差与假设
 
@@ -156,9 +156,9 @@ pub struct SloWatch {             // ChainConfig.slo_watch: Option<...>
 
 - **R-slo1**：watcher 误切（上报抖动瞬时越门）——MVP 无迟滞/去抖，
   interval 周期即天然平滑；误切率观察期后再定迟滞策略；
-- **O-slo1**：~~`seepctl group` 子命令展示各成员实时 SLO 分~~（**已落地
+- **O-slo1**：~~`rillanectl group` 子命令展示各成员实时 SLO 分~~（**已落地
   2026-10-10**：`RoutingEngine::group_quality_report` 快照面 + 控制面
-  `GET /routing/stats` + `seepctl group`——成员数据源 real/legacy/unknown、
+  `GET /routing/stats` + `rillanectl group`——成员数据源 real/legacy/unknown、
   p95/丢包、门判定与 latency 组当前确定性选点；选点/门/评分口径与
   select_latency_member 同源共用）；
 - **O-slo2**：~~游戏 profile 默认启用接线（P2-3）~~（**已落地

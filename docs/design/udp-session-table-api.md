@@ -1,16 +1,16 @@
 # P0-1 Interface draft: UDP session table API and reclaim algorithm
 
-> Status: **implemented (todo P0-1 complete, 2026-09)** - implementation surface = `crates/seep-core/src/udp/` (differences between the draft signatures in §2.2 below and the implementation are adjudicated by the §9 table) - design basis: [udp-session-table.md](udp-session-table.md) (this document does not re-argue, it only gives transcribable API/algorithm) - overall design: [udp-dataplane.md](udp-dataplane.md) - relay path contract: [udp-relay-path.md](udp-relay-path.md) §4 - corresponding [todo.md](../../todo.md) P0-1
+> Status: **implemented (todo P0-1 complete, 2026-09)** - implementation surface = `crates/rillane-core/src/udp/` (differences between the draft signatures in §2.2 below and the implementation are adjudicated by the §9 table) - design basis: [udp-session-table.md](udp-session-table.md) (this document does not re-argue, it only gives transcribable API/algorithm) - overall design: [udp-dataplane.md](udp-dataplane.md) - relay path contract: [udp-relay-path.md](udp-relay-path.md) §4 - corresponding [todo.md](../../todo.md) P0-1
 > Assumptions (if they conflict with the implementation this draft needs to be revised back): A1 time base uses process monotonic clock seconds (avoids NTP jumps); A2 downlink channel capacity 64 follows udp-relay-path.md §4.3; A3 `FlowSession` structure unchanged (O7 goes through a wrapper, see §4.4); A4 metric naming follows [udp-observability.md](udp-observability.md) §2.4 (finalized at landing).
 
 ## Executive summary
 
-Give the **complete public API draft** of `seep-core::udp`: module layout and visibility, all signatures of `UdpSessionTable`/`SessionRef`/`SessionLedger`, transcribable pseudocode for timeout reclaim (epoch time base + double-confirmation removal + teardown outside the lock), concurrency lock order and memory order contracts, test clock injection. Goal: during implementation you can transcribe signature by signature from this draft, and look back at udp-session-table.md for the design trade-offs in the corresponding section.
+Give the **complete public API draft** of `rillane-core::udp`: module layout and visibility, all signatures of `UdpSessionTable`/`SessionRef`/`SessionLedger`, transcribable pseudocode for timeout reclaim (epoch time base + double-confirmation removal + teardown outside the lock), concurrency lock order and memory order contracts, test clock injection. Goal: during implementation you can transcribe signature by signature from this draft, and look back at udp-session-table.md for the design trade-offs in the corresponding section.
 
 ## 1. Module layout and visibility
 
 ```
-crates/seep-core/src/udp/
+crates/rillane-core/src/udp/
 ├── mod.rs          # pub use public surface; module docs (summary of this document)
 ├── key.rs          # UdpSessionKey / ProcessIdentity          (all pub)
 ├── config.rs       # UdpSessionConfig + Default + validate     (pub)
@@ -22,7 +22,7 @@ crates/seep-core/src/udp/
 └── clock.rs        # Clock trait + RealClock (pub) / MockClock (cfg(test))
 ```
 
-Dependency direction: `table -> inner/ledger/reclaim/metrics`; `reclaim -> inner`; no cycles. `UdpBinding`'s `Relay(Box<dyn UdpRelay>)` needs `UdpRelay` (udp-dataplane.md §1.2) -- the trait definition stays in `seep-core::udp`, avoiding a reverse dependency from protocols back to runtime.
+Dependency direction: `table -> inner/ledger/reclaim/metrics`; `reclaim -> inner`; no cycles. `UdpBinding`'s `Relay(Box<dyn UdpRelay>)` needs `UdpRelay` (udp-dataplane.md §1.2) -- the trait definition stays in `rillane-core::udp`, avoiding a reverse dependency from protocols back to runtime.
 
 ## 2. Public API draft
 
@@ -77,7 +77,7 @@ impl UdpSessionTable {
     /// Start the periodic reclaim task (sweep_interval; single task, repeated calls are no-op)
     pub fn spawn_reclaimer(self: &Arc<Self>) -> JoinHandle<()>;
 
-    /// /flows and seepctl stats snapshot
+    /// /flows and rillanectl stats snapshot
     pub fn snapshot(&self) -> TableSnapshot;
 }
 
@@ -274,7 +274,7 @@ The forwarder task holds `Arc<Inner>` + its own half of the `UdpBinding`; teardo
 - If the implementation finds a signature does not fit (e.g. `forward_up` synchronization is not feasible -- `Relay` egress needs async send), it is allowed to relax to `async fn forward_up`, but §5 lock order and the outside-the-lock IO principle are non-negotiable;
 - After this document is complete, the three-document chain for P0-1: overall design (udp-dataplane.md §1) -> design basis (udp-session-table.md) -> **interface draft (this document)**.
 
-## 9. Implementation notes (P0-1 landing adjudication, code in `crates/seep-core/src/udp/`)
+## 9. Implementation notes (P0-1 landing adjudication, code in `crates/rillane-core/src/udp/`)
 
 Deviations and clarifications from the draft during implementation, all adjudicated per the relaxation license in §8; lock order and outside-the-lock IO untouched:
 
@@ -297,4 +297,4 @@ Deviations and clarifications from the draft during implementation, all adjudica
 | 15 | Independent `live_count` atomic (§3.5 admission control) | No such variable: the capacity gate reads `sessions.len()` directly (`table.rs:180`), active count = `TableMetrics` atomic | An independent count naturally drifts from the DashMap length, needing periodic sweep reconciliation; direct read is zero maintenance cost, the soft-gate semantics (§8 relaxation) allows tiny oversell within a concurrency window |
 | 16 | `on_link_failure` switches fallback + `reconnect_count += 1` (§4.1/§4.2) | Only `on_error(FailureType::Route)` + returns `failed_nodes` as-is (`ledger.rs:63-73`) | Fallback switching belongs to the TCP `add_fallback_path` surface (UDP has no call site); UDP re-routing is driven by the runtime-side ChainFailureEvent re-routing the next packet; `reconnect_count` has no increment point |
 
-Test anchors: `crates/seep-core/tests/udp_session_table.rs` (**26 items**: lifecycle 2, fast path and mapping reuse 3, timeout reclaim 4, capacity and LRU 2, decision invalidation and re-routing 1, revocation/shutdown 2, uplink failure and downlink full 5, concurrency contracts 2, ledger direct tests 3, chain_id accounting 1, table-level aggregation 1).
+Test anchors: `crates/rillane-core/tests/udp_session_table.rs` (**26 items**: lifecycle 2, fast path and mapping reuse 3, timeout reclaim 4, capacity and LRU 2, decision invalidation and re-routing 1, revocation/shutdown 2, uplink failure and downlink full 5, concurrency contracts 2, ledger direct tests 3, chain_id accounting 1, table-level aggregation 1).

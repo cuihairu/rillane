@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """P1-5 §0.2 出站连接池验收统计脚本。
 
-从 seepd 控制面 /metrics 抓取 seep_pool_* / seep_tls_* 序列，按
+从 rillaned 控制面 /metrics 抓取 rillane_pool_* / rillane_tls_* 序列，按
 egress-connection-pool.md §0.2 三判据输出验收结论。纯标准库，无第三方依赖。
 
 三组数（§0.2 口径注记：避免"握手下降"歧义，显式分组输出）：
-  ① 前台握手   = seep_pool_dials_total{origin="foreground",result="ok"}
+  ① 前台握手   = rillane_pool_dials_total{origin="foreground",result="ok"}
                  ——请求路径阻塞拨号/握手次数；命中借出的请求零拨号（判据 2 可测口径）
-  ② 恢复占比   = seep_tls_handshakes_total{type="resumed"} /
-                 seep_tls_handshakes_total{type=*}
+  ② 恢复占比   = rillane_tls_handshakes_total{type="resumed"} /
+                 rillane_tls_handshakes_total{type=*}
                  ——预热/补充拨号的握手被会话恢复（HandshakeKind::Resumed）取代的占比
-  ③ 总拨号     = seep_pool_dials_total{origin=*,result="ok"} 之和
+  ③ 总拨号     = rillane_pool_dials_total{origin=*,result="ok"} 之和
                  ——≈ 流数不降（每流消耗一条连接的结构约束，§1.2；真降需 V2 多路复用）
 
 判据（--requests N，默认 10）：
-  1. seep_pool_acquires_total{result="hit"} ≥ N−1（装配预热后 miss 可为 0）
-  2. seep_pool_reuse_ratio ≥ (N−1)/N
+  1. rillane_pool_acquires_total{result="hit"} ≥ N−1（装配预热后 miss 可为 0）
+  2. rillane_pool_reuse_ratio ≥ (N−1)/N
   3. 前台握手 ≤ 1
 
 用法：
@@ -24,7 +24,7 @@ egress-connection-pool.md §0.2 三判据输出验收结论。纯标准库，无
     cat metrics.txt | python3 scripts/pool_reuse_stats.py --in -
     python3 scripts/pool_reuse_stats.py --in metrics.txt
 
-退出码：0 = 三判据全过；1 = 有判据未过；2 = 输入缺 seep_pool_* 序列
+退出码：0 = 三判据全过；1 = 有判据未过；2 = 输入缺 rillane_pool_* 序列
 （池未启用——§8.2 关闭态对照即此形，非采集错误）。
 """
 
@@ -90,8 +90,8 @@ def main() -> int:
             text = f.read()
 
     series = parse_metrics(text)
-    if not any(name.startswith("seep_pool_") for name, _ in series):
-        print("输入无 seep_pool_* 序列：出站连接池未启用（无 egress_pool 块时"
+    if not any(name.startswith("rillane_pool_") for name, _ in series):
+        print("输入无 rillane_pool_* 序列：出站连接池未启用（无 egress_pool 块时"
               "/metrics 不渲染该族，§8.2 关闭态对照形）", file=sys.stderr)
         return 2
 
@@ -99,18 +99,18 @@ def main() -> int:
     threshold_ratio = (n - 1) / n
 
     # ---- 三组数（§0.2 口径注记）------------------------------------------
-    hit = get(series, "seep_pool_acquires_total", result="hit")
-    miss = get(series, "seep_pool_acquires_total", result="miss")
-    stale = get(series, "seep_pool_acquires_total", result="stale_redial")
-    fg_ok = get(series, "seep_pool_dials_total", origin="foreground", result="ok")
-    fg_err = get(series, "seep_pool_dials_total", origin="foreground", result="error")
-    warm_ok = get(series, "seep_pool_dials_total", origin="warm", result="ok")
-    refill_ok = get(series, "seep_pool_dials_total", origin="refill", result="ok")
+    hit = get(series, "rillane_pool_acquires_total", result="hit")
+    miss = get(series, "rillane_pool_acquires_total", result="miss")
+    stale = get(series, "rillane_pool_acquires_total", result="stale_redial")
+    fg_ok = get(series, "rillane_pool_dials_total", origin="foreground", result="ok")
+    fg_err = get(series, "rillane_pool_dials_total", origin="foreground", result="error")
+    warm_ok = get(series, "rillane_pool_dials_total", origin="warm", result="ok")
+    refill_ok = get(series, "rillane_pool_dials_total", origin="refill", result="ok")
     total_dials = fg_ok + fg_err + warm_ok + refill_ok
-    reuse_gauge = get(series, "seep_pool_reuse_ratio")
-    h_full = get(series, "seep_tls_handshakes_total", type="full")
-    h_hrr = get(series, "seep_tls_handshakes_total", type="full_hrr")
-    h_resumed = get(series, "seep_tls_handshakes_total", type="resumed")
+    reuse_gauge = get(series, "rillane_pool_reuse_ratio")
+    h_full = get(series, "rillane_tls_handshakes_total", type="full")
+    h_hrr = get(series, "rillane_tls_handshakes_total", type="full_hrr")
+    h_resumed = get(series, "rillane_tls_handshakes_total", type="resumed")
     h_all = h_full + h_hrr + h_resumed
     resumed_ratio = h_resumed / h_all if h_all > 0 else 0.0
 
@@ -125,10 +125,10 @@ def main() -> int:
     print("=" * 64)
     print("P1-5 出站连接池验收统计（egress-connection-pool.md §0.2）")
     print("=" * 64)
-    print(f"① 前台握手   seep_pool_dials_total{{origin=foreground}} ok={fg_ok:.0f} err={fg_err:.0f}")
-    print(f"   恢复占比   seep_tls_handshakes_total resumed={h_resumed:.0f}/all={h_all:.0f}"
+    print(f"① 前台握手   rillane_pool_dials_total{{origin=foreground}} ok={fg_ok:.0f} err={fg_err:.0f}")
+    print(f"   恢复占比   rillane_tls_handshakes_total resumed={h_resumed:.0f}/all={h_all:.0f}"
           f" = {resumed_ratio * 100:.1f}%  (full={h_full:.0f} full_hrr={h_hrr:.0f})")
-    print(f"③ 总拨号     seep_pool_dials_total ok 之和 = {total_dials:.0f}"
+    print(f"③ 总拨号     rillane_pool_dials_total ok 之和 = {total_dials:.0f}"
           f"  (fg={fg_ok:.0f} warm={warm_ok:.0f} refill={refill_ok:.0f}；≈流数不降，§1.2)")
     print("-" * 64)
     print(f"acquires hit={hit:.0f} miss={miss:.0f} stale_redial={stale:.0f}"

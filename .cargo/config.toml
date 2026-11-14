@@ -7,7 +7,7 @@
 #   sudo unzip /tmp/linux/native-linux-x64-5.0.0.71-Release.zip -d /opt/ohos-sdk（约 2.8G）
 #
 # wrapper 脚本（aarch64-unknown-linux-ohos-clang）自带 --target/--sysroot，
-# 无需手工 CFLAGS；验收口径 = cargo check -p seep-ffi --target aarch64-unknown-linux-ohos。
+# 无需手工 CFLAGS；验收口径 = cargo check -p rillane-ffi --target aarch64-unknown-linux-ohos。
 # CI 自托管 runner 需同装 SDK 至 /opt/ohos-sdk 后此配置方可生效。
 
 [target.aarch64-unknown-linux-ohos]

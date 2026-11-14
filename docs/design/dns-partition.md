@@ -9,7 +9,7 @@
 ## 0. Scope and acceptance criteria
 
 **todo original text**: domestic/foreign DNS split, cache, anti-poisoning,
-integrating with the `seep-platform::network::dns` design.
+integrating with the `rillane-platform::network::dns` design.
 **Acceptance original text**: split resolution is correct and cache hit rate
 has metrics; polluted domains return trusted results.
 
@@ -28,9 +28,9 @@ has metrics; polluted domains return trusted results.
 - `dns.rs` is the **data model layer** (DnsConfig/DnsServer/DnsStats/DnsHandler trait, 991 lines),
   zero engine-surface implementation -- `mod.rs::create_dns_handler` always returns Err
   "real implementation belongs to P2-8", the T0 pin test is in place;
-- seep-platform dependencies already include tokio/socket2/regex/thiserror -- **MVP adds zero new
+- rillane-platform dependencies already include tokio/socket2/regex/thiserror -- **MVP adds zero new
   dependencies**, wire format is hand-written (RFC 1035 A/AAAA/CNAME minimal surface);
-- the seep-config mirror adds no dependencies (network-route.md §1.2 ruling precedent);
+- the rillane-config mirror adds no dependencies (network-route.md §1.2 ruling precedent);
 - `TunBlockConfig.dns_servers` is annotated "record only (consumption belongs to P2-8)";
 - `DnsConfig` platform types have no domestic/trusted group concept -- grouping and rules are the
   responsibility of the **config mirror + conversion layer** (M1), the engine only receives "two
@@ -126,8 +126,8 @@ impl LocalDnsServer {
 |---|----|------|----|
 | 1 | `network/dns_engine.rs` new file | Engine in full (wire/cache/partition/resolver/server/stats) | M0 |
 | 2 | `network/mod.rs` | pub mod + re-export; `create_dns_handler` switches to the real implementation; T0 test changes criteria (D-6) | M0 |
-| 3 | seep-config `NetworkBlockConfig.dns` sub-block mirror + validate | deny_unknown_fields; rules/groups/cache/anti-poisoning surface | M1 |
-| 4 | seep-runtime conversion + runtime_builder wiring + listener start/stop | `DnsBlockConfig -> ResolverConfig`; `TunBlockConfig.dns_servers` consumption lands | M1 |
+| 3 | rillane-config `NetworkBlockConfig.dns` sub-block mirror + validate | deny_unknown_fields; rules/groups/cache/anti-poisoning surface | M1 |
+| 4 | rillane-runtime conversion + runtime_builder wiring + listener start/stop | `DnsBlockConfig -> ResolverConfig`; `TunBlockConfig.dns_servers` consumption lands | M1 |
 | 5 | Control plane `/stats` dns section | `stats_snapshot()` exposure (acceptance "hit rate has metrics") | M1 |
 
 ## 5. Errors and boundaries
@@ -176,7 +176,7 @@ pollution_suspected/per-server counts within groups). No new endpoint (reuses th
 | Step | Content and landing points | Dependencies | Acceptance |
 |----|-----------|------|------|
 | M0 done 750de34 | Design draft + dns_engine.rs in full (§3) + mod.rs factory switch + §7-1..7 tests | -- | §7 all green; mock dual-upstream anti-poisoning three surfaces hold (17 tests) |
-| M1 done | seep-config dns sub-block (`DnsBlockConfig`/groups/rules/cache/listen, deny_unknown_fields + validate E1) + runtime `dns_config.rs` conversion (domestic defaults to falling back to tun.dns_servers:53 -- the dns_servers consumption promise is honored here) / `DnsService` listener start/stop + runtime_builder assembly (independent of the network virtualization switch, §9-4) + control plane `GET /dns/stats` + doc backfill | M0 | Control plane hit rate visible (endpoint test pins the exposure surface); dig-style end-to-end (dns_config lifecycle test pinned) |
+| M1 done | rillane-config dns sub-block (`DnsBlockConfig`/groups/rules/cache/listen, deny_unknown_fields + validate E1) + runtime `dns_config.rs` conversion (domestic defaults to falling back to tun.dns_servers:53 -- the dns_servers consumption promise is honored here) / `DnsService` listener start/stop + runtime_builder assembly (independent of the network virtualization switch, §9-4) + control plane `GET /dns/stats` + doc backfill | M0 | Control plane hit rate visible (endpoint test pins the exposure surface); dig-style end-to-end (dns_config lifecycle test pinned) |
 
 ## 8.1 M1 landing supplement (2026-10-02)
 
@@ -234,14 +234,14 @@ pollution_suspected/per-server counts within groups). No new endpoint (reuses th
 - **R-dns1**: trusted group trust is guaranteed by the deployer (plaintext UDP links can still be
   link-level polluted) -- noted in docs; encrypted channels go to V2 (§9-1);
 - **O-dns1**: ~~geosite/chnroutes bulk rule source import~~ (**landed 2026-10-10**:
-  `seepctl import-rules <source> --target <name> [--face routing|dns] [--name <n>] [--out <p>]` --
+  `rillanectl import-rules <source> --target <name> [--face routing|dns] [--name <n>] [--out <p>]` --
   v2fly text list line-set parsed line by line; the routing surface yields `routing.rules` fragments
   (domain -> DomainSuffix union, keyword -> DomainKeyword, CIDR -> Network, AND semantics so each
   type gets its own column), the dns surface yields `network.dns.rules` fragments (bare domain/
   `domain:` -> exact + suffix double pattern, D-2 leading-dot criteria; `full:` -> exact);
   `regexp:`/`include:`/`@attr`/bad lines go into the skip report one by one without blocking,
   keyword/CIDR on the dns surface raise explicit errors without silent downgrade; the converter lives
-  in seep-subscription `rule_source`);
+  in rillane-subscription `rule_source`);
 - **O-dns2**: ~~DoH/DoT upstreams, EDNS0, TCP surface go to V2~~ (DoH/DoT landed in G1-8 M1,
   2026-11-10, see section 9-1; EDNS0 and the TCP surface stay V2; real-upstream interop acceptance
   awaits an encrypted upstream deployment).

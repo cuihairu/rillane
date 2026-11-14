@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "seep-demo"
+rootProject.name = "rillane-demo"
 include(":app")

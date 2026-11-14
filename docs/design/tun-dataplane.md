@@ -2,13 +2,13 @@
 
 > Upstream: [roadmap.md](roadmap.md) S2 · [networking.md](../networking.md) §3 target shape · [status-audit-tun-network-middleware.md](status-audit-tun-network-middleware.md) §5 implementation impact (that report is authoritative for audit conclusions such as platform.rs not compiled / placeholder faking write success / missing mount points).
 > This document is the finalized landing design: **device interface, data flow, error paths, test strategy, step-by-step implementation checklist**. Deviations are backfilled into §6 after landing.
-> Reuse baseline: P0-1 session semantics (sticky key / idle reclamation / error classification, **mirrored not invoked**, see §2.2) · P0-3 `EgressUdpConnector` / capability scan · TCP mesh data plane (`mesh_transport`, existing) · `socket2` (already a seep-platform dependency) · annotation-matching precedent (`geoip.country`/`client.cidr`, `seep-routing::matches_rule`).
+> Reuse baseline: P0-1 session semantics (sticky key / idle reclamation / error classification, **mirrored not invoked**, see §2.2) · P0-3 `EgressUdpConnector` / capability scan · TCP mesh data plane (`mesh_transport`, existing) · `socket2` (already a rillane-platform dependency) · annotation-matching precedent (`geoip.country`/`client.cidr`, `rillane-routing::matches_rule`).
 
 ## 0. Scope and the P1-3 boundary
 
 | In this item | Belongs to P1-3 / other items |
 |-----------|-------------------|
-| `LinuxTunProvider` (real device I/O) + minimal `LinuxRouteManager` (addr/route idempotency + rollback) | `SeepConfig.network` config block schema, `seepctl route apply/clear` CLI, full include/bypass semantics, global takeover (fwmark/ip rule/SO_MARK) |
+| `LinuxTunProvider` (real device I/O) + minimal `LinuxRouteManager` (addr/route idempotency + rollback) | `RillaneConfig.network` config block schema, `rillanectl route apply/clear` CLI, full include/bypass semantics, global takeover (fwmark/ip rule/SO_MARK) |
 | `TunIngress` (UDP NAT side + TCP userspace-stack side), programmatic runtime wiring (`RuntimeConfig.network_config`) | redir/transparent modes (nftables/iptables) |
 | Process attribution (best-effort, carried via annotations) + `MatchCondition::Process` | DnsHandler implementation (P2-8), kernel-state PacketFilter implementation (does not exist; in-process rules are exactly the bypass matching of §2.7) |
 | Linux (including OpenWrt musl on the same path) | Windows(Wintun)/macOS(utun)/Android/iOS (to be filled in later following this shape) |
@@ -27,7 +27,7 @@ Soft dependency: **UDP over a mesh link** requires P0-4 `UdpChainRouter` to land
 ### 1.2 Interface signature
 
 ```rust
-// crates/seep-platform/src/network/linux.rs (new single file, design estimated ~400 lines; landed at 1757 lines including tests)
+// crates/rillane-platform/src/network/linux.rs (new single file, design estimated ~400 lines; landed at 1757 lines including tests)
 pub struct LinuxTunProvider {
     config: TunConfig,
     fd: Option<AsyncFd<OwnedFd>>,
@@ -47,8 +47,8 @@ pub struct LinuxRouteManager { config: RoutingConfig, applied: Mutex<Vec<Applied
 
 ### 1.3 Interface attributes and system routing (minimal `LinuxRouteManager`)
 
-- **MVP routing scope = explicit routes in the main table (include semantics)**: run `ip route replace <cidr> dev <tun> metric 0` only for the included set (configured CIDRs / the port ranges that accompany process rules cannot be expressed at the routing layer and stay in-process). Specific prefixes naturally take precedence over the default route -> traffic enters tun; **the default route is not modified**, so seep's own egress connections to relay addresses are unaffected (relay addresses also enter the §2.7 auto-bypass set). **The fwmark escape surface has landed (2026-10-05 egress fwmark batch)**: `network.egress_fwmark` config + uniform `SO_MARK` on egress TCP sockets (`seep_core::net_mark::connect_tcp`, default 0 for zero difference) + apply-time `ip rule fwmark` escape table/escape rules (recorded in AppliedStep for rollback, EEXIST tolerated) -- when fwmark is configured, apply uses ip rule; global takeover via default-route rewriting still belongs to V2.
-- Tooling: the `ip` command as a subprocess (`tokio::process::Command`). Rationale: universal across Linux/OpenWrt (the busybox ip subset suffices); netlink (the `rtnetlink` crate) is for V2. Note: this is the repository's **first library-level write-operation shell-out** (the existing precedent is only seepctl diagnose's read-only collection), see §6 deviation #2.
+- **MVP routing scope = explicit routes in the main table (include semantics)**: run `ip route replace <cidr> dev <tun> metric 0` only for the included set (configured CIDRs / the port ranges that accompany process rules cannot be expressed at the routing layer and stay in-process). Specific prefixes naturally take precedence over the default route -> traffic enters tun; **the default route is not modified**, so rillane's own egress connections to relay addresses are unaffected (relay addresses also enter the §2.7 auto-bypass set). **The fwmark escape surface has landed (2026-10-05 egress fwmark batch)**: `network.egress_fwmark` config + uniform `SO_MARK` on egress TCP sockets (`rillane_core::net_mark::connect_tcp`, default 0 for zero difference) + apply-time `ip rule fwmark` escape table/escape rules (recorded in AppliedStep for rollback, EEXIST tolerated) -- when fwmark is configured, apply uses ip rule; global takeover via default-route rewriting still belongs to V2.
+- Tooling: the `ip` command as a subprocess (`tokio::process::Command`). Rationale: universal across Linux/OpenWrt (the busybox ip subset suffices); netlink (the `rtnetlink` crate) is for V2. Note: this is the repository's **first library-level write-operation shell-out** (the existing precedent is only rillanectl diagnose's read-only collection), see §6 deviation #2.
 - **Idempotency**: `ip addr replace`/`ip link set up` are naturally idempotent; route `replace` likewise. `AppliedStep` logs the executed steps;
 - **Rollback**: on mid-apply failure -> undo the executed steps in reverse order, then bail (startup failure is not silenced); `clear_routing` = undo all AppliedSteps in reverse order (P1-3's `route clear` will reuse the same mechanism).
 
@@ -96,13 +96,13 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 
 - Uplink: `FlowTarget{host: dst.ip as a string, port, proto: Udp}` (dst is an IP literal, no name-resolution step);
 - associate goes through the P0-3 `RoutingUdpConnector` (direct/ss/wg); **when the decision is `RoutePath::Chain`**: it has uniformly switched to `UdpChainRouter` **as landed with P0-4 S5 (2026-09)** (chain decision -> mesh bridge, everything else falls to inner) -- the transitional state designed earlier, "first packet bails until wired", disappeared with S5, and this design is compatible with zero changes;
-- **Downlink write-back** (new pure function, inside seep-platform, pinned by unit tests): construct `IP(dst=src.ip, src=dst.ip) + UDP header + payload`; the IPv4 checksum may be 0 but the **IPv6 UDP checksum is mandatory** -- implement real checksums uniformly (full computation, about 20 lines, pinned by golden vectors); IP id increments, TTL 64, DF set (no fragmentation).
+- **Downlink write-back** (new pure function, inside rillane-platform, pinned by unit tests): construct `IP(dst=src.ip, src=dst.ip) + UDP header + payload`; the IPv4 checksum may be 0 but the **IPv6 UDP checksum is mandatory** -- implement real checksums uniformly (full computation, about 20 lines, pinned by golden vectors); IP id increments, TTL 64, DF set (no fragmentation).
 
 ### 2.4 TCP side: the smoltcp userspace stack
 
 - Dependency assumption: `smoltcp` (new dependency, version decided at implementation time; tun2proxy is a mature precedent);
 - Model: a single smoltcp `Interface` (phy layer = an Rx/TxToken adapter over `LinuxTunProvider`) carries all connections, one `TcpSocket` per TCP 5-tuple; smoltcp plays "the peer" to the local application (answering SYN-ACK/ACK/window) and **does not listen** -- a local SYN is an active inbound connection;
-- `SmolTcpStream`: smoltcp socket <-> tokio `IoStream` adapter (double buffering + waker; implements `seep_core::IoStream`);
+- `SmolTcpStream`: smoltcp socket <-> tokio `IoStream` adapter (double buffering + waker; implements `rillane_core::IoStream`);
 - Handoff: once the handshake completes, `Flow{id, target, io: Box::new(SmolTcpStream), metadata(+process annotations)}` -> `output.forward(decision, flow)`, with the decision taken from the sticky cache of the flow's first SYN;
 - Window/MTU: smoltcp buffers sized as tun MTU-40-20; keep-alive not enabled (sensitive to game long-connections).
 
@@ -111,14 +111,14 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 - Timing: attribute **once per flow on the first packet**, `(src ip:port) -> (pid, comm)` cached with a 30s TTL;
 - Method: `/proc/net/{tcp,udp}` to get the inode -> scan `/proc/<pid>/fd` (expensive: do the fd scan only when the routing config contains a `MatchCondition::Process` rule, otherwise skip); netlink sock_diag goes to V2;
 - Carrier: annotation keys **`process.name` / `process.pid`** (same-family precedent as `geoip.country`/`client.cidr`; `Flow::context()` already passes metadata through, zero struct breakage);
-- Rule side: `seep-config` gains `MatchCondition::Process { values: Vec<String> }`, and `matches_rule` (`seep-routing/src/lib.rs:494`) gains an arm reading the `process.name` annotation (exact match on comm, or absolute-path suffix match -- pick one at implementation time and pin it with tests).
+- Rule side: `rillane-config` gains `MatchCondition::Process { values: Vec<String> }`, and `matches_rule` (`rillane-routing/src/lib.rs:494`) gains an arm reading the `process.name` annotation (exact match on comm, or absolute-path suffix match -- pick one at implementation time and pin it with tests).
 
 ### 2.6 Runtime wiring
 
 - **Ownership ruling**: `TunIngress` is the owner in TUN mode -- it internally composes `LinuxTunProvider` + `LinuxRouteManager` (device creation/addressing/route setup complete at `run()` startup, teardown on exit) and **does not go through `NetworkManager`** (whose generic container shape targets other modes; P1-3 [network-route.md](network-route.md) §2.2 already ruled it is not absorbed, and TunIngress ownership continues);
 - Landing point: `runtime_builder::build()` gains a TUN block next to the UDP block -- condition `runtime_config.enable_network_virtualization && network_config.mode == Tun`, constructing `TunIngress` and inserting it into `ingress_endpoints["tun"]`; dependencies are only the router + egress descriptors (the UDP connector table and `scan_udp_capability` **share the same single build result with the P0-3 UDP block**), with no build() ordering problem (unlike P0-4 §9.1 -- `flow_router()` is only taken at `run()` time, and start() already uniformly injects RuntimeFlowRouter);
 - `TunIngress: IngressEndpoint`: `run(self: Arc<Self>, router, output)` = device-ready gate -> packet loop + per-flow task family; isomorphic with the socks5 ingress, with zero changes to `start()`'s unified loop.
-- **Coexistence and selection boundary with existing ingresses** (same gap closure as P0-4 §1): the TUN ingress and the socks5/mixed ingress coexist side by side in `ingress_endpoints`, both **injecting the same `FlowRouter`** (RuntimeFlowRouter when chain is enabled) and sharing the egress connector table and `scan_udp_capability` result; **the selection boundary is decided by the kernel/application configuration, not chosen by seep** -- socks5 traffic is an application explicitly using the proxy listen port, TUN traffic is the system routing steering application packets into the tun device, and the two paths do not overlap (a packet never enters two ingresses at once); on the UDP side, the TUN flow's `Arc<dyn UdpRelay>` is held by `TunFlowEntry` and **is not registered into the P0-1 `UdpSessionTable`** (that table is bound to the socks5 control connection), so TUN sessions are not counted in `seep_udp_sessions_active`, see §2.8.
+- **Coexistence and selection boundary with existing ingresses** (same gap closure as P0-4 §1): the TUN ingress and the socks5/mixed ingress coexist side by side in `ingress_endpoints`, both **injecting the same `FlowRouter`** (RuntimeFlowRouter when chain is enabled) and sharing the egress connector table and `scan_udp_capability` result; **the selection boundary is decided by the kernel/application configuration, not chosen by rillane** -- socks5 traffic is an application explicitly using the proxy listen port, TUN traffic is the system routing steering application packets into the tun device, and the two paths do not overlap (a packet never enters two ingresses at once); on the UDP side, the TUN flow's `Arc<dyn UdpRelay>` is held by `TunFlowEntry` and **is not registered into the P0-1 `UdpSessionTable`** (that table is bound to the socks5 control connection), so TUN sessions are not counted in `rillane_udp_sessions_active`, see §2.8.
 - **TUN-only startup is now permitted (honored 2026-10-05; the original MVP startup-rejection constraint is revoked)**: `runtime_builder::validate()` with empty `ingress` permits startup only when `network.mode=tun` and network virtualization is enabled -- TUN itself is the ingress (`build()` injects `ingress_endpoints["tun"]`, `start()` spawns the same loop, with no special-casing for a conventional ingress); other empty-ingress configs are still rejected (the error message notes the exemption). Build-level pin `tun_only_config_builds_with_tun_as_sole_ingress`; TUN-only start on a real machine has not been separately walked through (the difference from the conventional shape is only the missing socks5 listener; the start loop is isomorphic).
 
 ### 2.7 Bypass and loop prevention
@@ -126,12 +126,12 @@ struct TunFlowTable { map: DashMap<TunFlowKey, TunFlowEntry>, idle_udp/idle_tcp:
 - **Auto-bypass set** (automatic at build time, no user configuration needed): resolved addresses of all egress `server`/`endpoint` ∪ mesh `listen_address` and registered peer addresses ∪ `control.api_bind` ∪ the tun's own subnet -- these prefixes are **not written into** include routes and also enter the in-process fallback list;
 - Default bypass: reuse `route.rs::default_bypass_rules()` (private_ip/loopback/multicast -> Direct semantics = not entering tun);
 - In-process fallback: at step ② of the packet loop, a `BypassRule::matches(dst_ip, iface)` hit drops + counts (the routing layer should never have let it through in the first place; belt and suspenders);
-- Loop prevention: in explicit include-route mode, seep's egress sockets follow the main table's default route and their targets are already in auto-bypass, so there is naturally no loop.
+- Loop prevention: in explicit include-route mode, rillane's egress sockets follow the main table's default route and their targets are already in auto-bypass, so there is naturally no loop.
 
-### 2.8 Metrics (minimal set, names join the P0-5 `seep_*` family)
+### 2.8 Metrics (minimal set, names join the P0-5 `rillane_*` family)
 
-`seep_tun_packets_total{direction}`, `seep_tun_bytes_total{direction}`, `seep_tun_flows_active`, `seep_tun_bypass_dropped_total`, `seep_tun_parse_errors_total`, `seep_tun_unknown_flow_total`, `seep_tun_process_attr_miss_total`. Atomics + `/metrics` rendering hook into the P0-5 §7 landing-point list (they appear together when that document is accepted).
-- **Metering boundary**: TUN traffic **does not enter `seep_udp_sessions_active`/`seep_udp_relay_bytes_total`** -- TunFlowTable is independent of the P0-1 `UdpSessionTable` (§2.2 mirrors without reuse); the P0-5 `seep_udp_*` series reflects only socks5 inbound UDP, while TUN sessions/bytes go only through this document's `seep_tun_*` family. Operators should not misread `seep_udp_*` being zero while TUN has traffic as a fault (the two sides use different definitions and belong to two separate series families).
+`rillane_tun_packets_total{direction}`, `rillane_tun_bytes_total{direction}`, `rillane_tun_flows_active`, `rillane_tun_bypass_dropped_total`, `rillane_tun_parse_errors_total`, `rillane_tun_unknown_flow_total`, `rillane_tun_process_attr_miss_total`. Atomics + `/metrics` rendering hook into the P0-5 §7 landing-point list (they appear together when that document is accepted).
+- **Metering boundary**: TUN traffic **does not enter `rillane_udp_sessions_active`/`rillane_udp_relay_bytes_total`** -- TunFlowTable is independent of the P0-1 `UdpSessionTable` (§2.2 mirrors without reuse); the P0-5 `rillane_udp_*` series reflects only socks5 inbound UDP, while TUN sessions/bytes go only through this document's `rillane_tun_*` family. Operators should not misread `rillane_udp_*` being zero while TUN has traffic as a fault (the two sides use different definitions and belong to two separate series families).
 
 ### 2.9 smoltcp poll driving and downlink injection (T4 main-path completion)
 
@@ -192,7 +192,7 @@ Dependencies: `T0 -> T1 -> T2 -> T3 (UDP side) / T4 (TCP side, depends only on T
 
 | Step | Content and landing point | Depends on | Acceptance | Landed |
 |----|-----------|------|------|------|
-| T0 | Trait pruning (delete `packet_stream`/`TunPacketStream`/`TunInterface`) + `network/linux.rs` skeleton + four-factory cfg dispatch + enable nix | — | Compilation green; whole-repo baseline flat; existing seep-platform consumers unaware | `c076fb8` |
+| T0 | Trait pruning (delete `packet_stream`/`TunPacketStream`/`TunInterface`) + `network/linux.rs` skeleton + four-factory cfg dispatch + enable nix | — | Compilation green; whole-repo baseline flat; existing rillane-platform consumers unaware | `c076fb8` |
 | T1 | `LinuxTunProvider`: open/TUNSETIFF/AsyncFd read-write loop + `PacketInfo` integration | T0 | 4.2 device lifecycle + the "capture IP packets into FlowRouter" pin (core of P1-1 acceptance) | `75c7747` |
 | T2 | `LinuxRouteManager`: ip helper (construction/execution separation) + addr/route idempotency + AppliedStep rollback + auto-bypass set | T0 (independent of T1) | 4.2 routing idempotency/restoration/rollback | `92f12ba` |
 | T3 | UDP side: header-codec pure functions + `TunFlowTable` + `TunIngress` UDP loop + connector wiring + build() TUN block | T1 (+T2 for routing) | 4.1 codec/flow table + 4.2 UDP full-path echo | `a9f11dc` |
@@ -225,7 +225,7 @@ Acceptance alignment: P1-1 = T1+T2 (+ musl cross-compilation smoke belongs to P3
 
 - **R-tun1 (largest item, eliminated)**: smoltcp integration (phy adaptation/waker/window tuning) is the main T4 workload -- **T4 has landed @b5785c2** (`tun_tcp.rs` SmolTcpStream takeover, fallback path not enabled);
 - **R-tun2**: cost of `/proc` fd scanning -- triggered only for new flows + only when a Process rule exists; sampling and the switch are left to be tuned at implementation time;
-- **R-tun3**: seep's own control-plane/metrics traffic looping back in a global tun-takeover scenario -- include mode is naturally exempt; the fwmark escape surface has landed (egress socket `SO_MARK` + `ip rule fwmark` escape table), while the global mode with default-route rewriting still belongs to V2;
+- **R-tun3**: rillane's own control-plane/metrics traffic looping back in a global tun-takeover scenario -- include mode is naturally exempt; the fwmark escape surface has landed (egress socket `SO_MARK` + `ip rule fwmark` escape table), while the global mode with default-route rewriting still belongs to V2;
 - **O-icmp**: compensation for ICMP (PMTUD/ping) being unsupported = recommend MTU 1400; whether game scenarios need ICMP pass-through is pending real testing;
 - **O-quic**: whether QUIC traffic needs to be recognized as `TargetProto::Quic` for rules (the enum is already reserved) -- not done in MVP, to be discussed when a rule need appears;
 - **O-netlink**: migration window from the `ip` command -> rtnetlink (P1-3 or V2).

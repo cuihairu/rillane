@@ -1,6 +1,6 @@
 # Protocol support
 
-Seep is a network routing proxy system that supports a number of mainstream network protocols.
+Rillane is a network routing proxy system that supports a number of mainstream network protocols.
 
 > **Implementation status notes (verified against the code 2026-09; backfilled P0-1..P0-4 landing status 2026-09-30; backfilled P1-4/P1-5/P2-1..P2-6 landing status 2026-10-02; backfilled P2-7 landing status 2026-10-04; backfilled gRPC/h2 transport landing status 2026-10-10)**: the protocol semantics in this document are design-level wording; the "Status" line at the top of each section is the actual state of the code. Overall comparison:
 >
@@ -9,18 +9,18 @@ Seep is a network routing proxy system that supports a number of mainstream netw
 > | Ingress socks5 (CONNECT) / http (CONNECT) / mixed | implemented (TCP) | -- |
 > | Ingress socks5 UDP ASSOCIATE | **implemented (2026-09, P0-2)**: RFC 1928 ASSOCIATE + datagram relay; the `udp:` block is off by default | -- |
 > | Egress direct/socks5/http/shadowsocks/trojan/hysteria2/vless/wireguard (TCP) | implemented | -- |
-> | Egress UDP underlay (direct/ss/wg) | **implemented (2026-09, P0-3)**; integration test tool = `seepctl udp-probe` (P0-5, exit codes 0-4) | -- |
+> | Egress UDP underlay (direct/ss/wg) | **implemented (2026-09, P0-3)**; integration test tool = `rillanectl udp-probe` (P0-5, exit codes 0-4) | -- |
 > | Mesh TCP/UDP envelope binary encoding (TCP plane JSON -> binary v2, receiver sniffs and stays compatible with legacy JSON) | **implemented (2026-10, P2-6)**: the UDP plane was binary from P0-4; this step switched the TCP plane `MeshEnvelope` | [mesh-envelope-binary.md](design/mesh-envelope-binary.md) |
 > | Mesh UDP multi-hop forwarding (UdpEnvelope over UDP datagrams) | **implemented (2026-09, P0-4)**: FULL/CACHED hop caching, exit per-flow socket, same-port dual stack, plaintext gate (chain+udp without configured encryption is refused at build time) | -- |
-> | UDP observability and integration testing (`seep_udp_*` metric family / `/udp/stats` / the UDP section of `seepctl stats` / `udp-probe`) | **implemented (2026-09, P0-5)**: `/metrics` always renders (all zeros when the switch is off, the endpoint does not disappear) + ingress-level `udp_enabled` override + all `udp:` config fields | -- |
+> | UDP observability and integration testing (`rillane_udp_*` metric family / `/udp/stats` / the UDP section of `rillanectl stats` / `udp-probe`) | **implemented (2026-09, P0-5)**: `/metrics` always renders (all zeros when the switch is off, the endpoint does not disappear) + ingress-level `udp_enabled` override + all `udp:` config fields | -- |
 > | Egress UDP underlay (hy2) | not implemented (the public API of `hysteria2` 0.1.6 has no UDP egress; P0-4 is done and **the re-ruling stands**) | V2 (quinn underlay, undecided) |
 > | Egress vmess connector | **implemented (2026-10)**: VMess AEAD auth header (authID time window + anti-replay) + AES-128-GCM/ChaCha20-Poly1305 chunked stream data plane, tcp (optionally layered with TLS) / ws (optionally layered with TLS) / gRPC (always layered with TLS) / h2 (always layered with TLS); `alter_id=0` only, UDP underlay not implemented | the todo "VMess egress" item |
 > | hysteria v1 | **egress connector not implemented** (config schema and subscription conversion are supported, build-time error) | no plans (hy2 only) |
-> | Egress connection pool / TLS session resumption | **implemented (2026-10, P1-5)**: `egress_pool:` config block + pre-established borrow-and-consume pool (trojan/http/vless/vmess + direct selection) + TLS session resumption (process-wide shared ClientConfig) + `seep_pool_*`/`seep_tls_*` metrics + `GET /egress/pool/stats` | -- |
-> | Packet-length padding obfuscation cross-cutting layer (`FlowMiddleware` + chain `MeshEnvelope` frame padding + `seep_obfs_*` metric family + distribution check script) | **implemented (2026-10, P1-4)**: fixed/bucket/range shapes; a no-op for single-hop TCP with no own frame, UDP datagram padding has a reserved hook behind `UdpEnvelope` (V2) | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
-> | Mesh link observability (per-link RTT quantiles / observed loss / switch-reason ledger) | **implemented (2026-10, P2-1)**: `seep_mesh_link_rtt_ms{from,to,quantile}` + `seep_mesh_link_loss_ratio{from,to}` + `seep_mesh_switch_total{reason}` (always rendered while chains are enabled) + `GET /mesh/switches` with the last 100 events; all three families and the endpoint are absent while mesh is disabled | [mesh-link-observability.md](design/mesh-link-observability.md) |
-> | Mesh UDP anti-replay + revocation visibility | **implemented (2026-10-04, P2-7)**: v2 frame stream sequence numbers on the UDP plane + per-(flow,dir) 64-bit sliding window (`replay_dropped` counted into `/udp/stats` and `/metrics`) + revocation file carrier with mtime hot reload + runtime observability (`GET /mtls/revoked`, `seepctl mtls revoke status`); OCSP/CA direct revocation queries and end-to-end MAC are deferred to V2 | [mesh-advanced-security.md](design/mesh-advanced-security.md) |
-> | Timing/shaping perturbation (startup jitter + grid-aligned writes) | **implemented (2026-10, P2-4)**: `TimingMiddleware` sleeps inside handle (fixed/uniform, `max_delay_ms` gate), `ShapingMiddleware` wraps `flow.io` as `PacedIo` (interval grid + jitter, the read side is not wrapped); annotations are observable as `seep.obfs.timing`/`seep.obfs.shaping`; the game preset demonstrates the wiring | [obfuscation-timing-shaping.md](design/obfuscation-timing-shaping.md) |
+> | Egress connection pool / TLS session resumption | **implemented (2026-10, P1-5)**: `egress_pool:` config block + pre-established borrow-and-consume pool (trojan/http/vless/vmess + direct selection) + TLS session resumption (process-wide shared ClientConfig) + `rillane_pool_*`/`rillane_tls_*` metrics + `GET /egress/pool/stats` | -- |
+> | Packet-length padding obfuscation cross-cutting layer (`FlowMiddleware` + chain `MeshEnvelope` frame padding + `rillane_obfs_*` metric family + distribution check script) | **implemented (2026-10, P1-4)**: fixed/bucket/range shapes; a no-op for single-hop TCP with no own frame, UDP datagram padding has a reserved hook behind `UdpEnvelope` (V2) | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
+> | Mesh link observability (per-link RTT quantiles / observed loss / switch-reason ledger) | **implemented (2026-10, P2-1)**: `rillane_mesh_link_rtt_ms{from,to,quantile}` + `rillane_mesh_link_loss_ratio{from,to}` + `rillane_mesh_switch_total{reason}` (always rendered while chains are enabled) + `GET /mesh/switches` with the last 100 events; all three families and the endpoint are absent while mesh is disabled | [mesh-link-observability.md](design/mesh-link-observability.md) |
+> | Mesh UDP anti-replay + revocation visibility | **implemented (2026-10-04, P2-7)**: v2 frame stream sequence numbers on the UDP plane + per-(flow,dir) 64-bit sliding window (`replay_dropped` counted into `/udp/stats` and `/metrics`) + revocation file carrier with mtime hot reload + runtime observability (`GET /mtls/revoked`, `rillanectl mtls revoke status`); OCSP/CA direct revocation queries and end-to-end MAC are deferred to V2 | [mesh-advanced-security.md](design/mesh-advanced-security.md) |
+> | Timing/shaping perturbation (startup jitter + grid-aligned writes) | **implemented (2026-10, P2-4)**: `TimingMiddleware` sleeps inside handle (fixed/uniform, `max_delay_ms` gate), `ShapingMiddleware` wraps `flow.io` as `PacedIo` (interval grid + jitter, the read side is not wrapped); annotations are observable as `rillane.obfs.timing`/`rillane.obfs.shaping`; the game preset demonstrates the wiring | [obfuscation-timing-shaping.md](design/obfuscation-timing-shaping.md) |
 > | SLO-scored path selection (group policy `slo:` gate + penalty scoring + chain-side `slo_watch` switch on degradation) | **implemented (2026-10, P2-2)**: the `latency` policy with real data present = the lowest score inside the gate (score = p95 + loss x penalty); the chain watcher switches as soon as the gate is crossed, ledger entry `reason="slo_degraded"`; deployments without real data behave unchanged; the `slo_watch` YAML surface is deferred to P2-3 | [slo-scoring.md](design/slo-scoring.md) |
 > | Scenario profile presets (`profile: proxy\|game\|web`, expanded at config time) | **implemented (2026-10, P2-3)**: default-filling semantics (explicit always wins, zero branching at runtime); game = SLO targets + domain templates + bucket padding; web = connection pool; pick any one of `examples/profile-*.yaml` and it runs | [scenario-profiles.md](design/scenario-profiles.md) |
 > | obfs/salamander plugins | not implemented (the salamander pseudo-state is not on this repo's roadmap) | V2 candidate |
@@ -32,7 +32,7 @@ Seep is a network routing proxy system that supports a number of mainstream netw
 ## Ingress Protocols
 
 ### SOCKS5 proxy
-> Status: CONNECT is implemented (including username/password authentication, `IngressConfig::Socks5`) and **UDP ASSOCIATE (2026-09, P0-2)** -- cmd 0x01/0x03 dispatch (`seep-protocols/src/inbound/socks5.rs`), ASSOCIATE service/datagram header encoding/decoding and admission in `seep-core/src/udp/associate.rs`, the auth username enters the sticky key, the mixed ingress shares the same path; the `udp:` config block is off by default (when off, 0x03 gets 0x07). Details in [udp-dataplane.md](design/udp-dataplane.md) §2 and [udp-relay-path.md](design/udp-relay-path.md) §2.
+> Status: CONNECT is implemented (including username/password authentication, `IngressConfig::Socks5`) and **UDP ASSOCIATE (2026-09, P0-2)** -- cmd 0x01/0x03 dispatch (`rillane-protocols/src/inbound/socks5.rs`), ASSOCIATE service/datagram header encoding/decoding and admission in `rillane-core/src/udp/associate.rs`, the auth username enters the sticky key, the mixed ingress shares the same path; the `udp:` config block is off by default (when off, 0x03 gets 0x07). Details in [udp-dataplane.md](design/udp-dataplane.md) §2 and [udp-relay-path.md](design/udp-relay-path.md) §2.
 
 - **Protocol version**: SOCKS5 (RFC 1928)
 - **Authentication**:
@@ -191,7 +191,7 @@ Seep is a network routing proxy system that supports a number of mainstream netw
   - Obfuscation support (salamander)
 
 ### WireGuard
-> Status: partially implemented -- TCP traffic is forwarded through the system WireGuard interface (`address`/`allowed_ips`/`preshared_key`/`persistent_keepalive`/`mtu`/`dns` take effect, needs a system WG interface and the corresponding permissions); "kernel-level implementation" means it depends on the system WG, and seep does not do its own encryption/decryption; **the UDP underlay is implemented (2026-09, P0-3: `WireguardUdpConnector` -- pre-check after parsing `allowed_ips` (not in the set -> split the mapping and re-route) + an `mtu-80` cap, still through the system WG interface path)**, see [udp-relay-path.md](design/udp-relay-path.md).
+> Status: partially implemented -- TCP traffic is forwarded through the system WireGuard interface (`address`/`allowed_ips`/`preshared_key`/`persistent_keepalive`/`mtu`/`dns` take effect, needs a system WG interface and the corresponding permissions); "kernel-level implementation" means it depends on the system WG, and rillane does not do its own encryption/decryption; **the UDP underlay is implemented (2026-09, P0-3: `WireguardUdpConnector` -- pre-check after parsing `allowed_ips` (not in the set -> split the mapping and re-route) + an `mtu-80` cap, still through the system WG interface path)**, see [udp-relay-path.md](design/udp-relay-path.md).
 
 - **Protocol**: a fast, modern VPN
 - **Encryption**:
@@ -208,7 +208,7 @@ Seep is a network routing proxy system that supports a number of mainstream netw
 
 ## Protocol extensions
 
-Seep's modular design lets a new protocol be attached as an `EgressConnector` implementation:
+Rillane's modular design lets a new protocol be attached as an `EgressConnector` implementation:
 
 1. **Implement the protocol trait**: create a new protocol handler
 2. **Register the protocol**: declare the new protocol in the config file
@@ -218,7 +218,7 @@ Seep's modular design lets a new protocol be attached as an `EgressConnector` im
 
 ```rust
 use async_trait::async_trait;
-use seep_core::{Flow, FlowRouter};
+use rillane_core::{Flow, FlowRouter};
 
 pub struct MyProtocol;
 
@@ -237,7 +237,7 @@ impl EgressConnector for MyProtocol {
 
 ## Performance optimization
 
-> Status: async I/O (tokio) is implemented; **zero-copy/batched I/O landed within scope** (2026-10, P3-5: the relay buffer is parameterized as `performance.relay_buffer` (default 8192, zero difference) + `copy_bidirectional_with_sizes` at 16 relay points + mesh frame writes merged into one vectored submission; the benchmark and scope ruling are in [performance-io.md](design/performance-io.md) -- kernel splice and UDP recvmmsg/sendmmsg are out of scope, documented as-is); the **connection pool is implemented** (2026-10, P1-5: pre-established borrow-and-consume pool + TLS session resumption, the `egress_pool:` block, metrics such as `seep_pool_reuse_ratio` are visible -- total dials not dropping below the flow count is a structural constraint because each flow consumes one connection, and reducing total connections is deferred to V2 multiplexing); "smart selection / failover" is partly true -- group-policy path selection (7 policies) and mesh chain failover are implemented; "session persistence" holds on the UDP side (2026-09, P0-1 session table: process/five-tuple sticky keys + idle/lifetime reclamation, `seep-core/src/udp/`), and TCP connection reuse holds in pool form (2026-10, P1-5).
+> Status: async I/O (tokio) is implemented; **zero-copy/batched I/O landed within scope** (2026-10, P3-5: the relay buffer is parameterized as `performance.relay_buffer` (default 8192, zero difference) + `copy_bidirectional_with_sizes` at 16 relay points + mesh frame writes merged into one vectored submission; the benchmark and scope ruling are in [performance-io.md](design/performance-io.md) -- kernel splice and UDP recvmmsg/sendmmsg are out of scope, documented as-is); the **connection pool is implemented** (2026-10, P1-5: pre-established borrow-and-consume pool + TLS session resumption, the `egress_pool:` block, metrics such as `rillane_pool_reuse_ratio` are visible -- total dials not dropping below the flow count is a structural constraint because each flow consumes one connection, and reducing total connections is deferred to V2 multiplexing); "smart selection / failover" is partly true -- group-policy path selection (7 policies) and mesh chain failover are implemented; "session persistence" holds on the UDP side (2026-09, P0-1 session table: process/five-tuple sticky keys + idle/lifetime reclamation, `rillane-core/src/udp/`), and TCP connection reuse holds in pool form (2026-10, P1-5).
 
 ### Protocol-layer optimization
 - **Zero-copy**: Rust's ownership system avoids unnecessary memory copies (**implemented (within scope)**, 2026-10 P3-5 -- a userspace relay cannot avoid copies entirely (TLS termination, middleware chain semantics), so what landed is fewer copies and syscalls: `performance.relay_buffer` makes the bidirectional buffers configurable (+67% median throughput in the 8K->256K benchmark), `copy_bidirectional_with_sizes` at 16 relay points, mesh frame writes merged into one vectored submission (about 26% faster on the 4 KiB frame benchmark; rustls has no vectored path on the TLS segment, so it falls back to today's equivalent), and kernel splice is ruled out of scope (the middleware chain wrapper breaks fd semantics), see [performance-io.md](design/performance-io.md))
@@ -251,7 +251,7 @@ impl EgressConnector for MyProtocol {
 - **Failover**: detect failures automatically and switch to a backup path
 - **Link observability**: per-link RTT p50/p95 quantiles, observed loss ratio, a switch-reason ledger and counters (2026-10, P2-1, three families in `/metrics` + `GET /mesh/switches`)
 - **SLO-scored path selection**: the `latency` policy scores against p95 RTT/loss targets (the `slo:` gate + penalty), the chain side's `slo_watch` switches automatically on degradation and the reason is ledgered (2026-10, P2-2, see [slo-scoring.md](design/slo-scoring.md))
-- **TLS fingerprint shapes**: the four TLS variants of egress, `tls_fingerprint: none|chrome|ios|safari`, with pool-key/factory-key extension (2026-10, P2-5, `seepctl tls-fingerprint` prints the preset shape_material comparison table, see [tls-fingerprint.md](design/tls-fingerprint.md))
+- **TLS fingerprint shapes**: the four TLS variants of egress, `tls_fingerprint: none|chrome|ios|safari`, with pool-key/factory-key extension (2026-10, P2-5, `rillanectl tls-fingerprint` prints the preset shape_material comparison table, see [tls-fingerprint.md](design/tls-fingerprint.md))
 
 ## Security features
 
@@ -303,7 +303,7 @@ egress:
 ## Compatibility
 
 ### Client compatibility
-Seep's ingress is interoperable with mainstream proxy clients (the SOCKS5/HTTP CONNECT scope; methods the ingress does not support return 405):
+Rillane's ingress is interoperable with mainstream proxy clients (the SOCKS5/HTTP CONNECT scope; methods the ingress does not support return 405):
 
 - **Windows**: Shadowsocks-windows, Clash, v2rayN, Qv2ray
 - **macOS**: ShadowsocksX-NG, ClashX, V2RayU

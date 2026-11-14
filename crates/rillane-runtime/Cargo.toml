@@ -1,0 +1,48 @@
+[package]
+name = "rillane-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+dashmap.workspace = true
+smoltcp.workspace = true
+petgraph.workspace = true
+uuid.workspace = true
+rillane-config = { path = "../rillane-config" }
+rillane-core = { path = "../rillane-core" }
+rillane-platform = { path = "../rillane-platform" }
+rillane-protocols = { path = "../rillane-protocols" }
+rillane-routing = { path = "../rillane-routing" }
+rillane-telemetry = { path = "../rillane-telemetry" }
+rillane-mesh = { path = "../rillane-mesh" }
+rillane-subscription = { path = "../rillane-subscription" }
+rillane-plugins = { path = "../rillane-plugins" }
+notify.workspace = true
+futures.workspace = true
+whoami.workspace = true
+num_cpus.workspace = true
+regex.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hkdf.workspace = true
+aes-gcm.workspace = true
+aes.workspace = true
+libc = "0.2"
+rustls.workspace = true
+tokio-rustls.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+# P3-2（plugin-loader.md §4.3）：链装配测试以最小 wat 内联模块产出 .wasm 落盘；
+# 版本随 wasmtime 所引（Cargo.lock wat 1.261.0），复用同份缓存
+wat = "1.261"
+# mesh mTLS 重载路径回归测试以 rcgen 自签证书为夹具。
+rcgen.workspace = true

@@ -4,7 +4,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
-        android:label="SEEP Demo"
+        android:label="RILLANE Demo"
         android:allowBackup="false"
         android:theme="@android:style/Theme.Material.Light">
 
@@ -18,7 +18,7 @@
         <!-- VpnService：系统以 BIND_VPN_SERVICE 守卫；consent 弹窗经
              VpnService.prepare() 或 appops ACTIVATE_VPN 放行（CI 自动化路径） -->
         <service
-            android:name=".SeepVpnService"
+            android:name=".RillaneVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:exported="false">
             <intent-filter>

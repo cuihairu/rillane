@@ -1,4 +1,4 @@
-# Seep 示例插件（P3-2）
+# Rillane 示例插件（P3-2）
 
 WASM `FlowMiddleware` 插件（ABI：[docs/design/plugin-loader.md](../docs/design/plugin-loader.md) §1.2/§1.3）。
 本目录**不随宿主 workspace 编译**（wasm 专属 crate，独立 `[workspace]`，plugin-loader.md §7 P-load）。
@@ -15,7 +15,7 @@ rustup target add wasm32-unknown-unknown
 plugins/build.sh            # 产物 → plugins/output/{rate_limit,content_filter}.wasm
 ```
 
-## 启用（seepd 配置）
+## 启用（rillaned 配置）
 
 ```yaml
 obfuscation:
@@ -28,7 +28,7 @@ obfuscation:
 
 - 链序：内置 `middleware` 声明序在前，`plugins` 声明序在后；
 - 相对路径按进程 CWD 解析（validate E1：enabled 时路径必须存在）；
-- 链重建只发生在**进程重启**：当前 seepd 无配置热更新（启动一次性读配置，
+- 链重建只发生在**进程重启**：当前 rillaned 无配置热更新（启动一次性读配置，
   无 SIGHUP/watch），混淆链为进程内静态——插件实例状态（令牌桶）随进程退出
   清零，同进程内改配置不会重建链（plugin-loader.md §7 R-state 的触发前提
   现不成立）。
@@ -37,11 +37,11 @@ obfuscation:
 
 ```bash
 plugins/build.sh
-cargo run -p seep-plugins --example plugins_smoke
+cargo run -p rillane-plugins --example plugins_smoke
 ```
 
 预期：限速插件容量内放行、桶空后 deny（note 可见）；内容过滤命中禁词 deny、
-干净载荷 allow 且首块回放完好；trap/fuel 隔离由 seep-plugins 内联 WAT 单测钉死
+干净载荷 allow 且首块回放完好；trap/fuel 隔离由 rillane-plugins 内联 WAT 单测钉死
 （§4.1，同一 ABI 面）。
 
 ## 插件单测（宿主纯逻辑面）

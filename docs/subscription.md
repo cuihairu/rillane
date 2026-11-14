@@ -1,12 +1,12 @@
 # Subscription guide (current state)
 
-> Status: the whole chain is implemented (`crates/seep-subscription`) · Related: [architecture.md](architecture.md) · [mesh.md](mesh.md) · the Seep DSL schema is defined in `crates/seep-subscription/src/seep_dsl.rs`
+> Status: the whole chain is implemented (`crates/rillane-subscription`) · Related: [architecture.md](architecture.md) · [mesh.md](mesh.md) · the Rillane DSL schema is defined in `crates/rillane-subscription/src/rillane_dsl.rs`
 
 ## Executive summary
 
-The Seep subscription chain covers: fetch (conditional requests/proxy/custom headers) -> type auto-detection (Clash YAML / share links / base64) -> conversion into `SeepConfig` -> TTL+LRU cache -> two-level scheduled refresh (reload skipped when the content hash is unchanged) -> control-plane CRUD and hot reload. This page describes each stage and its boundaries against the actual code.
+The Rillane subscription chain covers: fetch (conditional requests/proxy/custom headers) -> type auto-detection (Clash YAML / share links / base64) -> conversion into `RillaneConfig` -> TTL+LRU cache -> two-level scheduled refresh (reload skipped when the content hash is unchanged) -> control-plane CRUD and hot reload. This page describes each stage and its boundaries against the actual code.
 
-There is also an offline conversion surface: `rule_source.rs` (O-dns1, 2026-10-10) parses geosite/chnroutes text rule sources into routing/DNS partition rule fragments (fed by `seepctl import-rules`), bypassing the subscription cache chain.
+There is also an offline conversion surface: `rule_source.rs` (O-dns1, 2026-10-10) parses geosite/chnroutes text rule sources into routing/DNS partition rule fragments (fed by `rillanectl import-rules`), bypassing the subscription cache chain.
 
 ## 1. Subscription sources and type detection
 
@@ -20,18 +20,18 @@ There is also an offline conversion surface: `rule_source.rs` (O-dns1, 2026-10-1
 - **Conditional requests**: `ETag` / `Last-Modified` are recorded and sent back; a 304 from the server hits the cache and skips re-conversion.
 - The fetch result `FetchResult` carries response header metadata and the final content.
 
-## 3. Conversion into SeepConfig (`clash.rs` + `converter.rs`)
+## 3. Conversion into RillaneConfig (`clash.rs` + `converter.rs`)
 
-| Clash concept | Seep mapping |
+| Clash concept | Rillane mapping |
 |-----------|----------|
 | `proxies` | `egress` (the `EgressConfig` variants) |
 | `proxy-groups` | `routing.groups` (`PolicyGroup`, policy preserved; members support nested groups and weights) |
 | `rules` | `routing.rules` |
 
 - When conversion produces an **egress type not implemented yet** (e.g. hysteria v1 -- schema/subscription conversion supports it, the egress connector is missing) it is not silently dropped: it errors at the runtime build (`RuntimeBuilder`) stage with a message. Protocol implementation boundaries are in the status notes of [PROTOCOLS.md](PROTOCOLS.md).
-- **Transport layer fields** (`network` + each `*-opts` block, completed with the protocol batch in 2026-10): import recognizes `network: tcp | ws | grpc | h2` and `ws-opts` (path / `headers.host`, Host header key accepted in three casings; flat `path`/`host` as fallback), `grpc-opts` (`grpc-service-name` canonical key + variant aliases), `h2-opts` (path/host, host accepted as a scalar or an array); SS `plugin`/`plugin-opts` convert to SIP003 per a translation table (the obfs family -> `obfs-local`, v2ray-plugin passed through with original key/value names, any other plugin name is rejected rather than imported loosely). Export is symmetric: ws/h2 emit a block per `network` (trojan does not produce h2 -- seep's trojan whitelist has no h2 scope), `grpc-opts` only when `network=grpc`; SS plugins have no Clash equivalent, so export degrades with a notice instead of producing anything. `network` values outside seep's whitelist error at RuntimeBuilder build time.
-- Export into the native Seep DSL and re-import is also supported (`seep_dsl.rs`): `version/meta/nodes (auth/transport/tls/location)/groups (strategy, nested members)/rulesets`, with a validator.
-- **Seep -> Clash reverse export** (`clash_export.rs`, 2026-10-07): `ClashExporter::export(&SeepConfig)` produces Clash YAML plus a report (exported/degraded lists). proxies cover ss/vmess/vless/trojan/http(s)/socks5/hysteria2/hysteria/wireguard (direct maps to the built-in `DIRECT` and produces no proxy); rules only when a single condition can be linearized (seep multi-condition AND is not the same as Clash's first-match-stop, so multi-condition rules are skipped and ledgered); group policies Fixed->select, Latency->url-test (generate_204/300s), Random/Weighted/Bandwidth/RoundRobin->load-balance(round-robin), ConsistentHash->load-balance(consistent-hashing); field-level items with no counterpart (e.g. `tls_fingerprint`) are added to `skipped` one by one without blocking export.
+- **Transport layer fields** (`network` + each `*-opts` block, completed with the protocol batch in 2026-10): import recognizes `network: tcp | ws | grpc | h2` and `ws-opts` (path / `headers.host`, Host header key accepted in three casings; flat `path`/`host` as fallback), `grpc-opts` (`grpc-service-name` canonical key + variant aliases), `h2-opts` (path/host, host accepted as a scalar or an array); SS `plugin`/`plugin-opts` convert to SIP003 per a translation table (the obfs family -> `obfs-local`, v2ray-plugin passed through with original key/value names, any other plugin name is rejected rather than imported loosely). Export is symmetric: ws/h2 emit a block per `network` (trojan does not produce h2 -- rillane's trojan whitelist has no h2 scope), `grpc-opts` only when `network=grpc`; SS plugins have no Clash equivalent, so export degrades with a notice instead of producing anything. `network` values outside rillane's whitelist error at RuntimeBuilder build time.
+- Export into the native Rillane DSL and re-import is also supported (`rillane_dsl.rs`): `version/meta/nodes (auth/transport/tls/location)/groups (strategy, nested members)/rulesets`, with a validator.
+- **Rillane -> Clash reverse export** (`clash_export.rs`, 2026-10-07): `ClashExporter::export(&RillaneConfig)` produces Clash YAML plus a report (exported/degraded lists). proxies cover ss/vmess/vless/trojan/http(s)/socks5/hysteria2/hysteria/wireguard (direct maps to the built-in `DIRECT` and produces no proxy); rules only when a single condition can be linearized (rillane multi-condition AND is not the same as Clash's first-match-stop, so multi-condition rules are skipped and ledgered); group policies Fixed->select, Latency->url-test (generate_204/300s), Random/Weighted/Bandwidth/RoundRobin->load-balance(round-robin), ConsistentHash->load-balance(consistent-hashing); field-level items with no counterpart (e.g. `tls_fingerprint`) are added to `skipped` one by one without blocking export.
 
 ## 4. Cache and refresh (`cache.rs` + `lib.rs`)
 
@@ -52,21 +52,21 @@ Control plane (`control.api_bind`, authentication in the Auth subsection of [mes
 | `DELETE /subscriptions/{name}` | delete a subscription |
 
 - A successful refresh with content changes triggers a runtime hot reload (routing/group/egress rebuild), and subscription events are counted in metrics (`inc_subscription_event`).
-- The config file itself is **not watched automatically at the moment**: seepd reads config once at startup, and `seep-runtime::HotReloadManager` (`watch_config_file`) is an exported capability that seepd does not wire up -- changing config requires restarting the process or triggering a hot reload through subscriptions/the control plane.
+- The config file itself is **not watched automatically at the moment**: rillaned reads config once at startup, and `rillane-runtime::HotReloadManager` (`watch_config_file`) is an exported capability that rillaned does not wire up -- changing config requires restarting the process or triggering a hot reload through subscriptions/the control plane.
 
 ## 6. CLI
 
 ```bash
-seepctl import-clash <url|file> --output seep.yaml   # offline conversion preview (no daemon; -o is equivalent, default config/clash_import.yaml)
-seepctl export-clash <seep config> -o clash.yaml     # Seep -> Clash reverse export (offline; default config/clash_export.yaml, prints the degraded/skipped list at the end)
-seepctl import-rules <url|file> --target <group or egress> [--face routing|dns]  # batch import of geosite/chnroutes text rule sources (O-dns1; default stdout, --out writes a file; skip list goes to stderr)
-seepctl subscription list|add|remove|refresh      # managed through the control plane
+rillanectl import-clash <url|file> --output rillane.yaml   # offline conversion preview (no daemon; -o is equivalent, default config/clash_import.yaml)
+rillanectl export-clash <rillane config> -o clash.yaml     # Rillane -> Clash reverse export (offline; default config/clash_export.yaml, prints the degraded/skipped list at the end)
+rillanectl import-rules <url|file> --target <group or egress> [--face routing|dns]  # batch import of geosite/chnroutes text rule sources (O-dns1; default stdout, --out writes a file; skip list goes to stderr)
+rillanectl subscription list|add|remove|refresh      # managed through the control plane
 ```
 
-Full `seepctl` flags (including `--header`/`--refresh-interval`/`--timeout` units) and control-plane endpoint semantics are in [cli.md](cli.md).
+Full `rillanectl` flags (including `--header`/`--refresh-interval`/`--timeout` units) and control-plane endpoint semantics are in [cli.md](cli.md).
 
 ## 7. Boundaries and not landed
 
 - Subscription fetch has no built-in timed retry/backoff yet (failures rely on the next global refresh round to retry);
-- "Clash -> Seep" import and "Seep -> Clash" reverse export are both implemented (`clash.rs` / `clash_export.rs`); native Seep DSL (`seep_dsl.rs`) -> Clash is not implemented;
+- "Clash -> Rillane" import and "Rillane -> Clash" reverse export are both implemented (`clash.rs` / `clash_export.rs`); native Rillane DSL (`rillane_dsl.rs`) -> Clash is not implemented;
 - The conversion granularity of subscription rulesets is limited by the coverage of Clash rule types; uncovered types are noted at conversion time.

@@ -1,0 +1,61 @@
+# RILLANE 最小可运行配置（systemd/deb 装机模板——落位 /etc/rillane/rillane.yaml）
+#
+# 结构同 config/rillane.yaml；最小面 = socks 入口 + direct 出口 + DNS 分流。
+# deb 包内仅带本示例（conffiles 登记 /etc/rillane/rillane.yaml.example，升级不覆盖；
+# 真配置由部署者 cp 落位 /etc/rillane/rillane.yaml）：
+#   install -m644 /etc/rillane/rillane.yaml.example /etc/rillane/rillane.yaml
+#   # 先改 admin_token，再 systemctl start rillane
+
+control:
+  api_bind: 127.0.0.1:9090
+  uds_path: null
+  admin_token: change-me
+
+telemetry:
+  log_level: info
+  enable_metrics: true
+  enable_tracing: false
+
+ingress:
+  - name: socks-in
+    type: socks5
+    bind: 0.0.0.0:7890
+
+egress:
+  - name: direct-main
+    type: direct
+
+routing:
+  default_node: direct-main
+  groups: []
+  rules: []
+
+# 网络虚拟化（TUN 面）：unit 缺省授予 CAP_NET_ADMIN，直接启用即可；
+# 不接管设备时整块删除，并建议用 drop-in 收窄 unit 能力面（README「硬化」节）。
+network:
+  tun:
+    name: rillane0
+    ipv4: 10.255.0.1/24
+    dns_servers:
+      - 192.168.1.1
+  # DNS 分流（P2-8）：本地监听 15353，客户端 resolv.conf 指向本机 15353
+  # 或 dnsmasq 转发；.cn 走 domestic，其余默认 domestic，境外名单走 trusted
+  dns:
+    domestic: []
+    trusted:
+      - 1.1.1.1:53
+    rules:
+      - pattern: .cn
+        group: domestic
+      - pattern: .google.com
+        group: trusted
+    default_group: domestic
+    anti_poison: cross_check
+    cache:
+      max_entries: 4096
+      min_ttl: 60
+      max_ttl: 3600
+      enable_negative_cache: true
+      negative_ttl: 60
+    listen_address: 127.0.0.1
+    listen_port: 15353

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """P1-4 §7.2 padding 帧长分布检查脚本。
 
-对采集到的 seepd mesh 数据面流量做 header 帧长分布统计，验证 padding 已
+对采集到的 rillaned mesh 数据面流量做 header 帧长分布统计，验证 padding 已
 实际生效（分布偏离"未开启 = 帧长恒等于明文 header 长度"的单点形，
 obfuscation-middleware.md §0/§7.2）。纯标准库，无第三方依赖。
 

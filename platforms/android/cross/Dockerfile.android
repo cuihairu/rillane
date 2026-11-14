@@ -1,4 +1,4 @@
-# seep-ffi android 交叉镜像（cross 自定义 target 镜像，Cross.toml 引用）
+# rillane-ffi android 交叉镜像（cross 自定义 target 镜像，Cross.toml 引用）
 #
 # 背景：cross 0.2.5 的 *-linux-android 官方镜像内置 NDK（gcc 4.9 时代），
 # 缺 rustc 1.99 android std 链接所需 libunwind（-lunwind 失败，实测）——

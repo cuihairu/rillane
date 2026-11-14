@@ -1,10 +1,10 @@
 # 配置参考
 
-> 状态：按 `crates/seep-config/src/lib.rs` serde 定义与各块 `validate()` 对账（2026-10-11）· 示例基线见仓库 `config/seep.yaml`（内联注释版）· 协议字段语义见 [PROTOCOLS.md](PROTOCOLS.md) · DNS 引擎细则见 [design/dns-partition.md](design/dns-partition.md) · TUN/network 细则见 [networking.md](networking.md) · 「必填」= 无 serde 缺省、配置缺席即解析失败
+> 状态：按 `crates/rillane-config/src/lib.rs` serde 定义与各块 `validate()` 对账（2026-10-11）· 示例基线见仓库 `config/rillane.yaml`（内联注释版）· 协议字段语义见 [PROTOCOLS.md](PROTOCOLS.md) · DNS 引擎细则见 [design/dns-partition.md](design/dns-partition.md) · TUN/network 细则见 [networking.md](networking.md) · 「必填」= 无 serde 缺省、配置缺席即解析失败
 
 ## 格式与加载
 
-- 路径：`SEEP_CONFIG` 环境变量（缺省 `config/seep.yaml`）；seepd 无 `--config` 旗标。
+- 路径：`RILLANE_CONFIG` 环境变量（缺省 `config/rillane.yaml`）；rillaned 无 `--config` 旗标。
 - 格式：按扩展名 hint 解析（`.yaml`/`.yml`/`.json`/`.toml`）；无 hint 依次尝试 YAML → JSON → TOML。
 - `profile:` 场景预设**仅在文件加载入口展开**（缺省填充语义，见下节）；订阅转换等程序化构造不触发。
 - 新增块（`udp:`/`network:`/`obfuscation:`/`egress_pool:`/`performance:`）均为 `deny_unknown_fields`：拼错子字段立刻报错；块缺席 = 整块关闭、行为零差异（`network.dns` 例外：块在场缺省启用）。
@@ -29,12 +29,12 @@
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `control.api_bind` | ✓ | 控制面监听地址（如 `127.0.0.1:9090`）；seepctl 缺省从它推导取数 URL |
+| `control.api_bind` | ✓ | 控制面监听地址（如 `127.0.0.1:9090`）；rillanectl 缺省从它推导取数 URL |
 | `control.uds_path` |  | Unix domain socket 路径（可选） |
-| `control.admin_token` |  | 非空时控制面要求 `x-admin-token` 头；seepctl 读取配置后自动附带 |
+| `control.admin_token` |  | 非空时控制面要求 `x-admin-token` 头；rillanectl 读取配置后自动附带 |
 | `telemetry.log_level` | ✓ | 日志级别（如 `info`） |
 | `telemetry.enable_metrics` | ✓ | `true` 时暴露 `GET /metrics`（Prometheus 文本） |
-| `telemetry.enable_tracing` | ✓ | `true` 且环境 `SEEP_CAPTURE_LOGS=1` 时提供 `GET /logs` |
+| `telemetry.enable_tracing` | ✓ | `true` 且环境 `RILLANE_CAPTURE_LOGS=1` 时提供 `GET /logs` |
 
 ## ingress[]（`type` 标签）
 
@@ -70,7 +70,7 @@
 - `flow`（vless）：**非 None 即构建期拒绝**（Vision 等未实现，报错含节点名）。
 - `method`（shadowsocks）：自由字符串，非法值构建期报错（以 shadowsocks crate 1.25 AEAD 方法集为准）；`plugin` 走 SIP003 桥（TCP 面经插件进程，UDP 面 plugin 模式判负）。
 - `hysteria`（v1）：schema/订阅转换支持，**出站连接器缺**——RuntimeBuilder 构建期报错；`hysteria2` UDP 承载归 V2（TCP 面可用）。
-- `tls_fingerprint`：`none | chrome | ios | safari`（对照表：`seepctl tls-fingerprint`）；缺省不模拟。
+- `tls_fingerprint`：`none | chrome | ios | safari`（对照表：`rillanectl tls-fingerprint`）；缺省不模拟。
 - `address`（wireguard）：逗号分隔多 CIDR（如 `10.0.0.2/32,fd00::2/128`）；`listen_port: 0` = 自动。
 
 ## routing
@@ -125,7 +125,7 @@ routing:
 network:
   mode: tun                      # 仅 tun（transparent/tap/hybrid 构建期拒）
   tun:
-    name: seep0                  # 缺省自动命名（tun%d）
+    name: rillane0                  # 缺省自动命名（tun%d）
     mtu: 1500                    # 须 ≥ 68
     ipv4: 10.255.0.1/24          # CIDR；进 auto-bypass
     ipv6: fd00::1/128            # 可选
@@ -155,7 +155,7 @@ network:
 ```
 
 - `routing.include` CIDR 须显式 `addr/prefix` 形式（裸 IP 不收，主机路由写 `/32`）。
-- 出站 fwmark 逃逸面（`egress_fwmark` ≠ 0）：planner 追加 `ip rule fwmark` + escape 表 100 默认路由，`seepctl route apply/clear` 账目内管理。
+- 出站 fwmark 逃逸面（`egress_fwmark` ≠ 0）：planner 追加 `ip rule fwmark` + escape 表 100 默认路由，`rillanectl route apply/clear` 账目内管理。
 
 ## obfuscation（缺省 None = 整块关、零开销）
 
@@ -191,7 +191,7 @@ network:
 | `session_cache_size` | `256` | TLS 恢复开启时 ≥ 1 |
 | `pre_dial_direct` | `false` | 须搭配 `enabled: true` |
 
-快照观测：`GET /egress/pool/stats` 或 `seepctl pool status`。
+快照观测：`GET /egress/pool/stats` 或 `rillanectl pool status`。
 
 ## profile / performance
 
@@ -202,18 +202,18 @@ network:
 
 | 变量 | 缺省 | 说明 |
 |------|------|------|
-| `SEEP_CONFIG` | `config/seep.yaml` | seepd 配置路径 |
-| `SEEP_CAPTURE_LOGS` | 关 | 配合 `telemetry.enable_tracing=true` 捕获进程日志供 `GET /logs`（`seepctl diagnose`） |
-| `SEEP_MESH_ALLOW_PLAINTEXT` | 关 | TCP mesh 数据面明文放行（仅开发） |
-| `SEEP_MESH_UDP_ALLOW_PLAINTEXT` | 关 | UDP mesh 数据面明文放行（仅开发；与上门独立取或） |
-| `SEEP_MESH_MTLS` | `false` | mTLS 环境配置总开关（false/缺省 = 不从环境装配 mTLS） |
-| `SEEP_MESH_MTLS_CA/_CERT/_KEY` | — | 证书三件套路径 |
-| `SEEP_MESH_MTLS_SERVER_NAME` | `seep` | rustls 验证 server_name |
-| `SEEP_MESH_MTLS_REQUIRE_CLIENT_AUTH` | `true` | 强制客户端证书校验（生产保持开启；绕过须 `SEEP_MESH_ALLOW_NO_CLIENT_AUTH=1`） |
-| `SEEP_MESH_ALLOW_NO_CLIENT_AUTH` | 关 | 开发环境绕过客户端证书校验（与上门互斥的逃生门） |
-| `SEEP_MESH_MTLS_VERIFY_PEER_NODE_ID` | `true` | 校验对端证书 CN 与节点 ID 一致 |
-| `SEEP_MESH_MTLS_ALLOW_UNKNOWN_PEERS` | `false` | 允许未知节点证书 |
-| `SEEP_MESH_MTLS_REVOKED_NODES` | — | 内联撤销清单（CSV） |
-| `SEEP_MESH_MTLS_REVOKED_NODES_FILE` | — | 撤销清单文件路径（mtime 热加载；`GET /mtls/revoked` 可查生效面） |
+| `RILLANE_CONFIG` | `config/rillane.yaml` | rillaned 配置路径 |
+| `RILLANE_CAPTURE_LOGS` | 关 | 配合 `telemetry.enable_tracing=true` 捕获进程日志供 `GET /logs`（`rillanectl diagnose`） |
+| `RILLANE_MESH_ALLOW_PLAINTEXT` | 关 | TCP mesh 数据面明文放行（仅开发） |
+| `RILLANE_MESH_UDP_ALLOW_PLAINTEXT` | 关 | UDP mesh 数据面明文放行（仅开发；与上门独立取或） |
+| `RILLANE_MESH_MTLS` | `false` | mTLS 环境配置总开关（false/缺省 = 不从环境装配 mTLS） |
+| `RILLANE_MESH_MTLS_CA/_CERT/_KEY` | — | 证书三件套路径 |
+| `RILLANE_MESH_MTLS_SERVER_NAME` | `rillane` | rustls 验证 server_name |
+| `RILLANE_MESH_MTLS_REQUIRE_CLIENT_AUTH` | `true` | 强制客户端证书校验（生产保持开启；绕过须 `RILLANE_MESH_ALLOW_NO_CLIENT_AUTH=1`） |
+| `RILLANE_MESH_ALLOW_NO_CLIENT_AUTH` | 关 | 开发环境绕过客户端证书校验（与上门互斥的逃生门） |
+| `RILLANE_MESH_MTLS_VERIFY_PEER_NODE_ID` | `true` | 校验对端证书 CN 与节点 ID 一致 |
+| `RILLANE_MESH_MTLS_ALLOW_UNKNOWN_PEERS` | `false` | 允许未知节点证书 |
+| `RILLANE_MESH_MTLS_REVOKED_NODES` | — | 内联撤销清单（CSV） |
+| `RILLANE_MESH_MTLS_REVOKED_NODES_FILE` | — | 撤销清单文件路径（mtime 热加载；`GET /mtls/revoked` 可查生效面） |
 
-SIP003 插件桥内部约定（`SS_LOCAL_*`/`SS_REMOTE_*`）不属配置面。mesh 证书工具链见 [mesh.md](mesh.md) 与 `seepctl mtls --help`。
+SIP003 插件桥内部约定（`SS_LOCAL_*`/`SS_REMOTE_*`）不属配置面。mesh 证书工具链见 [mesh.md](mesh.md) 与 `rillanectl mtls --help`。

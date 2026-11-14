@@ -7,15 +7,15 @@ This document describes the current MVP-level mesh control plane and chain (mult
 - `NodeId`: a string identifier for a mesh node (e.g. `client1`, `exit1`).
 - `NodeRole`: `client` / `relay` / `exit` / `hybrid`.
 - `link-state`: directed edge metrics between two nodes (latency/bandwidth/loss).
-- `chain`: a computed path from a source node to a target node. In the current MVP, Seep can *compute*
+- `chain`: a computed path from a source node to a target node. In the current MVP, Rillane can *compute*
   chains and attach path metadata to flows. TCP flows can also be forwarded hop-by-hop via the mesh
   data-plane listener (supports optional mTLS for encryption/authentication); UDP flows are forwarded
   hop-by-hop since P0-4 (`UdpEnvelope` over UDP datagrams, same port dual-stack — MVP plaintext gate,
   encryption selection remains V2).
 
-## Control Plane (seepd)
+## Control Plane (rillaned)
 
-Configured by `control.api_bind` in `SeepConfig` (default example in `config/seep.yaml`).
+Configured by `control.api_bind` in `RillaneConfig` (default example in `config/rillane.yaml`).
 
 Auth:
 - If `control.admin_token` is set, mutating requests must include either:
@@ -29,7 +29,7 @@ Endpoints (mesh scope):
 - `GET /nodes` (mesh node snapshots)
 - `POST /mesh/nodes/register` (register/update a node)
 - `POST /mesh/link-states` (update directed link-state)
-- `GET /mesh/switches` (最近 100 次 chain 切换事件，P2-1；`seepctl switches` 取数面)
+- `GET /mesh/switches` (最近 100 次 chain 切换事件，P2-1；`rillanectl switches` 取数面)
 - `GET /mtls/revoked` (撤销列表加载状态：mtime / 条目 / 加载错误，P2-7)
 - `POST /chains/dry-run` (chain build pre-check)
 - `POST /chains` (create/reuse chain; uses a session_id UUID)
@@ -38,10 +38,10 @@ Endpoints (mesh scope):
 - `GET /chains/stats`
 
 Other control-plane endpoints (outside mesh scope, dispatcher in
-`apps/seepd/src/control_plane.rs`):
+`apps/rillaned/src/control_plane.rs`):
 - Observability: `GET /flows` / `GET /metrics` / `GET /udp/stats` /
   `GET /egress/pool/stats` / `GET /dns/stats` / `GET /runtime/stats` /
-  `GET /routing/stats`（组实时质量：成员数据源/SLO 门判定/当前选点，`seepctl group` 取数面）
+  `GET /routing/stats`（组实时质量：成员数据源/SLO 门判定/当前选点，`rillanectl group` 取数面）
 - Subscriptions: `GET|POST /subscriptions`, `POST /subscriptions/refresh`,
   `POST /subscriptions/{name}/refresh`, `DELETE /subscriptions/{name}`
 - System routing (P1-3): `POST /network/route/apply` / `POST /network/route/clear`
@@ -61,8 +61,8 @@ When mesh + chain are enabled in the runtime, a route decision that resolves to 
 upgraded to a `RouteDecision::Chain` via the `ChainManager`. The computed path will also be attached to
 `FlowMetadata.annotations`:
 
-- `seep.chain.path`: JSON array of node ids (e.g. `["client1","exit1"]`)
-- `seep.route.reason`: the routing reason string (if present)
+- `rillane.chain.path`: JSON array of node ids (e.g. `["client1","exit1"]`)
+- `rillane.route.reason`: the routing reason string (if present)
 
 ## Mesh Data-Plane Protocol
 
@@ -72,62 +72,62 @@ When `mesh` + `chain` are enabled, each node also listens on `MeshConfig.listen_
 > **现状注记（2026-09-30 更新）**：本节正文描述 **TCP 面**协议（逐连接 `MeshStream` 双向拷贝，每连接一个 JSON `MeshEnvelope` 头）。
 > **UDP 数据面已实现（todo P0-4，2026-09 完成）**：`UdpEnvelope` 二进制头 over UDP 数据报、FULL/CACHED 跳缓存、
 > exit per-flow socket 与下行 task、同端口双栈（`spawn_udp` 与 TCP `spawn` 并列）、明文门（env
-> `SEEP_MESH_UDP_ALLOW_PLAINTEXT` ∪ `MeshConfig.udp_allow_plaintext_data_plane`，chain+udp 未配加密时**构建期拒绝启动**）——
+> `RILLANE_MESH_UDP_ALLOW_PLAINTEXT` ∪ `MeshConfig.udp_allow_plaintext_data_plane`，chain+udp 未配加密时**构建期拒绝启动**）——
 > 规格与实施见 [design/udp-mesh-dataplane.md](design/udp-mesh-dataplane.md)（与 TCP 面的选择边界见其 §1，多跳 TTL/去重裁决见其 §14）；
 > UDP 侧观测与配置见 [design/udp-observability.md](design/udp-observability.md)
-> （todo P0-5，**已落地**：`/udp/stats` 快照 + `seep_udp_*` 指标族 + 入口级 `udp_enabled` 覆盖）。
+> （todo P0-5，**已落地**：`/udp/stats` 快照 + `rillane_udp_*` 指标族 + 入口级 `udp_enabled` 覆盖）。
 > 按本注记原设条件，标题的 "(TCP, MVP)" 限定已随之移除。
 
 ### mTLS (Recommended / Secure-by-default for chain)
 
 - Enable mesh data-plane mTLS via env:
-  - `SEEP_MESH_MTLS=1`
-  - `SEEP_MESH_MTLS_CA=/path/to/ca.cert.pem`
-  - `SEEP_MESH_MTLS_CERT=/path/to/<node>.cert.pem`
-  - `SEEP_MESH_MTLS_KEY=/path/to/<node>.key.pem`
-  - Optional: `SEEP_MESH_MTLS_SERVER_NAME=seep`
+  - `RILLANE_MESH_MTLS=1`
+  - `RILLANE_MESH_MTLS_CA=/path/to/ca.cert.pem`
+  - `RILLANE_MESH_MTLS_CERT=/path/to/<node>.cert.pem`
+  - `RILLANE_MESH_MTLS_KEY=/path/to/<node>.key.pem`
+  - Optional: `RILLANE_MESH_MTLS_SERVER_NAME=rillane`
 - Client-certificate enforcement and peer-check controls (defaults; the full env-var table is in [config.md](config.md) "Environment variables"):
-  - `SEEP_MESH_MTLS_REQUIRE_CLIENT_AUTH=true` -- enforces client certificate validation (keep it on in production; bypassing needs `SEEP_MESH_ALLOW_NO_CLIENT_AUTH=1`)
-  - `SEEP_MESH_MTLS_VERIFY_PEER_NODE_ID=true` -- checks the peer certificate CN against the node ID
-  - `SEEP_MESH_MTLS_ALLOW_UNKNOWN_PEERS=false` -- allow unknown node certificates
-- When `chain` is enabled, seepd requires mTLS by default. For dev-only plaintext you can set:
-  - `SEEP_MESH_ALLOW_PLAINTEXT=1`
+  - `RILLANE_MESH_MTLS_REQUIRE_CLIENT_AUTH=true` -- enforces client certificate validation (keep it on in production; bypassing needs `RILLANE_MESH_ALLOW_NO_CLIENT_AUTH=1`)
+  - `RILLANE_MESH_MTLS_VERIFY_PEER_NODE_ID=true` -- checks the peer certificate CN against the node ID
+  - `RILLANE_MESH_MTLS_ALLOW_UNKNOWN_PEERS=false` -- allow unknown node certificates
+- When `chain` is enabled, rillaned requires mTLS by default. For dev-only plaintext you can set:
+  - `RILLANE_MESH_ALLOW_PLAINTEXT=1`
 
 #### CA Rotation (Bundle / 双信任窗口)
 
-Seep 支持把 `SEEP_MESH_MTLS_CA` 指向一个包含 **多个 CA cert** 的 PEM 文件（bundle）。推荐轮换流程：
+Rillane 支持把 `RILLANE_MESH_MTLS_CA` 指向一个包含 **多个 CA cert** 的 PEM 文件（bundle）。推荐轮换流程：
 
 1. 生成新 CA + bundle（旧+新）：
-   - `seepctl mtls rotate-ca --old-ca-cert ca.cert.pem --out-dir ./mtls`
-2. 将 `./mtls/ca.bundle.pem` 下发到所有节点并设置 `SEEP_MESH_MTLS_CA`，重启/滚动更新，进入双信任窗口
-3. 逐个节点用新 CA 重签证书（`seepctl mtls rotate ... --ca-cert ./mtls/ca.next.cert.pem --ca-key ./mtls/ca.next.key.pem`）
-4. 全量切换完成后，将 `SEEP_MESH_MTLS_CA` 从 bundle 收敛为仅新 CA
+   - `rillanectl mtls rotate-ca --old-ca-cert ca.cert.pem --out-dir ./mtls`
+2. 将 `./mtls/ca.bundle.pem` 下发到所有节点并设置 `RILLANE_MESH_MTLS_CA`，重启/滚动更新，进入双信任窗口
+3. 逐个节点用新 CA 重签证书（`rillanectl mtls rotate ... --ca-cert ./mtls/ca.next.cert.pem --ca-key ./mtls/ca.next.key.pem`）
+4. 全量切换完成后，将 `RILLANE_MESH_MTLS_CA` 从 bundle 收敛为仅新 CA
 
 #### Revocation (最小实现)
 
-- `SEEP_MESH_MTLS_REVOKED_NODES=nodeA,nodeB`：按证书 CN（node_id）拒绝指定节点的 mTLS 连接（需重启生效）。
-- `SEEP_MESH_MTLS_REVOKED_NODES_FILE=/path/to/revoked.txt`：从文件加载撤销列表，支持热加载（文件 mtime 变化会触发 reload）。
+- `RILLANE_MESH_MTLS_REVOKED_NODES=nodeA,nodeB`：按证书 CN（node_id）拒绝指定节点的 mTLS 连接（需重启生效）。
+- `RILLANE_MESH_MTLS_REVOKED_NODES_FILE=/path/to/revoked.txt`：从文件加载撤销列表，支持热加载（文件 mtime 变化会触发 reload）。
 
 辅助命令（编辑撤销列表文件）：
-- `seepctl mtls revoke add --file revoked.txt --node-id nodeA`
-- `seepctl mtls revoke remove --file revoked.txt --node-id nodeA`
-- `seepctl mtls revoke list --file revoked.txt`
+- `rillanectl mtls revoke add --file revoked.txt --node-id nodeA`
+- `rillanectl mtls revoke remove --file revoked.txt --node-id nodeA`
+- `rillanectl mtls revoke list --file revoked.txt`
 
 ### Metrics
 
-When `GET /metrics` is enabled, seepd exposes per-link counters (labels: `from`, `to`):
-- `seep_mesh_link_bytes_total`
-- `seep_mesh_link_connections_total`
-- `seep_mesh_link_errors_total`
+When `GET /metrics` is enabled, rillaned exposes per-link counters (labels: `from`, `to`):
+- `rillane_mesh_link_bytes_total`
+- `rillane_mesh_link_connections_total`
+- `rillane_mesh_link_errors_total`
 
 Chain-enabled deployments additionally render (P2-1, 恒渲染，mesh 未启用则缺席):
-- `seep_mesh_link_rtt_ms{from,to,quantile}` / `seep_mesh_link_loss_ratio{from,to}`
-  / `seep_mesh_switch_total{reason}` — see
+- `rillane_mesh_link_rtt_ms{from,to,quantile}` / `rillane_mesh_link_loss_ratio{from,to}`
+  / `rillane_mesh_switch_total{reason}` — see
   [design/mesh-link-observability.md](design/mesh-link-observability.md)
 
-UDP-side families (P0-5, 与 `/udp/stats` 同源): `seep_udp_*` — see
+UDP-side families (P0-5, 与 `/udp/stats` 同源): `rillane_udp_*` — see
 [design/udp-observability.md](design/udp-observability.md); mesh UDP replay
-counter `seep_udp_mesh[_client]_replay_dropped_total` (P2-7).
+counter `rillane_udp_mesh[_client]_replay_dropped_total` (P2-7).
 
 ### Wire Format (TCP 面，P2-6 起二进制 v2)
 
@@ -143,7 +143,7 @@ framing (`{` → legacy JSON, `'S'` → binary):
 ```
 
 Binary payload layout (big-endian, `MESH_ENVELOPE_BIN_VERSION = 2`,
-`seep-runtime/src/mesh_transport.rs`):
+`rillane-runtime/src/mesh_transport.rs`):
 
 ```
 magic(2)='SU' | struct_ver(1)=2 | flags(1)=0 (保留) | env.version(4)
@@ -180,8 +180,8 @@ Client → Relay (path=[relay1, exit1]) → Exit (path=[exit1]) → Target
 ### Rust API
 
 ```rust
-use seep_runtime::{MeshDataPlane, MeshEnvelope};
-use seep_mesh::{MeshRegistry, NodeRecord, NodeRole};
+use rillane_runtime::{MeshDataPlane, MeshEnvelope};
+use rillane_mesh::{MeshRegistry, NodeRecord, NodeRole};
 use std::sync::Arc;
 
 // Create data plane
@@ -203,7 +203,7 @@ let env = MeshEnvelope::new(
     443,
     vec!["relay1".into(), "exit1".into()],
 );
-let flow_id = seep_core::FlowId::new();
+let flow_id = rillane_core::FlowId::new();
 plane
     .dial_and_tunnel(&"relay1".into(), &env, &mut io_stream, None, &flow_id)
     .await?;
@@ -211,10 +211,10 @@ plane
 
 ## Minimal Example (curl)
 
-Assume seepd is running on `127.0.0.1:9090` and `admin_token: seep`:
+Assume rillaned is running on `127.0.0.1:9090` and `admin_token: rillane`:
 
 ```bash
-TOKEN=seep
+TOKEN=rillane
 BASE=http://127.0.0.1:9090
 
 # register nodes
@@ -248,20 +248,20 @@ curl -sS -X POST "$BASE/chains" \
   -d '{"source":"client1","target":"exit1"}'
 ```
 
-## Minimal Example (seepctl)
+## Minimal Example (rillanectl)
 
-`seepctl` reads `control.api_bind` / `control.admin_token` from your config:
+`rillanectl` reads `control.api_bind` / `control.admin_token` from your config:
 
 ```bash
-seepctl -c config/seep.yaml chain dry-run --source client1 --target exit1
-seepctl -c config/seep.yaml chain create  --source client1 --target exit1
-seepctl -c config/seep.yaml chain stats
+rillanectl -c config/rillane.yaml chain dry-run --source client1 --target exit1
+rillanectl -c config/rillane.yaml chain create  --source client1 --target exit1
+rillanectl -c config/rillane.yaml chain stats
 ```
 
 ## Security Notes (current status, 2026-10)
 
 - mTLS on the mesh data-plane is **required by default** when `chain` is enabled
-  (`SEEP_MESH_ALLOW_PLAINTEXT=1` only for dev). CA bundle dual-trust rotation and a
+  (`RILLANE_MESH_ALLOW_PLAINTEXT=1` only for dev). CA bundle dual-trust rotation and a
   minimal revocation list (by node cert CN, file hot-reload) are implemented — see above
   and [architecture.md](architecture.md).
 - `NodeACL` (client CIDR / role restrictions) and `NodeQuota` (bandwidth / connection
@@ -270,11 +270,11 @@ seepctl -c config/seep.yaml chain stats
   RFC4303-style 64-bit sliding window over v2 envelopes with flow sequence numbers
   (`UDP_FLAG_HAS_SEQ`). Rejected replays / out-of-window frames are dropped silently
   and counted (`replay_dropped`) in `/udp/stats` (mesh + mesh_client) and `/metrics`
-  (`seep_udp_mesh[_client]_replay_dropped_total`); v1 frames bypass the window
+  (`rillane_udp_mesh[_client]_replay_dropped_total`); v1 frames bypass the window
   (fail-open during mixed-deployment window). Design: [design/mesh-advanced-security.md](design/mesh-advanced-security.md) §3.
 - **Revocation distribution visibility** (todo P2-7, 2026-10-04): the revoked-list
   file hot-reload is now verifiable at runtime — `GET /mtls/revoked` (control plane)
-  + `seepctl mtls revoke status` show the loaded file state (mtime / entries /
+  + `rillanectl mtls revoke status` show the loaded file state (mtime / entries /
   load errors), closing the distribute—take-effect—verify loop. OCSP stays out of
   scope (needs direct CA connectivity, V2).
 - Still NOT implemented (todo P2-7): end-to-end multi-hop MAC / authentication —

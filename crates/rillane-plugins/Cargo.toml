@@ -1,0 +1,22 @@
+[package]
+name = "rillane-plugins"
+description = "P3-2: WASM FlowMiddleware loader (wasmtime) with trap/fuel isolation"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rillane-core = { path = "../rillane-core" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+# 载具（plugin-loader.md §1.1）：default-features=false 只留 cranelift 运行时 +
+# wat（wat 供测试内联文本模块，生产载入预编译二进制）；anyhow = wasmtime 49
+# 自有 Error → anyhow::Error 的 From 桥（缺省特性集含之，此处显式保留）
+wasmtime = { version = "49", default-features = false, features = ["cranelift", "runtime", "wat", "anyhow"] }
+base64 = "0.22"
+uuid = { workspace = true }

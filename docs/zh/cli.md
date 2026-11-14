@@ -1,28 +1,28 @@
-# seepctl CLI 参考
+# rillanectl CLI 参考
 
-> 状态：按 `apps/seepctl/src/main.rs` clap 定义对账（2026-10-11，18 个顶层子命令）· 本文只描述已实现行为；旗标/缺省值以 `seepctl <命令> --help` 实际输出为准 · 相关：[订阅指南](subscription.md) · [Mesh & Chain](mesh.md) · [系统路由与网络接管](networking.md)
+> 状态：按 `apps/rillanectl/src/main.rs` clap 定义对账（2026-10-11，18 个顶层子命令）· 本文只描述已实现行为；旗标/缺省值以 `rillanectl <命令> --help` 实际输出为准 · 相关：[订阅指南](subscription.md) · [Mesh & Chain](mesh.md) · [系统路由与网络接管](networking.md)
 
 ## 全局选项
 
 | 选项 | 说明 |
 |------|------|
-| `-c, --config <CONFIG>` | 配置文件路径（缺省 `config/seep.yaml`）；控制面命令用它读 `control.api_bind` / `control.admin_token` |
+| `-c, --config <CONFIG>` | 配置文件路径（缺省 `config/rillane.yaml`）；控制面命令用它读 `control.api_bind` / `control.admin_token` |
 | `-V, --version` | 打印版本 |
 
 ## 取数口径
 
-- **控制面命令**（`stats` / `group` / `switches` / `nodes` / `chain` / `pool` / `subscription` / `route` / `diagnose` / `mtls revoke status`）：HTTP 取 `seepd` 控制面；`control.admin_token` 非空时附 `x-admin-token` 头，未配置即匿名请求。
+- **控制面命令**（`stats` / `group` / `switches` / `nodes` / `chain` / `pool` / `subscription` / `route` / `diagnose` / `mtls revoke status`）：HTTP 取 `rillaned` 控制面；`control.admin_token` 非空时附 `x-admin-token` 头，未配置即匿名请求。
   - `--endpoint` 语义分两型（易混）：
     - **完整 URL 型**（替换整个目标 URL，须含路径）：`stats`（缺省 `http://{api_bind}/flows`）、`group`（`/routing/stats`）、`switches`（`/mesh/switches`）、`pool status`（`/egress/pool/stats`）、`nodes`（`/nodes`）；
     - **base URL 型**（仅替换 base，路径内部拼接）：`chain`、`subscription`、`route`、`diagnose`、`mtls revoke status`。
 - **离线命令**（`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / `mtls` 证书工具）：不经控制面，只读本地文件（`udp-probe` 例外——直接连 SOCKS5 入口实测）。
-- 无 `seepctl reload` 子命令：seepd 启动一次性读配置，运行期热更新仅由订阅刷新与控制面端点驱动（见 [architecture.md](architecture.md) 热更新口径）。
+- 无 `rillanectl reload` 子命令：rillaned 启动一次性读配置，运行期热更新仅由订阅刷新与控制面端点驱动（见 [architecture.md](architecture.md) 热更新口径）。
 
 ## 控制面 REST 端点总表
 
-按 `apps/seepd/src/control_plane.rs` 路由表对账（2026-10-11）。除注明外均需 `x-admin-token` 头（配置 `control.admin_token` 非空时）。
+按 `apps/rillaned/src/control_plane.rs` 路由表对账（2026-10-11）。除注明外均需 `x-admin-token` 头（配置 `control.admin_token` 非空时）。
 
-| 方法 | 路径 | 说明 | seepctl 对应 |
+| 方法 | 路径 | 说明 | rillanectl 对应 |
 |------|------|------|--------------|
 | GET | `/health` | 存活探针 | — |
 | GET | `/nodes` | mesh 节点快照 | `nodes` |
@@ -36,7 +36,7 @@
 | GET | `/runtime/stats` | runtime 统计 | —（仅 REST） |
 | GET | `/runtime/config` | 当前生效配置快照 | —（仅 REST） |
 | GET | `/events` | 事件日志（最近 N 行） | —（仅 REST） |
-| GET | `/logs` | 最近日志（需 `SEEP_CAPTURE_LOGS=1`） | `diagnose`（采集） |
+| GET | `/logs` | 最近日志（需 `RILLANE_CAPTURE_LOGS=1`） | `diagnose`（采集） |
 | GET | `/metrics` | Prometheus 文本 | —（Prometheus 抓取） |
 | GET | `/mtls/revoked` | 撤销列表生效面（mtime/条目/加载错误） | `mtls revoke status` |
 | GET | `/chains/stats` | 链路统计 | `chain stats` |
@@ -71,8 +71,8 @@
 | `nodes` | 查看 mesh 节点注册信息 | 控制面 `/nodes` |
 | `chain` | 链路管理（dry-run/create/get/terminate/stats） | 控制面 |
 | `pool` | 出站连接池快照（status） | 控制面 `/egress/pool/stats` |
-| `import-clash` | Clash YAML → Seep 配置（离线预览） | 离线 |
-| `export-clash` | Seep 配置 → Clash YAML 回导出（离线） | 离线 |
+| `import-clash` | Clash YAML → Rillane 配置（离线预览） | 离线 |
+| `export-clash` | Rillane 配置 → Clash YAML 回导出（离线） | 离线 |
 | `subscription` | 订阅管理（list/add/remove/refresh） | 控制面 |
 | `route` | 系统路由管理（apply/clear/status） | 控制面 + 本机 ip 命令 |
 | `diagnose` | 一键诊断信息收集（生成诊断目录） | 控制面 + 本机快照 |
@@ -83,11 +83,11 @@
 ### 控制面取数
 
 ```bash
-seepctl stats   [--endpoint <完整URL，含 /flows>]
-seepctl group   [--endpoint <完整URL，含 /routing/stats>]
-seepctl switches [--endpoint <完整URL，含 /mesh/switches>]
-seepctl nodes   [--endpoint <完整URL，含 /nodes>]
-seepctl pool status [--endpoint <完整URL，含 /egress/pool/stats>]
+rillanectl stats   [--endpoint <完整URL，含 /flows>]
+rillanectl group   [--endpoint <完整URL，含 /routing/stats>]
+rillanectl switches [--endpoint <完整URL，含 /mesh/switches>]
+rillanectl nodes   [--endpoint <完整URL，含 /nodes>]
+rillanectl pool status [--endpoint <完整URL，含 /egress/pool/stats>]
 ```
 
 `stats` 的 UDP 段与 `/flows` 同 base 推导：`--endpoint` 覆盖仅作用于 `/flows` 一侧。
@@ -99,7 +99,7 @@ seepctl pool status [--endpoint <完整URL，含 /egress/pool/stats>]
 ### profile
 
 ```bash
-seepctl profile <proxy|game|web> [--out <路径>]   # 缺省打印 stdout
+rillanectl profile <proxy|game|web> [--out <路径>]   # 缺省打印 stdout
 ```
 
 ### tls-fingerprint
@@ -109,7 +109,7 @@ seepctl profile <proxy|game|web> [--out <路径>]   # 缺省打印 stdout
 ### import-rules
 
 ```bash
-seepctl import-rules <SOURCE> --target <TARGET> [--face routing|dns] [--name <NAME>] [--out <路径>]
+rillanectl import-rules <SOURCE> --target <TARGET> [--face routing|dns] [--name <NAME>] [--out <路径>]
 ```
 
 - `<SOURCE>`：文件路径或 http(s) URL（v2fly 文本清单行集）；
@@ -121,7 +121,7 @@ seepctl import-rules <SOURCE> --target <TARGET> [--face routing|dns] [--name <NA
 ### udp-probe
 
 ```bash
-seepctl udp-probe --socks5 <地址> --host <主机> --port <端口> --payload-hex <hex>
+rillanectl udp-probe --socks5 <地址> --host <主机> --port <端口> --payload-hex <hex>
                   [--timeout <3s>] [--user <U>] [--pass <P>]
 ```
 
@@ -130,11 +130,11 @@ seepctl udp-probe --socks5 <地址> --host <主机> --port <端口> --payload-he
 ### chain
 
 ```bash
-seepctl chain dry-run   --source <S> --target <T>
-seepctl chain create    --source <S> --target <T> [--session-id <UUID>]   # 同 session_id 复用链路
-seepctl chain get       <CHAIN_ID>
-seepctl chain terminate <CHAIN_ID>
-seepctl chain stats
+rillanectl chain dry-run   --source <S> --target <T>
+rillanectl chain create    --source <S> --target <T> [--session-id <UUID>]   # 同 session_id 复用链路
+rillanectl chain get       <CHAIN_ID>
+rillanectl chain terminate <CHAIN_ID>
+rillanectl chain stats
 ```
 
 `chain` 组的 `--endpoint` 为 **base URL 型**。
@@ -142,19 +142,19 @@ seepctl chain stats
 ### import-clash / export-clash
 
 ```bash
-seepctl import-clash <url|file> [-o config/clash_import.yaml]   # -o 同义 --output
-seepctl export-clash <seep配置> [-o config/clash_export.yaml]   # 末尾打印降级/跳过清单
+rillanectl import-clash <url|file> [-o config/clash_import.yaml]   # -o 同义 --output
+rillanectl export-clash <rillane配置> [-o config/clash_export.yaml]   # 末尾打印降级/跳过清单
 ```
 
 ### subscription
 
 ```bash
-seepctl subscription list
-seepctl subscription add <NAME> <URL> [--type <T>] [--enabled true|false]
+rillanectl subscription list
+rillanectl subscription add <NAME> <URL> [--type <T>] [--enabled true|false]
                        [--refresh-interval <分>] [--timeout <秒>]
                        [--header k=v]... [--user-agent <UA>]
-seepctl subscription remove <NAME>
-seepctl subscription refresh [NAME]    # 不指定则刷新全部
+rillanectl subscription remove <NAME>
+rillanectl subscription refresh [NAME]    # 不指定则刷新全部
 ```
 
 `--header` 可多次传入。`--endpoint` 为 base URL 型。
@@ -162,9 +162,9 @@ seepctl subscription refresh [NAME]    # 不指定则刷新全部
 ### route
 
 ```bash
-seepctl route apply   [--dry-run]   # 幂等重放配置中的 include 目标；--dry-run 仅打印 ip 命令
-seepctl route clear               # 逆序清理所有已应用规则
-seepctl route status              # 设备态 + 已应用步骤表
+rillanectl route apply   [--dry-run]   # 幂等重放配置中的 include 目标；--dry-run 仅打印 ip 命令
+rillanectl route clear               # 逆序清理所有已应用规则
+rillanectl route status              # 设备态 + 已应用步骤表
 ```
 
 `--endpoint` 为 base URL 型。apply/clear 需 root 或 `CAP_NET_ADMIN`。
@@ -172,7 +172,7 @@ seepctl route status              # 设备态 + 已应用步骤表
 ### diagnose
 
 ```bash
-seepctl diagnose [--endpoint <base URL>] [--output <目录>] [--no-redact] [--no-local]
+rillanectl diagnose [--endpoint <base URL>] [--output <目录>] [--no-redact] [--no-local]
 ```
 
 缺省对配置做脱敏（token/password/private_key 等）；`--no-local` 跳过本机快照（路由/DNS/接口）。
@@ -180,18 +180,18 @@ seepctl diagnose [--endpoint <base URL>] [--output <目录>] [--no-redact] [--no
 ### mtls
 
 ```bash
-seepctl mtls init-ca    --out-dir <目录> [--common-name seep-mesh-ca] [--valid-days 3650]
-seepctl mtls issue      --node-id <ID> --ca-cert <pem> --ca-key <pem> --out-dir <目录>
-                        [--server-name seep] [--valid-days 365]
-seepctl mtls rotate     --node-id <ID> --ca-cert <pem> --ca-key <pem> --out-dir <目录>
+rillanectl mtls init-ca    --out-dir <目录> [--common-name rillane-mesh-ca] [--valid-days 3650]
+rillanectl mtls issue      --node-id <ID> --ca-cert <pem> --ca-key <pem> --out-dir <目录>
+                        [--server-name rillane] [--valid-days 365]
+rillanectl mtls rotate     --node-id <ID> --ca-cert <pem> --ca-key <pem> --out-dir <目录>
                         [--no-backup] [--valid-days 365]    # 默认备份 *.bak.<epoch>；新连接自动生效
-seepctl mtls bundle-ca  --ca-cert <pem>... --out-path <bundle.pem>
-seepctl mtls rotate-ca  --old-ca-cert <pem> --out-dir <目录>
-                        [--common-name seep-mesh-ca-next] [--valid-days 3650]   # 输出旧+新双信任 bundle
-seepctl mtls revoke list   [--file <路径>]
-seepctl mtls revoke add    --file <路径> --node-id <ID>
-seepctl mtls revoke remove --file <路径> --node-id <ID>
-seepctl mtls revoke status [--endpoint <base URL>]   # GET /mtls/revoked：分发—生效—校验闭环的「生效」观测
+rillanectl mtls bundle-ca  --ca-cert <pem>... --out-path <bundle.pem>
+rillanectl mtls rotate-ca  --old-ca-cert <pem> --out-dir <目录>
+                        [--common-name rillane-mesh-ca-next] [--valid-days 3650]   # 输出旧+新双信任 bundle
+rillanectl mtls revoke list   [--file <路径>]
+rillanectl mtls revoke add    --file <路径> --node-id <ID>
+rillanectl mtls revoke remove --file <路径> --node-id <ID>
+rillanectl mtls revoke status [--endpoint <base URL>]   # GET /mtls/revoked：分发—生效—校验闭环的「生效」观测
 ```
 
-撤销列表文件逐行 `node_id`（忽略空行/`#` 注释/逗号分隔）；推荐路径与 `SEEP_MESH_MTLS_REVOKED_NODES_FILE` 一致。
+撤销列表文件逐行 `node_id`（忽略空行/`#` 注释/逗号分隔）；推荐路径与 `RILLANE_MESH_MTLS_REVOKED_NODES_FILE` 一致。

@@ -1,28 +1,28 @@
-# seepctl CLI reference
+# rillanectl CLI reference
 
-> Status: reconciled against the clap definitions in `apps/seepctl/src/main.rs` (2026-10-11, 18 top-level subcommands) · this page only describes implemented behavior; flags/defaults are authoritative in the actual output of `seepctl <command> --help` · Related: [subscription guide](subscription.md) · [Mesh & Chain](mesh.md) · [system routing and network takeover](networking.md)
+> Status: reconciled against the clap definitions in `apps/rillanectl/src/main.rs` (2026-10-11, 18 top-level subcommands) · this page only describes implemented behavior; flags/defaults are authoritative in the actual output of `rillanectl <command> --help` · Related: [subscription guide](subscription.md) · [Mesh & Chain](mesh.md) · [system routing and network takeover](networking.md)
 
 ## Global options
 
 | Option | Description |
 |------|------|
-| `-c, --config <CONFIG>` | config file path (default `config/seep.yaml`); control-plane commands use it to read `control.api_bind` / `control.admin_token` |
+| `-c, --config <CONFIG>` | config file path (default `config/rillane.yaml`); control-plane commands use it to read `control.api_bind` / `control.admin_token` |
 | `-V, --version` | print version |
 
 ## Data sources
 
-- **Control-plane commands** (`stats` / `group` / `switches` / `nodes` / `chain` / `pool` / `subscription` / `route` / `diagnose` / `mtls revoke status`): HTTP against the `seepd` control plane; when `control.admin_token` is non-empty an `x-admin-token` header is attached, otherwise the request is anonymous.
+- **Control-plane commands** (`stats` / `group` / `switches` / `nodes` / `chain` / `pool` / `subscription` / `route` / `diagnose` / `mtls revoke status`): HTTP against the `rillaned` control plane; when `control.admin_token` is non-empty an `x-admin-token` header is attached, otherwise the request is anonymous.
   - `--endpoint` comes in two flavors (easy to confuse):
     - **Full-URL flavor** (replaces the whole target URL, must include the path): `stats` (default `http://{api_bind}/flows`), `group` (`/routing/stats`), `switches` (`/mesh/switches`), `pool status` (`/egress/pool/stats`), `nodes` (`/nodes`);
     - **Base-URL flavor** (replaces only the base, path appended internally): `chain`, `subscription`, `route`, `diagnose`, `mtls revoke status`.
 - **Offline commands** (`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / the `mtls` cert tools): no control plane, only local files are read (exception: `udp-probe` dials the SOCKS5 ingress directly).
-- There is no `seepctl reload` subcommand: seepd reads config once at startup, and runtime hot reloads are driven only by subscription refresh and control-plane endpoints (see the hot-reload scope in [architecture.md](architecture.md)).
+- There is no `rillanectl reload` subcommand: rillaned reads config once at startup, and runtime hot reloads are driven only by subscription refresh and control-plane endpoints (see the hot-reload scope in [architecture.md](architecture.md)).
 
 ## Control-plane REST endpoint reference
 
-Reconciled against the routing table in `apps/seepd/src/control_plane.rs` (2026-10-11). Unless noted, all require the `x-admin-token` header (when `control.admin_token` is configured non-empty).
+Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (2026-10-11). Unless noted, all require the `x-admin-token` header (when `control.admin_token` is configured non-empty).
 
-| Method | Path | Description | seepctl counterpart |
+| Method | Path | Description | rillanectl counterpart |
 |------|------|------|--------------|
 | GET | `/health` | liveness probe | — |
 | GET | `/nodes` | mesh node snapshot | `nodes` |
@@ -36,7 +36,7 @@ Reconciled against the routing table in `apps/seepd/src/control_plane.rs` (2026-
 | GET | `/runtime/stats` | runtime stats | — (REST only) |
 | GET | `/runtime/config` | snapshot of the currently effective config | — (REST only) |
 | GET | `/events` | event log (last N lines) | — (REST only) |
-| GET | `/logs` | recent logs (requires `SEEP_CAPTURE_LOGS=1`) | `diagnose` (collects) |
+| GET | `/logs` | recent logs (requires `RILLANE_CAPTURE_LOGS=1`) | `diagnose` (collects) |
 | GET | `/metrics` | Prometheus text | — (Prometheus scraping) |
 | GET | `/mtls/revoked` | effective view of the revocation list (mtime/entries/load errors) | `mtls revoke status` |
 | GET | `/chains/stats` | chain stats | `chain stats` |
@@ -71,8 +71,8 @@ Reconciled against the routing table in `apps/seepd/src/control_plane.rs` (2026-
 | `nodes` | view mesh node registration info | control plane `/nodes` |
 | `chain` | chain management (dry-run/create/get/terminate/stats) | control plane |
 | `pool` | egress connection pool snapshot (status) | control plane `/egress/pool/stats` |
-| `import-clash` | Clash YAML -> Seep config (offline preview) | offline |
-| `export-clash` | Seep config -> Clash YAML reverse export (offline) | offline |
+| `import-clash` | Clash YAML -> Rillane config (offline preview) | offline |
+| `export-clash` | Rillane config -> Clash YAML reverse export (offline) | offline |
 | `subscription` | subscription management (list/add/remove/refresh) | control plane |
 | `route` | system route management (apply/clear/status) | control plane + local ip commands |
 | `diagnose` | one-shot diagnostics collection (creates a diagnostics directory) | control plane + local snapshot |
@@ -83,11 +83,11 @@ Reconciled against the routing table in `apps/seepd/src/control_plane.rs` (2026-
 ### Control-plane data
 
 ```bash
-seepctl stats   [--endpoint <full URL including /flows>]
-seepctl group   [--endpoint <full URL including /routing/stats>]
-seepctl switches [--endpoint <full URL including /mesh/switches>]
-seepctl nodes   [--endpoint <full URL including /nodes>]
-seepctl pool status [--endpoint <full URL including /egress/pool/stats>]
+rillanectl stats   [--endpoint <full URL including /flows>]
+rillanectl group   [--endpoint <full URL including /routing/stats>]
+rillanectl switches [--endpoint <full URL including /mesh/switches>]
+rillanectl nodes   [--endpoint <full URL including /nodes>]
+rillanectl pool status [--endpoint <full URL including /egress/pool/stats>]
 ```
 
 The UDP section of `stats` is derived from the same base as `/flows`: the `--endpoint` override only affects the `/flows` side.
@@ -99,7 +99,7 @@ No flags; the config is given through the global `-c`. `show` prints a summary (
 ### profile
 
 ```bash
-seepctl profile <proxy|game|web> [--out <path>]   # default prints to stdout
+rillanectl profile <proxy|game|web> [--out <path>]   # default prints to stdout
 ```
 
 ### tls-fingerprint
@@ -109,7 +109,7 @@ No flags; prints the comparison table of `shape_material` shape strings for the 
 ### import-rules
 
 ```bash
-seepctl import-rules <SOURCE> --target <TARGET> [--face routing|dns] [--name <NAME>] [--out <path>]
+rillanectl import-rules <SOURCE> --target <TARGET> [--face routing|dns] [--name <NAME>] [--out <path>]
 ```
 
 - `<SOURCE>`: a file path or http(s) URL (a v2fly text manifest line set);
@@ -121,7 +121,7 @@ seepctl import-rules <SOURCE> --target <TARGET> [--face routing|dns] [--name <NA
 ### udp-probe
 
 ```bash
-seepctl udp-probe --socks5 <address> --host <host> --port <port> --payload-hex <hex>
+rillanectl udp-probe --socks5 <address> --host <host> --port <port> --payload-hex <hex>
                   [--timeout <3s>] [--user <U>] [--pass <P>]
 ```
 
@@ -130,11 +130,11 @@ seepctl udp-probe --socks5 <address> --host <host> --port <port> --payload-hex <
 ### chain
 
 ```bash
-seepctl chain dry-run   --source <S> --target <T>
-seepctl chain create    --source <S> --target <T> [--session-id <UUID>]   # reuses the chain for the same session_id
-seepctl chain get       <CHAIN_ID>
-seepctl chain terminate <CHAIN_ID>
-seepctl chain stats
+rillanectl chain dry-run   --source <S> --target <T>
+rillanectl chain create    --source <S> --target <T> [--session-id <UUID>]   # reuses the chain for the same session_id
+rillanectl chain get       <CHAIN_ID>
+rillanectl chain terminate <CHAIN_ID>
+rillanectl chain stats
 ```
 
 `--endpoint` for the `chain` group is the **base-URL flavor**.
@@ -142,19 +142,19 @@ seepctl chain stats
 ### import-clash / export-clash
 
 ```bash
-seepctl import-clash <url|file> [-o config/clash_import.yaml]   # -o is equivalent to --output
-seepctl export-clash <seep config> [-o config/clash_export.yaml]   # prints the degraded/skipped list at the end
+rillanectl import-clash <url|file> [-o config/clash_import.yaml]   # -o is equivalent to --output
+rillanectl export-clash <rillane config> [-o config/clash_export.yaml]   # prints the degraded/skipped list at the end
 ```
 
 ### subscription
 
 ```bash
-seepctl subscription list
-seepctl subscription add <NAME> <URL> [--type <T>] [--enabled true|false]
+rillanectl subscription list
+rillanectl subscription add <NAME> <URL> [--type <T>] [--enabled true|false]
                        [--refresh-interval <min>] [--timeout <sec>]
                        [--header k=v]... [--user-agent <UA>]
-seepctl subscription remove <NAME>
-seepctl subscription refresh [NAME]    # refreshes all when no name given
+rillanectl subscription remove <NAME>
+rillanectl subscription refresh [NAME]    # refreshes all when no name given
 ```
 
 `--header` can be passed multiple times. `--endpoint` is the base-URL flavor.
@@ -162,9 +162,9 @@ seepctl subscription refresh [NAME]    # refreshes all when no name given
 ### route
 
 ```bash
-seepctl route apply   [--dry-run]   # idempotently replays the include targets from the config; --dry-run only prints the ip commands
-seepctl route clear               # removes all applied rules in reverse order
-seepctl route status              # device state + table of applied steps
+rillanectl route apply   [--dry-run]   # idempotently replays the include targets from the config; --dry-run only prints the ip commands
+rillanectl route clear               # removes all applied rules in reverse order
+rillanectl route status              # device state + table of applied steps
 ```
 
 `--endpoint` is the base-URL flavor. apply/clear need root or `CAP_NET_ADMIN`.
@@ -172,7 +172,7 @@ seepctl route status              # device state + table of applied steps
 ### diagnose
 
 ```bash
-seepctl diagnose [--endpoint <base URL>] [--output <dir>] [--no-redact] [--no-local]
+rillanectl diagnose [--endpoint <base URL>] [--output <dir>] [--no-redact] [--no-local]
 ```
 
 By default the config is redacted (token/password/private_key etc.); `--no-local` skips the local snapshot (routes/DNS/interfaces).
@@ -180,18 +180,18 @@ By default the config is redacted (token/password/private_key etc.); `--no-local
 ### mtls
 
 ```bash
-seepctl mtls init-ca    --out-dir <dir> [--common-name seep-mesh-ca] [--valid-days 3650]
-seepctl mtls issue      --node-id <ID> --ca-cert <pem> --ca-key <pem> --out-dir <dir>
-                        [--server-name seep] [--valid-days 365]
-seepctl mtls rotate     --node-id <ID> --ca-cert <pem> --ca-key <pem> --out-dir <dir>
+rillanectl mtls init-ca    --out-dir <dir> [--common-name rillane-mesh-ca] [--valid-days 3650]
+rillanectl mtls issue      --node-id <ID> --ca-cert <pem> --ca-key <pem> --out-dir <dir>
+                        [--server-name rillane] [--valid-days 365]
+rillanectl mtls rotate     --node-id <ID> --ca-cert <pem> --ca-key <pem> --out-dir <dir>
                         [--no-backup] [--valid-days 365]    # backs up to *.bak.<epoch> by default; new connections pick it up automatically
-seepctl mtls bundle-ca  --ca-cert <pem>... --out-path <bundle.pem>
-seepctl mtls rotate-ca  --old-ca-cert <pem> --out-dir <dir>
-                        [--common-name seep-mesh-ca-next] [--valid-days 3650]   # outputs an old+new dual-trust bundle
-seepctl mtls revoke list   [--file <path>]
-seepctl mtls revoke add    --file <path> --node-id <ID>
-seepctl mtls revoke remove --file <path> --node-id <ID>
-seepctl mtls revoke status [--endpoint <base URL>]   # GET /mtls/revoked: the "effective" leg of the distribution -> effect -> verification loop
+rillanectl mtls bundle-ca  --ca-cert <pem>... --out-path <bundle.pem>
+rillanectl mtls rotate-ca  --old-ca-cert <pem> --out-dir <dir>
+                        [--common-name rillane-mesh-ca-next] [--valid-days 3650]   # outputs an old+new dual-trust bundle
+rillanectl mtls revoke list   [--file <path>]
+rillanectl mtls revoke add    --file <path> --node-id <ID>
+rillanectl mtls revoke remove --file <path> --node-id <ID>
+rillanectl mtls revoke status [--endpoint <base URL>]   # GET /mtls/revoked: the "effective" leg of the distribution -> effect -> verification loop
 ```
 
-The revocation list file holds one `node_id` per line (empty lines/`#` comments/commas ignored); the recommended path matches `SEEP_MESH_MTLS_REVOKED_NODES_FILE`.
+The revocation list file holds one `node_id` per line (empty lines/`#` comments/commas ignored); the recommended path matches `RILLANE_MESH_MTLS_REVOKED_NODES_FILE`.

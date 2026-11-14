@@ -3,14 +3,14 @@
 > 上游设计：[udp-dataplane.md](udp-dataplane.md) §4（P0-4 概念稿：envelope 格式/转发行为/加密三选一/验收）。
 > 本文是实现级裁决：**精确格式、类型签名、状态机、接线点、测试计划**。落地后偏差回填 §11 与上游 §6 注记。
 > 决策索引 D-1..D-16、接口接缝清单、与 P1-4/P1-5/P2-5 边界互指及验收·统计口径显式（**第四轮补全，2026-09-30**）见 §0.1、§0.2 与 §15–§17。
-> 复用基线：P0-1 会话表（`seep-core::udp`）· P0-3 出站载荷（`EgressUdpConnector` + RoutingUdpConnector）· TCP 面数据平面（`seep-runtime::mesh_transport`）。
+> 复用基线：P0-1 会话表（`rillane-core::udp`）· P0-3 出站载荷（`EgressUdpConnector` + RoutingUdpConnector）· TCP 面数据平面（`rillane-runtime::mesh_transport`）。
 > **状态（2026-09-30）：已落地**——P0-4 S0–S6 全部完成（todo.md P0-4 已勾选，§10 八项验收测试 + 27 项新增测试全绿）；落地偏差以代码注记与 todo P0-4 落地行为准，本文保持实现级设计定稿原文。观测与配置续篇 [udp-observability.md](udp-observability.md)（todo P0-5，**已落地**）。
 
 ## 0. 范围
 
 - 两跳链路（client → relay → exit）的 UDP 双向转发，首包 FULL / 后续 CACHED；
 - UDP 面路由从基础 `RoutingEngine` 切到 `RuntimeFlowRouter`（chain 决策），链路故障复用 `ChainManager`；
-- 加密按上游 §4.4 MVP 兜底：明文仅 `SEEP_MESH_UDP_ALLOW_PLAINTEXT=1` 显式开启，未配置加密时 chain+udp **构建期拒绝启动**（V2 quinn 选型未决，不在本条目）；
+- 加密按上游 §4.4 MVP 兜底：明文仅 `RILLANE_MESH_UDP_ALLOW_PLAINTEXT=1` 显式开启，未配置加密时 chain+udp **构建期拒绝启动**（V2 quinn 选型未决，不在本条目）；
 - 不含：QUIC 载荷（V2）、跨 relay 回源校验（O3）、TCP 面 envelope 二进制化（P2-6 用本文 §2 格式）。
 
 ### 0.1 验收口径（显式，第四轮补全 2026-09-30）
@@ -20,13 +20,13 @@ todo P0-4 验收三条逐条落可测口径（对齐 P0-3/P1-4/P1-5 显式改写
 1. **两跳链路 UDP 双向转发** = §10 T2：client `MeshUdpRelay` → relay plane → exit plane → 环回 echo，真 socket、无特权，dir=Down 全链路回包断言；
 2. **对端不可达时按超时回收** = 双路径各有断言：idle 过期（T4，expiry 就地改写 + `unknown_flow`）与 exit 侧 recv Err（target 不可达/复位 → `retire_flow` 单点，§13-1 触发点②）——"不可达"不合成单一超时口径；
 3. **"QUIC 站点经 hy2 出站可达"维持改判**：hysteria2 crate 0.1.6 公开 API 无 UDP 出口（P0-3 V1 核查），hy2 UDP 随 V2 quinn 载具裁决（§12），本条目 MVP 不含；**可验口径 = QUIC 站点即普通 UDP**（`TargetProto::Quic` 不特判，§1）**经 mesh UDP 面（两跳）至 P0-3 已实现载体（direct/ss/wg）可达**；
-4. **明文门先行**的语义 = 未配置加密时 chain+udp 构建期拒绝启动（T6）；明文仅 `SEEP_MESH_UDP_ALLOW_PLAINTEXT=1` / 配置合流（§13-6）显式开启。
+4. **明文门先行**的语义 = 未配置加密时 chain+udp 构建期拒绝启动（T6）；明文仅 `RILLANE_MESH_UDP_ALLOW_PLAINTEXT=1` / 配置合流（§13-6）显式开启。
 
 ### 0.2 统计口径注记
 
 - **不去重（D-14）的观测推论**：mesh UDP 面可能重复递交同一数据报（FULL 周期重发、best-effort 语义）——验收与监控**不得以"零重复"为判据**，重复是 §14-2 裁决下的预期行为；
 - `forwarded_up` 含本机发出的 FULL/CACHED 全部数据报（§13-2），FULL 周期重发（§5，64 包/30s 拍脑袋值）计入其中——评估有效载荷率时须知分母含重发开销；
-- `seep_udp_mesh_*`（P0-5 §2.4，数据报/流计数）与 TCP 面 mesh 记账（`record_link_bytes` 连接字节）**分族不混算**——同一 `listen_address` 端口上两面的流量在监控上属两个序列族；
+- `rillane_udp_mesh_*`（P0-5 §2.4，数据报/流计数）与 TCP 面 mesh 记账（`record_link_bytes` 连接字节）**分族不混算**——同一 `listen_address` 端口上两面的流量在监控上属两个序列族；
 - `malformed` 同时涵盖解码拒绝与 TTL 熔断（§14-1 复用既有字段）——归因按日志拆"格式错误 vs 环熔断"，不拆序列；
 - `flows_active` 为 gauge 直读（§13-2），与 sweep 时点的真实表长存在瞬态偏差，监控可接受。
 
@@ -49,7 +49,7 @@ client (MeshUdpRelay)          relay (MeshDataPlane UDP)        exit (MeshDataPl
   - UDP 数据报 → P0-1 会话表 → `UdpChainRouter`（§5）→ UDP 面二进制 envelope（§2）；
   - QUIC 站点 = 普通 UDP（`TargetProto::Quic` 不特判）走 UDP 面；hy2 出站载荷（P0-3 §3.4(c) 移入）是**出口载体**问题，不经 mesh UDP 面；
   - 两面仅共享 `listen_address` 端口号与 registry/记账（`record_link_bytes`）；envelope 格式、socket、生命周期完全独立——TCP 面 flow 逐连接（`MeshStream` 双向拷贝、每连接 envelope 头一次），UDP 面 flow 逐数据报无连接（每包带 envelope 头）；
-  - 加密水位差异（既有事实）：TCP 面 chain 默认强制 mTLS（`SEEP_MESH_ALLOW_PLAINTEXT` 仅 dev）；UDP 面 MVP 走 §6 明文门——V2 QUIC 载具时对齐。
+  - 加密水位差异（既有事实）：TCP 面 chain 默认强制 mTLS（`RILLANE_MESH_ALLOW_PLAINTEXT` 仅 dev）；UDP 面 MVP 走 §6 明文门——V2 QUIC 载具时对齐。
 
 ## 2. UdpEnvelope 二进制格式（§4.2 精确化）
 
@@ -87,8 +87,8 @@ pub fn decode_udp_envelope(buf: &[u8]) -> Result<UdpEnvelope>
 ```
 
 - 校验：magic/ver/保留位/domain 长度/CACHED 携带路径（拒绝）；截断一律错误（计 `malformed`）。
-- 与 P0-2 SOCKS5 头编解码同风格：纯函数、单测钉住（`seep-core/src/udp/associate.rs` 先例）。
-- **落点**：`seep-runtime/src/mesh_transport.rs`（与 TCP `MeshEnvelope` 同文件；seep-mesh 不依赖 tokio 运行时细节，且转发行为同文件便于同测）。
+- 与 P0-2 SOCKS5 头编解码同风格：纯函数、单测钉住（`rillane-core/src/udp/associate.rs` 先例）。
+- **落点**：`rillane-runtime/src/mesh_transport.rs`（与 TCP `MeshEnvelope` 同文件；rillane-mesh 不依赖 tokio 运行时细节，且转发行为同文件便于同测）。
 
 ## 3. 跳缓存（UdpFlowCache）
 
@@ -146,7 +146,7 @@ send(payload) → target；下行 task: socket.recv → UdpEnvelope{dir:Down, pa
 ## 5. 客户端出站：UdpChainRouter + MeshUdpRelay
 
 ```rust
-// seep-runtime（私有）：P0-3 RoutingUdpConnector 的 chain 感知包装
+// rillane-runtime（私有）：P0-3 RoutingUdpConnector 的 chain 感知包装
 struct UdpChainRouter {
     inner: RoutingUdpConnector,          // 非 chain 决策：按 final_node 分发（P0-3）
     mesh: Option<MeshUdpBridge>,         // chain 决策；None + chain 决策 → 构建期已拦截
@@ -182,7 +182,7 @@ struct MeshUdpRelay { /* impl UdpRelay */
 pub struct MeshUdpGate { pub allow_plaintext: bool }  // env 只在 from_env 读取，测试显式传参
 impl MeshUdpGate { fn ensure_usable(&self, tls: Option<&MeshTlsConfig>) -> Result<()> }
 // tls 为 None 且 !allow_plaintext → Err("mesh UDP 面未配置加密且未显式允许明文
-//   （SEEP_MESH_UDP_ALLOW_PLAINTEXT=1）；chain+udp 组合拒绝启动（udp-dataplane.md §4.4/V2）")
+//   （RILLANE_MESH_UDP_ALLOW_PLAINTEXT=1）；chain+udp 组合拒绝启动（udp-dataplane.md §4.4/V2）")
 ```
 
 - **落点在构建期**（`RuntimeBuilder::build`）：非 client 角色拉起 UDP 面前、client 侧 UdpChainRouter::mesh 构建前各查一次；
@@ -202,7 +202,7 @@ impl MeshUdpGate { fn ensure_usable(&self, tls: Option<&MeshTlsConfig>) -> Resul
 - **chain_id 口径桥接**：`ChainManager.chain_id` 是 UUID 随机串，P0-1 `chain_id_of(decision)` 是 `chain:{hops.join("->")}`——两者不换算。`ChainFailureEvent` 由 runtime 在 `handle_chain_failure` 成功后构造：**chain_id 字段填 `chain_id_of(切换后的新决策)`**，failed_nodes 填旧链失败节点。ledger 绑定 gate（chain_id 相等才吊销）按新决策口径命中；
 - 切换后本 UDP 面的流：决策已变 → 下包 ensure_decision 重路由（P0-1 语义），在途跳缓存自然过期。
 
-## 9. RuntimeBuilder / seepd 接线
+## 9. RuntimeBuilder / rillaned 接线
 
 ### 9.1 build() 阶段时序调整：UDP 块下移（本节为实施前提）
 
@@ -279,15 +279,15 @@ S2 UdpFlowCache 跳缓存 ─┘   S4 UdpChainRouter/MeshUdpRelay ─┴─► S
 - 落点：`mesh_transport.rs`：`MeshUdpGate::ensure_usable`；`MeshDataPlane` 增 `udp: Option<UdpFace>` 字段与 `with_udp(gate)` 构造子；`handle_udp_datagram` / `spawn_udp`；exit 分支的 per-flow connected socket 表 + 下行 task。
 - 依赖：S1 + S2。
 - 实施要点：转发/回包共用节点级 UDP 面 socket（§1 拓扑）；FULL→剥自身重编码、CACHED→查缓存转发（§11-4）；exit 下行从缓存读 prev（FULL 重刷新 prev 后下行随之改向）；gate 只做显式参数检查，env 读取留在调用方（§11-5）。
-- 验收：§10 T6（tls=None 且 `!allow_plaintext` → Err 信息含 `SEEP_MESH_UDP_ALLOW_PLAINTEXT`）、T3（relay 直调 `handle_udp_datagram`，第 2 包 decode 为 Cached 且 path 空）、T4 的 unknown_flow 路径；单跳（client→exit）真 socket 往返先行钉住 exit 分支。
+- 验收：§10 T6（tls=None 且 `!allow_plaintext` → Err 信息含 `RILLANE_MESH_UDP_ALLOW_PLAINTEXT`）、T3（relay 直调 `handle_udp_datagram`，第 2 包 decode 为 Cached 且 path 空）、T4 的 unknown_flow 路径；单跳（client→exit）真 socket 往返先行钉住 exit 分支。
 
 **S4 UdpChainRouter + MeshUdpRelay**（§5）
 
-- 落点：`seep-runtime` 新私有模块 `udp_chain.rs`：`UdpChainRouter`（`RoutePath::Chain{hops≥2}` → mesh，其余 → 内部 `RoutingUdpConnector`）、`MeshUdpBridge::associate`（解析 hops[1] 地址 + 本地 socket）、`MeshUdpRelay`（impl P0-1 `UdpRelay`：FULL 首包 → CACHED 后续 + 周期重发 FULL，下行只认 CACHED dir=Down 且 flow_id 匹配）。
+- 落点：`rillane-runtime` 新私有模块 `udp_chain.rs`：`UdpChainRouter`（`RoutePath::Chain{hops≥2}` → mesh，其余 → 内部 `RoutingUdpConnector`）、`MeshUdpBridge::associate`（解析 hops[1] 地址 + 本地 socket）、`MeshUdpRelay`（impl P0-1 `UdpRelay`：FULL 首包 → CACHED 后续 + 周期重发 FULL，下行只认 CACHED dir=Down 且 flow_id 匹配）。
 - 依赖：S1（解码）；P0-3 trait 面（已在仓库）。
 - 验收：§10 T7（Chain 分派命中 MeshUdpRelay / Direct 落 inner 连接器）；`MeshUdpRelay` 对桩 UDP 对端（假 relay：收 FULL 存样、回 CACHED dir=Down）完成 send/recv 单测。
 
-**S5 build() / seepd 接线**（§9.2 + §8）
+**S5 build() / rillaned 接线**（§9.2 + §8）
 
 - 落点：`runtime_builder.rs::build()`：udp.enabled && enable_chain 时 UDP 表 FlowRouter 换 `RuntimeFlowRouter`（S0 腾出的位置）；出站连接器换 `UdpChainRouter`；非 client 角色并列 `spawn_udp`（gate 前置）；`ChainFailureEvent` 按 §8 口径桥接。
 - 依赖：S0 + S3 + S4。
@@ -366,7 +366,7 @@ pub struct UdpFaceMetrics {
 ```
 
 - 落点：`mesh_transport.rs`，`UdpFace` 内持有；
-- `seep_udp_mesh_flows_active` 直接读 gauge（不扫 `map.len()`——sweep 时点才有偏差，监控可接受）。
+- `rillane_udp_mesh_flows_active` 直接读 gauge（不扫 `map.len()`——sweep 时点才有偏差，监控可接受）。
 
 ### 13-3 envelope 大小上界（补 §2）
 
@@ -392,7 +392,7 @@ gate 构造参数化（§6 已定 env 只在读取层出现）；**合流点定�
 
 ```
 allow_plaintext = cfg.mesh.udp_allow_plaintext_data_plane /* bool, serde default false */
-                  || env_flag("SEEP_MESH_UDP_ALLOW_PLAINTEXT")
+                  || env_flag("RILLANE_MESH_UDP_ALLOW_PLAINTEXT")
 ```
 
 结果以 `MeshUdpGate { allow_plaintext: bool }` 显式传入两个消费点（非 client 的 `spawn_udp` 前 / client 的 `UdpChainRouter` mesh 臂构建前）——两处 gate 实例同源，测试传参即可覆盖两分支，不碰进程 env（§11-5 裁决不变）。
@@ -444,21 +444,21 @@ allow_plaintext = cfg.mesh.udp_allow_plaintext_data_plane /* bool, serde default
 
 | 接缝 | 位置 | 契约 |
 |------|------|------|
-| ingress 分派 | socks5 入站 0x03 命令分派（`seep-protocols/src/inbound/socks5.rs`）→ `UdpAssociateService`（`seep-core/src/udp/associate.rs`） | P0-2 既有，本条目零改动；数据报自会话表进入 |
+| ingress 分派 | socks5 入站 0x03 命令分派（`rillane-protocols/src/inbound/socks5.rs`）→ `UdpAssociateService`（`rillane-core/src/udp/associate.rs`） | P0-2 既有，本条目零改动；数据报自会话表进入 |
 | 会话→决策 | `UdpSessionTable`（粘滞键/ensure_decision/ledger）→ `RouteDecision` | P0-1 既有；S5 将其 FlowRouter 换 `RuntimeFlowRouter`（D-9） |
-| 决策→出站 | `UdpChainRouter` 实现 P0-3 `EgressUdpConnector`（`seep-core/src/udp/relay.rs:259`）：`Chain{hops≥2}` → `MeshUdpBridge`，其余 → 内部 `RoutingUdpConnector`（P0-3 按 final_node 分发） | §5；能力扫描 `mesh.` 豁免已就位（§9.2），chain 决策的出口能力由 exit 侧真实 connect 表达 |
+| 决策→出站 | `UdpChainRouter` 实现 P0-3 `EgressUdpConnector`（`rillane-core/src/udp/relay.rs:259`）：`Chain{hops≥2}` → `MeshUdpBridge`，其余 → 内部 `RoutingUdpConnector`（P0-3 按 final_node 分发） | §5；能力扫描 `mesh.` 豁免已就位（§9.2），chain 决策的出口能力由 exit 侧真实 connect 表达 |
 | 客户端承载 | `MeshUdpRelay` 实现 P0-1 `UdpRelay` | 会话表/§3.6 分级 teardown/forwarder 零改动复用（§5） |
 | 与 TCP 面 | 仅共享 `listen_address` 端口与 `record_link_bytes` 记账；envelope/socket/生命周期独立 | §1 选择边界（指针不重复） |
 | 故障接线 | `ChainFailureEvent`（§8 口径）；在途跳缓存自然过期、不主动拆 | §8、D-10 |
-| 观测 | `UdpFaceMetrics`（§13-2）= P0-5 §2.4 `seep_udp_mesh_*` 数据源 | 数据源契约；口径注记见 §0.2 |
-| 注解可见性 | UDP 会话的 `FlowContext.metadata.annotations`（`seep-core/src/lib.rs:85-89`/`:52-55`，`process.*` 同族承载先例）在 `associate(&ctx, &decision)`（`relay.rs:267`，decision 为粘滞决策）可达 | P1-4 padding 会话级生产的前提（D-15）；实施时核对 ingress 侧是否已写入所需注解，缺则由 ingress 在 associate 前补写（备选，非本条目范围） |
+| 观测 | `UdpFaceMetrics`（§13-2）= P0-5 §2.4 `rillane_udp_mesh_*` 数据源 | 数据源契约；口径注记见 §0.2 |
+| 注解可见性 | UDP 会话的 `FlowContext.metadata.annotations`（`rillane-core/src/lib.rs:85-89`/`:52-55`，`process.*` 同族承载先例）在 `associate(&ctx, &decision)`（`relay.rs:267`，decision 为粘滞决策）可达 | P1-4 padding 会话级生产的前提（D-15）；实施时核对 ingress 侧是否已写入所需注解，缺则由 ingress 在 associate 前补写（备选，非本条目范围） |
 
 ## 17. 边界互指（外部条目，第四轮补全 2026-09-30）
 
 ### 17-P1-4 混淆中间件（padding 载体接缝——本轮修正一处生产点缺口）
 
 - [obfuscation-middleware.md](obfuscation-middleware.md) §2.3/§4.4 已把本条的 `UdpEnvelope` 列为 padding 的**理想帧载体**（一数据报 = 一个可控字节边界）并预留执行钩子——两稿互指成立；
-- **生产点修正（D-15）**：P1-4 §4.4 原表述"UDP 编码器读 `seep.obfs.padding` 注解"隐含注解已存在——但该注解的生产点（`FlowOutputRouter::forward` ② 的 middleware 链）只在 TCP Flow 路径，**UDP 会话路径（associate → `UdpRelay::send_to`）无 Flow 可挂链**。裁决：UDP 面 padding spec 在 **associate 会话级**按 obfuscation 配置与选择器求值（复用 `PaddingSpec` 与策略纯函数，`apply_to` 语义按会话 target/egress 判定），不经 `FlowMiddleware::handle`——与 P1-4 §2.1"流签名不承载帧语义"同因的第二次出现（报文语义同样不适配流 trait）；P1-4 §4.4 已加修订注记与本节互指；
+- **生产点修正（D-15）**：P1-4 §4.4 原表述"UDP 编码器读 `rillane.obfs.padding` 注解"隐含注解已存在——但该注解的生产点（`FlowOutputRouter::forward` ② 的 middleware 链）只在 TCP Flow 路径，**UDP 会话路径（associate → `UdpRelay::send_to`）无 Flow 可挂链**。裁决：UDP 面 padding spec 在 **associate 会话级**按 obfuscation 配置与选择器求值（复用 `PaddingSpec` 与策略纯函数，`apply_to` 语义按会话 target/egress 判定），不经 `FlowMiddleware::handle`——与 P1-4 §2.1"流签名不承载帧语义"同因的第二次出现（报文语义同样不适配流 trait）；P1-4 §4.4 已加修订注记与本节互指；
 - **执行点（D-16）**：填充产生于 envelope 封装侧两处——client FULL 首发、exit 下行封装（均为"编码后 send_to 前"，与 P1-4 §4.4 表述一致）；relay 的 FULL 剥自身与 hop_index+1 重编码**保持既有 `pad_len` 不追加**（杜绝逐跳叠加填充）；CACHED 转发段无新增填充；
 - 线格式：`pad_len` 的线上位置（§2 保留位 vs 新字段）与版本门取值随 P1-4 UDP 载具落地定稿（§12 已登记），fail-open 对齐 P1-4 §2.4——本稿不预定。
 

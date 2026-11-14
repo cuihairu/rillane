@@ -11,7 +11,7 @@
 > precedence; M2 this commit: the mesh -> routing quality bridge + the ChainManager SLO watcher +
 > `SwitchReason::SloDegraded` + the `slo_watch` programmatic config surface).
 > The YAML side goes to P2-3 (D-6/O-slo2); `slo_watch` is currently reachable only through programmatic
-> construction of `ChainConfig` (serde deserialization is supported, `seepd` does not pass it through).
+> construction of `ChainConfig` (serde deserialization is supported, `rillaned` does not pass it through).
 > §6 E2 deviation note: the loss of a link with zero connections is recorded as 0.0 (the observation API
 > has no atomic "errors/connections in the same snapshot" surface, and a pure-RTT node should not be
 > inflated by suspected loss).
@@ -28,7 +28,7 @@
    link_quality for two members and assert the selection flips;
 2. **Automatic switch on degradation**: the chain SLO watcher detects the current path crossing the
    gate -> `handle_chain_failure` triggers a switch/termination, ledger event
-   `reason="slo_degraded"` (the P2-1 `seep_mesh_switch_total{reason}` counting family is visible
+   `reason="slo_degraded"` (the P2-1 `rillane_mesh_switch_total{reason}` counting family is visible
    automatically, no new metric family) -- unit tests inject degradation data to drive the watcher;
 3. **Fallback takes effect**: after the switch, the `ChainContext` current path = the promoted backup
    path (the promotion semantics were fixed in P2-1 M1, with a single get_current_path wording) --
@@ -36,10 +36,10 @@
 
 ## 1. Current state and structural constraints
 
-- `RoutingEngine` (seep-routing): the `latency` policy = min of the last sample in `latency_stats`;
+- `RoutingEngine` (rillane-routing): the `latency` policy = min of the last sample in `latency_stats`;
   **the sample source is simulated** (`measure_node_latency` is random 10-100ms -- the existing
-  `test_health_check_integration` depends on that path); dependencies are only seep-config + seep-core
-  (**no dependency on seep-mesh** -- data can only be pushed in, the precedent being
+  `test_health_check_integration` depends on that path); dependencies are only rillane-config + rillane-core
+  (**no dependency on rillane-mesh** -- data can only be pushed in, the precedent being
   `update_bandwidth_stats`);
 - P2-1 delivered the real data source: `MeshRegistry.link_rtt` (RttRing p50/p95) +
   `link_traffic` (errors/connections) -- keyed by `(from,to)` link direction, which must be aggregated
@@ -47,7 +47,7 @@
 - `ChainManager::handle_chain_failure` (after the P2-1 repair): the promotion semantics on switch are
   correct and the ledger is left with traces by reason -- degradation switching can reuse it directly;
   what is missing is only the "degradation detected" trigger and the reason enum value;
-- seep-config has no chain YAML block: `RuntimeBuilder.chain_config` is the only programmatic entry
+- rillane-config has no chain YAML block: `RuntimeBuilder.chain_config` is the only programmatic entry
   (`Option<ChainConfig>`).
 
 ## 2. Decisions (D-x)
@@ -65,8 +65,8 @@
   precedence = link_quality (real) -> legacy latency_stats (simulated/existing) -> the first healthy
   member. Semantic change note: when real data is present the read goes from "last sample" up to "p95
   percentile" (§9).
-- **D-4 zero new dependencies, zero trait changes**: seep-routing adds no dependency; the mesh ->
-  routing bridge lives in seep-runtime (aggregating RttRing/LinkTraffic: a node's p95 = the max of the
+- **D-4 zero new dependencies, zero trait changes**: rillane-routing adds no dependency; the mesh ->
+  routing bridge lives in rillane-runtime (aggregating RttRing/LinkTraffic: a node's p95 = the max of the
   worst hop of the adjacent links, a node's loss = the sum of errors / the sum of connections, pushed
   only when there is data).
 - **D-5 automatic switch on degradation**: `ChainConfig.slo_watch: Option<SloWatch{
@@ -77,20 +77,20 @@
   family gains the `reason="slo_degraded"` series automatically).
 - **D-6 the config surface in two steps**: the group-level `PolicyGroup.slo` (serde default None, zero
   difference for existing configs) lands in YAML this step; the chain-side `slo_watch` lands only in
-  the programmatic surface this step (`RuntimeBuilder.chain_config`) -- seep-config has no chain block,
+  the programmatic surface this step (`RuntimeBuilder.chain_config`) -- rillane-config has no chain block,
   and the YAML side lands together with the P2-3 profile (default enabled in the game profile = wired
   there).
 
 ## 3. Data structures
 
 ```rust
-// seep-config
+// rillane-config
 pub struct SloPolicy {            // PolicyGroup.slo: Option<...> (serde default)
     pub p95_ms: Option<u32>,      // target gate (None = no gate on this dimension)
     pub loss_ratio: Option<f64>,  // target gate (None = no gate on this dimension)
     pub loss_penalty_ms: Option<f64>, // default 1000.0
 }
-// seep-runtime chain.rs
+// rillane-runtime chain.rs
 pub struct SloWatch {             // ChainConfig.slo_watch: Option<...>
     pub p95_ms: u32,
     pub loss_ratio: f64,
@@ -102,20 +102,20 @@ pub struct SloWatch {             // ChainConfig.slo_watch: Option<...>
 
 | Point | Change |
 |----|------|
-| `PolicyGroup` (seep-config) | + `slo: Option<SloPolicy>` (default); validate: loss_ratio in [0,1], penalty >= 0 |
+| `PolicyGroup` (rillane-config) | + `slo: Option<SloPolicy>` (default); validate: loss_ratio in [0,1], penalty >= 0 |
 | `RoutingEngine::select_latency_member` | the gate + scoring (D-2), read precedence (D-3) |
 | `RoutingEngine::update_link_quality` | new public write point + TTL |
-| the seep-runtime bridge task | periodically aggregate MeshRegistry -> update_link_quality (node = an endpoint name of the link) |
+| the rillane-runtime bridge task | periodically aggregate MeshRegistry -> update_link_quality (node = an endpoint name of the link) |
 | `ChainConfig` / `ChainManager` | + the slo_watch field + the watcher task (spawned the same way as start_health_check_task) |
 | `SwitchReason` | + SloDegraded (incremental in three places) |
 
 ## 5. Control plane
 
 No new metric family or endpoint: a degradation switch is visible automatically through the P2-1
-`seep_mesh_switch_total{reason="slo_degraded"}` and `/mesh/switches` (the reason was chosen as an
+`rillane_mesh_switch_total{reason="slo_degraded"}` and `/mesh/switches` (the reason was chosen as an
 enum value for exactly this purpose). The group policy selection result is routing-internal state,
 exposed at the time of this draft's delivery via the existing diagnose surface; a later O-slo1
-(2026-10-10) added a dedicated observability surface: `GET /routing/stats` + `seepctl group` (a
+(2026-10-10) added a dedicated observability surface: `GET /routing/stats` + `rillanectl group` (a
 real-time quality snapshot of the group, with the selected endpoint/gate/score and the selection from
 the same source).
 
@@ -146,8 +146,8 @@ the same source).
 
 | Step | Content and landing points | Depends on | Acceptance |
 |----|-----------|------|------|
-| M1 | the seep-config SloPolicy + the seep-routing scoring core (update_link_quality/gate/scoring/read precedence) + the §7-1/2 unit tests | - | §7-1/2 green; zero regression over existing routing tests |
-| M2 | the seep-runtime bridge + SloWatch/watcher + SwitchReason::SloDegraded + the §7-3/4 unit tests + documentation backfill (todo/PROTOCOLS/roadmap/landing note in this draft) | M1 | §7-3/4 green; the §0 wordings are reproducible item by item |
+| M1 | the rillane-config SloPolicy + the rillane-routing scoring core (update_link_quality/gate/scoring/read precedence) + the §7-1/2 unit tests | - | §7-1/2 green; zero regression over existing routing tests |
+| M2 | the rillane-runtime bridge + SloWatch/watcher + SwitchReason::SloDegraded + the §7-3/4 unit tests + documentation backfill (todo/PROTOCOLS/roadmap/landing note in this draft) | M1 | §7-3/4 green; the §0 wordings are reproducible item by item |
 
 ## 9. Deviations and assumptions
 
@@ -169,9 +169,9 @@ the same source).
 - **R-slo1**: a spurious watcher switch (a transient crossing of the gate due to reporting jitter) --
   the MVP has no hysteresis/debounce, and the interval period is the natural smoothing; the hysteresis
   policy is decided after an observation period for the false-switch rate;
-- **O-slo1**: ~~the `seepctl group` subcommand shows the real-time SLO score of each member~~ (**landed
+- **O-slo1**: ~~the `rillanectl group` subcommand shows the real-time SLO score of each member~~ (**landed
   2026-10-10**: the `RoutingEngine::group_quality_report` snapshot surface + the control plane
-  `GET /routing/stats` + `seepctl group` -- a member's data source of real/legacy/unknown, p95/loss,
+  `GET /routing/stats` + `rillanectl group` -- a member's data source of real/legacy/unknown, p95/loss,
   the gate judgment and the latency group's current deterministic selected endpoint; the
   selected-endpoint/gate/scoring wording is shared from the same source as select_latency_member);
 - **O-slo2**: ~~the wiring of default enabled in the game profile (P2-3)~~ (**landed

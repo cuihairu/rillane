@@ -3,14 +3,14 @@
 > Upstream design: [udp-dataplane.md](udp-dataplane.md) §4 (P0-4 concept draft: envelope format / forwarding behavior / encryption three-way choice / acceptance).
 > This document is the implementation-level ruling: **exact format, type signatures, state machine, wiring points, test plan**. Deviations after landing are backfilled into §11 and the upstream §6 note.
 > Decision index D-1..D-16, the interface seam list, mutual boundary references with P1-4/P1-5/P2-5, and explicit acceptance/metric framing (**fourth-round completion, 2026-09-30**) are in §0.1, §0.2, and §15–§17.
-> Reuse baseline: P0-1 session table (`seep-core::udp`) · P0-3 egress underlay (`EgressUdpConnector` + RoutingUdpConnector) · TCP-plane data plane (`seep-runtime::mesh_transport`).
+> Reuse baseline: P0-1 session table (`rillane-core::udp`) · P0-3 egress underlay (`EgressUdpConnector` + RoutingUdpConnector) · TCP-plane data plane (`rillane-runtime::mesh_transport`).
 > **Status (2026-09-30): landed** -- P0-4 S0–S6 all complete (todo.md P0-4 checked off; §10 eight acceptance tests + 27 new tests all green); as-landed deviations are authoritative per code notes and todo P0-4 landing behavior, and this document keeps the implementation-level design final text. Observability and config continuation: [udp-observability.md](udp-observability.md) (todo P0-5, **landed**).
 
 ## 0. Scope
 
 - UDP bidirectional forwarding on a two-hop link (client → relay → exit), first packet FULL / later CACHED;
 - UDP-plane routing switches from the base `RoutingEngine` to `RuntimeFlowRouter` (chain decisions); link failure handling reuses `ChainManager`;
-- Encryption follows upstream §4.4 MVP fallback: plaintext only via explicit `SEEP_MESH_UDP_ALLOW_PLAINTEXT=1`; with no encryption configured, chain+udp **refuses to start at build time** (V2 quinn choice is open, out of this item);
+- Encryption follows upstream §4.4 MVP fallback: plaintext only via explicit `RILLANE_MESH_UDP_ALLOW_PLAINTEXT=1`; with no encryption configured, chain+udp **refuses to start at build time** (V2 quinn choice is open, out of this item);
 - Excludes: QUIC underlay (V2), cross-relay back-to-source verification (O3), TCP-plane envelope binarization (P2-6 uses this document's §2 format).
 
 ### 0.1 Acceptance framing (explicit; fourth-round completion 2026-09-30)
@@ -20,13 +20,13 @@ todo P0-4's three acceptance items, each given a measurable framing (following t
 1. **Two-hop link UDP bidirectional forwarding** = §10 T2: client `MeshUdpRelay` → relay plane → exit plane → loopback echo; real sockets, no privileges; dir=Down full-chain reply assertions;
 2. **Reclaim on timeout when the peer is unreachable** = both paths have their own assertions: idle expiry (T4, expiry rewritten in place + `unknown_flow`) and exit-side recv Err (target unreachable/reset → `retire_flow` single point, §13-1 trigger point ②) -- "unreachable" is not collapsed into a single timeout framing;
 3. **"QUIC sites reachable via hy2 egress" keeps the revision**: the hysteria2 crate 0.1.6 public API has no UDP egress (P0-3 V1 check); hy2 UDP is decided with the V2 quinn vehicle (§12) and is out of this item's MVP; **verifiable framing = QUIC sites are ordinary UDP** (`TargetProto::Quic` is not special-cased, §1) **reachable through the mesh UDP plane (two hops) to a P0-3 already-implemented vehicle (direct/ss/wg)**;
-4. The semantics of **plaintext gate first** = with no encryption configured, chain+udp refuses to start at build time (T6); plaintext only via explicit `SEEP_MESH_UDP_ALLOW_PLAINTEXT=1` / config merge (§13-6).
+4. The semantics of **plaintext gate first** = with no encryption configured, chain+udp refuses to start at build time (T6); plaintext only via explicit `RILLANE_MESH_UDP_ALLOW_PLAINTEXT=1` / config merge (§13-6).
 
 ### 0.2 Metric framing notes
 
 - **Observational consequence of no deduplication (D-14)**: the mesh UDP plane may deliver the same datagram more than once (FULL periodic resend, best-effort semantics) -- acceptance and monitoring **must not use "zero duplicates" as a criterion**; duplication is expected behavior under the §14-2 ruling;
 - `forwarded_up` includes all datagrams emitted locally, FULL/CACHED (§13-2); the FULL periodic resend (§5, 64 packets / 30s as a rough value) counts inside it -- when evaluating effective payload rate, know the denominator includes resend overhead;
-- `seep_udp_mesh_*` (P0-5 §2.4, datagram/flow counters) and TCP-plane mesh accounting (`record_link_bytes` connection bytes) are **separate families, never mixed** -- the two planes' traffic on the same `listen_address` port belongs to two series families in monitoring;
+- `rillane_udp_mesh_*` (P0-5 §2.4, datagram/flow counters) and TCP-plane mesh accounting (`record_link_bytes` connection bytes) are **separate families, never mixed** -- the two planes' traffic on the same `listen_address` port belongs to two series families in monitoring;
 - `malformed` covers both decode refusals and TTL circuit breaking (§14-1 reuses the existing field) -- attribution is split by logs into "format error vs. loop break", not split into series;
 - `flows_active` is a direct gauge read (§13-2) with transient skew against the true table length at sweep time; monitoring accepts this.
 
@@ -49,7 +49,7 @@ client (MeshUdpRelay)          relay (MeshDataPlane UDP)        exit (MeshDataPl
   - UDP datagrams → P0-1 session table → `UdpChainRouter` (§5) → UDP-plane binary envelope (§2);
   - QUIC sites = ordinary UDP (`TargetProto::Quic` not special-cased) through the UDP plane; the hy2 egress underlay (moved in by P0-3 §3.4(c)) is an **exit vehicle** question and does not go through the mesh UDP plane;
   - The two planes share only the `listen_address` port number and registry/accounting (`record_link_bytes`); envelope format, sockets, and lifecycle are fully independent -- the TCP-plane flow is per-connection (`MeshStream` bidirectional copy, one envelope header per connection); the UDP-plane flow is per-datagram and connectionless (every packet carries an envelope header);
-  - Encryption-level difference (existing fact): the TCP-plane chain enforces mTLS by default (`SEEP_MESH_ALLOW_PLAINTEXT` is dev-only); the UDP-plane MVP goes through the §6 plaintext gate -- to be aligned when the V2 QUIC vehicle lands.
+  - Encryption-level difference (existing fact): the TCP-plane chain enforces mTLS by default (`RILLANE_MESH_ALLOW_PLAINTEXT` is dev-only); the UDP-plane MVP goes through the §6 plaintext gate -- to be aligned when the V2 QUIC vehicle lands.
 
 ## 2. UdpEnvelope binary format (§4.2 made precise)
 
@@ -87,8 +87,8 @@ pub fn decode_udp_envelope(buf: &[u8]) -> Result<UdpEnvelope>
 ```
 
 - Validation: magic/ver/reserved bits/domain length/CACHED carrying a path (refuse); truncation is always an error (counted as `malformed`).
-- Same style as the P0-2 SOCKS5 header codecs: pure functions, pinned by unit tests (precedent `seep-core/src/udp/associate.rs`).
-- **Landing point**: `seep-runtime/src/mesh_transport.rs` (same file as the TCP `MeshEnvelope`; seep-mesh does not depend on tokio runtime details, and keeping the forwarding behavior in the same file makes joint testing easy).
+- Same style as the P0-2 SOCKS5 header codecs: pure functions, pinned by unit tests (precedent `rillane-core/src/udp/associate.rs`).
+- **Landing point**: `rillane-runtime/src/mesh_transport.rs` (same file as the TCP `MeshEnvelope`; rillane-mesh does not depend on tokio runtime details, and keeping the forwarding behavior in the same file makes joint testing easy).
 
 ## 3. Hop cache (UdpFlowCache)
 
@@ -146,7 +146,7 @@ Downlink dir=Down (relay receives): look up the cache → `send_to(cache.prev)` 
 ## 5. Client egress: UdpChainRouter + MeshUdpRelay
 
 ```rust
-// seep-runtime (private): a chain-aware wrapper around the P0-3 RoutingUdpConnector
+// rillane-runtime (private): a chain-aware wrapper around the P0-3 RoutingUdpConnector
 struct UdpChainRouter {
     inner: RoutingUdpConnector,          // non-chain decisions: dispatch by final_node (P0-3)
     mesh: Option<MeshUdpBridge>,         // chain decisions; None + chain decision → already blocked at build time
@@ -182,7 +182,7 @@ struct MeshUdpRelay { /* impl UdpRelay */
 pub struct MeshUdpGate { pub allow_plaintext: bool }  // env is read only at from_env; tests pass it explicitly
 impl MeshUdpGate { fn ensure_usable(&self, tls: Option<&MeshTlsConfig>) -> Result<()> }
 // tls is None and !allow_plaintext → Err("mesh UDP plane has no encryption configured and plaintext is not explicitly allowed
-//   (SEEP_MESH_UDP_ALLOW_PLAINTEXT=1); the chain+udp combination refuses to start (udp-dataplane.md §4.4/V2)")
+//   (RILLANE_MESH_UDP_ALLOW_PLAINTEXT=1); the chain+udp combination refuses to start (udp-dataplane.md §4.4/V2)")
 ```
 
 - **The landing point is at build time** (`RuntimeBuilder::build`): checked once before non-client roles bring up the UDP plane, and once before the client-side UdpChainRouter::mesh construction;
@@ -202,7 +202,7 @@ impl MeshUdpGate { fn ensure_usable(&self, tls: Option<&MeshTlsConfig>) -> Resul
 - **chain_id framing bridge**: `ChainManager.chain_id` is a random UUID string, while P0-1's `chain_id_of(decision)` is `chain:{hops.join("->")}` -- the two are not converted into each other. `ChainFailureEvent` is constructed by the runtime after `handle_chain_failure` succeeds: **the chain_id field is filled with `chain_id_of(the new decision after the switch)`**, and failed_nodes with the old chain's failed nodes. The ledger binding gate (revokes only on chain_id equality) hits under the new-decision framing;
 - This UDP plane's flows after a switch: the decision has changed → the next packet's ensure_decision reroutes (P0-1 semantics), and the in-flight hop cache expires naturally.
 
-## 9. RuntimeBuilder / seepd wiring
+## 9. RuntimeBuilder / rillaned wiring
 
 ### 9.1 build() phase-order adjustment: move the UDP block down (this section is a precondition for implementation)
 
@@ -279,15 +279,15 @@ S2 UdpFlowCache hop cache ─┘   S4 UdpChainRouter/MeshUdpRelay ─┴─► S
 - Landing point: `mesh_transport.rs`: `MeshUdpGate::ensure_usable`; `MeshDataPlane` gains a `udp: Option<UdpFace>` field and a `with_udp(gate)` constructor; `handle_udp_datagram` / `spawn_udp`; the exit branch's per-flow connected-socket table + downlink task.
 - Dependencies: S1 + S2.
 - Implementation points: forwarding and replies share the node-level UDP-plane socket (§1 topology); FULL → strip self and re-encode, CACHED → look up the cache and forward (§11-4); the exit downlink reads prev from the cache (after a FULL re-refreshes prev, the downlink follows the new direction); the gate only checks its explicit parameters, and env reading stays at the caller (§11-5).
-- Acceptance: §10 T6 (tls=None and `!allow_plaintext` → Err message contains `SEEP_MESH_UDP_ALLOW_PLAINTEXT`), T3 (the relay calls `handle_udp_datagram` directly; the 2nd packet decodes as Cached with empty path), T4's unknown_flow path; a single-hop (client→exit) real-socket round trip pins the exit branch first.
+- Acceptance: §10 T6 (tls=None and `!allow_plaintext` → Err message contains `RILLANE_MESH_UDP_ALLOW_PLAINTEXT`), T3 (the relay calls `handle_udp_datagram` directly; the 2nd packet decodes as Cached with empty path), T4's unknown_flow path; a single-hop (client→exit) real-socket round trip pins the exit branch first.
 
 **S4 UdpChainRouter + MeshUdpRelay** (§5)
 
-- Landing point: new private module `udp_chain.rs` in `seep-runtime`: `UdpChainRouter` (`RoutePath::Chain{hops≥2}` → mesh, otherwise → the inner `RoutingUdpConnector`), `MeshUdpBridge::associate` (resolve the hops[1] address + local socket), `MeshUdpRelay` (impls P0-1 `UdpRelay`: FULL first packet → CACHED afterwards + periodic FULL resend; the downlink accepts only CACHED dir=Down with a matching flow_id).
+- Landing point: new private module `udp_chain.rs` in `rillane-runtime`: `UdpChainRouter` (`RoutePath::Chain{hops≥2}` → mesh, otherwise → the inner `RoutingUdpConnector`), `MeshUdpBridge::associate` (resolve the hops[1] address + local socket), `MeshUdpRelay` (impls P0-1 `UdpRelay`: FULL first packet → CACHED afterwards + periodic FULL resend; the downlink accepts only CACHED dir=Down with a matching flow_id).
 - Dependencies: S1 (decode); the P0-3 trait surface (already in the repo).
 - Acceptance: §10 T7 (Chain dispatch hits MeshUdpRelay / Direct falls to the inner connector); `MeshUdpRelay` against a stub UDP peer (fake relay: receives FULL, stores a sample, replies CACHED dir=Down) completes send/recv unit tests.
 
-**S5 build() / seepd wiring** (§9.2 + §8)
+**S5 build() / rillaned wiring** (§9.2 + §8)
 
 - Landing point: `runtime_builder.rs::build()`: when udp.enabled && enable_chain, the UDP table's FlowRouter is swapped for `RuntimeFlowRouter` (at the position S0 freed); the egress connector is swapped for `UdpChainRouter`; non-client roles spawn `spawn_udp` alongside (gate in front); `ChainFailureEvent` is bridged per the §8 framing.
 - Dependencies: S0 + S3 + S4.
@@ -366,7 +366,7 @@ pub struct UdpFaceMetrics {
 ```
 
 - Landing point: `mesh_transport.rs`, held inside `UdpFace`;
-- `seep_udp_mesh_flows_active` reads the gauge directly (no `map.len()` scan -- skew exists only at the sweep point, acceptable for monitoring).
+- `rillane_udp_mesh_flows_active` reads the gauge directly (no `map.len()` scan -- skew exists only at the sweep point, acceptable for monitoring).
 
 ### 13-3 envelope size ceiling (supplements §2)
 
@@ -392,7 +392,7 @@ The gate's construction is parameterized (§6 already decided env appears only a
 
 ```
 allow_plaintext = cfg.mesh.udp_allow_plaintext_data_plane /* bool, serde default false */
-                  || env_flag("SEEP_MESH_UDP_ALLOW_PLAINTEXT")
+                  || env_flag("RILLANE_MESH_UDP_ALLOW_PLAINTEXT")
 ```
 
 The result is passed explicitly as `MeshUdpGate { allow_plaintext: bool }` into both consumers (before the non-client `spawn_udp` / before the client `UdpChainRouter` mesh arm construction) -- the two gate instances share one source; tests cover both branches just by passing arguments, without touching the process env (the §11-5 ruling stands).
@@ -444,21 +444,21 @@ Existing rulings numbered -- the content stays in its original §section; this i
 
 | Seam | Location | Contract |
 |------|------|------|
-| ingress dispatch | socks5 inbound 0x03 command dispatch (`seep-protocols/src/inbound/socks5.rs`) → `UdpAssociateService` (`seep-core/src/udp/associate.rs`) | existing from P0-2; zero changes in this item; datagrams enter via the session table |
+| ingress dispatch | socks5 inbound 0x03 command dispatch (`rillane-protocols/src/inbound/socks5.rs`) → `UdpAssociateService` (`rillane-core/src/udp/associate.rs`) | existing from P0-2; zero changes in this item; datagrams enter via the session table |
 | session → decision | `UdpSessionTable` (sticky key / ensure_decision / ledger) → `RouteDecision` | existing from P0-1; S5 swaps its FlowRouter for `RuntimeFlowRouter` (D-9) |
-| decision → egress | `UdpChainRouter` implements P0-3 `EgressUdpConnector` (`seep-core/src/udp/relay.rs:259`): `Chain{hops≥2}` → `MeshUdpBridge`, otherwise → the inner `RoutingUdpConnector` (P0-3 dispatches by final_node) | §5; the capability scan `mesh.` exemption is already in place (§9.2); a chain decision's exit capability is expressed by the exit side's real connect |
+| decision → egress | `UdpChainRouter` implements P0-3 `EgressUdpConnector` (`rillane-core/src/udp/relay.rs:259`): `Chain{hops≥2}` → `MeshUdpBridge`, otherwise → the inner `RoutingUdpConnector` (P0-3 dispatches by final_node) | §5; the capability scan `mesh.` exemption is already in place (§9.2); a chain decision's exit capability is expressed by the exit side's real connect |
 | client underlay | `MeshUdpRelay` implements P0-1 `UdpRelay` | the session table / §3.6 staged teardown / forwarder reused with zero changes (§5) |
 | with the TCP plane | shares only the `listen_address` port and `record_link_bytes` accounting; envelope/socket/lifecycle independent | §1 selection boundary (pointer, no restatement) |
 | failure wiring | `ChainFailureEvent` (§8 framing); the in-flight hop cache expires naturally and is not actively torn down | §8, D-10 |
-| observability | `UdpFaceMetrics` (§13-2) = the data source for P0-5 §2.4 `seep_udp_mesh_*` | data source contract; framing notes in §0.2 |
-| annotation visibility | the UDP session's `FlowContext.metadata.annotations` (`seep-core/src/lib.rs:85-89`/`:52-55`, with the `process.*` family as the precedent) reachable at `associate(&ctx, &decision)` (`relay.rs:267`, where decision is the sticky decision) | the precondition for P1-4 padding session-level production (D-15); at implementation, verify whether ingress already writes the needed annotations, and if not, have ingress backfill them before associate (fallback option, out of scope for this item) |
+| observability | `UdpFaceMetrics` (§13-2) = the data source for P0-5 §2.4 `rillane_udp_mesh_*` | data source contract; framing notes in §0.2 |
+| annotation visibility | the UDP session's `FlowContext.metadata.annotations` (`rillane-core/src/lib.rs:85-89`/`:52-55`, with the `process.*` family as the precedent) reachable at `associate(&ctx, &decision)` (`relay.rs:267`, where decision is the sticky decision) | the precondition for P1-4 padding session-level production (D-15); at implementation, verify whether ingress already writes the needed annotations, and if not, have ingress backfill them before associate (fallback option, out of scope for this item) |
 
 ## 17. Boundary cross-references (external items; fourth-round completion 2026-09-30)
 
 ### 17-P1-4 obfuscation middleware (padding vehicle seam -- this round fixes one production-point gap)
 
 - [obfuscation-middleware.md](obfuscation-middleware.md) §2.3/§4.4 already lists this item's `UdpEnvelope` as padding's **ideal frame carrier** (one datagram = one controllable byte boundary) and reserves the execution hook -- the two drafts' mutual reference holds;
-- **production-point correction (D-15)**: P1-4 §4.4's original wording "the UDP encoder reads the `seep.obfs.padding` annotation" implied the annotation already exists -- but that annotation's production point (the middleware chain at `FlowOutputRouter::forward` ②) exists only on the TCP Flow path, and the **UDP session path (associate → `UdpRelay::send_to`) has no Flow to hang a chain on**. Ruling: the UDP plane's padding spec is evaluated at the **associate session level** from the obfuscation config and selector (reusing `PaddingSpec` and the policy pure functions, with `apply_to` semantics judged by the session's target/egress), not through `FlowMiddleware::handle` -- the second occurrence of the same cause as P1-4 §2.1's "the stream signature does not carry frame semantics" (packet semantics likewise do not fit the stream trait); P1-4 §4.4 now carries a revision note cross-referencing this section;
+- **production-point correction (D-15)**: P1-4 §4.4's original wording "the UDP encoder reads the `rillane.obfs.padding` annotation" implied the annotation already exists -- but that annotation's production point (the middleware chain at `FlowOutputRouter::forward` ②) exists only on the TCP Flow path, and the **UDP session path (associate → `UdpRelay::send_to`) has no Flow to hang a chain on**. Ruling: the UDP plane's padding spec is evaluated at the **associate session level** from the obfuscation config and selector (reusing `PaddingSpec` and the policy pure functions, with `apply_to` semantics judged by the session's target/egress), not through `FlowMiddleware::handle` -- the second occurrence of the same cause as P1-4 §2.1's "the stream signature does not carry frame semantics" (packet semantics likewise do not fit the stream trait); P1-4 §4.4 now carries a revision note cross-referencing this section;
 - **execution point (D-16)**: padding is produced at two envelope wrapping points -- the client's FULL first send and the exit downlink wrapping (both "after encoding, before send_to", consistent with P1-4 §4.4's wording); the relay's FULL self-strip and hop_index+1 re-encoding **keep the existing `pad_len` without appending** (preventing per-hop padding accumulation); CACHED forwarding segments add no padding;
 - wire format: `pad_len`'s wire position (§2 reserved bits vs. a new field) and the version-gate value are finalized with the P1-4 UDP vehicle landing (§12 already registers this), fail-open aligned with P1-4 §2.4 -- this draft does not pre-fix it.
 

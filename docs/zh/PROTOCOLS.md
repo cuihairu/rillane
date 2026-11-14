@@ -1,6 +1,6 @@
 # 协议支持
 
-Seep 是一个网络路由代理系统，支持多种主流的网络协议。
+Rillane 是一个网络路由代理系统，支持多种主流的网络协议。
 
 > **实现状态标注（2026-09 对照代码核实；2026-09-30 回填 P0-1..P0-4 落地状态；2026-10-02 回填 P1-4/P1-5/P2-1..P2-6 落地状态；2026-10-04 回填 P2-7 落地状态；2026-10-10 回填 gRPC/h2 传输落地状态）**：本文协议语义描述为设计口径；每节开头的「状态」标注为代码实况。总体对照：
 >
@@ -9,18 +9,18 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
 > | 入站 socks5 (CONNECT) / http (CONNECT) / mixed | 已实现（TCP） | — |
 > | 入站 socks5 UDP ASSOCIATE | **已实现（2026-09，P0-2）**：RFC 1928 ASSOCIATE + 数据报中继；`udp:` 块缺省关闭 | — |
 > | 出站 direct/socks5/http/shadowsocks/trojan/hysteria2/vless/wireguard（TCP） | 已实现 | — |
-> | 出站 UDP 承载（direct/ss/wg） | **已实现（2026-09，P0-3）**；联调工具 = `seepctl udp-probe`（P0-5，退出码 0-4） | — |
+> | 出站 UDP 承载（direct/ss/wg） | **已实现（2026-09，P0-3）**；联调工具 = `rillanectl udp-probe`（P0-5，退出码 0-4） | — |
 > | mesh TCP/UDP envelope 二进制化（TCP 面 JSON→二进制 v2，接收侧嗅探兼容旧 JSON） | **已实现（2026-10，P2-6）**：UDP 面 P0-4 即二进制；TCP 面 `MeshEnvelope` 本步切换 | [mesh-envelope-binary.md](design/mesh-envelope-binary.md) |
 > | mesh UDP 多跳转发（UdpEnvelope over UDP 数据报） | **已实现（2026-09，P0-4）**：FULL/CACHED 跳缓存、exit per-flow socket、同端口双栈、明文门（chain+udp 未配加密构建期拒绝） | — |
-> | UDP 观测与联调（`seep_udp_*` 指标族 / `/udp/stats` / `seepctl stats` UDP 段 / `udp-probe`） | **已实现（2026-09，P0-5）**：`/metrics` 恒渲染（开关关闭全零、端点不消失）+ 入口级 `udp_enabled` 覆盖 + `udp:` 配置全字段 | — |
+> | UDP 观测与联调（`rillane_udp_*` 指标族 / `/udp/stats` / `rillanectl stats` UDP 段 / `udp-probe`） | **已实现（2026-09，P0-5）**：`/metrics` 恒渲染（开关关闭全零、端点不消失）+ 入口级 `udp_enabled` 覆盖 + `udp:` 配置全字段 | — |
 > | 出站 UDP 承载（hy2） | 未实现（`hysteria2` 0.1.6 公开 API 无 UDP 出口；P0-4 已完成且**维持改判**） | V2（quinn 载具，未决） |
 > | 出站 vmess 连接器 | **已实现（2026-10）**：VMess AEAD 认证头（authID 时间窗+防重放）+ AES-128-GCM/ChaCha20-Poly1305 分块流数据面，tcp（可叠 TLS）/ws（可叠 TLS）/gRPC（恒叠 TLS）/h2（恒叠 TLS）；`alter_id=0` 限定，UDP 承载未实现 | todo「VMess 出站」条目 |
 > | hysteria v1 | **出站连接器未实现**（配置 schema 与订阅转换已支持，构建期报错） | 无计划（仅 hy2） |
-> | 出站连接池 / TLS 会话恢复 | **已实现（2026-10，P1-5）**：`egress_pool:` 配置块 + 预建立/借出即消费池（trojan/http/vless/vmess + direct 选通）+ TLS 会话恢复（进程级共享 ClientConfig）+ `seep_pool_*`/`seep_tls_*` 指标 + `GET /egress/pool/stats` | — |
-> | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `seep_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
-> | mesh 链路可观测（per-link RTT 分位 / 观测形丢包 / 切换原因账本） | **已实现（2026-10，P2-1）**：`seep_mesh_link_rtt_ms{from,to,quantile}` + `seep_mesh_link_loss_ratio{from,to}` + `seep_mesh_switch_total{reason}`（chain 启用时恒渲染）+ `GET /mesh/switches` 最近 100 事件；mesh 未启用三族与端点均缺席 | [mesh-link-observability.md](design/mesh-link-observability.md) |
-> | mesh UDP 防重放 + 撤销可见性 | **已实现（2026-10-04，P2-7）**：UDP 面 v2 帧流序号 + per-(flow,dir) 64 位滑窗（`replay_dropped` 计数进 `/udp/stats` 与 `/metrics`）+ 撤销文件载体 mtime 热加载 + 运行期观测（`GET /mtls/revoked`、`seepctl mtls revoke status`）；OCSP/CA 直连撤销查询与端到端 MAC 归 V2 | [mesh-advanced-security.md](design/mesh-advanced-security.md) |
-> | timing/shaping 扰动（启动抖动 + 写网格归一） | **已实现（2026-10，P2-4）**：`TimingMiddleware` handle 内 sleep（fixed/uniform，max_delay_ms 闸门）、`ShapingMiddleware` 包装 `flow.io` 为 `PacedIo`（interval 网格 + jitter，读侧不包装）；注解可观测 `seep.obfs.timing`/`seep.obfs.shaping`；game 预设接线演示 | [obfuscation-timing-shaping.md](design/obfuscation-timing-shaping.md) |
+> | 出站连接池 / TLS 会话恢复 | **已实现（2026-10，P1-5）**：`egress_pool:` 配置块 + 预建立/借出即消费池（trojan/http/vless/vmess + direct 选通）+ TLS 会话恢复（进程级共享 ClientConfig）+ `rillane_pool_*`/`rillane_tls_*` 指标 + `GET /egress/pool/stats` | — |
+> | 包长填充混淆横切层（`FlowMiddleware` + chain `MeshEnvelope` 帧填充 + `rillane_obfs_*` 指标族 + 分布检查脚本） | **已实现（2026-10，P1-4）**：fixed/bucket/range 三形态；单跳 TCP 无自有帧 no-op，UDP 数据报填充随 `UdpEnvelope` 预留钩子（V2） | [obfuscation-middleware.md](design/obfuscation-middleware.md) |
+> | mesh 链路可观测（per-link RTT 分位 / 观测形丢包 / 切换原因账本） | **已实现（2026-10，P2-1）**：`rillane_mesh_link_rtt_ms{from,to,quantile}` + `rillane_mesh_link_loss_ratio{from,to}` + `rillane_mesh_switch_total{reason}`（chain 启用时恒渲染）+ `GET /mesh/switches` 最近 100 事件；mesh 未启用三族与端点均缺席 | [mesh-link-observability.md](design/mesh-link-observability.md) |
+> | mesh UDP 防重放 + 撤销可见性 | **已实现（2026-10-04，P2-7）**：UDP 面 v2 帧流序号 + per-(flow,dir) 64 位滑窗（`replay_dropped` 计数进 `/udp/stats` 与 `/metrics`）+ 撤销文件载体 mtime 热加载 + 运行期观测（`GET /mtls/revoked`、`rillanectl mtls revoke status`）；OCSP/CA 直连撤销查询与端到端 MAC 归 V2 | [mesh-advanced-security.md](design/mesh-advanced-security.md) |
+> | timing/shaping 扰动（启动抖动 + 写网格归一） | **已实现（2026-10，P2-4）**：`TimingMiddleware` handle 内 sleep（fixed/uniform，max_delay_ms 闸门）、`ShapingMiddleware` 包装 `flow.io` 为 `PacedIo`（interval 网格 + jitter，读侧不包装）；注解可观测 `rillane.obfs.timing`/`rillane.obfs.shaping`；game 预设接线演示 | [obfuscation-timing-shaping.md](design/obfuscation-timing-shaping.md) |
 > | SLO 打分选路（组策略 `slo:` 门 + penalty 评分 + chain 侧 `slo_watch` 劣化切换） | **已实现（2026-10，P2-2）**：`latency` 策略真数据在场时 = 门内最低分（score = p95 + loss × penalty）；chain watcher 越门即切换，账本 `reason="slo_degraded"`；无真数据部署行为不变；`slo_watch` YAML 面归 P2-3 | [slo-scoring.md](design/slo-scoring.md) |
 > | 场景 profile 预设（`profile: proxy\|game\|web` 配置期展开） | **已实现（2026-10，P2-3）**：缺省填充语义（显式恒优先，运行期零分支）；game = SLO 目标 + 域名模板 + bucket 混淆；web = 连接池；`examples/profile-*.yaml` 三选一即运行 | [scenario-profiles.md](design/scenario-profiles.md) |
 > | obfs/salamander 插件 | 未实现（salamander 伪态不在本仓路线） | V2 备选 |
@@ -32,7 +32,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
 ## 入口协议 (Ingress Protocols)
 
 ### SOCKS5 代理
-> 状态：已实现 CONNECT（含用户名/密码认证，`IngressConfig::Socks5`）与 **UDP ASSOCIATE（2026-09，P0-2）**——cmd 0x01/0x03 分派（`seep-protocols/src/inbound/socks5.rs`），ASSOCIATE 服务/数据报头编解码/准入在 `seep-core/src/udp/associate.rs`，认证用户名进粘滞键，mixed 入口同享；`udp:` 配置块缺省关闭（关闭时 0x03 回 0x07）。详见 [udp-dataplane.md](design/udp-dataplane.md) §2 与 [udp-relay-path.md](design/udp-relay-path.md) §2。
+> 状态：已实现 CONNECT（含用户名/密码认证，`IngressConfig::Socks5`）与 **UDP ASSOCIATE（2026-09，P0-2）**——cmd 0x01/0x03 分派（`rillane-protocols/src/inbound/socks5.rs`），ASSOCIATE 服务/数据报头编解码/准入在 `rillane-core/src/udp/associate.rs`，认证用户名进粘滞键，mixed 入口同享；`udp:` 配置块缺省关闭（关闭时 0x03 回 0x07）。详见 [udp-dataplane.md](design/udp-dataplane.md) §2 与 [udp-relay-path.md](design/udp-relay-path.md) §2。
 
 - **协议版本**: SOCKS5 (RFC 1928)
 - **认证方式**:
@@ -191,7 +191,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
   - 支持混淆 (salamander)
 
 ### WireGuard
-> 状态：部分实现——TCP 流量经系统 WireGuard 接口转发（`address`/`allowed_ips`/`preshared_key`/`persistent_keepalive`/`mtu`/`dns` 配置生效，需系统 WG 接口与相应权限）；「内核级实现」指依赖系统 WG，seep 自身不做加解密；**UDP 承载已实现（2026-09，P0-3：`WireguardUdpConnector`——`allowed_ips` 解析后预检（不在集合 → 拆映射重路由）+ MTU 上限 `mtu-80`，仍走系统 WG 接口路径）**，见 [udp-relay-path.md](design/udp-relay-path.md)。
+> 状态：部分实现——TCP 流量经系统 WireGuard 接口转发（`address`/`allowed_ips`/`preshared_key`/`persistent_keepalive`/`mtu`/`dns` 配置生效，需系统 WG 接口与相应权限）；「内核级实现」指依赖系统 WG，rillane 自身不做加解密；**UDP 承载已实现（2026-09，P0-3：`WireguardUdpConnector`——`allowed_ips` 解析后预检（不在集合 → 拆映射重路由）+ MTU 上限 `mtu-80`，仍走系统 WG 接口路径）**，见 [udp-relay-path.md](design/udp-relay-path.md)。
 
 - **协议**: 快速现代 VPN
 - **加密**:
@@ -208,7 +208,7 @@ Seep 是一个网络路由代理系统，支持多种主流的网络协议。
 
 ## 协议扩展
 
-Seep 的模块化设计使新协议以 `EgressConnector` 实现挂入：
+Rillane 的模块化设计使新协议以 `EgressConnector` 实现挂入：
 
 1. **实现协议 trait**: 创建新的协议处理器
 2. **注册协议**: 在配置文件中声明新协议
@@ -218,7 +218,7 @@ Seep 的模块化设计使新协议以 `EgressConnector` 实现挂入：
 
 ```rust
 use async_trait::async_trait;
-use seep_core::{Flow, FlowRouter};
+use rillane_core::{Flow, FlowRouter};
 
 pub struct MyProtocol;
 
@@ -237,7 +237,7 @@ impl EgressConnector for MyProtocol {
 
 ## 性能优化
 
-> 状态：异步 I/O（tokio）已实现；**零拷贝/批量收发已按范围落地**（2026-10，P3-5：relay 缓冲参数化 `performance.relay_buffer`（缺省 8192 零差异）+ 16 处 relay 点 `copy_bidirectional_with_sizes` + mesh 帧写 vectored 合一；基准与范围裁决见 [performance-io.md](design/performance-io.md)——内核态 splice 与 UDP recvmmsg/sendmmsg 为范围外，如实登记）；**连接池已实现**（2026-10，P1-5：预建立/借出即消费池 + TLS 会话恢复，`egress_pool:` 块，`seep_pool_reuse_ratio` 等指标可见——总拨号 ≈ 流数不降系每流消耗一条连接的结构约束，降总连接数归 V2 多路复用）；「智能选择/故障转移」部分成立——组策略选路（7 种策略）与 mesh chain 故障回退已实现；「会话保持」在 UDP 侧已成立（2026-09，P0-1 会话表：进程/五元组粘滞键 + 空闲/生命周期回收，`seep-core/src/udp/`），TCP 侧连接复用以池形态成立（2026-10，P1-5）。
+> 状态：异步 I/O（tokio）已实现；**零拷贝/批量收发已按范围落地**（2026-10，P3-5：relay 缓冲参数化 `performance.relay_buffer`（缺省 8192 零差异）+ 16 处 relay 点 `copy_bidirectional_with_sizes` + mesh 帧写 vectored 合一；基准与范围裁决见 [performance-io.md](design/performance-io.md)——内核态 splice 与 UDP recvmmsg/sendmmsg 为范围外，如实登记）；**连接池已实现**（2026-10，P1-5：预建立/借出即消费池 + TLS 会话恢复，`egress_pool:` 块，`rillane_pool_reuse_ratio` 等指标可见——总拨号 ≈ 流数不降系每流消耗一条连接的结构约束，降总连接数归 V2 多路复用）；「智能选择/故障转移」部分成立——组策略选路（7 种策略）与 mesh chain 故障回退已实现；「会话保持」在 UDP 侧已成立（2026-09，P0-1 会话表：进程/五元组粘滞键 + 空闲/生命周期回收，`rillane-core/src/udp/`），TCP 侧连接复用以池形态成立（2026-10，P1-5）。
 
 ### 协议层优化
 - **零拷贝**: 使用 Rust 的所有权系统避免不必要的内存拷贝（**已实现（范围）**，2026-10 P3-5——用户态中继无法全免拷贝（TLS 终结、middleware 链语义），落地形态为减少拷贝与 syscall：`performance.relay_buffer` 双向缓冲可配（8K→256K 基准中位吞吐 +67%）、16 处 relay 点 `copy_bidirectional_with_sizes`、mesh 帧写两段合一 vectored 提交（4 KiB 帧基准快约 26%，TLS 段 rustls 无 vectored 自动回落等价现状）；内核态 splice 判出界（middleware 链包装破坏 fd 语义），见 [performance-io.md](design/performance-io.md)）
@@ -251,7 +251,7 @@ impl EgressConnector for MyProtocol {
 - **故障转移**: 自动检测故障并切换备用路径
 - **链路可观测**: per-link RTT p50/p95 分位、观测形丢包比、切换原因账本与计数（2026-10，P2-1，`/metrics` 三族 + `GET /mesh/switches`）
 - **SLO 打分选路**: `latency` 策略以 p95 RTT/丢包为目标打分（`slo:` 门 + penalty），chain 侧 `slo_watch` 劣化自动切换且原因入账本（2026-10，P2-2，见 [slo-scoring.md](design/slo-scoring.md)）
-- **TLS 指纹形态**: egress 四 TLS 变体 `tls_fingerprint: none|chrome|ios|safari`，池键/工厂键扩展（2026-10，P2-5，`seepctl tls-fingerprint` 打印预设 shape_material 对照表，见 [tls-fingerprint.md](design/tls-fingerprint.md)）
+- **TLS 指纹形态**: egress 四 TLS 变体 `tls_fingerprint: none|chrome|ios|safari`，池键/工厂键扩展（2026-10，P2-5，`rillanectl tls-fingerprint` 打印预设 shape_material 对照表，见 [tls-fingerprint.md](design/tls-fingerprint.md)）
 
 ## 安全特性
 
@@ -303,7 +303,7 @@ egress:
 ## 兼容性
 
 ### 客户端兼容性
-Seep 入口与主流代理客户端互通（SOCKS5/HTTP CONNECT 口径；入口不支持的方法返回 405）：
+Rillane 入口与主流代理客户端互通（SOCKS5/HTTP CONNECT 口径；入口不支持的方法返回 405）：
 
 - **Windows**: Shadowsocks-windows, Clash, v2rayN, Qv2ray
 - **macOS**: ShadowsocksX-NG, ClashX, V2RayU

@@ -2,7 +2,7 @@
 
 > 上游：[roadmap.md](roadmap.md) S4（「插件动态加载：WASM/动态库 `FlowMiddleware` 加载器 + 限速/内容过滤示例」勘误降级条目）· [obfuscation-middleware.md](obfuscation-middleware.md) §1.2/§1.5（静态链 + 「P3-2 动态加载在此容器之上扩展，trait 不动」）。
 > 本文是落地定稿：**范围裁决、载具与 ABI、隔离机制、配置面、示例插件、计数面、测试策略、分步清单**。落地后偏差回填 §9。
-> 复用基线：`FlowMiddleware` trait（seep-core，name/handle 两方法）· `MiddlewareChain` 静态容器（build 期定序、运行期只读，P1-4 §1.2 C1）· `FlowOutputRouter::forward` E8 错误路径（任一 middleware Err 即中止）· `ObfuscationConfig` schema + validate（E1/E2 先例）· P1-5 池/工厂进程级单例（D-10）单例先例。
+> 复用基线：`FlowMiddleware` trait（rillane-core，name/handle 两方法）· `MiddlewareChain` 静态容器（build 期定序、运行期只读，P1-4 §1.2 C1）· `FlowOutputRouter::forward` E8 错误路径（任一 middleware Err 即中止）· `ObfuscationConfig` schema + validate（E1/E2 先例）· P1-5 池/工厂进程级单例（D-10）单例先例。
 
 ## 0. 范围裁决
 
@@ -10,7 +10,7 @@
 |-----------|-------------|
 | **WASM 载具**（wasmtime）：载入器 + `FlowMiddleware` 适配器 + 进程级 engine 单例；崩溃（trap）与超时（fuel 指令预算）隔离 | **动态库直载**（libloading 同进程）：无法兑现「崩溃有隔离」验收（同地址空间无隔离边界），待有真实需求另开条目（§9 偏差 1） |
 | **两个示例插件**：限速（令牌桶，实例内存态）+ 内容过滤（首块关键词扫描）；`plugins/` 目录独立构建（非 workspace 成员，wasm32-unknown-unknown 交叉编译） | 插件 I/O 面（网络/文件/时钟）：MVP 插件纯计算、零 WASI（宿主注入 `now_ms`——wasm32-unknown-unknown 无时钟）；异步 host function 归 V2 |
-| **配置面**：`obfuscation.plugins` 块（路径 + fuel 预算），build_middleware_chain 追加挂载；seepd 现为启动时一次性读配置（配置热更新未接线），插件链进程内静态、随进程重启换代 | 插件热插拔/运行期装卸（无独立装卸 API）|
+| **配置面**：`obfuscation.plugins` 块（路径 + fuel 预算），build_middleware_chain 追加挂载；rillaned 现为启动时一次性读配置（配置热更新未接线），插件链进程内静态、随进程重启换代 | 插件热插拔/运行期装卸（无独立装卸 API）|
 | **首块探测内容过滤**：`wants_payload` 导出声明 + `Flow.io` 首块探测/回放包装 | 载荷**改写**（MVP 只 allow/deny 二值裁决，不改写流字节——HTTP 级改写语义面归 V2）|
 | **计数面**：per-plugin 原子计数（calls/denied/traps/fuel_exhausted）+ tracing 日志；**控制面 `GET /plugins/stats` 已接线**（2026-10-05 观测轮：runtime 旁路具体类型句柄 + getter 快照）| /metrics 指标族形态（端点 JSON 已可用；prometheus 序列归后续按需）|
 
@@ -21,7 +21,7 @@
 ### 1.1 载具裁决：WASM（wasmtime）
 
 - 验收「崩溃/超时有隔离」**只有 WASM 能兑现**：trap（unreachable/OOM/栈超）在 wasmtime 层转 Err，同进程动态库崩溃即进程崩溃，无隔离可言；fuel 指令预算是同步调用的唯一可硬中止机制（§3）；
-- 依赖成本如实登记：wasmtime 进 workspace（seep-plugins crate），首编一次性成本（cranelift），`default-features = false` 只留 `cranelift + runtime + wat`（wat 供测试内联 WAT，生产载入二进制 .wasm）；
+- 依赖成本如实登记：wasmtime 进 workspace（rillane-plugins crate），首编一次性成本（cranelift），`default-features = false` 只留 `cranelift + runtime + wat`（wat 供测试内联 WAT，生产载入二进制 .wasm）；
 - engine 进程级单例（D-10 同法）：编译器/JIT 全局一份，插件间共享；每插件独立 `Instance`/`Store`（状态隔离）。
 
 ### 1.2 插件 ABI（wasm32-unknown-unknown，自定义导出，无 WASI）
@@ -42,7 +42,7 @@
 
 ```json
 {"flow_id":"<uuid>","host":"example.com","port":443,"proto":"tcp",
- "now_ms":1760000000000,"annotations":{"seep.route.kind":"chain"},
+ "now_ms":1760000000000,"annotations":{"rillane.route.kind":"chain"},
  "first_chunk":"<base64，wants_payload=1 时携带；上限 4096B>"}
 ```
 
@@ -57,11 +57,11 @@
 ```
 
 - `deny` → 适配器 `bail!`（E8 既有语义：该流中止，错误冒泡）；
-- `set_annotations`/`remove_annotations`：插件可写 `metadata.annotations`（§1.4 契约同款——carrier 键 `seep.*` 由内置链写，插件建议用自有命名空间如 `plugin.<name>.*`，文档约定不强制）。
+- `set_annotations`/`remove_annotations`：插件可写 `metadata.annotations`（§1.4 契约同款——carrier 键 `rillane.*` 由内置链写，插件建议用自有命名空间如 `plugin.<name>.*`，文档约定不强制）。
 
 ## 2. 宿主侧
 
-### 2.1 载入器（crates/seep-plugins）
+### 2.1 载入器（crates/rillane-plugins）
 
 ```rust
 pub struct PluginLoadOptions { pub fuel: u64 }        // 每调用 fuel 预算
@@ -74,10 +74,10 @@ pub fn load_plugin(path: &Path, opts: PluginLoadOptions) -> Result<Arc<dyn FlowM
 
 ### 2.2 首块探测回放（`wants_payload=1`）
 
-- `handle()` 内：`flow.io.read()` 单次读至多 4096B → 入 ctx → 调插件 → **deny 即 `bail!`**（探测字节随流丢弃，连接关闭）→ **allow 则把探测字节回放**：`ReplayIo { replay: Vec<u8>, inner: Box<dyn IoStream> }` 实现 `AsyncRead`（先回放后透传）+ `AsyncWrite`（直透）——`IoStream` blanket impl 自动适配（seep-core lib.rs:18）；
+- `handle()` 内：`flow.io.read()` 单次读至多 4096B → 入 ctx → 调插件 → **deny 即 `bail!`**（探测字节随流丢弃，连接关闭）→ **allow 则把探测字节回放**：`ReplayIo { replay: Vec<u8>, inner: Box<dyn IoStream> }` 实现 `AsyncRead`（先回放后透传）+ `AsyncWrite`（直透）——`IoStream` blanket impl 自动适配（rillane-core lib.rs:18）；
 - 时序假设（如实登记）：`forward()` 在链执行（§2.1 runtime_builder.rs:1740）后才把 flow 交出站连接器，链内探测是首读者；观测面无违例先例。
 
-### 2.3 配置面（seep-config `ObfuscationConfig.plugins`）
+### 2.3 配置面（rillane-config `ObfuscationConfig.plugins`）
 
 ```yaml
 obfuscation:
@@ -101,7 +101,7 @@ obfuscation:
 
 ## 4. 测试策略
 
-### 4.1 单测（seep-plugins，内联 WAT，零外部文件，CI 确定性）
+### 4.1 单测（rillane-plugins，内联 WAT，零外部文件，CI 确定性）
 
 - **noop**：名字/allow/注解 set+remove 往返；
 - **trap**：`unreachable` 模块 → Err 收敛、`traps=1`、**同插件下一调用仍成功**（Store 未毒化——隔离语义核心断言）；
@@ -115,7 +115,7 @@ obfuscation:
 - 宿主集成验证（本机执行，成果入 todo 进度）：限速——第 N+1 流 deny 且 note 可见；内容过滤——首块含关键词 deny、干净载荷 allow 透传；
 - trap/死循环隔离由 4.1 WAT 单测钉死（WAT 与插件同 ABI 面）。
 
-### 4.3 配置面（seep-config / seep-runtime）
+### 4.3 配置面（rillane-config / rillane-runtime）
 
 - plugins 块 deny_unknown_fields + validate 矩阵（path 不存在 E1、disabled 容忍半成品）；
 - `build_middleware_chain` 装配测试：plugins 在内置链之后、链名序断言、坏路径构建期 Err。
@@ -127,7 +127,7 @@ obfuscation:
 | 步 | 内容与落点 | 验收 |
 |----|-----------|------|
 | R0 | 本文设计稿 | — |
-| R1 | loader + 适配器 + 首块回放 + 配置面：crates/seep-plugins（engine 单例/ABI/隔离/计数）+ seep-config plugins 块 + seep-runtime 装配 + 4.1/4.3 单测 | 全绿 |
+| R1 | loader + 适配器 + 首块回放 + 配置面：crates/rillane-plugins（engine 单例/ABI/隔离/计数）+ rillane-config plugins 块 + rillane-runtime 装配 + 4.1/4.3 单测 | 全绿 |
 | R2 | 示例插件 + 验收实况 + 文档回填：plugins/ 两示例（独立构建脚本）+ 4.2 实况 + todo P3-2 勾选 + obfuscation-middleware.md §1.5 注记 + §9 偏差 | 全绿 + 实况 |
 
 ## 6. 偏差与假设
@@ -143,15 +143,15 @@ obfuscation:
 
 ## 7. 风险与未决
 
-- **P-load**：wasmtime 首编成本进 workspace（如实登记）；构建期 `plugins/` 不在 workspace members（wasm 专属 crate 不可宿主编译），seepd 发行物含 loader 不含示例产物（README 记构建法）；
+- **P-load**：wasmtime 首编成本进 workspace（如实登记）；构建期 `plugins/` 不在 workspace members（wasm 专属 crate 不可宿主编译），rillaned 发行物含 loader 不含示例产物（README 记构建法）；
 - **R-name**：`plugin_name()` 返回宿主 `Box::leak` 固化——泄漏量 = 插件数 × 名字长（载入一次，生命周期进程级，可接受；记录于源注释）；
-- **R-state**：插件实例状态（令牌桶）随 Store 存活至进程退出——seepd 无配置热更新接线（启动一次读入），链在进程内不重建，令牌桶实际随进程退出清零；若未来接入热更新重建链，旧实例随 `MiddlewareChain` Arc 消亡、状态同为清零语义。
+- **R-state**：插件实例状态（令牌桶）随 Store 存活至进程退出——rillaned 无配置热更新接线（启动一次读入），链在进程内不重建，令牌桶实际随进程退出清零；若未来接入热更新重建链，旧实例随 `MiddlewareChain` Arc 消亡、状态同为清零语义。
 
 ## 9. 落地回填（2026-10-04，R1/R2 全部兑现）
 
-**R1**（loader + 配置面）：`crates/seep-plugins`（lib.rs/abi.rs/loader.rs/plugin.rs/replay.rs）+ seep-config `ObfsPluginConfig` + seep-runtime `build_middleware_chain` 装配——§2/§3/§4.1/§4.3 逐条兑现；单测 10 项全绿（noop 注解往返 / deny bail / trap 隔离+Store 未毒化 / fuel 耗尽 / 首块回放+透传 / 探测后 deny / 谎报决策长度 / 坏 magic / 缺导出 / ReplayIo poll 语义）。
+**R1**（loader + 配置面）：`crates/rillane-plugins`（lib.rs/abi.rs/loader.rs/plugin.rs/replay.rs）+ rillane-config `ObfsPluginConfig` + rillane-runtime `build_middleware_chain` 装配——§2/§3/§4.1/§4.3 逐条兑现；单测 10 项全绿（noop 注解往返 / deny bail / trap 隔离+Store 未毒化 / fuel 耗尽 / 首块回放+透传 / 探测后 deny / 谎报决策长度 / 坏 magic / 缺导出 / ReplayIo poll 语义）。
 
-**R2**（示例 + 实况）：`plugins/rate-limit`（令牌桶容量 3、秒回 1，`now_ms` 宿主注入推进回补）与 `plugins/content-filter`（内置禁词表 base64 解码后小写化子串匹配）——独立 `[workspace]`、不入 members（§7 P-load），`plugins/build.sh` 产 `plugins/output/*.wasm`（gitignore 不入库）；宿主侧纯逻辑单测随 crate 自跑（回补封顶 / 大小写不敏感命中）。**验收实况**：`cargo run -p seep-plugins --example plugins_smoke`——限速 3 放 1 拒（note 可见）、`/wp-admin` 命中拒、干净载荷 allow 且首块回放完好 + 后续透传、per-plugin 计数实证。
+**R2**（示例 + 实况）：`plugins/rate-limit`（令牌桶容量 3、秒回 1，`now_ms` 宿主注入推进回补）与 `plugins/content-filter`（内置禁词表 base64 解码后小写化子串匹配）——独立 `[workspace]`、不入 members（§7 P-load），`plugins/build.sh` 产 `plugins/output/*.wasm`（gitignore 不入库）；宿主侧纯逻辑单测随 crate 自跑（回补封顶 / 大小写不敏感命中）。**验收实况**：`cargo run -p rillane-plugins --example plugins_smoke`——限速 3 放 1 拒（note 可见）、`/wp-admin` 命中拒、干净载荷 allow 且首块回放完好 + 后续透传、per-plugin 计数实证。
 
 实现期修正（与 §1/§2 初稿的差异，均不越 §0 范围裁决）：
 
@@ -160,7 +160,7 @@ obfuscation:
 | 1 | wasmtime 49 自有 `Error` 类型（非 anyhow re-export） | Cargo.toml 显式保留 `anyhow` feature（`From<wasmtime::Error> for anyhow::Error` 桥）；宿主侧上下文经 `map_err(anyhow::Error::from)` 后挂 anyhow `context` |
 | 2 | wasmtime 49 导出查找 API | `get_typed_func` 返回 `Result`（缺导出即 Err，携「failed to find function export」）；可选导出（wants_payload）先 `get_export`（Option）探存在 |
 | 3 | 载入期探测调用缺燃料 | `consume_fuel(true)` 引擎下 Store 初始 fuel=0——载入期 `wants_payload`/`plugin_name` 探测前先 `set_fuel(u64::MAX)` 放开（每调用预算重置语义仍归 invoke，§2.1 不变） |
-| 4 | 示例插件线性内存扩容 | `alloc` 内 `memory_size`/`memory_grow` 按需扩页（`#[cfg(target_arch = "wasm32")]` 门控——宿主 `cargo test` 只走纯逻辑面不触 alloc）；cdylib 产物名随包名（`seep_plugin_<name>.wasm`），build.sh 复制为对外名 |
+| 4 | 示例插件线性内存扩容 | `alloc` 内 `memory_size`/`memory_grow` 按需扩页（`#[cfg(target_arch = "wasm32")]` 门控——宿主 `cargo test` 只走纯逻辑面不触 alloc）；cdylib 产物名随包名（`rillane_plugin_<name>.wasm`），build.sh 复制为对外名 |
 | 5 | 死循环 WAT 形 | `(loop br)` 后必须补 `unreachable` 方过 wasm 类型校验（函数结果 i32 的静态可达性要求） |
 | 6 | 计数面观测载体 | §0 计数面「控制端点接线归后续观测轮」已兑现两步：`WasmPluginMiddleware::stats()`（`Debug` 呈现 + `plugins_smoke` 实证）；2026-10-05 观测轮补控制面 `GET /plugins/stats`（runtime `get_plugin_stats()` 快照旁路，`load_plugin_with_stats` 同实例双句柄——链内 trait 对象、观测具体类型，不二次 JIT）；/metrics 指标族形态归后续按需 |
 
