@@ -1,0 +1,23 @@
+# 覆盖率口径与 CI 门禁一致：行覆盖率 80% 为底线（llvm-cov --fail-under-lines 80）。
+# project 允许 1% 浮动，防止一次无关模块的偶发波动把 PR 打红；
+# patch 新增代码按 80% 口径要求，新代码不背旧债。
+# 注意：此文件只定义 Codecov 状态检查的计算口径；把 Codecov 状态检查设为
+# GitHub 必须通过（required status check）需在仓库 Settings → Branches 配置。
+codecov:
+  require_ci_to_pass: true
+
+coverage:
+  status:
+    project:
+      default:
+        target: 80%
+        threshold: 1%
+        informational: false
+    patch:
+      default:
+        target: 80%
+        informational: false
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
