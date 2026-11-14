@@ -1,4 +1,4 @@
-# Rillane 目标架构：六平台、Clash 兼容与并行场景
+# Rillane v1 架构设计：六平台、Clash 兼容与并行场景
 
 状态：**设计提案，尚未整体实现**；日期 2026-11-14；当前代码基线 `46c2b12`。本页记录建议决策与迁移门禁，不替代 [当前实现清单](../architecture.md)，也不改变已有稳定发布授权约束。
 
@@ -8,13 +8,13 @@
 
 | ID | 需求 | 验收含义 |
 |---|---|---|
-| V2-R1 | Linux / OpenWrt / macOS / Windows / Android / iOS | 共用内核与配置语义，各有接管、DNS、退出/恢复和产物验收 |
-| V2-R2 | Clash/Mihomo 站点订阅 | 常见完整配置及 provider-only 输入有明确模式，节点/规则/组保真，不等价项明确诊断 |
-| V2-R3 | 按进程分别代理 | **仅 Windows、macOS、Linux 本机**；同目标可按本地应用分别选出口 |
-| V2-R4 | 网页与游戏同时加速 | 一个数据面实例里并列场景策略，TCP/UDP 都可按证据分类，不能只切换单一 profile |
-| V2-R5 | 可解释与可验证 | 能追到来源、规则、配置代际、出口、质量样本与资源影响，不承诺无测量的性能领先 |
-| V2-R6 | Debug 与真实路径 | Explain/Trace/Probe 分离，计划、实际与未知明确，有界且脱敏 |
-| V2-R7 | 可选 MCP | 默认关闭、先本机只读，提案/授权/应用/验证/回滚，不进入热路径 |
+| V1-R1 | Linux / OpenWrt / macOS / Windows / Android / iOS | 共用内核与配置语义，各有接管、DNS、退出/恢复和产物验收 |
+| V1-R2 | Clash/Mihomo 站点订阅 | 常见完整配置及 provider-only 输入有明确模式，节点/规则/组保真，不等价项明确诊断 |
+| V1-R3 | 按进程分别代理 | **仅 Windows、macOS、Linux 本机**；同目标可按本地应用分别选出口 |
+| V1-R4 | 网页与游戏同时加速 | 一个数据面实例里并列场景策略，TCP/UDP 都可按证据分类，不能只切换单一 profile |
+| V1-R5 | 可解释与可验证 | 能追到来源、规则、配置代际、出口、质量样本与资源影响，不承诺无测量的性能领先 |
+| V1-R6 | Debug 与真实路径 | Explain/Trace/Probe 分离，计划、实际与未知明确，有界且脱敏 |
+| V1-R7 | 可选 MCP | 默认关闭、先本机只读，提案/授权/应用/验证/回滚，不进入热路径 |
 
 OpenWrt 的 LAN 流按设备/IP/端口/域名分流，**不要求识别远端电脑 PID**。Android/iOS 本轮不要求桌面进程归因；移动应用名单可作后续附加能力，不阻断六平台基础代理。iOS 普通 VPN 不承诺任意第三方应用规则；受管 Per-App VPN 另行评估，非普通用户 MVP。
 
@@ -91,7 +91,7 @@ SourceSnapshot 需记录获取内容的 SHA-256、来源版本、获取/解析�
 | route_type | 映射等价的路由/终止动作，沿用现有拒绝与错误边界 |
 | 新增字段 | 注入 generation、scenario、能力约束、queue_class、failure_policy；旧配置默认 general/普通队列，失败动作按旧行为显式映射 |
 
-迁移时生产路由器只有一个权威输出；旧 API 可提供只读兼容视图，但执行必须消费完整 RoutePlan。组选择不是已连通证据，实际拨号结果另记到会话/Trace。新增字段必须贯通执行与回归测试。旧 [scenario profile 设计](scenario-profiles.md)仍是配置期缺省展开；运行期并列策略不恢复 ProfileKind 分支。
+迁移时生产路由器只有一个权威输出；旧 API 可提供只读兼容视图，但执行必须消费完整 RoutePlan。组选择不是已连通证据，实际拨号结果另记到会话/Trace。新增字段必须贯通执行与回归测试。`profile: proxy|game|web` 预设仍是配置期缺省展开，显式配置优先、重复展开幂等；运行期并列策略不恢复 ProfileKind 分支。
 
 ### 5.1 每条流的路径
 
@@ -178,38 +178,38 @@ CLI/UI/MCP 共用诊断与配置应用服务。纯 Explain 固定代际/质量�
 
 ## 10. 分阶段迁移与验收
 
-以下 RV2 为架构工作包索引；**唯一原子执行清单为仓库根目录 `todo.md`，RIL-001～RIL-095**。旧待办已完整替换，历史保留在 Git。RV2 不另行勾选，以原子任务提交、fixture 与真机证据为准。
+以下 RV1 为架构工作包索引；**唯一原子执行清单为仓库根目录 `todo.md`，RIL-001～RIL-095**。旧待办已完整替换，历史保留在 Git。RV1 不另行勾选，以原子任务提交、fixture 与真机证据为准。
 
 | ID | 优先级 | 工作包 | 前置 | 完成门禁 |
 |---|---|---|---|---|
-| RV2-01 | P0 | 冻结概念/规范 IR/诊断与能力模型 | — | 兼容旧配置的契约样例与拒绝矩阵 |
-| RV2-02 | P0 | 重构 SourceSnapshot/稳定目录与来源替换 | 01 | 同名、更新、删除、离线失败保留旧版本 |
-| RV2-03 | P0 | 节点 provider/use 与 provider-only 输入 | 02 | L1真实脱敏fixture、周期/单位、下载上限、内容hash进快照 |
-| RV2-04 | P0 | 修正组策略映射与保真 | 01/03 | select/url-test/fallback/load-balance；不支持relay明确拒绝 |
-| RV2-05 | P0 | 规则集/进程规则/规则顺序兼容 | 01/03 | L3fixture、源目标端口区别、未知能力拒绝 |
-| RV2-06 | P0 | 本地策略与订阅模式分离 | 02/04/05 | nodes-only/full-policy；刷新不覆盖用户规则 |
-| RV2-07 | P0 | RuntimeGeneration 与副作用事务 | 01/06 | 部分失败回滚、旧流排空、重启恢复 |
-| RV2-08 | P0 | 抽取 PacketPort/SocketBypass/NetworkEvents | 01 | Linux行为回归，跨平台mock契约 |
-| RV2-09 | P0 | 三桌面 OwnerResolver 契约 | 01 | Known/Unknown/Unsupported、超时、缓存与匹配模式 |
-| RV2-10 | P0 | Linux 本机进程和接管强化 | 08/09 | TCP/UDP、完整路径、PID/端口复用、权限失败 |
-| RV2-11 | P1 | Windows 技术探针与正式适配 | 正式08/09；探针无前置 | Wintun+身份+DNS/路由+SCM真机回归 |
-| RV2-12 | P1 | macOS 技术探针与正式适配 | 正式08/09；探针无前置 | 公开API+身份+签名权限+退出恢复真机回归 |
-| RV2-13 | P0 | 并行ScenarioPolicy与RoutePlan执行 | 04/07 | 一实例game/web并行；原profile可迁移 |
-| RV2-14 | P0 | 会话粘性与更新/故障策略 | 07/13 | 长TCP、UDP映射、配置刷新、撤销与重连边界 |
-| RV2-15 | P0 | 有界预算/队列与公平调度 | 13/14 | 同时下载/游戏，资源有界且网页不饥饿 |
-| RV2-16 | P0 | 质量样本、迟滞与解释接口 | 13 | metric/source/时效区分；失败率不冒充丢包 |
-| RV2-17 | P0 | small/mobile/full 构建能力裁剪 | 08 | small排除Wasmtime/JIT，依赖图与峰值RSS可核验 |
-| RV2-18 | P1 | OpenWrt 网关正式集成 | 07/08/17 | fw4/procd、IPv4/IPv6、DNS/崩溃恢复；不要求远端PID |
-| RV2-19 | P1 | FFI 包批次/所有权/取消与宿主接口 | 正式08/17；iOS探针提前 | fd与公开packetFlow均可适配，mock和ABI回归 |
-| RV2-20 | P1 | Android 完整代理接线 | 13/14/19 | TCP/UDP、protect、前台服务、撤销与Wi-Fi/蜂窝切换 |
-| RV2-21 | P1 | iOS 公开PacketTunnel接线 | 13/14/19 | 无私有fd；真机签名、IPC、内存/暂停恢复、DNS/UDP |
-| RV2-22 | P2 | 可选Mesh/插件边界与安全承载 | 14/17 | 普通订阅不依赖Mesh；不安全UDP路径拒绝 |
-| RV2-23 | P1 | 六平台契约/产物/真机CI与诊断 | 10/11/12/18/20/21 | 构建、接管、退出恢复分别报告，不以cross-check替代 |
-| RV2-24 | P1 | 并发游戏/网页对照与收益复核 | 15/16/23 | 同线路/负载测p50/p95/抖动/TTFB/吞吐/CPU/RSS，发布限制与失败样例 |
-| RV2-25 | P0 | 真实流诊断、纯Explain与主动Probe | 07/13/14/16 | RIL-051～061；预测/观测分离、脱敏与有界资源 |
-| RV2-26 | P1 | 路径检查与留存 | 25 | RIL-062～064；图/JSON一致，不推断机场内部路径 |
-| RV2-27 | P1 | 默认关闭的只读MCP | 25/17 | RIL-065～072；stdio、范围鉴权和泄漏回归 |
-| RV2-28 | P1 | 提案与受控MCP写入 | 07/27 | RIL-073～082；精确授权、并发/幂等、补偿与看门狗 |
+| RV1-01 | P0 | 冻结概念/规范 IR/诊断与能力模型 | — | 兼容旧配置的契约样例与拒绝矩阵 |
+| RV1-02 | P0 | 重构 SourceSnapshot/稳定目录与来源替换 | 01 | 同名、更新、删除、离线失败保留旧版本 |
+| RV1-03 | P0 | 节点 provider/use 与 provider-only 输入 | 02 | L1真实脱敏fixture、周期/单位、下载上限、内容hash进快照 |
+| RV1-04 | P0 | 修正组策略映射与保真 | 01/03 | select/url-test/fallback/load-balance；不支持relay明确拒绝 |
+| RV1-05 | P0 | 规则集/进程规则/规则顺序兼容 | 01/03 | L3fixture、源目标端口区别、未知能力拒绝 |
+| RV1-06 | P0 | 本地策略与订阅模式分离 | 02/04/05 | nodes-only/full-policy；刷新不覆盖用户规则 |
+| RV1-07 | P0 | RuntimeGeneration 与副作用事务 | 01/06 | 部分失败回滚、旧流排空、重启恢复 |
+| RV1-08 | P0 | 抽取 PacketPort/SocketBypass/NetworkEvents | 01 | Linux行为回归，跨平台mock契约 |
+| RV1-09 | P0 | 三桌面 OwnerResolver 契约 | 01 | Known/Unknown/Unsupported、超时、缓存与匹配模式 |
+| RV1-10 | P0 | Linux 本机进程和接管强化 | 08/09 | TCP/UDP、完整路径、PID/端口复用、权限失败 |
+| RV1-11 | P1 | Windows 技术探针与正式适配 | 正式08/09；探针无前置 | Wintun+身份+DNS/路由+SCM真机回归 |
+| RV1-12 | P1 | macOS 技术探针与正式适配 | 正式08/09；探针无前置 | 公开API+身份+签名权限+退出恢复真机回归 |
+| RV1-13 | P0 | 并行ScenarioPolicy与RoutePlan执行 | 04/07 | 一实例game/web并行；原profile可迁移 |
+| RV1-14 | P0 | 会话粘性与更新/故障策略 | 07/13 | 长TCP、UDP映射、配置刷新、撤销与重连边界 |
+| RV1-15 | P0 | 有界预算/队列与公平调度 | 13/14 | 同时下载/游戏，资源有界且网页不饥饿 |
+| RV1-16 | P0 | 质量样本、迟滞与解释接口 | 13 | metric/source/时效区分；失败率不冒充丢包 |
+| RV1-17 | P0 | small/mobile/full 构建能力裁剪 | 08 | small排除Wasmtime/JIT，依赖图与峰值RSS可核验 |
+| RV1-18 | P1 | OpenWrt 网关正式集成 | 07/08/17 | fw4/procd、IPv4/IPv6、DNS/崩溃恢复；不要求远端PID |
+| RV1-19 | P1 | FFI 包批次/所有权/取消与宿主接口 | 正式08/17；iOS探针提前 | fd与公开packetFlow均可适配，mock和ABI回归 |
+| RV1-20 | P1 | Android 完整代理接线 | 13/14/19 | TCP/UDP、protect、前台服务、撤销与Wi-Fi/蜂窝切换 |
+| RV1-21 | P1 | iOS 公开PacketTunnel接线 | 13/14/19 | 无私有fd；真机签名、IPC、内存/暂停恢复、DNS/UDP |
+| RV1-22 | P2 | 可选Mesh/插件边界与安全承载 | 14/17 | 普通订阅不依赖Mesh；不安全UDP路径拒绝 |
+| RV1-23 | P1 | 六平台契约/产物/真机CI与诊断 | 10/11/12/18/20/21 | 构建、接管、退出恢复分别报告，不以cross-check替代 |
+| RV1-24 | P1 | 并发游戏/网页对照与收益复核 | 15/16/23 | 同线路/负载测p50/p95/抖动/TTFB/吞吐/CPU/RSS，发布限制与失败样例 |
+| RV1-25 | P0 | 真实流诊断、纯Explain与主动Probe | 07/13/14/16 | RIL-051～061；预测/观测分离、脱敏与有界资源 |
+| RV1-26 | P1 | 路径检查与留存 | 25 | RIL-062～064；图/JSON一致，不推断机场内部路径 |
+| RV1-27 | P1 | 默认关闭的只读MCP | 25/17 | RIL-065～072；stdio、范围鉴权和泄漏回归 |
+| RV1-28 | P1 | 提案与受控MCP写入 | 07/27 | RIL-073～082；精确授权、并发/幂等、补偿与看门狗 |
 
 ### 10.1 关键路径与独立交付
 

@@ -1,6 +1,6 @@
 # 配置参考
 
-> 状态：按 `crates/rillane-config/src/lib.rs` serde 定义与各块 `validate()` 对账（2026-10-11）· 示例基线见仓库 `config/rillane.yaml`（内联注释版）· 协议字段语义见 [PROTOCOLS.md](PROTOCOLS.md) · DNS 引擎细则见 [design/dns-partition.md](design/dns-partition.md) · TUN/network 细则见 [networking.md](networking.md) · 「必填」= 无 serde 缺省、配置缺席即解析失败
+本页描述当前代码的配置 schema，不代表 v1 目标字段已经实现。定义以 `crates/rillane-config/src/lib.rs` 与各块校验为准，示例见仓库 `config/rillane.yaml`。[协议支持](PROTOCOLS.md)、[网络接管](networking.md)描述现有边界；[v1 设计](design/architecture-v1.md)描述下一阶段。必填表示没有 serde 缺省。
 
 ## 格式与加载
 
@@ -86,10 +86,10 @@ routing:
         - type: weighted_node      # 或 node | group | weighted_group
           name: trojan-node
           weight: 3
-      slo:                        # 可选（slo-scoring.md）
+      slo:                        # 可选；质量值需核查来源
         p95_ms: 80
         loss_ratio: 0.02
-        loss_penalty_ms: 1000     # 缺省 1000.0（1% 丢包 ≈ +10ms 罚分）
+        loss_penalty_ms: 1000     # 缺省 1000.0（ratio 增加 0.01 ≈ +10ms 罚分）
   rules:                           # 必填（可为空表）；先到先得
     - name: cn
       target: auto
@@ -101,6 +101,8 @@ routing:
 - `strategy` 七种：`fixed | latency | random | bandwidth | weighted | consistent_hash | round_robin`。
 - 路由条件 `type` 标签：`any{conditions}` / `not{condition}` / `domain_suffix{values}` / `domain_keyword{values}` / `domain_regex{patterns}` / `domain_full{values}` / `geoip{country}` / `geo_site{category}` / `ip_cidr{cidrs}` / `network{cidrs}` / `port{values}` / `process{values}`。进程名口径 `/proc/<pid>/comm` 截断 15 字节；**仅 TUN 入口有该注解**，其它 ingress 恒不命中。`geoip` 读 `routing.geoip_db`（MaxMind DB Country `.mmdb`，仅目标 IP 字面量）；`geo_site` 读 `routing.geosite_db`（v2fly `.dat`）。数据库路径缺席或加载失败时对应条件恒不命中。数据库相对路径按配置文件所在目录解析。
 - `slo` 校验：`loss_ratio ∈ [0,1]`、`loss_penalty_ms ≥ 0`；`latency` 策略在 `slo:` 门内取最低分，chain 侧 `slo_watch` 劣化自动切换。
+
+注意：现有 `loss_ratio` 字段保留兼容名称，部分链路来源实际为连接错误率；配置目标不能当成真实游戏丢包测量。需要连同来源/样本解释，v1 将区分指标类型。
 
 ## udp（缺省整块关；变更重启生效——会话状态不可热迁移）
 
@@ -132,7 +134,7 @@ network:
     dns_servers: [1.1.1.1]       # 可选；network.dns.domestic 缺省回落此列表 +53
   routing:
     include: ["10.111.0.0/16"]   # 纳入 tun 的前缀（include 语义；负向即 bypass）
-  dns:                           # 见下表；细则见 dns-partition.md
+  dns:                           # 见下表；字段见本节
     enabled: true                # 块在场缺省 true
     domestic: ["223.5.5.5:53"]   # 空 = 回落 tun.dns_servers +53
     trusted: ["8.8.8.8:53"]      # ip:port；可信性由部署者保证

@@ -1,4 +1,4 @@
-# RILLANE Android demo（P3-4）
+# RILLANE Android demo
 
 Rust 核心（`crates/rillane-ffi` cdylib）+ Kotlin VpnService。`build.sh` 一条命令
 产 APK：rillane-ffi 交叉（NDK 工具链）→ `jniLibs` 预置 → gradle 只打包
@@ -56,8 +56,8 @@ adb install -r platforms/android/app/build/outputs/apk/debug/app-debug.apk
   转发脚本（NDK wrapper 按 dirname $0 定位本体，软链会断）。
 - **未验（真机）**：arm64 真机全流程（.so 形态已验、真机 consent/UI 交互
   与性能未跑）；有真机时按上面验收路径即可。
-- TCP/UDP 的真实代理路径（IP 流重组 → FlowRouter → egress）随 P1-2
-  TunIngress 落地；当前 TUN 面仅 ICMP echo 轮转，全局路由（0.0.0.0/0）
+- TCP/UDP 的真实代理路径（IP 流重组 → FlowRouter → egress）仍需移植
+  共享数据面；当前 TUN 面仅 ICMP echo 轮转，全局路由（0.0.0.0/0）
   在此之前不开启（避免流量黑洞）。
 - **wireguard 出站在 android 构建中剥离**：`defguard_boringtun` 0.6 无
   android 平台支撑（内部 `tun` crate 不识别目标 + cfg 面守卫类型错位，

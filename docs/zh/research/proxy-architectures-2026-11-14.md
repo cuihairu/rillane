@@ -2,7 +2,7 @@
 
 研究日期：2026-11-14。Rillane 对照基线：`46c2b1256e78e830a1d1783ae908893f7377b768`。本次交付是**研究与目标设计**，没有将六平台数据面或完整 Clash 兼容标为已实现。
 
-配套阅读：[32 个架构概念及抽象依据](../design/architecture-concepts.md)、[Rillane 目标架构与迁移计划](../design/architecture-v2.md)、[当前实现](../architecture.md)。图由 `scripts/render_architecture_diagrams.py` 生成，SVG 可单独打开与导出。
+配套阅读：[32 个架构概念及抽象依据](../design/architecture-concepts.md)、[Rillane 目标架构与迁移计划](../design/architecture-v1.md)、[当前实现](../architecture.md)。图由 `scripts/render_architecture_diagrams.py` 生成，SVG 可单独打开与导出。
 
 **最新需求边界：按进程分别代理只要求 Windows、macOS、Linux 本机。** OpenWrt、Android、iOS 保留跨平台代理与网页/游戏并行处理计划，不要求桌面式进程归因；以下平台差异是设计约束，不是给移动端新增 PID 交付项。
 
@@ -119,7 +119,7 @@ provider 的成员可以变化，而规则和用户偏好应能保持；规则�
 
 吸收 provider 解耦、类型化平台边界、真实反馈与诊断；新增本地策略与订阅来源分离、并行场景目标、会话代际和资源预算。收益属于待验证的工程假设：订阅更新不覆盖用户规则、老流不被无意义切换、浏览下载与游戏竞争时有可测退化边界、同核心减少平台逻辑重复。
 
-不承诺 Rust 自动更快、多跳自动更低延迟、混淆必然加速或 UDP 透明无缝换出口。下一步按 [迁移门禁](../design/architecture-v2.md#migration) 逐项交付，再做同节点、同网络和同负载的对照测量。
+不承诺 Rust 自动更快、多跳自动更低延迟、混淆必然加速或 UDP 透明无缝换出口。下一步按 [迁移门禁](../design/architecture-v1.md#migration) 逐项交付，再做同节点、同网络和同负载的对照测量。
 
 ## 9. 官方证据目录
 

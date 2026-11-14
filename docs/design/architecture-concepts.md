@@ -2,7 +2,7 @@
 
 Status: research/design proposal, 2026-11-14. These **32 core concepts** define the scope of a proxy/acceleration kernel; they are not an exhaustive inventory of competitors' private types or a claim that all interfaces exist.
 
-Evidence: [upstream study](../research/proxy-architectures-2026-11-14.md). Composition: [target architecture](architecture-v2.md). **Process-based routing is required only on local Windows, macOS and Linux hosts**, not OpenWrt, Android or iOS.
+Evidence: [upstream study](../research/proxy-architectures-2026-11-14.md). Composition: [target architecture](architecture-v1.md). **Process-based routing is required only on local Windows, macOS and Linux hosts**, not OpenWrt, Android or iOS.
 
 ## 1. What justifies an abstraction
 

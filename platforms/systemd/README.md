@@ -1,7 +1,7 @@
-# platforms/systemd —— Linux systemd + deb 打包（P3-3）
+# platforms/systemd —— Linux systemd + deb 打包
 
 systemd unit + deb 组装产线。设计定稿与验证分层见
-[docs/design/platform-packaging.md](../../docs/design/platform-packaging.md) §2/§5。
+[docs/design/architecture-v1.md](../../docs/design/architecture-v1.md) §2/§5。
 
 ## 模板清单
 
@@ -30,7 +30,7 @@ journalctl -u rillane -f                 # 日志走 journal（telemetry.log_lev
 ## 硬化与能力面
 
 - unit 缺省授予 `CAP_NET_BIND_SERVICE`（低端口入口）+ `CAP_NET_ADMIN`（TUN 面，
-  P1-2 已落地）。**纯代理部署建议收窄**：
+   已落地）。**纯代理部署建议收窄**：
 
   ```bash
   sudo systemctl edit rillane
@@ -40,13 +40,13 @@ journalctl -u rillane -f                 # 日志走 journal（telemetry.log_lev
   #   CapabilityBoundingSet=CAP_NET_BIND_SERVICE
   ```
 
-- **有意不设 `MemoryDenyWriteExecute=yes`**：wasmtime JIT（P3-2 插件面）需要
+- **有意不设 `MemoryDenyWriteExecute=yes`**：wasmtime JIT（ 插件面）需要
   W→X 映射代码页，设了插件即失效——若部署不用插件且要此项硬化，drop-in 自行
   开启即可。
 - `ProtectSystem=strict` + `PrivateTmp` + `NoNewPrivileges` 等常规硬化已开；
   `SystemCallFilter` 未设（误伤面评估归后续，设计 §6 边界 4）。
 
-## 验证边界（如实登记，platform-packaging.md §5 分层）
+## 验证边界（脚本、产物、运行与真机分别记录）
 
 | 层 | 内容 | 状态 |
 |---|---|---|

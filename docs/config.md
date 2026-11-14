@@ -1,6 +1,6 @@
 # Configuration reference
 
-> Status: reconciled against the serde definitions in `crates/rillane-config/src/lib.rs` and each block's `validate()` (2026-10-11) · baseline example in the repo at `config/rillane.yaml` (inline-commented version) · protocol field semantics in [PROTOCOLS.md](PROTOCOLS.md) · DNS engine details in [design/dns-partition.md](design/dns-partition.md) · TUN/network details in [networking.md](networking.md) · "required" = no serde default, so a missing value fails parsing
+This page describes current configuration, not completed v1 fields. Definitions and validation live in `crates/rillane-config/src/lib.rs`; examples are in `config/rillane.yaml`. See [protocols](PROTOCOLS.md), [capture](networking.md) and the separate [v1 design](design/architecture-v1.md). Required fields have no serde default.
 
 ## Format and loading
 
@@ -86,7 +86,7 @@ routing:
         - type: weighted_node      # or node | group | weighted_group
           name: trojan-node
           weight: 3
-      slo:                        # optional (slo-scoring.md)
+      slo:                        # optional ; check quality provenance
         p95_ms: 80
         loss_ratio: 0.02
         loss_penalty_ms: 1000     # default 1000.0 (1% loss is about +10 ms penalty)
@@ -101,6 +101,8 @@ routing:
 - Seven `strategy` values: `fixed | latency | random | bandwidth | weighted | consistent_hash | round_robin`.
 - Routing condition `type` tags: `any{conditions}` / `not{condition}` / `domain_suffix{values}` / `domain_keyword{values}` / `domain_regex{patterns}` / `domain_full{values}` / `geoip{country}` / `geo_site{category}` / `ip_cidr{cidrs}` / `network{cidrs}` / `port{values}` / `process{values}`. The process-name scope is `/proc/<pid>/comm` truncated to 15 bytes; **only the TUN ingress carries that annotation**, so other ingresses never match. `geoip` reads `routing.geoip_db` (MaxMind DB Country `.mmdb`, target IP literal only) and `geo_site` reads `routing.geosite_db` (v2fly `.dat`); if a database path is absent or fails to load, the condition never matches. Relative database paths are resolved against the config-file directory.
 - `slo` validation: `loss_ratio` in [0,1], `loss_penalty_ms >= 0`; the `latency` strategy takes the lowest score inside the `slo:` gate, and the chain side's `slo_watch` switches automatically on degradation.
+
+Existing loss_ratio names are retained for compatibility. Some link observations are connection error ratios, not measured game packet loss. Interpret them with their source/sample evidence; v1 introduces typed measurements.
 
 ## udp (the whole block is off by default; changes take effect on restart -- session state cannot be hot-migrated)
 
@@ -132,7 +134,7 @@ network:
     dns_servers: [1.1.1.1]       # optional; network.dns.domestic falls back to this list +53
   routing:
     include: ["10.111.0.0/16"]   # prefixes brought into the tun (include semantics; the negative is bypass)
-  dns:                           # see the table below; details in dns-partition.md
+  dns:                           # see the table below; fields described here
     enabled: true                # true by default when the block is present
     domestic: ["223.5.5.5:53"]   # empty = fall back to tun.dns_servers +53
     trusted: ["8.8.8.8:53"]      # ip:port; trustworthiness is the deployer's responsibility

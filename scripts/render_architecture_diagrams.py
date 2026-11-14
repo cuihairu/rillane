@@ -117,7 +117,7 @@ overview("surge.svg", "Surge — documented functional architecture", "仅据官
   ("Boundary / 吸收重点", ["可解释诊断与真实反馈", "功能按平台明确声明", "不模仿未知私有内部结构"])],
 ], "Sources G1–G4 · official documented behavior, not source audit · 2026-11-14")
 
-overview("rillane-target.svg", "Rillane — proposed target architecture / 目标方案", "所有虚线框均为目标边界，未整体实现；复用现有模块，按迁移门禁逐项交付。", [
+overview("rillane-target.svg", "Rillane v1 — proposed architecture / 目标设计", "所有虚线框均为目标边界，未整体实现；复用现有模块，按迁移门禁逐项交付。", [
  [("Sources / 配置来源", ["Clash / Mihomo + local rules", "provider-scoped stable IDs", "sources never own local policy"]),
   ("Compiler / 配置编译", ["canonical typed IR + provenance", "validate refs / OS capabilities", "last-known-good on failure"]),
   ("Generation / 配置代际", ["immutable validated snapshot", "prepare → apply → publish", "new flows pin one generation"]),
@@ -130,7 +130,7 @@ overview("rillane-target.svg", "Rillane — proposed target architecture / 目�
   ("Resources / 资源隔离", ["class budgets / queue bounds", "optional pools / UDP caps", "small build excludes WASM JIT"]),
   ("Quality / 可解释反馈", ["typed samples + age + source", "new-flow choice / hysteresis", "failure ratio ≠ packet loss"]),
   ("Mesh / 可选节点网", ["managed capabilities / crypto", "not imposed on subscriptions", "no seamless migration promise"])],
-], "PROPOSED · ADRs A1–A10 and migration RV2 tasks · existing status is documented separately · 2026-11-14", True)
+], "PROPOSED · ADRs A1–A10 and migration RV1 tasks · existing status is documented separately · 2026-11-14", True)
 
 s = frame("Six platforms — shared core, explicit capability boundaries", "同一个 Rust 数据面设计；系统 helper、VPN service 或 extension 可以处于独立进程。", 1220)
 columns = [(255, "CAPTURE / 接管"), (695, "IDENTITY / 应用归因"), (1135, "LIFECYCLE / 验收边界")]
@@ -152,7 +152,7 @@ for i, (name, status, capture, identity, lifecycle) in enumerate(platforms):
 s += text(50, 1145, "Process-based routing is required only on local Windows, macOS and Linux hosts.", 23, INK, 650)
 s += text(50, 1185, "Proposed platform ports · OS references P1–P9 · OpenWrt / Android / iOS: proxy + concurrent game/web, no desktop PID requirement.", 17, MUTED)
 save("platform-boundaries.svg", s)
-s = frame("Rillane — Debug / MCP boundaries / 诊断与 AI 边界", "目标设计，尚未实现；蓝虚线是控制调用，橙虚线是观测，底部绿实线才是业务数据。", 1400)
+s = frame("Rillane v1 — Debug / MCP / 诊断与 AI 边界", "目标设计，尚未实现；蓝虚线是控制调用，橙虚线是观测，底部绿实线才是业务数据。", 1400)
 # Draw connections before cards. AI/MCP never sit in the forwarding chain.
 s += arrow([(1080, 260), (1038, 260)], "control")
 s += arrow([(797, 360), (797, 445)], "control")

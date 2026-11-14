@@ -1,6 +1,6 @@
 # Debugging, path explanation and optional MCP
 
-Status: **target design, not implemented**, 2026-11-14. Extends the [target architecture](architecture-v2.md) and concept C31. The repository-root `todo.md` is the execution backlog. New commands, APIs and tools below are proposed interfaces.
+Status: **target design, not implemented**, 2026-11-14. Extends the [target architecture](architecture-v1.md) and concept C31. The repository-root `todo.md` is the execution backlog. New commands, APIs and tools below are proposed interfaces.
 
 ## 1. Rationale and influences
 

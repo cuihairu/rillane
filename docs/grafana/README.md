@@ -52,3 +52,5 @@ scrape_configs:
 Grafana -> Dashboards -> New -> Import, select `docs/grafana/rillane-dashboard.json`.
 
 This dashboard uses the data source variable `${DS_PROMETHEUS}`; after import, select your Prometheus data source.
+
+This template documents existing metrics, not complete v1 telemetry. Series depend on enabled features/roles; use actual `/metrics` as authority. Unsupported event/error placeholder panels have been removed. Log capture also requires `telemetry.enable_tracing: true`; diagnose bundles are not automatically safe for model upload.

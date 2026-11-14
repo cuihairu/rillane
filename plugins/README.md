@@ -1,7 +1,7 @@
-# Rillane 示例插件（P3-2）
+# Rillane 示例插件
 
-WASM `FlowMiddleware` 插件（ABI：[docs/design/plugin-loader.md](../docs/design/plugin-loader.md) §1.2/§1.3）。
-本目录**不随宿主 workspace 编译**（wasm 专属 crate，独立 `[workspace]`，plugin-loader.md §7 P-load）。
+WASM `FlowMiddleware` 示例。ABI 以[加载器源码](../crates/rillane-plugins/src/lib.rs)为准；可选依赖边界见 [v1 设计](../docs/design/architecture-v1.md)。
+本目录**不随宿主 workspace 编译**（wasm 专属 crate，独立 `[workspace]`）。
 
 | 插件 | wants_payload | 语义 |
 |------|---------------|------|
@@ -30,7 +30,7 @@ obfuscation:
 - 相对路径按进程 CWD 解析（validate E1：enabled 时路径必须存在）；
 - 链重建只发生在**进程重启**：当前 rillaned 无配置热更新（启动一次性读配置，
   无 SIGHUP/watch），混淆链为进程内静态——插件实例状态（令牌桶）随进程退出
-  清零，同进程内改配置不会重建链（plugin-loader.md §7 R-state 的触发前提
+  清零，同进程内改配置不会重建链（当前加载器重建的触发前提
   现不成立）。
 
 ## 宿主侧验收实况

@@ -2,7 +2,7 @@
 
 状态：2026-11-14 研究与设计提案，未将下列接口全部实现。范围是代理/加速内核的 **32 个核心概念**，不是竞品所有内部类型的穷举。
 
-上游依据见 [架构研究及官方来源](../research/proxy-architectures-2026-11-14.md)；组合方案见 [目标架构](architecture-v2.md)。**进程分流验收限定 Windows、macOS、Linux 本机**；OpenWrt、Android、iOS 不承担此要求。
+上游依据见 [架构研究及官方来源](../research/proxy-architectures-2026-11-14.md)；组合方案见 [目标架构](architecture-v1.md)。**进程分流验收限定 Windows、macOS、Linux 本机**；OpenWrt、Android、iOS 不承担此要求。
 
 ## 1. 抽象的判断标准
 

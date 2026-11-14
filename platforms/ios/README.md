@@ -1,4 +1,4 @@
-# RILLANE iOS（P3-4）
+# RILLANE iOS
 
 Rust 核心（`crates/rillane-ffi` cdylib）+ `NEPacketTunnelProvider` extension。
 本目录提供：Provider Swift 源码、macOS 侧 xcframework 构建脚本、集成步骤。
@@ -43,8 +43,10 @@ Rust 核心（`crates/rillane-ffi` cdylib）+ `NEPacketTunnelProvider` extension
 - **已验**：C ABI 本体（宿主 Rust 测试，见 `crates/rillane-ffi`）；Swift 源码
   仅语法级自查，**未过 Xcode 编译**（无 macOS 工具链）；fd 交接
   （KVC `socket.fileDescriptor`）与 NE 生命周期未在真机运行。
-- TCP/UDP 真实代理路径随 P1-2 TunIngress 接入；当前 TUN 面仅 ICMP echo
+- TCP/UDP 真实代理路径仍需接入共享数据面；当前 TUN 面仅 ICMP echo
   轮转，全局路由在此之前不开启。
 - Network Extension 需付费开发者账号的 entitlement，本地模拟器可跑
   `aarch64-apple-ios-sim` 面但 NE extension 不支持模拟器运行——真机为
   唯一验收环境。
+
+当前私有 KVC fd 方式仅是现有脚手架状态，v1 必须替换为公开 packetFlow 批次接口，见 [v1 架构](../../docs/zh/design/architecture-v1.md)。

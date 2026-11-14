@@ -1,4 +1,4 @@
-# Rillane target architecture: six platforms and concurrent scenarios
+# Rillane v1 architecture design: six platforms and concurrent scenarios
 
 Status: **proposal, not implemented as a whole**, 2026-11-14. Baseline: `46c2b12`. This page records design recommendations and migration gates; [current implementation](../architecture.md) remains distinct. Existing stable-release authorization boundaries do not change.
 
@@ -8,13 +8,13 @@ Read the [upstream study](../research/proxy-architectures-2026-11-14.md) and [32
 
 | ID | Requirement | Acceptance meaning |
 |---|---|---|
-| V2-R1 | Linux/OpenWrt/macOS/Windows/Android/iOS | Common core and configuration semantics; individual capture, DNS, lifecycle and artifact gates |
-| V2-R2 | Clash/Mihomo site subscriptions | Explicit full-config/provider-only modes; preserved nodes/rules/groups and diagnostics for unsupported semantics |
-| V2-R3 | Process-based routing | **Local Windows, macOS and Linux only**, including different processes reaching the same target |
-| V2-R4 | Concurrent web/game acceleration | Parallel objectives within one data-plane instance, not a single mutually exclusive profile |
-| V2-R5 | Explainable, measurable results | Trace sources, rules, generations, endpoint choices, observations and resource effects |
-| V2-R6 | Debug and actual paths | Separate Explain/Trace/Probe; bounded sanitized evidence |
-| V2-R7 | Optional MCP | Disabled by default, local reads first, controlled proposals/apply/rollback |
+| V1-R1 | Linux/OpenWrt/macOS/Windows/Android/iOS | Common core and configuration semantics; individual capture, DNS, lifecycle and artifact gates |
+| V1-R2 | Clash/Mihomo site subscriptions | Explicit full-config/provider-only modes; preserved nodes/rules/groups and diagnostics for unsupported semantics |
+| V1-R3 | Process-based routing | **Local Windows, macOS and Linux only**, including different processes reaching the same target |
+| V1-R4 | Concurrent web/game acceleration | Parallel objectives within one data-plane instance, not a single mutually exclusive profile |
+| V1-R5 | Explainable, measurable results | Trace sources, rules, generations, endpoint choices, observations and resource effects |
+| V1-R6 | Debug and actual paths | Separate Explain/Trace/Probe; bounded sanitized evidence |
+| V1-R7 | Optional MCP | Disabled by default, local reads first, controlled proposals/apply/rollback |
 
 OpenWrt uses device/IP/domain/port policy without requiring remote client PIDs. Android/iOS do not need desktop process attribution. Optional application lists/UID features do not block their baseline delivery. Ordinary iOS VPN must not promise arbitrary third-party app process rules; managed Per-App VPN is a separate possible deployment.
 
@@ -89,7 +89,7 @@ Existing core RouteDecision already has path/reason/route_type; RoutePath models
 | route_type | Preserve equivalent routing/terminal actions and existing rejection/error boundaries |
 | New fields | Supply generation, scenario, capabilities, queue_class and failure_policy; legacy policy defaults to general/ordinary queues with explicitly equivalent failure behavior |
 
-Keep one authoritative production output. Legacy APIs may expose read-only views, but execution consumes the full plan. Selection is not connection evidence; record actual attempts separately. Test every new field through execution. Existing [scenario presets](scenario-profiles.md) remain configuration-time defaults; concurrent policies do not reintroduce runtime ProfileKind branches.
+Keep one authoritative production output. Legacy APIs may expose read-only views, but execution consumes the full plan. Selection is not connection evidence; record actual attempts separately. Test every new field through execution. Existing `profile: proxy|game|web` presets remain configuration-time defaults, with explicit values taking priority and idempotent expansion; concurrent policies do not reintroduce runtime ProfileKind branches.
 
 ```text
 CapturePort → FlowContext
@@ -169,38 +169,38 @@ Start with interfaces/modules; split crates only for measurable dependency or re
 
 ## 10. Migration and acceptance
 
-RV2 items are architectural indexes. The **single atomic execution backlog is repository-root `todo.md`, RIL-001–RIL-095**. It replaces the old checklist; history stays in Git. Use atomic task commits, fixtures and device evidence rather than independently marking RV2 complete.
+RV1 items are architectural indexes. The **single atomic execution backlog is repository-root `todo.md`, RIL-001–RIL-095**. It replaces the old checklist; history stays in Git. Use atomic task commits, fixtures and device evidence rather than independently marking RV1 complete.
 
 | ID | Priority | Work package | Depends on | Gate |
 |---|---|---|---|---|
-| RV2-01 | P0 | Concepts/IR/diagnostics/capability contracts | — | Legacy config and rejection fixtures |
-| RV2-02 | P0 | Source snapshots/stable catalog/replacement | 01 | Collisions, updates, deletion, last-known-good |
-| RV2-03 | P0 | Provider/use/provider-only nodes | 02 | L1 fixtures, units/bounded fetch/content hash in snapshot |
-| RV2-04 | P0 | Correct group semantics | 01/03 | select/url-test/fallback/load-balance; reject unsupported relay |
-| RV2-05 | P0 | Rule sets/process conditions/order | 01/03 | L3 fixtures, src/dst ports, unsupported capabilities |
-| RV2-06 | P0 | Local-policy ownership/import modes | 02/04/05 | Refresh does not overwrite user rules |
-| RV2-07 | P0 | Generations and OS transactions | 01/06 | Rollback, drain and restart recovery |
-| RV2-08 | P0 | Packet/bypass/network event ports | 01 | Linux regression and platform mocks |
-| RV2-09 | P0 | Three-desktop owner contracts | 01 | Known/Unknown/Unsupported, deadline/cache/modes |
-| RV2-10 | P0 | Linux capture/ownership hardening | 08/09 | TCP/UDP/path/PID/port reuse and permissions |
-| RV2-11 | P1 | Windows spike and adapter | production 08/09; spike independent | Wintun/owner/routes/DNS/SCM on Windows |
-| RV2-12 | P1 | macOS spike and adapter | production 08/09; spike independent | Public APIs/identity/signing/cleanup on macOS |
-| RV2-13 | P0 | Concurrent scenarios/RoutePlan execution | 04/07 | One instance with game and web; preset migration |
-| RV2-14 | P0 | Session pin/update/failure policies | 07/13 | Long TCP, UDP mappings, removal and reconnect |
-| RV2-15 | P0 | Bounded budgets/queues/fairness | 13/14 | Concurrent download/game without unbounded use or web starvation |
-| RV2-16 | P0 | Typed quality/hysteresis/explanation | 13 | Source/age semantics; failure ratio is not loss |
-| RV2-17 | P0 | small/mobile/full build pruning | 08 | small excludes Wasmtime/JIT; graph and peak RSS |
-| RV2-18 | P1 | OpenWrt gateway integration | 07/08/17 | fw4/procd/dual-stack/DNS/recovery; no remote PID |
-| RV2-19 | P1 | FFI packet/lifecycle ownership | production 08/17; iOS spike early | fd and public packetFlow ports; cancellation/ABI tests |
-| RV2-20 | P1 | Android full forwarding | 13/14/19 | TCP/UDP/protect/foreground/revoke/Wi-Fi-cellular |
-| RV2-21 | P1 | iOS public Packet Tunnel integration | 13/14/19 | No private fd; signed device, IPC/memory/resume/DNS/UDP |
-| RV2-22 | P2 | Optional Mesh/plugin boundaries | 14/17 | Standard nodes independent; insecure UDP rejected |
-| RV2-23 | P1 | Six-platform contracts/artifacts/device CI | 10/11/12/18/20/21 | Build/capture/recovery reported separately |
-| RV2-24 | P1 | Concurrent performance comparison | 15/16/23 | Same endpoint/network/load; p50/p95/jitter/TTFB/throughput/CPU/RSS |
-| RV2-25 | P0 | Real traces, pure Explain and active Probe | 07/13/14/16 | RIL-051–061; bounded sanitized evidence |
-| RV2-26 | P1 | Path inspection and retention | 25 | RIL-062–064; diagram/JSON parity |
-| RV2-27 | P1 | Disabled-by-default read-only MCP | 25/17 | RIL-065–072; stdio, scopes and disclosure tests |
-| RV2-28 | P1 | Proposals and controlled MCP writes | 07/27 | RIL-073–082; authority/concurrency/idempotency/recovery |
+| RV1-01 | P0 | Concepts/IR/diagnostics/capability contracts | — | Legacy config and rejection fixtures |
+| RV1-02 | P0 | Source snapshots/stable catalog/replacement | 01 | Collisions, updates, deletion, last-known-good |
+| RV1-03 | P0 | Provider/use/provider-only nodes | 02 | L1 fixtures, units/bounded fetch/content hash in snapshot |
+| RV1-04 | P0 | Correct group semantics | 01/03 | select/url-test/fallback/load-balance; reject unsupported relay |
+| RV1-05 | P0 | Rule sets/process conditions/order | 01/03 | L3 fixtures, src/dst ports, unsupported capabilities |
+| RV1-06 | P0 | Local-policy ownership/import modes | 02/04/05 | Refresh does not overwrite user rules |
+| RV1-07 | P0 | Generations and OS transactions | 01/06 | Rollback, drain and restart recovery |
+| RV1-08 | P0 | Packet/bypass/network event ports | 01 | Linux regression and platform mocks |
+| RV1-09 | P0 | Three-desktop owner contracts | 01 | Known/Unknown/Unsupported, deadline/cache/modes |
+| RV1-10 | P0 | Linux capture/ownership hardening | 08/09 | TCP/UDP/path/PID/port reuse and permissions |
+| RV1-11 | P1 | Windows spike and adapter | production 08/09; spike independent | Wintun/owner/routes/DNS/SCM on Windows |
+| RV1-12 | P1 | macOS spike and adapter | production 08/09; spike independent | Public APIs/identity/signing/cleanup on macOS |
+| RV1-13 | P0 | Concurrent scenarios/RoutePlan execution | 04/07 | One instance with game and web; preset migration |
+| RV1-14 | P0 | Session pin/update/failure policies | 07/13 | Long TCP, UDP mappings, removal and reconnect |
+| RV1-15 | P0 | Bounded budgets/queues/fairness | 13/14 | Concurrent download/game without unbounded use or web starvation |
+| RV1-16 | P0 | Typed quality/hysteresis/explanation | 13 | Source/age semantics; failure ratio is not loss |
+| RV1-17 | P0 | small/mobile/full build pruning | 08 | small excludes Wasmtime/JIT; graph and peak RSS |
+| RV1-18 | P1 | OpenWrt gateway integration | 07/08/17 | fw4/procd/dual-stack/DNS/recovery; no remote PID |
+| RV1-19 | P1 | FFI packet/lifecycle ownership | production 08/17; iOS spike early | fd and public packetFlow ports; cancellation/ABI tests |
+| RV1-20 | P1 | Android full forwarding | 13/14/19 | TCP/UDP/protect/foreground/revoke/Wi-Fi-cellular |
+| RV1-21 | P1 | iOS public Packet Tunnel integration | 13/14/19 | No private fd; signed device, IPC/memory/resume/DNS/UDP |
+| RV1-22 | P2 | Optional Mesh/plugin boundaries | 14/17 | Standard nodes independent; insecure UDP rejected |
+| RV1-23 | P1 | Six-platform contracts/artifacts/device CI | 10/11/12/18/20/21 | Build/capture/recovery reported separately |
+| RV1-24 | P1 | Concurrent performance comparison | 15/16/23 | Same endpoint/network/load; p50/p95/jitter/TTFB/throughput/CPU/RSS |
+| RV1-25 | P0 | Real traces, pure Explain and active Probe | 07/13/14/16 | RIL-051–061; bounded sanitized evidence |
+| RV1-26 | P1 | Path inspection and retention | 25 | RIL-062–064; diagram/JSON parity |
+| RV1-27 | P1 | Disabled-by-default read-only MCP | 25/17 | RIL-065–072; stdio, scopes and disclosure tests |
+| RV1-28 | P1 | Proposals and controlled MCP writes | 07/27 | RIL-073–082; authority/concurrency/idempotency/recovery |
 
 ### 10.1 Critical path and independent deliveries
 

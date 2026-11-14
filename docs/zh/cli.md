@@ -1,6 +1,6 @@
 # rillanectl CLI 参考
 
-> 状态：按 `apps/rillanectl/src/main.rs` clap 定义对账（2026-10-11，18 个顶层子命令）· 本文只描述已实现行为；旗标/缺省值以 `rillanectl <命令> --help` 实际输出为准 · 相关：[订阅指南](subscription.md) · [Mesh & Chain](mesh.md) · [系统路由与网络接管](networking.md)
+本页只描述现有 CLI；旗标、默认值和可用命令以 `rillanectl <命令> --help` 为准。[订阅](subscription.md)、[Mesh](mesh.md)、[网络接管](networking.md)为现状参考。v1 的 Explain/Trace/Probe/MCP 仍是[目标设计](design/debug-and-mcp.md)，不能当成当前命令执行。
 
 ## 全局选项
 
@@ -28,7 +28,7 @@
 | GET | `/nodes` | mesh 节点快照 | `nodes` |
 | GET | `/flows` | 入口→出口累计流量统计 | `stats` |
 | GET | `/udp/stats` | UDP 会话/中继统计快照 | `stats`（UDP 段同取） |
-| GET | `/routing/stats` | 组实时质量（成员数据源/p95/丢包/SLO 门/当前选点） | `group` |
+| GET | `/routing/stats` | 组实时质量（成员数据源/p95/质量 ratio（按来源解释）/SLO 门/当前选点） | `group` |
 | GET | `/mesh/switches` | 链路切换账本（最近 100 次） | `switches` |
 | GET | `/egress/pool/stats` | 出站连接池快照 | `pool status` |
 | GET | `/dns/stats` | DNS 服务统计快照 | —（仅 REST） |
@@ -62,7 +62,7 @@
 | `check` | 校验配置文件 | 离线 |
 | `show` | 打印配置摘要 | 离线 |
 | `stats` | 查看流量统计（尾部附 UDP 段：会话/中继字节/丢弃/过期/mesh 面） | 控制面 `/flows` |
-| `group` | 查看组实时质量：成员数据源、p95/丢包、SLO 门判定、latency 组当前选点 | 控制面 `/routing/stats` |
+| `group` | 查看组实时质量：成员数据源、p95/质量 ratio（按来源解释）、SLO 门判定、latency 组当前选点 | 控制面 `/routing/stats` |
 | `switches` | 查看链路切换账本（最近 100 次事件，含前后路径与原因） | 控制面 `/mesh/switches` |
 | `profile` | 生成场景骨架配置（`proxy\|game\|web`） | 离线 |
 | `tls-fingerprint` | TLS 指纹形态预设对照表（none/chrome/ios/safari 的 shape_material 四维导出） | 离线 |

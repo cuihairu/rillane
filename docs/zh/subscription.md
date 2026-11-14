@@ -1,74 +1,45 @@
-# 订阅指南（现状）
+# 订阅指南（当前实现）
 
-> 状态：拉取/转换/重载链路存在，Clash/Mihomo 语义兼容仍为部分实现（`crates/rillane-subscription`）· 相关：[architecture.md](architecture.md) · [mesh.md](mesh.md) · Rillane DSL schema 定义于 `crates/rillane-subscription/src/rillane_dsl.rs`
+Clash/Mihomo 为**部分兼容**。当前拉取、转换、缓存、刷新与控制面链路存在；目标的来源快照、完整 provider 与保真规则/组见 [v1 订阅设计](design/architecture-v1.md#subscription-compatibility)。
 
-2026-11-14 复核：provider/use、规则集尚不完整，进程规则导入被跳过，fallback/relay 映射改变语义。[架构研究](research/proxy-architectures-2026-11-14.md#verified-gaps) 记录源码证据，[目标设计](design/architecture-v2.md#subscription-compatibility) 给出兼容分级与验收门禁。
+## 输入和转换
 
-## 执行摘要
+支持 Clash YAML、分享链接列表及其 base64 表达，以及 Rillane 自有 DSL。具体类型与协议字段以 `crates/rillane-subscription` 的转换器和运行时校验为准。当前 ClashConfig 要求的结构不能被理解为已支持任意 provider-only 输入。
 
-Rillane 订阅链路覆盖：拉取（条件请求/代理/自定义头）→ 类型自动识别（Clash YAML / 分享链接 / base64）→ 转换为 `RillaneConfig` → TTL+LRU 缓存 → 两级定时刷新（内容哈希无变化跳过重载）→ 控制面 CRUD 与热更新。本文按代码实况描述各环节与边界。
+| 输入 | 当前映射 | 限制 |
+|---|---|---|
+| proxies | egress | 导入字段存在不代表对应平台/协议可运行 |
+| proxy-groups | routing.groups | fallback → Random、relay → ConsistentHash 存在语义损失 |
+| rules | routing.rules | PROCESS-NAME、RULE-SET 等关键规则可能被告警后跳过 |
+| url-test interval | 探活秒数 | 当前错误按毫秒除以 1000；显式 300 被算成 1 秒，缺省仍为 300 秒 |
 
-另有离线转换面：`rule_source.rs`（O-dns1，2026-10-10）把 geosite/chnroutes 文本规则源解析为路由/DNS 分流规则片段（`rillanectl import-rules` 取数），不经订阅缓存链路。
+因此不能只看“转换成功”判断安全可用。先核查关键规则、组和单位；修复任务为根目录 `todo.md` 的 RIL-092/RIL-093，完整保真实现见 RIL-007～RIL-016。源码依据见[研究缺口](research/proxy-architectures-2026-11-14.md#verified-gaps)。
 
-## 1. 订阅源与类型识别
+## 拉取、缓存与更新
 
-- 支持源类型：**Clash YAML**（proxies/proxy-groups/rules）与**分享链接列表**（`vmess://`、`vless://`、`trojan://`、`hysteria2://`/`hy2://`、`ss://` 等，见 `converter.rs`）；整体为 base64 编码的链接列表会自动解码（`try_decode_base64`）。
-- 类型自动识别：`Subscription::detect_type` 按内容特征判定，无需手工指定。
-- 内容校验：拉取后经 `validate_content` 检查非空与基本形态，防止空响应覆盖现有配置。
+拉取器支持超时、请求头、代理和条件请求；缓存提供 TTL/LRU。Subscription 已有 SHA-256 内容摘要和变更检测。摘要不是签名，也不证明来源可信。
 
-## 2. 拉取（`fetcher.rs`）
+当前 runtime 按名字追加节点/组并 extend 规则，不能正确传播更新/删除。控制面删除来源不等于 v1 所承诺的来源对象与存活会话事务。订阅刷新后的有效配置必须检查；新代际实现前不能假定本地策略、旧流与 OS 状态已原子切换。
 
-- 基于 `reqwest`（rustls）；可配置：超时、User-Agent、自定义请求头、出站代理（`with_proxy`）、重定向策略。
-- **条件请求**：记录并回传 `ETag` / `Last-Modified`，服务端返回 304 时命中缓存、不重复转换。
-- 拉取结果 `FetchResult` 携带响应头元数据与最终内容。
-
-## 3. 转换为 RillaneConfig（`clash.rs` + `converter.rs`）
-
-| Clash 概念 | Rillane 映射 |
-|-----------|----------|
-| `proxies` | `egress`（`EgressConfig` 各变体） |
-| `proxy-groups` | `routing.groups`（`PolicyGroup`；部分映射，不保证保留每种组算法语义） |
-| `rules` | `routing.rules` |
-
-- 转换产出**当前未实现的出站类型**（如 hysteria v1——schema/订阅转换已支持，出站连接器缺）时不会静默丢弃：运行时构建（`RuntimeBuilder`）阶段报错提示。协议实现边界见 [PROTOCOLS.md](PROTOCOLS.md) 状态标注。
-- **传输层字段**（`network` + 各 `*-opts` 块，2026-10 随协议批补齐）：导入识别 `network: tcp | ws | grpc | h2` 与 `ws-opts`（path / `headers.host`，Host 头键大小写三形兼容；平铺 `path`/`host` 优先兜底）、`grpc-opts`（`grpc-service-name` 规范键 + 变体别名）、`h2-opts`（path/host，host 标量或数组皆收）；SS 的 `plugin`/`plugin-opts` 按换算表转 SIP003（obfs 族→`obfs-local`、v2ray-plugin 原名键值透传、其余插件名拒导宁缺毋滥）。导出侧对称产出：ws/h2 按 `network` 出块（trojan 不产 h2——rillane 侧 trojan 白名单无 h2 口径）、`grpc-opts` 仅 `network=grpc`；SS 插件无 Clash 等价表达，导出降级提示不产出。rillane 白名单外的 `network` 值在 RuntimeBuilder 构建期报错。
-- 亦支持导出为 Rillane 自有 DSL 并回导入（`rillane_dsl.rs`）：`version/meta/nodes（auth/transport/tls/location）/groups（strategy、嵌套成员）/rulesets`，附带校验器。
-- **Rillane → Clash 回导出**（`clash_export.rs`，2026-10-07）：`ClashExporter::export(&RillaneConfig)` 产出 Clash YAML + 报告（导出/降级清单）。proxies 覆盖 ss/vmess/vless/trojan/http(s)/socks5/hysteria2/hysteria/wireguard（direct 映射内置 `DIRECT`，不产出 proxy）；规则仅单条件可线性化（rillane 多条件 AND ≠ Clash 首中即停，多条件跳过并登记）；组策略 Fixed→select、Latency→url-test（generate_204/300s）、Random/Weighted/Bandwidth/RoundRobin→load-balance(round-robin)、ConsistentHash→load-balance(consistent-hashing)；字段级无对应项（如 `tls_fingerprint`）逐条入 `skipped` 不阻塞导出。
-
-## 4. 缓存与刷新（`cache.rs` + `lib.rs`）
-
-- `SubscriptionCache`：TTL + LRU 双维度清理，默认清理间隔 1 小时；暴露命中命中率等统计（`CacheStats`）。
-- 两级刷新节奏：单订阅 `refresh_interval`（分钟）与全局刷新循环（默认 300 秒一轮，`needs_refresh` 判定是否到期）。
-- **变更检测**：内容哈希（`has_content_changed`）不变时跳过转换与 runtime 重载，避免无效热更新。
-
-## 5. 控制面与热更新
-
-控制面（`control.api_bind`，认证方式见 [mesh.md](mesh.md) Auth 小节）：
-
-| 端点 | 行为 |
-|------|------|
-| `GET /subscriptions` | 列出订阅与状态（最近刷新/错误） |
-| `POST /subscriptions` | 添加订阅 |
-| `POST /subscriptions/refresh` | 全量刷新 |
-| `POST /subscriptions/{name}/refresh` | 单订阅刷新 |
-| `DELETE /subscriptions/{name}` | 删除订阅 |
-
-- 刷新成功且内容变化时触发 runtime 热更新（路由/组/出站重建），订阅事件计入指标（`inc_subscription_event`）。
-- 配置文件本身的变更**当前无自动监视**：rillaned 启动一次性读配置，`rillane-runtime::HotReloadManager`（`watch_config_file`）为导出能力但 rillaned 未接线——改配置需重启进程或经订阅/控制面路径触发热更新。
-
-## 6. CLI
+## 命令与接口
 
 ```bash
-rillanectl import-clash <url|file> --output rillane.yaml   # 离线转换预览（不经守护进程；-o 同义，缺省 config/clash_import.yaml）
-rillanectl export-clash <rillane配置> -o clash.yaml        # Rillane → Clash 回导出（离线；缺省 config/clash_export.yaml，末尾打印降级/跳过清单）
-rillanectl import-rules <url|file> --target <组或出口> [--face routing|dns]  # geosite/chnroutes 文本规则源批量导入（O-dns1；缺省 stdout，--out 写文件；跳过清单走 stderr）
-rillanectl subscription list|add|remove|refresh      # 经控制面管理
+rillanectl subscription --help
+rillanectl import-clash --help
+rillanectl export-clash --help
+rillanectl import-rules --help
 ```
 
-完整 `rillanectl` 旗标（含 `--header`/`--refresh-interval`/`--timeout` 单位）与控制面端点语义见 [cli.md](cli.md)。
+`import-rules` 是 geosite/chnroutes 文本规则到配置片段的离线转换，不等于订阅 RULE-SET 运行时支持。具体参数见 [CLI](cli.md)。
 
-## 7. 边界与未落地
+| 接口 | 操作 |
+|---|---|
+| GET /subscriptions | 状态列表 |
+| POST /subscriptions | 添加 |
+| POST /subscriptions/refresh | 刷新全部 |
+| POST /subscriptions/{name}/refresh | 刷新单个 |
+| DELETE /subscriptions/{name} | 删除来源 |
 
-- 订阅拉取暂无内建定时重试退避（失败依赖下一轮全局刷新周期重试）；
-- 「Clash → Rillane」导入与「Rillane → Clash」回导出双向已实现（`clash.rs` / `clash_export.rs`）；Rillane 自有 DSL（`rillane_dsl.rs`）→ Clash 未实现；
-- 订阅规则集（rulesets）转换粒度受 Clash 规则类型覆盖面限制，未覆盖类型在转换期提示。
+管理鉴权见 [配置](config.md)的 `control.admin_token`；当前普通只读与敏感读/写端点的门控不同，不等于 v1 的细粒度 MCP 权限。配置文件本身没有通用 watch 或 SIGHUP 重载，修改后需要按当前支持方式生效。
+
+订阅 URL、头、节点秘密及原始运行配置不应发送给模型；现有 diagnose 不自动满足 v1 DiagnosticView 的脱敏契约。参见 [Debug 与 MCP](design/debug-and-mcp.md)。

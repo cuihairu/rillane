@@ -1,0 +1,14 @@
+# Rillane v1 design
+
+This directory maintains only the current v1 design. **Proposal, not implemented as a whole.** The design version is separate from the software release version.
+
+| Document | Responsibility |
+|---|---|
+| [v1 architecture design](architecture-v1.md) | Six platforms, Clash compatibility, local process routing, concurrent scenarios, generations, ownership and independent delivery gates |
+| [Concepts and rationale](architecture-concepts.md) | Responsibilities, rationale, benefits and costs of 32 core concepts |
+| [Debug, paths and optional MCP](debug-and-mcp.md) | Explanation, actual traces, active probes, privacy, authority and configuration lifecycle |
+| [Upstream architecture study](../research/proxy-architectures-2026-11-14.md) | Primary evidence, SVGs and influences from Mihomo, sing-box and Surge |
+
+The repository-root [todo.md](https://github.com/cuihairu/rillane/blob/main/todo.md) is the single execution backlog. Other pages do not duplicate completion checklists. Process routing is required only on local Windows/macOS/Linux hosts; OpenWrt/Android/iOS use available domain/IP/port/device evidence.
+
+[Current implementation](../architecture.md), [configuration](../config.md) and [CLI reference](../cli.md) describe existing behavior, not completed v1 delivery. Old designs, roadmaps and audits have been removed from the active documentation tree; consult Git history for historical material.

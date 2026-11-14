@@ -1,8 +1,8 @@
-# Rillane 新架构实施清单
+# Rillane v1 架构实施清单
 
 更新：2026-11-14。**本文件完整替换旧待办，是后续实施的唯一任务入口。** 旧清单及审计过程保留在 Git 历史，不继续作为当前完成状态。当前研究和文档已交付，不代表下列功能已经实现；所有任务从未验收状态开始，已有代码经核验可以复用，不要求重写。
 
-设计依据：[目标架构](docs/zh/design/architecture-v2.md)、[概念与抽象理由](docs/zh/design/architecture-concepts.md)、[Debug / MCP](docs/zh/design/debug-and-mcp.md)、[竞品研究](docs/zh/research/proxy-architectures-2026-11-14.md)。[当前实现说明](docs/zh/architecture.md)用于区分复用能力与缺口。
+设计依据：[目标架构](docs/zh/design/architecture-v1.md)、[概念与抽象理由](docs/zh/design/architecture-concepts.md)、[Debug / MCP](docs/zh/design/debug-and-mcp.md)、[竞品研究](docs/zh/research/proxy-architectures-2026-11-14.md)。[当前实现说明](docs/zh/architecture.md)用于区分复用能力与缺口。
 
 ## 范围和执行约定
 

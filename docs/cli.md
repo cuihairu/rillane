@@ -1,6 +1,6 @@
 # rillanectl CLI reference
 
-> Status: reconciled against the clap definitions in `apps/rillanectl/src/main.rs` (2026-10-11, 18 top-level subcommands) · this page only describes implemented behavior; flags/defaults are authoritative in the actual output of `rillanectl <command> --help` · Related: [subscription guide](subscription.md) · [Mesh & Chain](mesh.md) · [system routing and network takeover](networking.md)
+This page describes existing commands; use `rillanectl <command> --help` for current flags/defaults. See [subscriptions](subscription.md), [Mesh](mesh.md) and [capture](networking.md). v1 Explain/Trace/Probe/MCP are [proposed](design/debug-and-mcp.md), not current commands.
 
 ## Global options
 
@@ -28,7 +28,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | GET | `/nodes` | mesh node snapshot | `nodes` |
 | GET | `/flows` | cumulative ingress->egress traffic stats | `stats` |
 | GET | `/udp/stats` | UDP session/relay stats snapshot | `stats` (UDP section fetched together) |
-| GET | `/routing/stats` | real-time group quality (member data source/p95/loss/SLO gate/current selected endpoint) | `group` |
+| GET | `/routing/stats` | real-time group quality (member data source/p95/quality ratio (source-dependent)/SLO gate/current selected endpoint) | `group` |
 | GET | `/mesh/switches` | chain switch ledger (last 100) | `switches` |
 | GET | `/egress/pool/stats` | egress connection pool snapshot | `pool status` |
 | GET | `/dns/stats` | DNS service stats snapshot | — (REST only) |
@@ -62,7 +62,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | `check` | validate a config file | offline |
 | `show` | print a config summary | offline |
 | `stats` | view traffic stats (UDP section appended: sessions/relay bytes/drops/expiry/mesh plane) | control plane `/flows` |
-| `group` | view real-time group quality: member data source, p95/loss, SLO gate decisions, the latency group's current selected endpoint | control plane `/routing/stats` |
+| `group` | view real-time group quality: member data source, p95/quality ratio (source-dependent), SLO gate decisions, the latency group's current selected endpoint | control plane `/routing/stats` |
 | `switches` | view the chain switch ledger (last 100 events, with before/after paths and reasons) | control plane `/mesh/switches` |
 | `profile` | generate a scenario skeleton config (`proxy\|game\|web`) | offline |
 | `tls-fingerprint` | TLS fingerprint preset comparison table (four-dimension shape_material export of none/chrome/ios/safari) | offline |

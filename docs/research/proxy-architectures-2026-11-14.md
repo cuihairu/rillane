@@ -2,7 +2,7 @@
 
 Date: 2026-11-14. Rillane baseline: `46c2b1256e78e830a1d1783ae908893f7377b768`. This is a research and design package, not an implementation release.
 
-Read the [32 architecture concepts](../design/architecture-concepts.md), [target architecture and migration](../design/architecture-v2.md), and [current implementation](../architecture.md). Standalone SVGs are reproducible with `scripts/render_architecture_diagrams.py`.
+Read the [32 architecture concepts](../design/architecture-concepts.md), [target architecture and migration](../design/architecture-v1.md), and [current implementation](../architecture.md). Standalone SVGs are reproducible with `scripts/render_architecture_diagrams.py`.
 
 **Process-based routing is required only on local Windows, macOS and Linux hosts.** OpenWrt, Android and iOS remain proxy and concurrent game/web targets; desktop-style process attribution is not required there.
 
@@ -88,7 +88,7 @@ Shared policy semantics therefore coexist with different OS capabilities. On pla
 
 Adopt source separation, typed OS boundaries, observed quality and diagnostics. Propose local-policy ownership, parallel scenario objectives, pinned sessions, generations and bounded resources. Expected benefits remain hypotheses until measured: preserved user intent after subscription changes, stable sessions, bounded competition and less duplicated platform logic.
 
-Do not promise automatic Rust speedups, universally faster multi-hop, obfuscation gains or seamless UDP migration. Follow the [migration gates](../design/architecture-v2.md#migration) and measure under the same endpoints, network and load.
+Do not promise automatic Rust speedups, universally faster multi-hop, obfuscation gains or seamless UDP migration. Follow the [migration gates](../design/architecture-v1.md#migration) and measure under the same endpoints, network and load.
 
 ## 9. Official evidence
 

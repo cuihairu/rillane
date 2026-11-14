@@ -1,4 +1,4 @@
-# RILLANE HarmonyOS（鸿蒙）适配（P3-4 填空；aarch64 编译面 2026-10-10、x86_64/armv7 2026-10-11）
+# RILLANE HarmonyOS（鸿蒙）适配（ 填空；aarch64 编译面 2026-10-10、x86_64/armv7 2026-10-11）
 
 Rust 核心（`crates/rillane-ffi` cdylib，C ABI 面）在三个
 `*-unknown-linux-ohos` 目标下编译面打通：aarch64 与 x86_64 走真实

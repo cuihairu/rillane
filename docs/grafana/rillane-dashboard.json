@@ -346,62 +346,6 @@
       "type": "timeseries"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 6,
-        "x": 18,
-        "y": 15
-      },
-      "id": 9,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sum by (type) (rate(rillane_mesh_events_total[5m]))",
-          "legendFormat": "mesh {{type}}",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sum by (type) (rate(rillane_subscription_events_total[5m]))",
-          "legendFormat": "sub {{type}}",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sum by (source) (rate(rillane_errors_total[5m]))",
-          "legendFormat": "err {{source}}",
-          "refId": "C"
-        }
-      ],
-      "title": "Events / Errors (per second)",
-      "type": "timeseries"
-    },
-    {
       "collapsed": false,
       "gridPos": {
         "h": 1,

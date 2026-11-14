@@ -52,3 +52,5 @@ scrape_configs:
 Grafana -> Dashboards -> New -> Import，选择 `docs/grafana/rillane-dashboard.json`。
 
 该 dashboard 使用了数据源变量 `${DS_PROMETHEUS}`，导入后选择你的 Prometheus 数据源即可。
+
+模板仅作为现有实现的使用参考，不代表 v1 全部观测已交付。指标随功能开关和节点角色出现，以实际 `/metrics` 为准；未实现的事件/总错误占位面板已移除。日志抓取还要求 `telemetry.enable_tracing: true`；诊断包不默认适合上传模型。
