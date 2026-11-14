@@ -45,7 +45,7 @@
 | ID / 概念 | 责任与输入输出 | 为什么单独抽象 | 收益与代价 |
 |---|---|---|---|
 | C17 Match / Action | 流条件匹配 → 路由、拒绝或必要元数据动作 | “是什么流”与“怎样处理”分别变化 | 好处：规则复用且保序；代价：需定义首中即停、AND/OR/NOT、DNS 前置条件与冲突优先级 |
-| C18 RoutePlan | 目标逻辑组、场景、约束、队列类别、失败策略、命中原因 | 只返回字符串节点名无法表达 UDP 能力和场景目标 | 好处：选择与执行可分别测试；代价：计划要被会话执行层完整消费，不能成为孤儿字段 |
+| C18 RoutePlan | 目标逻辑组、场景、约束、队列类别、失败策略、命中原因 | 现有 RouteDecision/RoutePath 已含组、链路与原因，需继续补场景、队列、失败策略与能力约束 | 好处：选择与执行可分别测试；代价：计划要被会话执行层完整消费，不能成为孤儿字段 |
 | C19 PolicyGroup | 有序/动态成员集合 + select/url-test/fallback/load-balance 等算法 | 规则引用稳定组，组再处理动态节点 | 好处：兼容现有订阅且可独立测选点；代价：引用循环、用户选择、嵌套及算法参数都要保真 |
 | C20 ScenarioPolicy | game/web/general 的并行目标与资源偏好 | UDP 并不全是游戏，TCP 也并不全是网页 | 好处：游戏走稳态低尾延迟，网页走首字节/吞吐；代价：分类冲突要有优先级，不能依靠端口猜测覆盖用户规则 |
 | C21 Endpoint / Dialer / Transport | 出口协议负责远端握手；dialer 负责连接/旁路；transport 承载字节或数据报 | TLS/WS/QUIC 传输与 SS/VLESS 等代理语义并非同一层 | 好处：能力组合与复用清楚；代价：必须检查合法组合，不能把不支持 UDP 的出口当可用 |
@@ -119,3 +119,5 @@ PacketPort.read_batch(deadline) / write_batch(packets)
 | 小设备可部署 | 不含 WASM JIT 的依赖图、包大小、启动与峰值 RSS、会话/队列上限 |
 
 在这些证据产生之前，“更合理”表示边界和验收更清楚，不表示已证明比 Mihomo、sing-box 或 Surge 更快。
+
+C31 的细化见 [Debug、路径解释与可选 MCP](debug-and-mcp.md)：RouteExplanation、FlowTrace/TraceEvent、ProbeJob、DiagnosticView、ConfigProposal/ApplyReceipt、MCPAdapter，分别说明职责、抽象理由、收益、成本与安全边界。

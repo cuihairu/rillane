@@ -41,6 +41,8 @@ See `docs/architecture.md` for details, and `docs/cli.md` for the full `rillanec
 
 Architecture planning (2026-11-14): [upstream study with 5 SVG diagrams](docs/research/proxy-architectures-2026-11-14.md), [32 concepts with reasons and costs](docs/design/architecture-concepts.md), and [six-platform target design](docs/design/architecture-v2.md). Local process routing targets Windows/macOS/Linux only; Android/iOS/OpenWrt remain proxy and concurrent game/web targets. These are proposals, not completed platform implementations; Clash/Mihomo compatibility is currently partial.
 
+Diagnostics and AI planning: [Debugging, path explanation and optional MCP](docs/design/debug-and-mcp.md), with an additional SVG. The [replacement atomic backlog](todo.md) has 95 tasks with dependencies and acceptance criteria. New diagnostic interfaces and MCP are not implemented yet.
+
 ```bash
 cargo run -p rillaned
 cargo run -p rillanectl -- --help

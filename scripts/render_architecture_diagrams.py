@@ -121,7 +121,7 @@ overview("rillane-target.svg", "Rillane — proposed target architecture / 目�
  [("Sources / 配置来源", ["Clash / Mihomo + local rules", "provider-scoped stable IDs", "sources never own local policy"]),
   ("Compiler / 配置编译", ["canonical typed IR + provenance", "validate refs / OS capabilities", "last-known-good on failure"]),
   ("Generation / 配置代际", ["immutable validated snapshot", "prepare → apply → publish", "new flows pin one generation"]),
-  ("Control / 平台宿主", ["daemon / Android service", "Apple Packet Tunnel extension", "UI / IPC / lifecycle adapters"])],
+  ("Control / 平台宿主", ["daemon / Android service", "Apple Packet Tunnel extension", "UI / IPC / optional MCP"])],
  [("CapturePort / 接管端口", ["socket / packet-batch inputs", "Linux / OpenWrt / Wintun", "Android VPN / Apple packetFlow"]),
   ("Flow / 流与应用上下文", ["TCP stream / UDP association", "OwnerResolver + DNS context", "known / unknown / unsupported"]),
   ("Policy / 并行场景", ["process + domain → route plan", "game / web objectives coexist", "target + queue + fail policy"]),
@@ -130,7 +130,7 @@ overview("rillane-target.svg", "Rillane — proposed target architecture / 目�
   ("Resources / 资源隔离", ["class budgets / queue bounds", "optional pools / UDP caps", "small build excludes WASM JIT"]),
   ("Quality / 可解释反馈", ["typed samples + age + source", "new-flow choice / hysteresis", "failure ratio ≠ packet loss"]),
   ("Mesh / 可选节点网", ["managed capabilities / crypto", "not imposed on subscriptions", "no seamless migration promise"])],
-], "PROPOSED · ADRs A1–A8 and migration RV2 tasks · existing status is documented separately · 2026-11-14", True)
+], "PROPOSED · ADRs A1–A10 and migration RV2 tasks · existing status is documented separately · 2026-11-14", True)
 
 s = frame("Six platforms — shared core, explicit capability boundaries", "同一个 Rust 数据面设计；系统 helper、VPN service 或 extension 可以处于独立进程。", 1220)
 columns = [(255, "CAPTURE / 接管"), (695, "IDENTITY / 应用归因"), (1135, "LIFECYCLE / 验收边界")]
@@ -152,4 +152,39 @@ for i, (name, status, capture, identity, lifecycle) in enumerate(platforms):
 s += text(50, 1145, "Process-based routing is required only on local Windows, macOS and Linux hosts.", 23, INK, 650)
 s += text(50, 1185, "Proposed platform ports · OS references P1–P9 · OpenWrt / Android / iOS: proxy + concurrent game/web, no desktop PID requirement.", 17, MUTED)
 save("platform-boundaries.svg", s)
-print(f"Generated 5 standalone SVGs in {OUT}")
+s = frame("Rillane — Debug / MCP boundaries / 诊断与 AI 边界", "目标设计，尚未实现；蓝虚线是控制调用，橙虚线是观测，底部绿实线才是业务数据。", 1400)
+# Draw connections before cards. AI/MCP never sit in the forwarding chain.
+s += arrow([(1080, 260), (1038, 260)], "control")
+s += arrow([(797, 360), (797, 445)], "control")
+s += arrow([(282, 360), (282, 445)], "control")
+s += arrow([(565, 540), (523, 540)], "control")
+s += arrow([(1030, 540), (1072, 540)], "control")
+s += arrow([(282, 640), (282, 750)], "control", (65, 700, "explain / 纯推演"))
+s += arrow([(1312, 640), (1312, 750)], "control", (1110, 700, "approved / 授权后"))
+s += arrow([(565, 845), (535, 845), (535, 690), (420, 690), (420, 648)], "feedback")
+s += arrow([(282, 945), (282, 995), (700, 995), (700, 1042)], "control")
+s += arrow([(850, 1050), (850, 953)], "feedback", (870, 1010, "events"))
+s += arrow([(1312, 945), (1312, 995), (1000, 995), (1000, 1042)], "control")
+for x1, x2 in ((515, 565), (1030, 1080)):
+    s += arrow([(x1, 1135), (x2 - 8, 1135)])
+rows = [
+ [("CLI / UI", ["shared application service", "text / JSON / path view", "same diagnostic semantics"]),
+  ("MCP adapter / 可选", ["local stdio; disabled by default", "no shell / generic admin proxy", "credentials stay outside model"]),
+  ("AI client / 分析与建议", ["sanitized evidence and diff", "scoped reads / explicit probes", "writes require granted authority"])],
+ [("Diagnostics / 诊断服务", ["Explain / Trace / Probe", "redacted field allowlists", "active probes: separate scope"]),
+  ("Authority / 服务端权限", ["read / identity / probe / write", "size / rate / target limits", "annotations are not permission"]),
+  ("Proposal / 配置提案", ["stored patch + base generation", "owner / expiry / exact approval", "conflict + idempotency checks"])],
+ [("Explain / 共享求值", ["production routing evaluator", "frozen config / quality snapshot", "no DNS or connection side effect"]),
+  ("Trace / 有界观测", ["flow / attempt / generation IDs", "planned vs actual endpoint", "TTL / sampling / drop counters"]),
+  ("Apply / 发布事务", ["persist + OS effects + generation", "receipt / verify / compensate", "rollback + host watchdog"])],
+ [("FlowContext / 业务输入", ["capture + owner + DNS evidence", "local PID: Win / Mac / Linux", "mobile: host IPC, no MCP default"]),
+  ("Router + Session / 数据面", ["game / web policies coexist", "pin generation and endpoint", "works without AI or tracing"]),
+  ("Egress / 实际出口", ["DIRECT / standard proxy", "optional managed Mesh", "provider internals are unknown"])],
+]
+for row, y in zip(rows, (175, 455, 760, 1050)):
+    for (heading, lines), x in zip(row, (50, 565, 1080)):
+        s += box(x, y, 465, 185, heading, lines, True)
+s += text(50, 1300, "PROPOSED: prediction ≠ observation ≠ active network probe; path views show unknowns explicitly.", 22, INK, 650)
+s += text(50, 1350, "A9–A10 / C31 refinements · debug-and-mcp.md · atomic backlog RIL-051–RIL-082 · 2026-11-14", 19, MUTED)
+save("debug-mcp.svg", s)
+print(f"Generated 6 standalone SVGs in {OUT}")

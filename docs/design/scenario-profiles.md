@@ -12,6 +12,8 @@
 > §7-1..5 unit tests; M1 this commit: three examples under examples/ + the §7-6 integration test +
 > documentation backfill).
 
+> **v2 evolution (proposed, not implemented):** [Target architecture §5](architecture-v2.md#route-plan-migration) retains configuration-time defaults and explicit-value priority. Parallel ScenarioPolicy extends ordinary policy, not runtime ProfileKind branches. Presets and handwritten policy still share one engine. See root `todo.md`, RIL-017/RIL-021.
+
 ## 0. Scope and acceptance wording
 
 **todo original text**: three config templates for `proxy` / `game` / `web` (routing rules + obfuscation switches + scheduling targets), the same engine underneath.

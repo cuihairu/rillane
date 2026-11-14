@@ -11,6 +11,8 @@
 > 填充 + 单测 §7-1..5；M1 本提交：examples/ 三份示例 + §7-6 集成测 +
 > 文档回填）。
 
+> **v2 演进说明（提案，未实现）**：[目标架构 §5](architecture-v2.md#route-plan-migration)将保留本页 `profile` 的配置期缺省展开与显式优先；新增的是普通策略模型里的并列 ScenarioPolicy，并非恢复运行期 `ProfileKind` 分支。预设生成与手写规则仍用同一执行引擎。详见根目录 `todo.md` 的 RIL-017/RIL-021。
+
 ## 0. 范围与验收口径
 
 **todo 原文**：`proxy` / `game` / `web` 三套配置模板（路由规则 + 混淆开关 + 调度目标），底层同一引擎。

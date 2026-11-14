@@ -45,7 +45,7 @@ Subscription owns input adaptation, config owns canonical validation, and runtim
 | ID / concept | Responsibility | Why separate it | Benefit and cost |
 |---|---|---|---|
 | C17 Match/Action | Conditions produce route/reject/enrichment actions | Classification differs from execution | Reusable rules; specify order, boolean semantics and DNS dependencies |
-| C18 RoutePlan | Group, scenario, constraints, queue, failure policy and explanation | A node-name string cannot express all execution requirements | Test selection separately; every plan field must be consumed |
+| C18 RoutePlan | Group, scenario, constraints, queue, failure policy and explanation | Existing RouteDecision/RoutePath carries groups, chains and reasons; add scenario, queue, capabilities and failure policy | Test selection separately; every plan field must be consumed |
 | C19 PolicyGroup | Dynamic/ordered members with precise selection algorithms | Rules should reference stable groups | Existing subscriptions retain meaning; validate cycles, nesting and user choices |
 | C20 ScenarioPolicy | Parallel game/web/general objectives | UDP is not always gaming; TCP is not always web | Independent latency/stability/throughput goals; define classification priority |
 | C21 Endpoint/Dialer/Transport | Proxy handshake, OS-safe dialing and stream/datagram carriage | TLS/WS/QUIC differ from proxy protocol semantics | Clear composition; reject unsupported combinations and UDP paths |
@@ -107,3 +107,5 @@ Ports support deadlines/cancellation and do not assume identical OS abilities. S
 | Small-device support | Dependency graph excluding WASM JIT; artifact size, startup and peak RSS, bounded sessions/queues |
 
 Before this evidence exists, a more reasonable architecture means clearer boundaries and acceptance criteria, not proven superiority over Mihomo, sing-box or Surge.
+
+See [Debugging, path explanation and optional MCP](debug-and-mcp.md) for C31 refinements: RouteExplanation, FlowTrace/TraceEvent, ProbeJob, DiagnosticView, ConfigProposal/ApplyReceipt and MCPAdapter, with rationale, costs and boundaries.
