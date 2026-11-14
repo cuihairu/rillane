@@ -3269,6 +3269,300 @@ dependencies = [
 ]
 
 [[package]]
+name = "rillane-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "thiserror 1.0.69",
+ "toml",
+]
+
+[[package]]
+name = "rillane-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "criterion",
+ "dashmap 6.1.0",
+ "libc",
+ "serde",
+ "socket2 0.5.10",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "rillane-ffi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jni 0.21.1",
+ "libc",
+ "rillane-config",
+ "rillane-runtime",
+ "serde_json",
+ "serde_yaml_ng",
+ "tokio",
+]
+
+[[package]]
+name = "rillane-mesh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dashmap 5.5.3",
+ "petgraph",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "rillane-platform"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "dns-lookup",
+ "futures",
+ "network-interface",
+ "nix 0.28.0",
+ "rcgen",
+ "regex",
+ "reqwest",
+ "rillane-config",
+ "rillane-core",
+ "rustls",
+ "serde",
+ "serde_json",
+ "socket2 0.5.10",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "uuid",
+ "webpki-roots 0.26.11",
+ "winapi",
+]
+
+[[package]]
+name = "rillane-plugins"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "rillane-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wasmtime",
+]
+
+[[package]]
+name = "rillane-protocols"
+version = "0.1.0"
+dependencies = [
+ "aes 0.8.4",
+ "aes-gcm 0.10.3",
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chacha20poly1305 0.10.1",
+ "crc32fast",
+ "defguard_wireguard_rs",
+ "h2",
+ "http",
+ "httparse",
+ "hysteria2",
+ "md-5 0.10.6",
+ "pin-project-lite",
+ "rand 0.8.6",
+ "rcgen",
+ "rillane-config",
+ "rillane-core",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha1 0.10.6",
+ "sha2",
+ "sha3",
+ "shadowsocks",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls",
+ "tokio-socks",
+ "tracing",
+ "uuid",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "rillane-routing"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dashmap 6.1.0",
+ "geosite-rs",
+ "maxminddb",
+ "maxminddb-writer",
+ "rand 0.8.6",
+ "regex",
+ "rillane-config",
+ "rillane-core",
+ "serde",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rillane-runtime"
+version = "0.1.0"
+dependencies = [
+ "aes 0.8.4",
+ "aes-gcm 0.10.3",
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dashmap 6.1.0",
+ "futures",
+ "hkdf 0.12.4",
+ "libc",
+ "notify",
+ "num_cpus",
+ "petgraph",
+ "rcgen",
+ "regex",
+ "rillane-config",
+ "rillane-core",
+ "rillane-mesh",
+ "rillane-platform",
+ "rillane-plugins",
+ "rillane-protocols",
+ "rillane-routing",
+ "rillane-subscription",
+ "rillane-telemetry",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "smoltcp",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "uuid",
+ "wat",
+ "whoami",
+ "x509-parser",
+]
+
+[[package]]
+name = "rillane-subscription"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "md-5 0.10.6",
+ "regex",
+ "reqwest",
+ "rillane-config",
+ "rillane-core",
+ "rillane-telemetry",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "serde_yaml_ng",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "rillane-telemetry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rillanectl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rcgen",
+ "reqwest",
+ "rillane-config",
+ "rillane-core",
+ "rillane-protocols",
+ "rillane-runtime",
+ "rillane-subscription",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rillaned"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rcgen",
+ "rillane-config",
+ "rillane-core",
+ "rillane-mesh",
+ "rillane-platform",
+ "rillane-runtime",
+ "rillane-subscription",
+ "rillane-telemetry",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wat",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3514,300 +3808,6 @@ checksum = "cc1f0cbffaac4852523ce30d8bd3c5cdc873501d96ff467ca09b6767bb8cd5c0"
 dependencies = [
  "core-foundation-sys",
  "libc",
-]
-
-[[package]]
-name = "rillane-config"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "regex",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "thiserror 1.0.69",
- "toml",
-]
-
-[[package]]
-name = "rillane-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "criterion",
- "dashmap 6.1.0",
- "libc",
- "serde",
- "socket2 0.5.10",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "rillane-ffi"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "jni 0.21.1",
- "libc",
- "rillane-config",
- "rillane-runtime",
- "serde_json",
- "serde_yaml_ng",
- "tokio",
-]
-
-[[package]]
-name = "rillane-mesh"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "dashmap 5.5.3",
- "petgraph",
- "serde",
- "serde_json",
- "serde_with",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "rillane-platform"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "dns-lookup",
- "futures",
- "network-interface",
- "nix 0.28.0",
- "rcgen",
- "regex",
- "reqwest",
- "rustls",
- "rillane-config",
- "rillane-core",
- "serde",
- "serde_json",
- "socket2 0.5.10",
- "thiserror 1.0.69",
- "tokio",
- "tokio-rustls",
- "tracing",
- "uuid",
- "webpki-roots 0.26.11",
- "winapi",
-]
-
-[[package]]
-name = "rillane-plugins"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "rillane-core",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
- "wasmtime",
-]
-
-[[package]]
-name = "rillane-protocols"
-version = "0.1.0"
-dependencies = [
- "aes 0.8.4",
- "aes-gcm 0.10.3",
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "chacha20poly1305 0.10.1",
- "crc32fast",
- "defguard_wireguard_rs",
- "h2",
- "http",
- "httparse",
- "hysteria2",
- "md-5 0.10.6",
- "pin-project-lite",
- "rand 0.8.6",
- "rcgen",
- "rustls",
- "rillane-config",
- "rillane-core",
- "serde",
- "serde_json",
- "sha1 0.10.6",
- "sha2",
- "sha3",
- "shadowsocks",
- "thiserror 1.0.69",
- "tokio",
- "tokio-rustls",
- "tokio-socks",
- "tracing",
- "uuid",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "rillane-routing"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "dashmap 6.1.0",
- "geosite-rs",
- "maxminddb",
- "maxminddb-writer",
- "rand 0.8.6",
- "regex",
- "rillane-config",
- "rillane-core",
- "serde",
- "sha2",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rillane-runtime"
-version = "0.1.0"
-dependencies = [
- "aes 0.8.4",
- "aes-gcm 0.10.3",
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "dashmap 6.1.0",
- "futures",
- "hkdf 0.12.4",
- "libc",
- "notify",
- "num_cpus",
- "petgraph",
- "rcgen",
- "regex",
- "rustls",
- "rillane-config",
- "rillane-core",
- "rillane-mesh",
- "rillane-platform",
- "rillane-plugins",
- "rillane-protocols",
- "rillane-routing",
- "rillane-subscription",
- "rillane-telemetry",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2",
- "smoltcp",
- "tokio",
- "tokio-rustls",
- "tracing",
- "uuid",
- "wat",
- "whoami",
- "x509-parser",
-]
-
-[[package]]
-name = "rillane-subscription"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "futures",
- "md-5 0.10.6",
- "regex",
- "reqwest",
- "rillane-config",
- "rillane-core",
- "rillane-telemetry",
- "serde",
- "serde_json",
- "serde_with",
- "serde_yaml_ng",
- "sha2",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "rillane-telemetry"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "rillanectl"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "rcgen",
- "reqwest",
- "rillane-config",
- "rillane-core",
- "rillane-protocols",
- "rillane-runtime",
- "rillane-subscription",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "time",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rillaned"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "http-body-util",
- "hyper",
- "hyper-util",
- "rcgen",
- "rillane-config",
- "rillane-core",
- "rillane-mesh",
- "rillane-platform",
- "rillane-runtime",
- "rillane-subscription",
- "rillane-telemetry",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
- "wat",
 ]
 
 [[package]]
