@@ -31,8 +31,8 @@
 
 ## 2. Clash/Mihomo 订阅与本地策略
 
-- [ ] **RIL-092｜P0｜当前导入器 interval 单位修复**；依赖：无。
-  交付：在现有转换器按秒读取 interval，修正文档/注释/旧测试。验收：显式 300 得 300 秒、60000 得 60000 秒，缺省仍按既定默认处理；0/非法输入有策略，不等待新 IR/provider。
+- [x] **RIL-092｜P0｜当前导入器 interval 单位修复**；依赖：无。（2026-11-15 完成）
+  交付：`crates/rillane-subscription/src/clash.rs:70-78` 新增 `clash_interval_secs`——按秒原样透传，`0`/缺省按 300 秒；`clash.rs:1246` 接入；`ClashProxyGroup::interval` 注释改秒（`clash.rs:393`）。导出侧同源缺陷一并修：`clash_export.rs:694-702` `interval_ms`→`interval_secs`，300_000→300（否则 Mihomo 侧 300000 秒≈不探活）。文档同步：`docs/subscription.md:14`、`docs/zh/subscription.md:14`、研究缺口表标已修。验收证据：`test_urltest_interval_read_in_seconds`（300→300、60000→60000、0→300、缺省→300）+ `clash_interval_secs_policy` 单测 + 旧用例 `test_urltest_group_probe_config_mapped` 改断言 60000；rillane-subscription 74 测全绿。commit：见 git log `fix: read clash interval in seconds`。
 - [ ] **RIL-093｜P0｜当前导入器有损转换护栏**；依赖：无。
   交付：明确导入模式/错误，未实现的 fallback/relay 与关键不支持规则不能伪装成功。验收：严格导入拒绝语义损失，宽松仅节点导入报告丢弃内容；现有可支持节点和组回归，完整 fallback 实现仍由 RIL-012 交付。
 

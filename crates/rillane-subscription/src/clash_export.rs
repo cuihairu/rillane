@@ -95,7 +95,7 @@ impl ClashExporter {
                 group_type: group_type(&group.strategy),
                 proxies: members,
                 url: url_test_url(&group.strategy),
-                interval: interval_ms(&group.strategy),
+                interval: interval_secs(&group.strategy),
                 strategy: load_balance_strategy(&group.strategy),
             });
             report.exported_groups.push(group.name.clone());
@@ -690,10 +690,12 @@ fn url_test_url(strategy: &Strategy) -> Option<String> {
     }
 }
 
-/// url-test 测速间隔（毫秒）
-fn interval_ms(strategy: &Strategy) -> Option<u64> {
+/// url-test 测速间隔（秒）。Clash/Mihomo 的 `interval` 单位是秒——旧实现写成
+/// 300_000，导出的配置在 Mihomo 侧会变成每 300000 秒探一次，等价于不探活
+/// （RIL-092 同源缺陷，导入/导出两侧统一到秒）。
+fn interval_secs(strategy: &Strategy) -> Option<u64> {
     match strategy {
-        Strategy::Latency => Some(300_000),
+        Strategy::Latency => Some(300),
         _ => None,
     }
 }

@@ -65,7 +65,7 @@ These are responsibility correspondences, not identical types or proof that the 
 | clash.rs root/group models | No complete provider/use model | Separate source snapshots from runtime endpoints |
 | convert_group_type_to_strategy | fallback→Random; relay→ConsistentHash | Preserve semantics or reject explicitly |
 | convert_clash_rule | PROCESS-NAME/RULE-SET skipped | Structured diagnostics and strict policy imports |
-| convert_proxy_groups_to_groups | interval treated as milliseconds | Versioned unit/behavior fixtures |
+| convert_proxy_groups_to_groups | ~~interval treated as milliseconds~~ fixed (RIL-092, 2026-11-15): read as seconds; 0/omission map to 300 s; export side corrected in step | Unit policy pinned by `clash_interval_secs` unit tests and YAML counterexamples |
 | merge_config_delta_in_place | Append-only names and rules | Source replacement, deletion and local ownership |
 | link_quality_between | errors/connections named loss | Typed failure metrics versus packet loss |
 | platform network/runtime TUN | Non-Linux TUN rejected | Actual adapter/runtime gates, not cross-build claims |

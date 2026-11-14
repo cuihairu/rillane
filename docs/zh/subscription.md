@@ -11,7 +11,7 @@ Clash/Mihomo 为**部分兼容**。当前拉取、转换、缓存、刷新与控
 | proxies | egress | 导入字段存在不代表对应平台/协议可运行 |
 | proxy-groups | routing.groups | fallback → Random、relay → ConsistentHash 存在语义损失 |
 | rules | routing.rules | PROCESS-NAME、RULE-SET 等关键规则可能被告警后跳过 |
-| url-test interval | 探活秒数 | 当前错误按毫秒除以 1000；显式 300 被算成 1 秒，缺省仍为 300 秒 |
+| url-test interval | 探活秒数 | 已按秒读取（RIL-092 修复）；0 与缺省都按 300 秒处理 |
 
 因此不能只看“转换成功”判断安全可用。先核查关键规则、组和单位；修复任务为根目录 `todo.md` 的 RIL-092/RIL-093，完整保真实现见 RIL-007～RIL-016。源码依据见[研究缺口](research/proxy-architectures-2026-11-14.md#verified-gaps)。
 

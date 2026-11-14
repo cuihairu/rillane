@@ -67,6 +67,17 @@ fn split_probe_url(url: &str) -> Option<(String, String)> {
     Some((probe, path))
 }
 
+/// Clash/Mihomo 的 url-test `interval` 单位是**秒**（官方缺省 300），不是毫秒；
+/// 这里原样透传，不做任何换算。`0` 表示配置者未填（YAML 里写了键但留空），
+/// 按缺省 300 处理——若按字面值落成 0，运行期 `interval(0)` 会退化成每 tick 一次
+/// 的探测风暴，且与「缺省 300」语义冲突（RIL-092）。
+fn clash_interval_secs(interval: Option<u64>) -> u64 {
+    match interval {
+        Some(0) | None => 300,
+        Some(secs) => secs,
+    }
+}
+
 /// Clash 代理类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -379,7 +390,7 @@ pub struct ClashProxyGroup {
     /// URL 测试地址（用于 url-test）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// 测试间隔（毫秒）
+    /// 测试间隔（秒；Clash/Mihomo 口径，0 视为缺省 300）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval: Option<u64>,
     /// 负载均衡策略
@@ -1222,7 +1233,7 @@ impl ClashConverter {
 
             // G1-9：url-test 组的测试 URL/间隔映射为 UrlTestConfig，订阅导入
             // 后即按原节奏探活选路。url 缺席或解析失败 = 不注入（宁缺不造，
-            // 不发明探测目标）；Clash interval 为毫秒，换算成秒下限 1。
+            // 不发明探测目标）；Clash interval 单位是秒，原样透传（RIL-092）。
             let url_test =
                 match group.group_type {
                     ClashProxyGroupType::UrlTest => group
@@ -1232,10 +1243,7 @@ impl ClashConverter {
                         .map(|(probe, path)| UrlTestConfig {
                             probe,
                             path,
-                            interval_secs: group
-                                .interval
-                                .map(|ms| (ms / 1000).max(1))
-                                .unwrap_or(300),
+                            interval_secs: clash_interval_secs(group.interval),
                             timeout_ms: 5000,
                         }),
                     _ => None,
@@ -1608,12 +1616,13 @@ rules:
             .unwrap();
         assert_eq!(groups.len(), 3);
 
-        // auto：url 拆出 probe/path，interval 60000ms → 60s
+        // auto：url 拆出 probe/path，interval 单位是秒——60000 即 60000 秒
+        // （RIL-092：旧实现误当毫秒换算成 60 秒，探活被放大约 1000 倍）
         let auto = groups.iter().find(|g| g.name.ends_with("auto")).unwrap();
         let url_test = auto.url_test.as_ref().expect("url-test 组带 url 应注入");
         assert_eq!(url_test.probe, "cp.cloudflare.com:443");
         assert_eq!(url_test.path, "/generate_204");
-        assert_eq!(url_test.interval_secs, 60);
+        assert_eq!(url_test.interval_secs, 60000);
 
         // manual：url-test 组缺 url → 不注入（宁缺不造）
         let manual = groups.iter().find(|g| g.name.ends_with("manual")).unwrap();
@@ -1622,6 +1631,79 @@ rules:
         // pick：select 组即便带 url 也不注入（只认 url-test 组）
         let pick = groups.iter().find(|g| g.name.ends_with("pick")).unwrap();
         assert!(pick.url_test.is_none());
+    }
+
+    /// RIL-092 反例：interval 单位是秒，不是毫秒。显式 300 → 300 秒、
+    /// 显式 60000 → 60000 秒、缺省/写 0 → 300 秒。
+    #[test]
+    fn test_urltest_interval_read_in_seconds() {
+        let yaml_content = r#"
+proxies:
+  - name: "ss-1"
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: password
+
+proxy-groups:
+  - name: "sec-300"
+    type: url-test
+    url: "https://example.com/generate_204"
+    interval: 300
+    proxies:
+      - "ss-1"
+  - name: "sec-60000"
+    type: url-test
+    url: "https://example.com/generate_204"
+    interval: 60000
+    proxies:
+      - "ss-1"
+  - name: "zero"
+    type: url-test
+    url: "https://example.com/generate_204"
+    interval: 0
+    proxies:
+      - "ss-1"
+  - name: "defaulted"
+    type: url-test
+    url: "https://example.com/generate_204"
+    proxies:
+      - "ss-1"
+rules:
+  - MATCH,sec-300
+        "#;
+        let converter = ClashConverter::new();
+        let config = converter.parse(yaml_content).unwrap();
+        let groups = converter
+            .convert_proxy_groups_to_groups(&config.proxy_groups)
+            .unwrap();
+
+        let interval_of = |suffix: &str| -> u64 {
+            groups
+                .iter()
+                .find(|g| g.name.ends_with(suffix))
+                .unwrap()
+                .url_test
+                .as_ref()
+                .expect("url-test 组带 url 应注入探测配置")
+                .interval_secs
+        };
+        assert_eq!(interval_of("sec-300"), 300);
+        assert_eq!(interval_of("sec-60000"), 60000);
+        // 0 与缺省同一策略：缺省 300 秒，不落成 0
+        assert_eq!(interval_of("zero"), 300);
+        assert_eq!(interval_of("defaulted"), 300);
+    }
+
+    /// RIL-092 单位策略的直接单测（不经 YAML，隔离策略本身）。
+    #[test]
+    fn clash_interval_secs_policy() {
+        assert_eq!(clash_interval_secs(None), 300);
+        assert_eq!(clash_interval_secs(Some(0)), 300);
+        assert_eq!(clash_interval_secs(Some(300)), 300);
+        assert_eq!(clash_interval_secs(Some(60000)), 60000);
+        assert_eq!(clash_interval_secs(Some(1)), 1);
     }
 
     #[test]

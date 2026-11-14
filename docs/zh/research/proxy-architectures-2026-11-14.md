@@ -93,7 +93,7 @@ provider 的成员可以变化，而规则和用户偏好应能保持；规则�
 | `clash.rs::ClashConfig / ClashProxyGroup` | 没有完整 provider/use 根模型 | 将来源与节点目录单独建模 |
 | `clash.rs::convert_group_type_to_strategy` | fallback→Random，relay→ConsistentHash | 不等价策略必须实现或明确拒绝 |
 | `clash.rs::convert_clash_rule` | PROCESS-NAME / RULE-SET 被跳过 | 兼容级别与结构化诊断；禁止关键规则悄悄降级 |
-| `clash.rs::convert_proxy_groups_to_groups` | 把 interval 当毫秒除以 1000 | 对照锁定配置版本核验单位，用 fixture 固定 |
+| `clash.rs::convert_proxy_groups_to_groups` | ~~把 interval 当毫秒除以 1000~~ 已修（RIL-092，2026-11-15）：按秒读取，0/缺省按 300 秒；导出侧 300_000 同步改 300 | 单位策略已由 `clash_interval_secs` 单测与 YAML 反例测试固定 |
 | `runtime_builder.rs::merge_config_delta_in_place` | 按名字只追加节点/组，规则 extend | 来源替换、删除、同名更新与本地策略需要独立语义 |
 | `chain.rs::link_quality_between` | errors/connections 被命名为 loss | 区分连接失败率与真实数据包丢包率 |
 | `network/mod.rs` 与 runtime TUN 分支 | Linux 之外仍拒绝真实 TUN | 打包成功不等于系统接管完成 |
