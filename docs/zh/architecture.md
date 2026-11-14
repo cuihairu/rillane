@@ -1,5 +1,7 @@
 # Rillane 架构草图
 
+本页记录当前实现。[竞品研究与 SVG](research/proxy-architectures-2026-11-14.md)、[32 个概念与抽象依据](design/architecture-concepts.md)、[目标架构](design/architecture-v2.md) 是独立的 2026-11-14 提案：覆盖六平台，按进程代理仅要求 Windows/macOS/Linux 本机；规划模块不能视为已完成能力。
+
 ## 设计目标
 - 以 Rust 实现跨平台代理内核：数据面走 tokio 异步运行时，mesh 数据面默认强制 mTLS，代码组织为 monorepo 分 crate。
 - 全部 crate / app / 平台 glue 代码在一个 monorepo 内，依赖版本随 workspace 锁定，减少漂移。
@@ -65,7 +67,9 @@ rillane/
 - **跨平台边界（如实标注）**：非 Linux 平台 Provider 仍为占位实现（构造即告警、收发返回"未实现"）；`RouteManagerFactory`/`DnsHandlerFactory` 的非 Linux 分支仍返回 Err——TUN 主路径不经工厂，直构 `LinuxTunProvider`/`LinuxRouteManager`。
 - 只读能力：`rillanectl diagnose` 采集本机路由/DNS/接口快照。
 
-## 订阅与配置编译（现状：全链路已实现）
+## 订阅与配置编译（链路存在，兼容仍为部分实现）
+
+拉取/转换/重载不代表完整 Clash/Mihomo 语义兼容：provider/use、规则集尚不完整，进程规则导入被跳过，fallback/relay 映射改变语义。依赖导入策略前请核对 [已验证缺口](research/proxy-architectures-2026-11-14.md#verified-gaps) 与目标方案兼容门禁。
 
 - Clash 订阅（proxies/proxy-groups/rules）与分享链接（vmess/vless/trojan/hysteria2/ss，含 base64 整体编码）均可转换为 `RillaneConfig`；类型自动识别（`detect_type`）。转换中产出暂未实现的出站类型（如 hysteria v1——schema/订阅转换已支持，出站连接器缺）会在构建期报错提示。
 - 自有 Rillane DSL（version/meta/nodes/groups/rulesets，含认证/传输层/TLS/地理位置字段）支持导入导出与校验。

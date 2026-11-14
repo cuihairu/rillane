@@ -1,6 +1,8 @@
 # 订阅指南（现状）
 
-> 状态：全链路已实现（`crates/rillane-subscription`）· 相关：[architecture.md](architecture.md) · [mesh.md](mesh.md) · Rillane DSL schema 定义于 `crates/rillane-subscription/src/rillane_dsl.rs`
+> 状态：拉取/转换/重载链路存在，Clash/Mihomo 语义兼容仍为部分实现（`crates/rillane-subscription`）· 相关：[architecture.md](architecture.md) · [mesh.md](mesh.md) · Rillane DSL schema 定义于 `crates/rillane-subscription/src/rillane_dsl.rs`
+
+2026-11-14 复核：provider/use、规则集尚不完整，进程规则导入被跳过，fallback/relay 映射改变语义。[架构研究](research/proxy-architectures-2026-11-14.md#verified-gaps) 记录源码证据，[目标设计](design/architecture-v2.md#subscription-compatibility) 给出兼容分级与验收门禁。
 
 ## 执行摘要
 
@@ -25,7 +27,7 @@ Rillane 订阅链路覆盖：拉取（条件请求/代理/自定义头）→ 类
 | Clash 概念 | Rillane 映射 |
 |-----------|----------|
 | `proxies` | `egress`（`EgressConfig` 各变体） |
-| `proxy-groups` | `routing.groups`（`PolicyGroup`，保留策略；成员支持嵌套组与权重） |
+| `proxy-groups` | `routing.groups`（`PolicyGroup`；部分映射，不保证保留每种组算法语义） |
 | `rules` | `routing.rules` |
 
 - 转换产出**当前未实现的出站类型**（如 hysteria v1——schema/订阅转换已支持，出站连接器缺）时不会静默丢弃：运行时构建（`RuntimeBuilder`）阶段报错提示。协议实现边界见 [PROTOCOLS.md](PROTOCOLS.md) 状态标注。

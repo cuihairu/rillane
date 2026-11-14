@@ -1,5 +1,7 @@
 # Rillane architecture sketch
 
+This page describes the existing implementation. The [upstream study and SVGs](research/proxy-architectures-2026-11-14.md), [32 concepts and rationale](design/architecture-concepts.md), and [target architecture](design/architecture-v2.md) are a separate 2026-11-14 proposal. Targets include six platforms; process-based routing is required only on local Windows/macOS/Linux. Planned components must not be read as completed features.
+
 ## Design goals
 - Cross-platform proxy kernel in Rust: the data plane runs on the tokio async runtime, the mesh data plane enforces mTLS by default, and the code base is a monorepo split into crates.
 - All crates / apps / platform glue live in one monorepo; dependency versions are pinned by the workspace to reduce drift.
@@ -65,7 +67,9 @@ rillane/
 - **Cross-platform boundary (honestly labeled)**: on non-Linux platforms the providers are still placeholders (warn on construction, send/recv return "not implemented"); the non-Linux branches of `RouteManagerFactory`/`DnsHandlerFactory` still return Err -- the main TUN path bypasses the factories and constructs `LinuxTunProvider`/`LinuxRouteManager` directly.
 - Read-only capability: `rillanectl diagnose` collects a snapshot of local routes/DNS/interfaces.
 
-## Subscriptions and config compilation (current state: the whole chain is implemented)
+## Subscriptions and config compilation (pipeline exists; compatibility is partial)
+
+The pipeline does not establish full Clash/Mihomo semantic compatibility: providers/use and rule sets are incomplete, process rules are skipped on import, and fallback/relay mappings change behavior. See the [verified gaps](research/proxy-architectures-2026-11-14.md#verified-gaps) and proposed compatibility gates before relying on imported policy.
 
 - Clash subscriptions (proxies/proxy-groups/rules) and share links (vmess/vless/trojan/hysteria2/ss, including whole-payload base64) both convert into `RillaneConfig`; the type is auto-detected (`detect_type`). Conversions that produce egress types not implemented yet (e.g. hysteria v1 -- schema/subscription conversion supports it, the egress connector is missing) fail at build time with an explicit error.
 - The native Rillane DSL (version/meta/nodes/groups/rulesets, including auth/transport/TLS/geo fields) supports import, export and validation.

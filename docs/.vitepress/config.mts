@@ -42,6 +42,9 @@ export default defineConfig({
             text: 'Design docs',
             items: [
               { text: 'Positioning and foundation', link: '/design/positioning' },
+              { text: 'Architecture study & SVGs', link: '/research/proxy-architectures-2026-11-14' },
+              { text: '32 concepts and rationale', link: '/design/architecture-concepts' },
+              { text: 'Target architecture (proposal)', link: '/design/architecture-v2' },
               { text: 'Phased roadmap', link: '/design/roadmap' },
               { text: 'UDP datapath (P0)', link: '/design/udp-dataplane' },
               { text: 'TUN and network (P1-1..P1-3)', link: '/design/tun-dataplane' },
@@ -59,6 +62,9 @@ export default defineConfig({
             items: [
               { text: 'Home', link: '/' },
               { text: 'Architecture sketch', link: '/architecture' },
+              { text: 'Architecture study & SVGs', link: '/research/proxy-architectures-2026-11-14' },
+              { text: '32 concepts and rationale', link: '/design/architecture-concepts' },
+              { text: 'Target architecture (proposal)', link: '/design/architecture-v2' },
               { text: 'Protocol support', link: '/PROTOCOLS' },
               { text: 'Subscription guide', link: '/subscription' },
               { text: 'Configuration reference', link: '/config' },
@@ -219,6 +225,9 @@ export default defineConfig({
             text: '设计文档',
             items: [
               { text: '定位与技术底座', link: '/zh/design/positioning' },
+              { text: '架构研究与 SVG', link: '/zh/research/proxy-architectures-2026-11-14' },
+              { text: '架构概念与抽象依据', link: '/zh/design/architecture-concepts' },
+              { text: '目标架构（提案）', link: '/zh/design/architecture-v2' },
               { text: '分阶段路线图', link: '/zh/design/roadmap' },
               { text: 'UDP 数据通路（P0）', link: '/zh/design/udp-dataplane' },
               {
@@ -239,6 +248,9 @@ export default defineConfig({
             items: [
               { text: '首页', link: '/zh/' },
               { text: '架构草图', link: '/zh/architecture' },
+              { text: '架构研究与 SVG', link: '/zh/research/proxy-architectures-2026-11-14' },
+              { text: '32 个概念与抽象依据', link: '/zh/design/architecture-concepts' },
+              { text: '目标架构（提案）', link: '/zh/design/architecture-v2' },
               { text: '协议支持', link: '/zh/PROTOCOLS' },
               { text: '订阅指南', link: '/zh/subscription' },
               { text: '配置参考', link: '/zh/config' },

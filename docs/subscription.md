@@ -1,6 +1,8 @@
 # Subscription guide (current state)
 
-> Status: the whole chain is implemented (`crates/rillane-subscription`) · Related: [architecture.md](architecture.md) · [mesh.md](mesh.md) · the Rillane DSL schema is defined in `crates/rillane-subscription/src/rillane_dsl.rs`
+> Status: fetching/conversion/reload exists; Clash/Mihomo semantic compatibility is partial (`crates/rillane-subscription`) · Related: [architecture.md](architecture.md) · [mesh.md](mesh.md) · the Rillane DSL schema is defined in `crates/rillane-subscription/src/rillane_dsl.rs`
+
+2026-11-14 clarification: provider/use models and rule sets are incomplete; imported process rules are skipped; fallback/relay change semantics. The [architecture study](research/proxy-architectures-2026-11-14.md#verified-gaps) records code evidence and the [target design](design/architecture-v2.md#subscription-compatibility) defines migration gates.
 
 ## Executive summary
 
@@ -25,7 +27,7 @@ There is also an offline conversion surface: `rule_source.rs` (O-dns1, 2026-10-1
 | Clash concept | Rillane mapping |
 |-----------|----------|
 | `proxies` | `egress` (the `EgressConfig` variants) |
-| `proxy-groups` | `routing.groups` (`PolicyGroup`, policy preserved; members support nested groups and weights) |
+| `proxy-groups` | `routing.groups` (`PolicyGroup`; mappings are partial and do not preserve every group algorithm) |
 | `rules` | `routing.rules` |
 
 - When conversion produces an **egress type not implemented yet** (e.g. hysteria v1 -- schema/subscription conversion supports it, the egress connector is missing) it is not silently dropped: it errors at the runtime build (`RuntimeBuilder`) stage with a message. Protocol implementation boundaries are in the status notes of [PROTOCOLS.md](PROTOCOLS.md).

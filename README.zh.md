@@ -38,6 +38,9 @@ platforms/   # 各平台集成脚手架 (Android/iOS/OpenWrt/desktop)
 更多细节见 `docs/architecture.md`；完整 `rillanectl` 命令参考（18 个子命令、旗标与控制面端点语义）见 `docs/cli.md`。
 
 ## 快速开始
+
+架构规划（2026-11-14）：[竞品研究与 5 张 SVG](docs/zh/research/proxy-architectures-2026-11-14.md)、[32 个概念及抽象理由/代价](docs/zh/design/architecture-concepts.md)、[六平台目标方案](docs/zh/design/architecture-v2.md)。按进程代理仅要求 Windows/macOS/Linux 本机；Android/iOS/OpenWrt 继续规划代理与游戏/网页并行处理。目标方案未整体实现，当前 Clash/Mihomo 兼容为部分实现。
+
 ```bash
 cargo run -p rillaned
 cargo run -p rillanectl -- --help

@@ -38,6 +38,9 @@ platforms/   # platform integration scaffolding (Android/iOS/OpenWrt/desktop)
 See `docs/architecture.md` for details, and `docs/cli.md` for the full `rillanectl` command reference (18 subcommands, flags, and control-plane endpoint semantics).
 
 ## Quick Start
+
+Architecture planning (2026-11-14): [upstream study with 5 SVG diagrams](docs/research/proxy-architectures-2026-11-14.md), [32 concepts with reasons and costs](docs/design/architecture-concepts.md), and [six-platform target design](docs/design/architecture-v2.md). Local process routing targets Windows/macOS/Linux only; Android/iOS/OpenWrt remain proxy and concurrent game/web targets. These are proposals, not completed platform implementations; Clash/Mihomo compatibility is currently partial.
+
 ```bash
 cargo run -p rillaned
 cargo run -p rillanectl -- --help
