@@ -24,6 +24,7 @@ pub mod outbound;
 pub mod performance;
 pub mod plan;
 pub mod pool;
+pub mod resources;
 pub mod probe;
 pub mod quality;
 pub mod query;
@@ -66,6 +67,11 @@ pub use outbound::{
     OpenedAssociation, OpenedStream, OutboundCapabilities, StreamIo, StreamOutbound, TargetBinding,
     CODE_OPEN_CANCELLED, CODE_OPEN_HANDSHAKE, CODE_OPEN_POOL_EXHAUSTED, CODE_OPEN_REFUSED,
     CODE_OPEN_TIMEOUT, CODE_OPEN_UNSUPPORTED,
+};
+pub use resources::{
+    AssembledBackend, BackendDeclaration, LeaseGuard, LeaseKey, LeaseState, PoolResourceKind,
+    ResourceError, CODE_CAP_FEATURE, CODE_CAP_REUSE, CODE_CAP_SHAPE, CODE_CAP_TRANSPORT,
+    CODE_KEY_INVALID, CODE_LEASE_STATE, assemble_backend,
 };
 pub use underlay::{
     BypassCapability, BypassOutcome, BypassPolicy, CompositionError, DialOutcome, DialTarget,
