@@ -17,6 +17,7 @@ pub mod mesh_transport;
 pub mod network_config;
 pub mod obfs_config;
 pub mod pool_config;
+pub mod publisher;
 pub mod runtime_builder;
 pub mod sniff;
 // TUN 入口 + /proc 进程归因 + TCP 用户态栈（tun-dataplane.md §2；Linux 数据面）。
@@ -46,6 +47,11 @@ pub use obfs_config::{
     ShapingPolicy, TimingPolicy,
 };
 pub use pool_config::to_pool_policy;
+pub use publisher::{
+    EffectiveEntry, PendingTx, PublishCoordinator, PublishError, PublishJournal, PublishPhase,
+    PublishTxnOutcome, ReconcileReport, RetainedEntry, CODE_GENERATION_UNCHANGED,
+    CODE_JOURNAL_CORRUPT,
+};
 pub use rillane_platform::network::NetworkMode;
 pub use runtime_builder::{
     ConfigMergeStats, FlowStatItem, MeshConfig, MeshEventType, NetworkEventType, Runtime,

@@ -3470,6 +3470,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2",
  "smoltcp",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-rustls",
  "tracing",
