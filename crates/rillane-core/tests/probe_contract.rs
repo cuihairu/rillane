@@ -112,7 +112,8 @@ impl ProbeExecutor for GatedExec {
     }
 }
 
-/// 按 sent 回报 UdpEcho（预算结算断言用）。
+/// 按 sent 回报 UdpEcho（预算结算断言用）。payload_len 恒 1——sent
+/// 即字节口径，与既有断言的预留/退还算术逐数对齐。
 struct SettlingExec {
     sent: u32,
     replies: u32,
@@ -129,6 +130,7 @@ impl ProbeExecutor for SettlingExec {
         Ok(ProbeOutcome::UdpEcho {
             sent: self.sent,
             replies: self.replies,
+            payload_len: 1,
             rtt_ms: if self.replies == 0 { None } else { Some(9) },
         })
     }
@@ -476,6 +478,9 @@ async fn measurements_are_explicit_not_fabricated() {
         Some(ProbeOutcome::UdpEcho {
             sent: 3,
             replies: 0,
+            // 桩执行器回报固定 payload_len=1——快照逐字段等于执行器
+            // 回报（不是提交目标回显）
+            payload_len: 1,
             rtt_ms: None,
         }),
         "无回应不造 RTT——测量逐字段等于执行器回报"

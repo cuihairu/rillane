@@ -141,7 +141,10 @@ pub enum ProbeTarget {
     ProxyHandshake { egress: String, addr: SocketAddr },
     /// UDP 回显探测（地址在范围内；载荷长度受
     /// [`ProbeLimits::udp_payload_max_bytes`] 约束）
-    UdpEcho { addr: SocketAddr, payload_len: usize },
+    UdpEcho {
+        addr: SocketAddr,
+        payload_len: usize,
+    },
 }
 
 impl ProbeTarget {
@@ -163,7 +166,9 @@ impl ProbeTarget {
     /// 预留 0，执行器回报的实耗在结算时补记）
     fn reserved_bytes(&self) -> u64 {
         match self {
-            ProbeTarget::UdpEcho { payload_len, .. } => u64::from(u16::try_from(*payload_len).unwrap_or(u16::MAX)).max(1),
+            ProbeTarget::UdpEcho { payload_len, .. } => {
+                u64::from(u16::try_from(*payload_len).unwrap_or(u16::MAX)).max(1)
+            }
             _ => 0,
         }
     }
@@ -206,19 +211,23 @@ pub enum ProbeOutcome {
     /// 代理握手：实测握手 RTT
     ProxyHandshake { rtt_ms: u64 },
     /// UDP 回显：显式 sent/replies 计数（丢包率由计数可算）；
-    /// replies=0 时 RTT 为 None
+    /// replies=0 时 RTT 为 None；payload_len 供预算按字节实结
     UdpEcho {
         sent: u32,
         replies: u32,
+        payload_len: usize,
         rtt_ms: Option<u64>,
     },
 }
 
 impl ProbeOutcome {
-    /// 本测量消耗的字节数（预算结算口径——UDP 回显按实发计）
+    /// 本测量消耗的字节数（预算结算口径——UDP 回显按实发计：
+    /// 包数 × 载荷字节数，与预留面同一字节口径）
     pub fn bytes_used(&self) -> u64 {
         match self {
-            ProbeOutcome::UdpEcho { sent, .. } => u64::from(*sent),
+            ProbeOutcome::UdpEcho {
+                sent, payload_len, ..
+            } => u64::from(*sent) * u64::try_from(*payload_len).unwrap_or(u64::MAX),
             _ => 0,
         }
     }
@@ -372,8 +381,7 @@ impl ProbeService {
                 self.scope.allows_egress(egress) && self.scope.allows_addr(*addr)
             }
             ProbeTarget::UdpEcho { addr, payload_len } => {
-                *payload_len <= self.limits.udp_payload_max_bytes
-                    && self.scope.allows_addr(*addr)
+                *payload_len <= self.limits.udp_payload_max_bytes && self.scope.allows_addr(*addr)
             }
         };
         if !in_scope {
@@ -504,11 +512,16 @@ impl ProbeService {
                 Ok(Ok(measure)) => {
                     record.state = JOB_STATE_COMPLETED;
                     record.outcome = Some(measure.clone());
-                    // 预算结算：预留与实耗的差额退还
+                    // 预算结算：双向按实耗对账——实耗低于预留退差额；
+                    // 实耗超出预留（多包回显）补扣超额（预留只是提交面的
+                    // 下界，实发字节才是预算的真话——地板为 0 不透支）
                     let spent = measure.bytes_used();
                     let reserved = target.reserved_bytes();
+                    let mut guard = budget.lock().expect("budget poisoned");
                     if spent < reserved {
-                        *budget.lock().expect("budget poisoned") += reserved - spent;
+                        *guard += reserved - spent;
+                    } else if spent > reserved {
+                        *guard = guard.saturating_sub(spent - reserved);
                     }
                 }
                 Ok(Err(exec_err)) => {
@@ -565,10 +578,13 @@ mod tests {
     async fn out_of_scope_targets_are_rejected_per_kind() {
         let in_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
         let mut scope = scope_with_addr(in_addr);
-        scope
-            .allow_host("example.invalid")
-            .allow_egress("direct");
-        let service = ProbeService::new(scope, limits(2, 1_000), Arc::new(InstantExec), fixed_clock());
+        scope.allow_host("example.invalid").allow_egress("direct");
+        let service = ProbeService::new(
+            scope,
+            limits(2, 1_000),
+            Arc::new(InstantExec),
+            fixed_clock(),
+        );
 
         let err = service
             .submit(ProbeTarget::Dns {
@@ -604,7 +620,9 @@ mod tests {
                 host: "example.invalid".into()
             })
             .is_ok());
-        assert!(service.submit(ProbeTarget::Connect { addr: in_addr }).is_ok());
+        assert!(service
+            .submit(ProbeTarget::Connect { addr: in_addr })
+            .is_ok());
     }
 
     /// 不可信文本无法扩展范围：范围是装配时闭合集合——后缀/前缀
@@ -613,7 +631,12 @@ mod tests {
     async fn scope_is_closed_and_unknown_jobs_answer_explicitly() {
         let mut scope = TargetScope::empty();
         scope.allow_host("example.invalid");
-        let service = ProbeService::new(scope, limits(1, 1_000), Arc::new(InstantExec), fixed_clock());
+        let service = ProbeService::new(
+            scope,
+            limits(1, 1_000),
+            Arc::new(InstantExec),
+            fixed_clock(),
+        );
         // 订阅/远端文本常见的扩展手法逐类拒绝
         for host in [
             "example.invalid.",
@@ -671,7 +694,10 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, CODE_PROBE_BUDGET_EXHAUSTED);
         let second = service
-            .submit(ProbeTarget::UdpEcho { addr, payload_len: 90 })
+            .submit(ProbeTarget::UdpEcho {
+                addr,
+                payload_len: 90,
+            })
             .expect("结算后按实耗回收 90");
         wait_state(&service, second, JOB_STATE_COMPLETED).await;
     }
@@ -711,6 +737,8 @@ mod tests {
                 ProbeTarget::UdpEcho { .. } => ProbeOutcome::UdpEcho {
                     sent: 10,
                     replies: 8,
+                    // 载荷 1B：sent 即字节口径——预算退还算术逐数对齐
+                    payload_len: 1,
                     rtt_ms: Some(3),
                 },
             })
@@ -746,6 +774,7 @@ mod tests {
                 ProbeTarget::UdpEcho { .. } => ProbeOutcome::UdpEcho {
                     sent: 1,
                     replies: 1,
+                    payload_len: 64,
                     rtt_ms: Some(1),
                 },
             }
@@ -901,6 +930,7 @@ mod tests {
                 Ok(ProbeOutcome::UdpEcho {
                     sent: 3,
                     replies: 0,
+                    payload_len: 64,
                     rtt_ms: None,
                 })
             }
@@ -923,13 +953,83 @@ mod tests {
             Some(ProbeOutcome::UdpEcho {
                 sent,
                 replies,
+                payload_len,
                 rtt_ms,
             }) => {
                 assert_eq!((sent, replies), (3, 0));
+                assert_eq!(payload_len, 64);
                 assert_eq!(rtt_ms, None, "无回应不造 RTT");
             }
             other => panic!("应得 UDP 回显测量，得到 {other:?}"),
         }
+    }
+
+    /// 预算按字节实结（RIL-061 执行器面口径钉）：3 包 × 64B = 192B——
+    /// 包数不当字节数（少记 = 预算少扣，探测面白吃流量）。
+    #[test]
+    fn udp_echo_bytes_count_payload_not_packets() {
+        let outcome = ProbeOutcome::UdpEcho {
+            sent: 3,
+            replies: 0,
+            payload_len: 64,
+            rtt_ms: None,
+        };
+        assert_eq!(outcome.bytes_used(), 192);
+        // 非回显测量零字节（预留面本来就只对 UdpEcho 记账）
+        assert_eq!(ProbeOutcome::Connect { rtt_ms: 7 }.bytes_used(), 0);
+    }
+
+    /// 服务级字节结算：预留 = payload_len、实耗 = 包数×payload_len——
+    /// 多包回显超出预留的部分补扣（预算反映实发字节），剩余按字节精确可用。
+    #[tokio::test]
+    async fn budget_settles_udp_bytes_by_payload() {
+        struct TripleEcho;
+        #[async_trait]
+        impl ProbeExecutor for TripleEcho {
+            async fn run(
+                &self,
+                _target: &ProbeTarget,
+                _deadline: Instant,
+                _cancel: &CancelToken,
+            ) -> Result<ProbeOutcome, ProbeExecError> {
+                Ok(ProbeOutcome::UdpEcho {
+                    sent: 3,
+                    replies: 3,
+                    payload_len: 64,
+                    rtt_ms: Some(1),
+                })
+            }
+        }
+        let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let mut cap = limits(2, 1_000);
+        cap.byte_budget = 200;
+        let service = ProbeService::new(
+            scope_with_addr(addr),
+            cap,
+            Arc::new(TripleEcho),
+            fixed_clock(),
+        );
+        let id = service
+            .submit(ProbeTarget::UdpEcho {
+                addr,
+                payload_len: 64,
+            })
+            .unwrap();
+        wait_state(&service, id, JOB_STATE_COMPLETED).await;
+        // 200 - 3×64 = 8 字节可用：恰 8 字节新作业可提交，9 拒绝
+        service
+            .submit(ProbeTarget::UdpEcho {
+                addr,
+                payload_len: 8,
+            })
+            .expect("8 字节恰在实结预算内");
+        let err = service
+            .submit(ProbeTarget::UdpEcho {
+                addr,
+                payload_len: 9,
+            })
+            .unwrap_err();
+        assert_eq!(err.code, CODE_PROBE_BUDGET_EXHAUSTED);
     }
 
     /// 执行器失败与不支持显式归类（稳定码透传）
@@ -955,7 +1055,8 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
         let mut scope = scope_with_addr(addr);
         scope.allow_egress("direct");
-        let service = ProbeService::new(scope, limits(2, 1_000), Arc::new(PickyExec), fixed_clock());
+        let service =
+            ProbeService::new(scope, limits(2, 1_000), Arc::new(PickyExec), fixed_clock());
         let hs = service
             .submit(ProbeTarget::ProxyHandshake {
                 egress: "direct".into(),
@@ -978,7 +1079,11 @@ mod tests {
     /// 轮询等待作业到达指定状态（编排是异步的——测试辅助）
     async fn wait_state(service: &ProbeService, id: u64, state: &str) {
         for _ in 0..400 {
-            if service.result(id).map(|s| s.state == state).unwrap_or(false) {
+            if service
+                .result(id)
+                .map(|s| s.state == state)
+                .unwrap_or(false)
+            {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
