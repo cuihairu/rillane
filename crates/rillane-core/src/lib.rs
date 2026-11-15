@@ -19,6 +19,7 @@ pub mod executor;
 pub mod fake_ip;
 pub mod hosts;
 pub mod inbound;
+pub mod meter;
 pub mod net_mark;
 pub mod outbound;
 pub mod performance;
@@ -67,6 +68,10 @@ pub use outbound::{
     OpenedAssociation, OpenedStream, OutboundCapabilities, StreamIo, StreamOutbound, TargetBinding,
     CODE_OPEN_CANCELLED, CODE_OPEN_HANDSHAKE, CODE_OPEN_POOL_EXHAUSTED, CODE_OPEN_REFUSED,
     CODE_OPEN_TIMEOUT, CODE_OPEN_UNSUPPORTED,
+};
+pub use meter::{
+    AttributionView, OriginLedger, SessionMeter, SessionTotals, TrafficDirection, TrafficOrigin,
+    CODE_METER_ATTEMPT, CODE_METER_CARRIER, CODE_METER_SESSION, MAX_TRACKED_ATTEMPTS,
 };
 pub use resources::{
     AssembledBackend, BackendDeclaration, LeaseGuard, LeaseKey, LeaseState, PoolResourceKind,
