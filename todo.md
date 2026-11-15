@@ -298,8 +298,13 @@
   ② 真实崩溃可重放（commit_point_crash_replay_subprocess）：子进程（current_exe + 测试名过滤 + 注入环境）在提交点前 Prepared / Applied 两档 SIGABRT 定格磁盘（暂存目录 + pending journal 原子写后 `process::abort`）；父进程重开裁决：两档一律回滚挂起、旧代际保持有效、暂存目录清掉；`recover()` 幂等（二次恢复零动作）；两档注入后现役仍是 g1（发布面未被崩溃污染）。
   ③ 磁盘错误 + 未补偿可见（disk_faults_reopen_consistent_and_uncompensated_visible）：journal 临时写路径被目录占位 → 落盘段 `JournalCorrupt`（detail 含「落盘失败」）、journal 正本无损、prepare 半途遗留目录重开对账以**孤儿可见**（不被静默吸收）、修复后收敛 + 重放成功。提交点后 / retained 记账前的崩溃窗口：`effective` 成功回执保留（不回滚）、漏账旧代际以孤儿可见（**不用成功回执掩盖**）、`reclaim` 收敛且不回滚回执。排空先于回收（RIL-023 对账）：retained 面驱动 `LeaseGuard::drain("generation retired")+close`（无 InUse 幸存者）完成后 `reclaim` 才回收旧代际目录、现役不动。
   ④ 多客户端并发（concurrent_readers_never_observe_torn_journal）：单写者连续 16 次提交 × 3 读者线程并发重开（>100 次观察窗）：读者永不见撕裂 journal（原子 rename 提交点）、effective 恒属已知代际集或初始空、镜像账面自洽（挂起候选 ∈ 已知集且 ≠ 现役）；终态 = 最后一次提交、retained 全账 15 条、无孤儿。
-- [ ] **RIL-089｜P1｜并行负载性能对照**；依赖：RIL-025、RIL-027、RIL-031、RIL-064。
+- [x] **RIL-089｜P1｜并行负载性能对照**；依赖：RIL-025、RIL-027、RIL-031、RIL-064。
   交付：先提供 Linux 同节点/线路/负载对照，其他平台随适配追加；连接池优化单独对照，不阻断核心策略测量。验收：p50/p95、抖动、有效丢包样本、TTFB、吞吐、CPU/RSS 与重复次数完整；同时报告回退和无收益条件。
+  完成（2026-11-16）：`crates/rillane-runtime/tests/parallel_load_benchmark.rs` 2 测试（新增文件，不触并发 Actor 脏面），10× 重复全绿，`cargo clippy -p rillane-runtime --all-targets --all-features -- -D warnings` 干净，rillane-runtime 全量 187 lib + 11 集成测绿；对照报告落 `docs/zh/parallel-load.md` + 英文孪生 `docs/parallel-load.md`（RIL-064 同款格式：诚实范围 + 实测表 + 回退/无收益条件 + 量测工具）。验收指标全集逐轮打印：游戏臂 4 会话 × 200 笔 100 B ping-pong、网页臂 4 会话 × 2 MiB 回显流、并行 5 轮重复——p50/p95（游戏并行 0.49–0.67 ms vs 单独 0.43 ms）、抖动（0.04–0.12 ms）、有效丢包（全程 0/800 每轮）、TTFB（5.5–12.3 ms）、吞吐（网页并行 20–34 MiB/s vs 单独 90–108）、CPU（≈102% 单核当量，CLK_TCK=100 /proc/self/stat utime+stime）、RSS（增量 ≈6 MiB <128 MiB 守卫）、重复次数（5 轮逐轮打印）。逐验收条款映射如下。
+  ① 同节点/线路/负载对照（parallel_load_arms_measured_with_bounds）：同一实例（SOCKS5 入口 → 默认直连）、同一回环目标、三类臂同形状——读法：共存干扰真实存在且落在吞吐侧（90–108 → 20–34 MiB/s），延迟侧尾延迟亚毫秒有界——正是 RIL-025 公平调度要接管的分配面。诚实范围显式：debug 构建回环实测（非外网线路），发布构建更快；调度接线后复测端到端策略收益；连接池优化单独对照不在本报告。保守守卫（饥饿/无界驻留任何机器挂测）：并行零有效丢包、游戏 p95 < 1 s、网页每会话 ≥ 1 MiB/s、RSS < 128 MiB、逐字节回显核对、TTFB 有限。
+  ② 调度策略对照（scheduling_policy_replay_reports_conditions，确定性回放——RIL-025 出口发送循环接线前的诚实范围）：16 KiB 轮窗 + 3 KiB 延迟预算 + 64 KiB 在途下载 + 每轮 100 B 小包——公平调度游戏等待 p95 = 0 ms（钉在一轮内）vs FIFO 基线 p95 = 10 ms（随下载块排队），吞吐完成轮次差 ≤ 2 轮（赤字有界）；公平与 FIFO 共用同一驱动循环与到达序列。
+  ③ 回退条件：无延迟类流量时公平调度逐轮服务量与 FIFO 全同、吞吐完成轮次相同（工作保守回退）；场景切换三路驻留（现役分数未知/无候选/候选分数未知——RIL-027 prefer 的检查次序逐路断言，缺数据不盲换）。
+  ④ 无收益条件：游戏 RTT 达标（rtt_p95 低于目标一半）时预算只下移、夹在声明下界、步长可审计（应用步长和 = 终值-初值），超标时上移——不为延迟类过度占用。
 - [ ] **RIL-090｜P1｜MCP 客户端互操作验收**；依赖：RIL-072、RIL-081、RIL-083。
   交付：固定 SDK/协议的真实客户端读写演示与断连恢复证据。验收：取消/错误/分页/启动退出/权限拒绝正确；模型缺席时核心与 CLI 照常运行。
 - [ ] **RIL-091｜P1｜完整范围文档与限制对齐**；依赖：RIL-084、RIL-085、RIL-086、RIL-087、RIL-088、RIL-089、RIL-090。
