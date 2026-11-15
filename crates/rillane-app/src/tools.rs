@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 /// 服务端授权面（RIL-068 强制的口径——与注解无关）。
 /// Write 档本版不存在工具（配置变更走 RIL-073+ 提案面），枚举臂
 /// 保留以钉住「注解≠授权」的四档语义。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Scope {
     /// 聚合统计与纯推演（脱敏读）
     Read,

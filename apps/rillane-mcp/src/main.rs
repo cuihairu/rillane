@@ -12,8 +12,13 @@
 //!   置 30 s 上限）——卡死的控制面不会无限占住会话；
 //! - 取消：`notifications/cancelled` 登记后，被取消请求的答复**不写**
 //!   （官方契约：停止处理、释放资源、不答复；登记集有界，超限挤最旧）。
+//! - 授权（RIL-068）：授权档**只**来自启动配置（默认只读——最小面），
+//!   请求面没有任何字段能改变它（模型声称授权不能升级范围是结构性
+//!   保证）；越权/超限在执行前拒绝（稳定码 -32001/-32002），被拒请求
+//!   不进入执行、不消耗配额；凭证只进执行器私有字段。
 
 use clap::Parser;
+use rillane_app::authz::{self, GrantedScopes, RateLimiter};
 use rillane_app::client::BlockingApp;
 use rillane_app::dispatch;
 use rillane_app::mcp::{self, IncomingMessage, JsonRpcError, RequestId, ServerMethod};
@@ -24,6 +29,9 @@ use std::io::BufRead;
 
 /// 取消登记集上限（有界——恶意客户端的取消风暴不涨内存）
 const CANCELLED_SET_CAP: usize = 4096;
+
+/// 速率限制固定窗口宽（每窗 = 每分钟）
+const RATE_WINDOW_SECS: u64 = 60;
 
 #[derive(Parser)]
 #[command(
@@ -40,19 +48,31 @@ struct Cli {
     /// 管理令牌（覆盖配置；只进执行器，不出现在任何答复/日志里）
     #[arg(long)]
     token: Option<String>,
+    /// 本会话授权档（逗号分隔 read|detailed|probe|write；默认只读；
+    /// 启动期解析失败即退出——不带病运行）
+    #[arg(long, default_value = "read")]
+    scope: String,
+    /// 每分钟窗内工具调用上限（0 = 不限速；默认 60）
+    #[arg(long, default_value_t = 60)]
+    rate_limit: u32,
 }
 
-/// 会话状态：边界执行器 + 被取消请求登记（有界队列 + 成员集）
+/// 会话状态：边界执行器 + 授权态（RIL-068：只来自启动配置）+ 被取消
+/// 请求登记（有界队列 + 成员集）
 struct ServerState {
     app: BlockingApp,
+    grants: GrantedScopes,
+    rate: RateLimiter,
     cancelled_queue: VecDeque<RequestId>,
     cancelled_set: HashSet<RequestId>,
 }
 
 impl ServerState {
-    fn new(app: BlockingApp) -> Self {
+    fn new(app: BlockingApp, grants: GrantedScopes, rate: RateLimiter) -> Self {
         Self {
             app,
+            grants,
+            rate,
             cancelled_queue: VecDeque::new(),
             cancelled_set: HashSet::new(),
         }
@@ -138,6 +158,24 @@ fn dispatch_request(
                 JsonRpcError::invalid_params("tools/call needs a tool name")
                     .with_code_data("mcp.input.required", serde_json::json!({"field": "name"}))
             })?;
+            // 范围门与限速门（RIL-068）先于参数校验：授权只读工具目录
+            // 的服务端档位——请求面字段（声称授权/scope/granted 等）与
+            // 工具注解都不参与判定；被拒请求不进入校验/执行、不消耗
+            // 配额。未知名无档位可言——落回 build_operation 的 -32602。
+            if let Some(tool) = rillane_app::tools::tool(name) {
+                if !state.grants.grants(tool.scope) {
+                    eprintln!(
+                        "rillane-mcp: denied {} (requires {})",
+                        name,
+                        authz::scope_name(tool.scope)
+                    );
+                    return Err(authz::scope_denied_error(tool.scope));
+                }
+                if !state.rate.try_acquire_at(std::time::Instant::now()) {
+                    eprintln!("rillane-mcp: rate limited ({})", name);
+                    return Err(authz::rate_limited_error(state.rate.window()));
+                }
+            }
             let (op, _tool) = dispatch::build_operation(name, args.get("arguments"))?;
             let started = std::time::Instant::now();
             let reply = state.app.execute(op);
@@ -174,6 +212,19 @@ fn main() {
         .endpoint
         .unwrap_or_else(|| format!("http://{}", config.control.api_bind));
     let token = cli.token.or(config.control.admin_token.clone());
+    // 授权档启动期解析（RIL-068）——未知档名/空串退出，不带病运行
+    let grants = match GrantedScopes::parse(&cli.scope) {
+        Ok(grants) => grants,
+        Err(reason) => {
+            eprintln!("rillane-mcp: invalid --scope: {reason}");
+            std::process::exit(1);
+        }
+    };
+    let rate = RateLimiter::new(
+        cli.rate_limit,
+        std::time::Duration::from_secs(RATE_WINDOW_SECS),
+        std::time::Instant::now(),
+    );
     let app = match BlockingApp::new(&base, token.as_deref()) {
         Ok(app) => app,
         Err(err) => {
@@ -185,10 +236,11 @@ fn main() {
         }
     };
     eprintln!(
-        "rillane-mcp: stdio adapter started (protocol {}, no listener port)",
-        mcp::PROTOCOL_VERSION
+        "rillane-mcp: stdio adapter started (protocol {}, scopes <{}>, no listener port)",
+        mcp::PROTOCOL_VERSION,
+        cli.scope
     );
-    let mut state = ServerState::new(app);
+    let mut state = ServerState::new(app, grants, rate);
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let line = match line {
@@ -224,7 +276,28 @@ mod tests {
     use std::net::TcpListener;
 
     fn state() -> ServerState {
-        ServerState::new(BlockingApp::new("http://127.0.0.1:1", None).expect("app"))
+        state_with(GrantedScopes::read_only(), 0)
+    }
+
+    /// 自定授权态构造（rate_max = 0 → 不限速）
+    fn state_with(grants: GrantedScopes, rate_max: u32) -> ServerState {
+        ServerState::new(
+            BlockingApp::new("http://127.0.0.1:1", None).expect("app"),
+            grants,
+            RateLimiter::new(
+                rate_max,
+                std::time::Duration::from_secs(RATE_WINDOW_SECS),
+                std::time::Instant::now(),
+            ),
+        )
+    }
+
+    /// tools/call 请求行构造（带版本声明与 arguments）
+    fn call_line(id: u64, name: &str, arguments: Value) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"_meta":{{"io.modelcontextprotocol/protocolVersion":"{}"}},"name":"{name}","arguments":{arguments}}}}}"#,
+            mcp::PROTOCOL_VERSION
+        )
     }
 
     fn meta_params() -> Value {
@@ -294,8 +367,10 @@ mod tests {
         assert_eq!(out["error"]["data"]["code"], "mcp.tool.unknown");
 
         let mut bad = base;
-        bad["name"] = json!("flow_trace");
-        bad["arguments"] = json!({"id": "f-1", "raw": true});
+        // flow_list 是 Read 档——只读会话能到参数校验（畸形字段在
+        // 校验面拒绝，与范围门分立）
+        bad["name"] = json!("flow_list");
+        bad["arguments"] = json!({"raw": true});
         let line = format!(
             r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{}}}"#,
             bad
@@ -356,8 +431,15 @@ mod tests {
                 let _ = sock.write_all(response.as_bytes());
             }
         });
-        let mut st =
-            ServerState::new(BlockingApp::new(&format!("http://{addr}"), None).expect("app"));
+        let mut st = ServerState::new(
+            BlockingApp::new(&format!("http://{addr}"), None).expect("app"),
+            GrantedScopes::read_only(),
+            RateLimiter::new(
+                0,
+                std::time::Duration::from_secs(RATE_WINDOW_SECS),
+                std::time::Instant::now(),
+            ),
+        );
         let mut params = meta_params();
         params["name"] = json!("runtime_stats");
         let line = format!(
@@ -383,5 +465,121 @@ mod tests {
         assert!(st
             .cancelled_set
             .contains(&RequestId::Num(CANCELLED_SET_CAP as i64 + 9)));
+    }
+
+    #[test]
+    fn read_only_session_denies_detailed_and_probe_tools() {
+        // 只读档（默认）：详细身份档与探测档在执行前拒绝——稳定码
+        // -32001、data 只带所需档名（不带请求回显）
+        for (name, args, required) in [
+            ("flow_trace", json!({"id": "f-1"}), "detailed"),
+            ("flow_events", json!({"id": "f-1"}), "detailed"),
+            ("flow_svg", json!({"id": "f-1"}), "detailed"),
+            (
+                "probe_submit",
+                json!({"kind": "dns", "host": "example.com"}),
+                "probe",
+            ),
+            ("probe_cancel", json!({"id": 1}), "probe"),
+        ] {
+            let line = call_line(20, name, args);
+            let out = handle_line(&mut state(), &line).expect("answer");
+            assert_eq!(out["error"]["code"], -32001, "tool {name}");
+            assert_eq!(
+                out["error"]["data"]["code"], "mcp.scope.denied",
+                "tool {name}"
+            );
+            assert_eq!(out["error"]["data"]["required"], required, "tool {name}");
+        }
+    }
+
+    #[test]
+    fn claimed_authorization_in_request_cannot_escalate_scope() {
+        // 直接构造调用（携带声称授权的请求面字段：scope/granted/
+        // authorized/_meta 附加键）——没有任何字段参与判定，仍按启动档
+        // 拒绝（升级范围在结构上不可能：GrantedScopes 只来自启动配置）
+        let mut params = meta_params();
+        params["name"] = json!("flow_trace");
+        params["arguments"] = json!({"id": "f-1"});
+        params["scope"] = json!("write");
+        params["granted"] = json!(["read", "detailed", "probe", "write"]);
+        params["authorized"] = json!(true);
+        params["_meta"]["x-rillane-authorized"] = json!(true);
+        let line =
+            format!(r#"{{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{params}}}"#);
+        let out = handle_line(&mut state(), &line).expect("answer");
+        assert_eq!(out["error"]["code"], -32001);
+        assert_eq!(out["error"]["data"]["required"], "detailed");
+    }
+
+    #[test]
+    fn granted_scope_reaches_execution_and_scope_gate_precedes_validation() {
+        // 探测档会话里 probe_submit 越过范围门进入执行（边界不可达 →
+        // 带内 control.unreachable——证明走的是执行路径而非拒绝）；
+        // 只读会话里同一请求答 -32001（范围门先于参数校验——被拒请求
+        // 不泄露参数面细节、不进入执行）
+        let probe = GrantedScopes::parse("read,probe").expect("parse");
+        let mut params = meta_params();
+        params["name"] = json!("probe_submit");
+        params["arguments"] = json!({"kind": "dns", "host": "example.com"});
+        let line =
+            format!(r#"{{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{params}}}"#);
+        let out = handle_line(&mut state_with(probe, 0), &line).expect("answer");
+        assert_eq!(out["id"], 22);
+        assert_eq!(out["result"]["isError"], true);
+        assert_eq!(
+            out["result"]["structuredContent"]["error"]["code"],
+            "control.unreachable"
+        );
+
+        let out = handle_line(&mut state(), &line).expect("answer");
+        assert_eq!(out["error"]["code"], -32001);
+    }
+
+    #[test]
+    fn rate_limit_blocks_excess_calls_in_window() {
+        // 每窗 2 次：前两次（执行失败也消耗配额——配额约束的是到达执行
+        // 的调用）有带内答复，第三次 -32002
+        let mut st = state_with(GrantedScopes::read_only(), 2);
+        let line = call_line(23, "runtime_stats", json!({}));
+        assert!(handle_line(&mut st, &line).is_some());
+        assert!(handle_line(&mut st, &line).is_some());
+        let out = handle_line(&mut st, &line).expect("answer");
+        assert_eq!(out["error"]["code"], -32002);
+        assert_eq!(out["error"]["data"]["code"], "mcp.rate.limited");
+        assert_eq!(out["error"]["data"]["window_secs"], RATE_WINDOW_SECS);
+    }
+
+    #[test]
+    fn denied_calls_do_not_consume_rate_quota() {
+        // 越权拒绝不消耗配额：任意多次越权后，合法调用仍按原配额可用
+        let mut st = state_with(GrantedScopes::read_only(), 2);
+        let denied = call_line(
+            24,
+            "probe_submit",
+            json!({"kind": "dns", "host": "example.com"}),
+        );
+        for _ in 0..5 {
+            let out = handle_line(&mut st, &denied).expect("answer");
+            assert_eq!(out["error"]["code"], -32001);
+        }
+        let line = call_line(25, "runtime_stats", json!({}));
+        assert!(handle_line(&mut st, &line).is_some());
+        assert!(handle_line(&mut st, &line).is_some());
+        let out = handle_line(&mut st, &line).expect("answer");
+        assert_eq!(out["error"]["code"], -32002, "合法调用仍按 2 次窗满拒绝");
+    }
+
+    #[test]
+    fn cli_defaults_are_read_only_with_minute_rate() {
+        let cli = Cli::try_parse_from(["rillane-mcp"]).expect("defaults");
+        assert_eq!(cli.scope, "read");
+        assert_eq!(cli.rate_limit, 60);
+        let cli =
+            Cli::try_parse_from(["rillane-mcp", "--scope", "read,probe", "--rate-limit", "0"])
+                .expect("custom");
+        assert_eq!(cli.scope, "read,probe");
+        assert_eq!(cli.rate_limit, 0);
+        assert!(GrantedScopes::parse(&cli.scope).is_ok());
     }
 }
