@@ -18,6 +18,9 @@ pub mod dns_engine;
 pub mod filter;
 // 本机身份契约（RIL-005）：OwnerResolver 三态 + 截止时间 + unknown 策略
 pub mod owner;
+// Linux 本机身份真实实现（RIL-030）：/proc 四元组→inode→pid→身份
+#[cfg(target_os = "linux")]
+pub mod owner_linux;
 // IP/UDP/TCP 报文编解码纯函数（tun-dataplane.md §2.3/§4.1）
 pub mod ipcodec;
 // 平台端口契约（RIL-004）：CapturePort/SocketBypass/NetworkEvents/
@@ -53,6 +56,8 @@ pub use owner::{
     ConnectionKey, InMemoryOwnerResolver, OwnerCapability, OwnerResolution, OwnerResolver,
     ProcessIdentity, UnknownOwnerPolicy, UnknownReason,
 };
+#[cfg(target_os = "linux")]
+pub use owner_linux::ProcOwnerResolver;
 pub use ports::{
     CapturePort, CapturedInput, InMemoryNetworkEvents, InMemoryRouteTransaction, IpProtocol,
     NetworkEvent, NetworkEvents, PacketInput, PacketMeta, RouteTransaction, SocketBypass,
