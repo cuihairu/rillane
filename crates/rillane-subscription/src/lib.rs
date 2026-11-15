@@ -30,6 +30,8 @@ pub mod converter;
 pub mod fetcher;
 pub mod rillane_dsl;
 pub mod rule_source;
+// 来源快照原子替换（RIL-008）：以来源版本整体替换，失败保留旧快照
+pub mod snapshots;
 
 pub use cache::*;
 pub use clash::*;
@@ -38,6 +40,7 @@ pub use converter::*;
 pub use fetcher::*;
 pub use rillane_dsl::*;
 pub use rule_source::*;
+pub use snapshots::{RefreshError, RefreshOutcome, SourceSnapshotStore};
 
 /// 订阅类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

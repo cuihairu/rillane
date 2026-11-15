@@ -882,6 +882,12 @@ pub struct ConfigMergeStats {
     pub nodes_added: usize,
     pub groups_added: usize,
     pub rules_added: usize,
+    /// 同名规则被新版本原位替换的条数（RIL-008：重复刷新替换不追加）
+    pub rules_updated: usize,
+    /// 同名节点被新版本原位替换的条数（订阅节点内容更新语义）
+    pub nodes_updated: usize,
+    /// 同名组被新版本原位替换的条数
+    pub groups_updated: usize,
 }
 
 /// Runtime 实例
@@ -1739,28 +1745,77 @@ fn merge_config_delta_in_place(
         .collect();
 
     let mut nodes_added = 0usize;
+    let mut nodes_updated = 0usize;
     for e in &delta.egress {
         if existing_egress.insert(e.name.clone()) {
             target.egress.push(e.clone());
             nodes_added += 1;
+        } else {
+            // RIL-008：同源刷新的更新语义——同名节点原位替换（内容变了
+            // 必须生效），不再跳过导致旧内容滞留
+            match target.egress.iter_mut().find(|t| t.name == e.name) {
+                Some(slot) => {
+                    *slot = e.clone();
+                    nodes_updated += 1;
+                }
+                None => {
+                    target.egress.push(e.clone());
+                    nodes_added += 1;
+                }
+            }
         }
     }
 
     let mut groups_added = 0usize;
+    let mut groups_updated = 0usize;
     for g in &delta.routing.groups {
         if existing_groups.insert(g.name.clone()) {
             target.routing.groups.push(g.clone());
             groups_added += 1;
+        } else {
+            // 同名组原位替换（成员/策略更新语义，与节点一致）
+            match target.routing.groups.iter_mut().find(|t| t.name == g.name) {
+                Some(slot) => {
+                    *slot = g.clone();
+                    groups_updated += 1;
+                }
+                None => {
+                    target.routing.groups.push(g.clone());
+                    groups_added += 1;
+                }
+            }
         }
     }
 
-    let rules_added = delta.routing.rules.len();
-    target.routing.rules.extend(delta.routing.rules.clone());
+    // RIL-008：规则按名原位替换——重复刷新同名规则（rule-1..N 序号稳定）
+    // 替换既有条目、保持首匹配顺序原位，不再 extend 反复追加；新名追加。
+    let mut rules_added = 0usize;
+    let mut rules_updated = 0usize;
+    for rule in &delta.routing.rules {
+        match target
+            .routing
+            .rules
+            .iter_mut()
+            .find(|t| t.name == rule.name)
+        {
+            Some(slot) => {
+                *slot = rule.clone();
+                rules_updated += 1;
+            }
+            None => {
+                target.routing.rules.push(rule.clone());
+                rules_added += 1;
+            }
+        }
+    }
 
     ConfigMergeStats {
         nodes_added,
         groups_added,
         rules_added,
+        rules_updated,
+        nodes_updated,
+        groups_updated,
     }
 }
 
@@ -4299,6 +4354,82 @@ mod tests {
             1
         );
         assert!(target.routing.groups.iter().any(|g| g.name == "g2"));
+        assert_eq!(target.routing.rules.len(), 2);
+    }
+
+    #[test]
+    fn merge_config_delta_repeated_refresh_replaces_in_place() {
+        // RIL-008：重复刷新同源 delta——同名规则原位替换（首匹配顺序保持），
+        // 不再 extend 反复追加；同名节点/组内容更新原位生效
+        let target_yaml = r#"
+control:
+  api_bind: 127.0.0.1:9090
+telemetry:
+  log_level: info
+  enable_metrics: true
+  enable_tracing: false
+ingress: []
+egress:
+  - name: direct
+    type: direct
+routing:
+  default_node: direct
+  groups: []
+  rules: []
+"#;
+        let delta_yaml = r#"
+control:
+  api_bind: 127.0.0.1:9090
+telemetry:
+  log_level: info
+  enable_metrics: true
+  enable_tracing: false
+ingress: []
+egress:
+  - name: direct
+    type: direct
+  - name: p1
+    type: direct
+routing:
+  default_node: direct
+  groups: []
+  rules:
+    - name: r1
+      matches:
+        - type: port
+          values: [80]
+      target: direct
+    - name: r2
+      matches:
+        - type: domain_suffix
+          values: [example.com]
+      target: p1
+"#;
+        let mut target =
+            rillane_config::RillaneConfig::from_str(target_yaml, None).expect("target 可解析");
+        let delta =
+            rillane_config::RillaneConfig::from_str(delta_yaml, None).expect("delta 可解析");
+
+        // 首次合并：r1/r2 追加
+        let stats1 = merge_config_delta_in_place(&mut target, &delta);
+        assert_eq!(stats1.rules_added, 2);
+        assert_eq!(target.routing.rules.len(), 2);
+
+        // 重复刷新（同 delta）：原位替换，零新增，总条数不变
+        let stats2 = merge_config_delta_in_place(&mut target, &delta);
+        assert_eq!(stats2.rules_added, 0, "重复刷新不得新增规则");
+        assert_eq!(stats2.rules_updated, 2);
+        assert_eq!(stats2.nodes_added, 0);
+        assert_eq!(target.routing.rules.len(), 2, "规则不得反复追加");
+        assert_eq!(target.egress.len(), 2);
+
+        // 内容更新：r1 目标改为 p1，再刷新 → 原位生效
+        let mut delta_updated = delta.clone();
+        delta_updated.routing.rules[0].target = "p1".to_string();
+        let stats3 = merge_config_delta_in_place(&mut target, &delta_updated);
+        assert_eq!(stats3.rules_added, 0);
+        assert_eq!(stats3.rules_updated, 2);
+        assert_eq!(target.routing.rules[0].target, "p1", "规则内容更新必须生效");
         assert_eq!(target.routing.rules.len(), 2);
     }
 
