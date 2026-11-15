@@ -9,7 +9,7 @@
 | `apps/rillaned` | 配置加载、运行时装配、HTTP 控制面 |
 | `apps/rillanectl` | 配置工具、控制面查询、订阅与证书管理 |
 | `rillane-core` | Flow、FlowContext、RouteDecision/RoutePath、转发接口与 UDP 基础类型 |
-| `rillane-config` | 配置模型、校验、profile 预设展开 |
+| `rillane-config` | 配置模型、校验、profile 预设展开；配置版本与能力契约（`contract` 模块） |
 | `rillane-routing` | 条件匹配、逻辑组与路由选择 |
 | `rillane-protocols` | 入站、出站、拨号与传输 |
 | `rillane-runtime` | 监听、会话、订阅接线、TUN 与 Mesh 装配 |
@@ -33,6 +33,8 @@
 RouteDecision/RoutePath 已包含组、链路与原因；v1 的 RoutePlan 在其上扩展，不新增第二套路由器。订阅已有 SHA-256 变更检测，但不能据此声称有来源签名或新代际事务。
 
 ## 控制与配置更新
+
+配置已携带 `version` 字段（当前仅 `1`）：缺省按 V1 适配存量配置，显式未知版本在解析期以稳定原因码 `config.version.unknown` 拒绝。构建能力集（`CapabilitySet`）用于在配置校验期拒绝当前构建不支持的组合（稳定原因码 `config.combo.unsupported`），避免拨号期才失败；缺省能力集为全量，现有调用方零差异。内核 `rillane-core` 不依赖 `rillane-config` 与 Clash 格式，订阅转换收敛于 `rillane-subscription` 侧。
 
 控制面是 `control.api_bind` 上的 HTTP/REST，接口见 [CLI 参考](cli.md)。当前 `/flows` 为入口/出口组合的聚合；兼容 `/connections` 不是完整真实连接表。`diagnose` 包含敏感运行信息，不能默认视为可安全上传 AI 的材料。
 

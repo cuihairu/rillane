@@ -9,7 +9,7 @@ This is an implementation reference, not another architecture design. The **sing
 | `apps/rillaned` | Configuration, runtime assembly and HTTP control plane |
 | `apps/rillanectl` | Configuration utilities, control queries, subscriptions and certificates |
 | `rillane-core` | Flow/FlowContext, RouteDecision/RoutePath, forwarding and UDP contracts |
-| `rillane-config` | Configuration models, validation and profile expansion |
+| `rillane-config` | Configuration models, validation, profile expansion and the config version/capability contract (`contract` module) |
 | `rillane-routing` | Conditions, logical groups and routing decisions |
 | `rillane-protocols` | Inbounds, outbounds, dialing and transports |
 | `rillane-runtime` | Listeners, sessions, subscriptions, TUN and Mesh assembly |
@@ -33,6 +33,8 @@ This is an implementation reference, not another architecture design. The **sing
 RouteDecision/RoutePath already describes groups, chains and reasons; RoutePlan extends it without creating a second router. Subscription SHA-256 change detection exists but is not source authentication or transactional generations.
 
 ## Control and updates
+
+Configurations carry a `version` field (currently only `1`): missing version adapts to V1 for legacy configs, and unknown versions are rejected at parse time with the stable reason code `config.version.unknown`. A build capability set (`CapabilitySet`) rejects combinations the current build cannot honor at config validation time (stable code `config.combo.unsupported`) instead of failing at dial time; the default capability set is full, so existing callers see no behavior change. The kernel `rillane-core` does not depend on `rillane-config` or Clash formats; subscription conversion stays in `rillane-subscription`.
 
 Control uses HTTP/REST on `control.api_bind`; see [CLI reference](cli.md). `/flows` aggregates ingress/egress pairs; compatibility `/connections` is not a complete real connection table. Diagnose bundles may contain sensitive runtime information and are not automatically safe for AI upload.
 
