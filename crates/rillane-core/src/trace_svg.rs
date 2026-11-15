@@ -41,15 +41,21 @@ const LANES: [&str; 4] = ["l3", "plan", "conn", "mesh"];
 /// 阶段 → 路径层（**穷尽匹配**：新增 TraceStage 变体时编译期即强制
 /// 归层，不允许落到「混画」兜底）。Mesh 账本无流内阶段——不返回 mesh。
 fn layer_of(stage: TraceStage) -> &'static str {
+    lane_of_stage(stage.as_str()).expect("TraceStage 全集在 lane_of_stage 内有归属——漏臂即 panic")
+}
+
+/// 线上阶段名 → 路径层（RIL-063：文本/JSON 投影与 SVG 共用同一归层
+/// ——不存在第二份阶段→层映射）。未知阶段名 → None（调用方显式
+/// 处理「未知阶段」，不猜层、不混画）。
+pub fn lane_of_stage(stage: &str) -> Option<&'static str> {
     match stage {
         // L3/接入面：接管 + 上下文身份 + DNS + 嗅探
-        TraceStage::Takeover | TraceStage::Identity | TraceStage::Dns | TraceStage::Sniff => "l3",
+        "takeover" | "identity" | "dns" | "sniff" => Some("l3"),
         // 计划面：规则求值 + RoutePlan（预测证据）
-        TraceStage::Rule | TraceStage::Plan => "plan",
+        "rule" | "plan" => Some("plan"),
         // 连接面：拨号尝试 + 实际出口 + 传输统计 + 终态
-        TraceStage::Attempt | TraceStage::Egress | TraceStage::Transfer | TraceStage::Close => {
-            "conn"
-        }
+        "attempt" | "egress" | "transfer" | "close" => Some("conn"),
+        _ => None,
     }
 }
 
@@ -256,6 +262,34 @@ mod tests {
     use super::*;
     use crate::outbound::EvidenceKind;
     use crate::trace::{AttemptId, FlowId, FlowOrigin};
+
+    /// RIL-063：字符串归层与枚举归层是同一份映射（SVG/文本/JSON 三投影
+    /// 一致）；未知阶段名显式 None——不猜层
+    #[test]
+    fn lane_of_stage_agrees_with_enum_mapping() {
+        for stage in [
+            TraceStage::Takeover,
+            TraceStage::Identity,
+            TraceStage::Dns,
+            TraceStage::Sniff,
+            TraceStage::Rule,
+            TraceStage::Plan,
+            TraceStage::Attempt,
+            TraceStage::Egress,
+            TraceStage::Transfer,
+            TraceStage::Close,
+        ] {
+            assert_eq!(
+                lane_of_stage(stage.as_str()),
+                Some(layer_of(stage)),
+                "stage {}",
+                stage.as_str()
+            );
+        }
+        assert_eq!(lane_of_stage("mesh"), None);
+        assert_eq!(lane_of_stage(""), None);
+        assert_eq!(lane_of_stage("Takeover"), None, "线名精确匹配——不猜大小写");
+    }
 
     /// 手工搭一条多阶段轨迹（接管→DNS→规则→计划→两次拨号→出口→关闭）
     fn sample_trace(flow_id: &str, detail_for: impl Fn(u64) -> String) -> FlowTrace {

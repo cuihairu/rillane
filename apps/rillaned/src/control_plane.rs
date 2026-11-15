@@ -149,7 +149,18 @@ impl ControlPlane {
             method,
             Method::POST | Method::PUT | Method::PATCH | Method::DELETE
         );
-        let is_sensitive_read = matches!(path.as_str(), "/runtime/config" | "/events" | "/logs");
+        // 敏感读面（RIL-063：逐连接轨迹携带详细身份——域名/进程/地址，
+        // 权限控制归 admin_token；未配置 token 的本机部署照常开放）
+        let is_sensitive_read = matches!(
+            path.as_str(),
+            "/runtime/config"
+                | "/events"
+                | "/logs"
+                | "/trace/flows"
+                | "/trace/flow"
+                | "/trace/flow.svg"
+                | "/trace/events"
+        );
         if (is_mutating || is_sensitive_read)
             && self.admin_token.is_some()
             && !self.is_authorized(&req)
@@ -5438,6 +5449,38 @@ mod tests {
             .unwrap();
         let resp = cp.handle(req).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// RIL-063：trace 读面携带详细身份（域名/进程/地址）——配置
+    /// admin_token 后与 mutating 同门（无凭据 401；带凭据照常应答；
+    /// 未配置 token 的本机部署照常开放）
+    #[tokio::test]
+    async fn trace_reads_require_admin_token_when_configured() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, Some("sekrit-token-2".to_string()), true);
+
+        let make = |uri: &str, token: Option<&str>| {
+            let mut b = Request::builder().method(Method::GET).uri(uri.to_string());
+            if let Some(t) = token {
+                b = b.header("x-admin-token", t);
+            }
+            b.body(RespBody::new(Bytes::new())).unwrap()
+        };
+        for uri in ["/trace/flows", "/trace/flow?id=f-1", "/trace/events?id=f-1"] {
+            let resp = cp.handle(make(uri, None)).await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "uri {uri}");
+            let resp = cp.handle(make(uri, Some("sekrit-token-2"))).await;
+            assert_ne!(resp.status(), StatusCode::UNAUTHORIZED, "uri {uri}");
+        }
+        // SVG 导出面同门
+        let resp = cp.handle(make("/trace/flow.svg?id=f-1", None)).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 未配置 token：读面照常开放（本机部署）
+        let runtime2 = build_runtime(false, false).await;
+        let cp2 = ControlPlane::new(runtime2, None, true);
+        let resp = cp2.handle(make("/trace/flows", None)).await;
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// RIL-060：参数非法逐项显式拒绝——limit=0（内核 query.page.invalid）、

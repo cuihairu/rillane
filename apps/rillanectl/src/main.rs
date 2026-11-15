@@ -282,6 +282,15 @@ enum TraceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// 交互路径检查（RIL-063）：单次边界读——配置来源定位（代际 +
+    /// 计划面事件原样，不重实现路由器）+ 分段展开（与路径图同一归层）
+    Inspect {
+        /// 真实 flow ID（聚合键不在此面）
+        id: String,
+        /// 输出版本化 JSON（schema_version=1 信封原样）
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Probe CLI 子命令（RIL-061，语法冻结——文本/版本化 JSON 双形态）。
@@ -1397,6 +1406,25 @@ fn main() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(v)?);
                     } else {
                         print!("{}", render_trace_events(v));
+                    }
+                }
+                TraceCommand::Inspect { id, json } => {
+                    // RIL-063 交互路径检查：恰一次边界读（GET /trace/flow）；
+                    // 缺席退出码 2（既有缺席渲染——collector 计数可见），
+                    // 断连/无权限走信封错误 → 退出码 1（稳定码显式）
+                    let v = app_json(&app, AppOperation::FlowTrace { id: id.clone() })?;
+                    if let Some(absent) = trace_absence(&v) {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&v)?);
+                        } else {
+                            print!("{}", render_trace_absent(&id, &absent));
+                        }
+                        std::process::exit(2);
+                    }
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&v)?);
+                    } else {
+                        print!("{}", render_trace_inspect(&v));
                     }
                 }
             }
@@ -2876,6 +2904,93 @@ fn render_trace_flow(v: &serde_json::Value) -> String {
     out
 }
 
+/// 交互路径检查文本（RIL-063）：头部 + 配置来源定位（代际 + 计划面
+/// 事件原样——归因读轨迹，不在 CLI 里重新求值规则）+ 分段展开（与
+/// 路径图同一归层 `lane_of_stage`；未知阶段显式列出，不猜层）+ 逐段
+/// 下钻指针（增量页/路径图——不为检查面发明第二取数路径）
+fn render_trace_inspect(v: &serde_json::Value) -> String {
+    let trace = v.get("trace").unwrap_or(&serde_json::Value::Null);
+    let flow = trace.get("flow").and_then(|x| x.as_str()).unwrap_or("-");
+    let origin = trace.get("origin").and_then(|x| x.as_str()).unwrap_or("-");
+    let generation = trace
+        .get("generation")
+        .and_then(|x| x.as_str())
+        .unwrap_or("-");
+    let closed = trace
+        .get("closed")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let events = trace
+        .get("events")
+        .and_then(|e| e.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = format!(
+        "flow {flow} origin={origin} generation={generation} closed={closed} events={}\n",
+        events.len()
+    );
+    // 配置来源定位
+    out.push_str("配置来源（代际 + 计划面事件，原样）:\n");
+    let mut plan_any = false;
+    for event in &events {
+        let stage = event.get("stage").and_then(|x| x.as_str()).unwrap_or("");
+        if rillane_core::trace_svg::lane_of_stage(stage) == Some("plan") {
+            plan_any = true;
+            out.push_str(&trace_event_line(event));
+        }
+    }
+    if !plan_any {
+        out.push_str("  （无计划面事件——轨迹未记录规则求值）\n");
+    }
+    if generation != "-" {
+        out.push_str(&format!(
+            "  重放验证: rillanectl explain --generation {generation} <host> --port N --proto tcp|udp|quic\n"
+        ));
+    }
+    // 分段展开（l3/plan/conn 与路径图同层；未知阶段独立列出）
+    out.push_str("分段展开（与路径图同层）:\n");
+    let mut lanes: [(&str, Vec<u64>); 4] = [
+        ("l3", Vec::new()),
+        ("plan", Vec::new()),
+        ("conn", Vec::new()),
+        ("未知", Vec::new()),
+    ];
+    for event in &events {
+        let stage = event.get("stage").and_then(|x| x.as_str()).unwrap_or("");
+        let seq = event.get("seq").and_then(|x| x.as_u64()).unwrap_or(0);
+        let lane = rillane_core::trace_svg::lane_of_stage(stage).unwrap_or("未知");
+        let slot = lanes
+            .iter_mut()
+            .find(|(name, _)| *name == lane)
+            .expect("lane 集固定四层");
+        slot.1.push(seq);
+    }
+    for (name, seqs) in &lanes {
+        if seqs.is_empty() {
+            out.push_str(&format!("  {name}: 无事件\n"));
+        } else {
+            out.push_str(&format!(
+                "  {name}: {} 事件（seq {}..{}）\n",
+                seqs.len(),
+                seqs[0],
+                seqs[seqs.len() - 1]
+            ));
+        }
+    }
+    // 下钻指针
+    if let Some(last) = events
+        .last()
+        .and_then(|e| e.get("seq"))
+        .and_then(|s| s.as_u64())
+    {
+        out.push_str(&format!(
+            "逐段下钻: rillanectl trace events {flow} --from-seq {} --limit 200；路径图: rillanectl trace flow {flow} --svg\n",
+            last + 1
+        ));
+    }
+    out
+}
+
 /// 事件增量文本：头部（flow/from_seq/count）+ 事件行
 fn render_trace_events(v: &serde_json::Value) -> String {
     let flow = v.get("flow").and_then(|x| x.as_str()).unwrap_or("-");
@@ -4048,6 +4163,112 @@ mod tests {
 
         let found = serde_json::json!({"schema_version": 1, "found": true, "trace": {}});
         assert!(trace_absence(&found).is_none(), "found:true 不是缺席");
+    }
+
+    /// RIL-063：交互检查文本——配置来源定位（计划面事件原样 + 代际
+    /// 重放指针）、分段展开（与路径图同层；未知阶段显式列出）、下钻
+    /// 指针（增量页/路径图）
+    #[test]
+    fn trace_inspect_renders_attribution_lanes_and_pointers() {
+        let v = serde_json::json!({
+            "schema_version": 1,
+            "found": true,
+            "trace": {
+                "flow": "f-inspect",
+                "origin": "stream",
+                "generation": "gen-9",
+                "closed": true,
+                "events": [
+                    {"seq": 0, "stage": "takeover", "code": "trace.taken_over",
+                     "evidence": "observed", "monotonic_ms": 0, "wall_ms": 1000, "detail": ""},
+                    {"seq": 1, "stage": "rule", "code": "route.selected",
+                     "evidence": "predicted", "monotonic_ms": 2, "wall_ms": 1002,
+                     "detail": "rule=domestic group=proxy"},
+                    {"seq": 2, "stage": "plan", "code": "plan.built",
+                     "evidence": "predicted", "monotonic_ms": 3, "wall_ms": 1003, "detail": ""},
+                    {"seq": 3, "stage": "egress", "code": "egress.established",
+                     "evidence": "observed", "monotonic_ms": 9, "wall_ms": 1009, "detail": ""},
+                    {"seq": 4, "stage": "close", "code": "flow.closed",
+                     "evidence": "observed", "monotonic_ms": 20, "wall_ms": 1020, "detail": ""},
+                    {"seq": 5, "stage": "future_stage", "code": "x.y",
+                     "evidence": "observed", "monotonic_ms": 21, "wall_ms": 1021, "detail": ""}
+                ]
+            }
+        });
+        let out = render_trace_inspect(&v);
+        // 头部（事件计数诚实）
+        assert!(
+            out.starts_with("flow f-inspect origin=stream generation=gen-9 closed=true events=6\n"),
+            "{out}"
+        );
+        // 配置来源定位：计划面事件原样（归因读轨迹，不重求值规则）
+        assert!(out.contains("配置来源"), "{out}");
+        assert!(
+            out.contains("#1 rule route.selected evidence=predicted attempt=- mono=2 wall=1002 rule=domestic group=proxy"),
+            "计划面事件行原样: {out}"
+        );
+        assert!(out.contains("plan.built"), "{out}");
+        assert!(
+            out.contains("重放验证: rillanectl explain --generation gen-9"),
+            "代际重放指针: {out}"
+        );
+        // 非计划面事件（takeover/egress）不进配置来源段
+        let attribution = out.split("分段展开").next().expect("attribution section");
+        assert!(!attribution.contains("route.selected\r") && !attribution.contains("#0 takeover"));
+        // 分段展开：同层计数 + 未知阶段显式列出（不猜层）
+        assert!(out.contains("分段展开（与路径图同层）:"), "{out}");
+        assert!(out.contains("  l3: 1 事件（seq 0..0）"), "{out}");
+        assert!(out.contains("  plan: 2 事件（seq 1..2）"), "{out}");
+        assert!(out.contains("  conn: 2 事件（seq 3..4）"), "{out}");
+        assert!(
+            out.contains("  未知: 1 事件（seq 5..5）"),
+            "未知阶段显式列出: {out}"
+        );
+        // 下钻指针：增量页 + 路径图（无第二取数路径）
+        assert!(
+            out.contains("逐段下钻: rillanectl trace events f-inspect --from-seq 6 --limit 200"),
+            "{out}"
+        );
+        assert!(
+            out.contains("rillanectl trace flow f-inspect --svg"),
+            "{out}"
+        );
+    }
+
+    /// RIL-063：无计划面事件如实声明（轨迹未记录规则求值——不造归因）
+    #[test]
+    fn trace_inspect_without_plan_events_declares_absence() {
+        let v = serde_json::json!({
+            "schema_version": 1,
+            "found": true,
+            "trace": {
+                "flow": "f-bare", "origin": "association", "generation": "gen-1",
+                "closed": false,
+                "events": [
+                    {"seq": 0, "stage": "close", "code": "association.reclaimed",
+                     "evidence": "observed", "monotonic_ms": 4, "wall_ms": 1004, "detail": ""}
+                ]
+            }
+        });
+        let out = render_trace_inspect(&v);
+        assert!(
+            out.contains("（无计划面事件——轨迹未记录规则求值）"),
+            "{out}"
+        );
+        assert!(out.contains("  conn: 1 事件（seq 0..0）"), "{out}");
+        assert!(out.contains("  l3: 无事件"), "{out}");
+    }
+
+    /// RIL-063：Inspect 走的边界操作就是 FlowTrace（恰一个读——
+    /// 检查面不发明第二取数路径）
+    #[test]
+    fn trace_inspect_maps_to_single_flow_trace_operation() {
+        let (op, _) = rillane_app::dispatch::build_operation(
+            "flow_trace",
+            Some(&serde_json::json!({ "id": "f-1" })),
+        )
+        .expect("op");
+        assert!(matches!(op, AppOperation::FlowTrace { .. }));
     }
 
     /// RIL-060：列表文本——空页不造行；有页逐行 + 总数尾行
