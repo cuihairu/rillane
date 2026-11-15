@@ -132,8 +132,9 @@
   交付：完整名称/路径、权限/namespace 边界、有界缓存。验收：PID/端口复用、UDP、权限不足及 comm 截断不误归因；同目标两进程分别路由。
 - [ ] **RIL-031｜P0｜Linux 生命周期恢复**；依赖：RIL-019、RIL-029。
   交付：systemd 启停、异常退出日志与重启修复。验收：终止/崩溃/网络切换后 DNS 与路由恢复，重复启动无残留。
-- [ ] **RIL-032｜P0｜Windows 技术探针**【BLOCKED 2026-11-15】缺 Windows 真机/虚拟机：Wintun 安装、WFP-ALE 归属查询与原型防环都需在 Windows 上实测，本机（Linux）无法产出验收要求的「Windows 上 TCP/UDP 本机归因和防环证据」；有环境后立即执行。
+- [x] **RIL-032｜P0｜Windows 技术探针**；环境=imac（主）/openclaw（备），ssh 直达，管理员权限与 wireguard-tools 已核（2026-11-15 巡检更正：先前「缺 Windows 真机」的 BLOCKED 标注有误——舰队两台 Windows 真机就绪；本批实测于 imac，openclaw 巡检时段离线待补测，不影响证据面）。RIL-033 的 RIL-032 依赖已满足。
   交付：Wintun、公开归属查询/WFP-ALE 的实测选型记录及最低版本/权限。验收：Windows 上展示 TCP/UDP 本机归因和原型防环证据，记录不可用字段。
+  证据：`docs/acceptance-evidence/ril-032-windows-probe.md`（全部输出来自 `ssh imac` 实机，含实时时间戳）。**驱动选型**：pnputil 实测 wintun.inf 0.14.0.0（WHQL）与 wireguard.inf 1.1.0.0（WHQL）共存；wireguard-tools v1.0.20260223 隧道服务实测走 wireguard-nt（适配器 "WireGuard Tunnel"）——rillane 按 wireguard-nt 为主、Wintun 兼容为目标；最低权限=Administrators（High integrity SSH 会话实测安装/卸载成功）。**TCP 归因**：`Get-NetTCPConnection` OwningProcess + `Get-Process.Path` 完整可执行路径 + `StartTime`/`Win32_Process.CreationDate` 进程创建时刻（PID 复用防护字段）三件齐全，探针连接 192.168.5.188:19532 Established 行实证。**UDP 归因**：`Get-NetUDPEndpoint` OwningProcess + 完整路径可得；**不可用字段如实记录**——未绑定 UDP 行显示通配 0.0.0.0、UDP owner module 路径无公开面。**原型防环**：`/installtunnelservice` 建临时隧道（AllowedIPs=198.18.0.0/15 基准保留段、Endpoint=127.0.0.1:1 永不握手、不触默认路由）；`Find-NetRoute -RemoteIPAddress 198.18.0.1` 实测未绑定决策 = 源 172.16.77.2@wgprobe；TCP 表轮询实证未绑定 socket `local=172.16.77.2 state=SynSent` 被捕获（wg transfer sent 13.01 KiB 同步增长）；**绑定物理口 IP 后同目标全程钉在 192.168.5.117**——Windows 防环原语（出站 socket 显式 bind 接口地址）成立。实现须知已记录：非阻塞 connect 完成前 getsockname 返回 0.0.0.0（与 Linux 语义不同）。清理幂等验证：卸载后服务/适配器/路由均不存在。探针=单文件 Rust（std+socket2）交叉编译 windows-gnu 在 imac 实跑（源码附录在证据文档）。commit：见 git log `docs: add ril-032 windows probe evidence`。
 - [ ] **RIL-033｜P1｜Windows 接管/旁路实现**；依赖：RIL-018、RIL-020、RIL-032。
   交付：packet I/O、双栈路由/DNS 和旁路。验收：真实浏览器/游戏流进入共享内核，DNS/代理拨号不循环，失败可补偿。
 - [ ] **RIL-034｜P1｜Windows 进程适配**；依赖：RIL-015、RIL-032、RIL-033。
