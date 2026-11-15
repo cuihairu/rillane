@@ -37,6 +37,10 @@ pub mod linux;
 // 现有 TUN 数据面与逃逸表
 #[cfg(target_os = "linux")]
 pub mod takeover;
+// Linux 生命周期恢复（RIL-031）：崩溃日志（持久化 JSONL）+ 重启修复
+// + 网络切换恢复动作映射
+#[cfg(target_os = "linux")]
+pub mod recovery;
 // TODO: 平台特定实现待完成（死稿，见 platform.rs 头部注记）
 // pub mod platform;
 
@@ -69,6 +73,11 @@ pub use takeover::{
     pump_tun, read_net_snapshot, read_so_mark, step_payload, LinuxNetworkEvents,
     LinuxRouteTransaction, LinuxSocketBypass, LinuxTakeoverPort, NetSnapshot, StepExecutor,
     TakeoverPortStats, TAKEOVER_FWMARK,
+};
+#[cfg(target_os = "linux")]
+pub use recovery::{
+    handle_network_event, journaling_executor, plan_for_event, recover, CrashJournal,
+    JournalEntry, JournalSnapshot, NetworkRecoveryAction, RecoveryReport, AUDIT_TARGET,
 };
 pub use route::{
     BypassAction, BypassCondition, BypassRule, RouteDestination, RouteManager, RouteRule,

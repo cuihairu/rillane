@@ -35,6 +35,29 @@ fn derive_runtime_config(config: &RillaneConfig) -> Result<RuntimeConfig> {
     })
 }
 
+/// SIGTERM 监听（unix；其余平台永不就绪——退出语义仍由 Ctrl-C 承担）。
+/// systemd stop / kill 默认信号都走这里，触发与 Ctrl-C 相同的优雅
+/// 退出路径（runtime.stop 回滚路由/停 DNS）。
+#[cfg(unix)]
+async fn wait_sigterm() {
+    use tokio::signal::unix::{signal, SignalKind};
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => {
+            term.recv().await;
+        }
+        Err(e) => {
+            // 信号面装不上：记日志继续（不能因监听失败拒绝启动）
+            tracing::warn!(target: "rillane::boot", error = %e, "SIGTERM 监听不可用");
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_sigterm() {
+    std::future::pending::<()>().await;
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // --version/-V 在配置加载前短路（daemon 不应因版本查询而读配置/起服务）
@@ -105,6 +128,12 @@ async fn main() -> Result<()> {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!(target: "rillane::boot", "收到 Ctrl-C，开始退出");
+        }
+        // RIL-031：systemd stop 发 SIGTERM——不接的话默认处理器直接杀
+        // 进程，runtime.stop 的 TUN teardown（路由回滚/DNS 停服）根本
+        // 不跑，系统侧残留只能靠下次启动的崩溃恢复面收拾。
+        _ = wait_sigterm() => {
+            info!(target: "rillane::boot", "收到 SIGTERM，开始优雅退出");
         }
         res = cp_task => {
             // Control plane exited unexpectedly.

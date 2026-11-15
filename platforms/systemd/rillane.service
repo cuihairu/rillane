@@ -13,6 +13,9 @@ Environment=RILLANE_CONFIG=/etc/rillane/rillane.yaml
 ExecStart=/usr/bin/rillaned
 Restart=on-failure
 RestartSec=5
+# 优雅退出窗口（RIL-031）：stop 发 SIGTERM → runtime.stop 完成 TUN
+# teardown（路由回滚/DNS 停服）；超时才 SIGKILL，避免路由/解析器残留
+TimeoutStopSec=30
 # 最低权限面：低端口绑定（入口 0-1023）+ TUN 设备创建（P1-2 已落地）。
 # 纯代理部署（无 TUN）可用 drop-in 收窄：systemctl edit rillane 后覆写两行去掉
 # CAP_NET_ADMIN。缺省按全功能口径给齐。
