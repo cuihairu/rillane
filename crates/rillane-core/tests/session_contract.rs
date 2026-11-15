@@ -650,24 +650,26 @@ async fn association_binding_reject_and_control_reclaim() {
     let t2 = EndpointRef::new("10.0.0.10", 53);
     let client_endpoint = EndpointRef::new("192.168.1.5", 50000);
 
-    // 客户端中继脚本：旁落目标 → 超限 → 合法 → 置位控制链后 EOF
+    // 客户端中继脚本：旁落目标 → 超限 → 合法 → 挂起（泵 biased 序
+    // 客户端上行优先——挂起让出轮询，回程与回收在出口脚本按序到达）
     let mut client_relay = ScriptDgramIo {
         script: Mutex::new(VecDeque::from([
             DgramAction::Packet(t2.clone(), Bytes::from_static(b"wrong")),
             DgramAction::Packet(t1.clone(), Bytes::from(vec![0u8; 2000])),
             DgramAction::Packet(t1.clone(), Bytes::from_static(b"ok")),
-            DgramAction::CloseAndEof(control.clone()),
+            DgramAction::Hang,
         ])),
         sent: Mutex::new(Vec::new()),
     };
     let outbound = Arc::new(ScriptedDatagram {
         fail: false,
         opens: AtomicU32::new(0),
-        // 出口脚本：回程一条，然后挂起
-        egress_script: vec![DgramAction::Packet(
-            EndpointRef::new("8.8.8.8", 53),
-            Bytes::from_static(b"back"),
-        )],
+        // 出口脚本：回程一条，然后置位控制链并关闭（回收口径终点——
+        // 脚本顺序即泵的服务顺序，同输入同观测，可离线重放）
+        egress_script: vec![
+            DgramAction::Packet(EndpointRef::new("8.8.8.8", 53), Bytes::from_static(b"back")),
+            DgramAction::CloseAndEof(control.clone()),
+        ],
     });
     let replies = Arc::new(Mutex::new(Vec::new()));
     let mut pending = PendingAssociation::new(
