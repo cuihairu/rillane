@@ -9,8 +9,9 @@ use serde_yaml::Value;
 use tracing::{debug, warn};
 
 use rillane_config::{
-    EgressConfig, EgressDescriptor, GroupMember, MatchCondition, PolicyGroup, RealityConfig,
-    RouteRule, RoutingConfig, Strategy, UrlTestConfig,
+    CompatibilityDiagnostic, EgressConfig, EgressDescriptor, GroupMember, MatchCondition, ObjectId,
+    PolicyGroup, RealityConfig, RouteRule, RoutingConfig, SourceId, SourceLocation, Strategy,
+    UrlTestConfig,
 };
 
 /// reality-opts YAML 块 → `RealityConfig`（G1-6 配置保留面）：键 kebab/snake
@@ -808,6 +809,12 @@ pub struct ClashConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "external-controller")]
     pub external_controller: Option<String>,
+    /// proxy-providers 原样捕获（RIL-007）：provider-only 输入的关键语义
+    /// 不得在解析期静默消失——进转换损失清单显式可见；完整 provider
+    /// 生命周期归 RIL-009/RIL-010
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(rename = "proxy-providers")]
+    pub proxy_providers: HashMap<String, Value>,
 }
 
 fn default_log_level() -> String {
@@ -824,6 +831,9 @@ pub struct ConversionReport {
     pub degraded_groups: Vec<(String, String)>,
     /// 被跳过的规则（规则名, 原因）：暂不支持的规则类型
     pub dropped_rules: Vec<(String, String)>,
+    /// 未吸收的整块输入（块名, 原因）（RIL-007）：如 proxy-providers——
+    /// 关键语义整块缺失必须显式可见，不得伪装成完整配置转换成功
+    pub unsupported_blocks: Vec<(String, String)>,
 }
 
 impl ConversionReport {
@@ -832,6 +842,7 @@ impl ConversionReport {
         self.dropped_nodes.is_empty()
             && self.degraded_groups.is_empty()
             && self.dropped_rules.is_empty()
+            && self.unsupported_blocks.is_empty()
     }
 
     /// 人可读的损失清单（逐行）；空报告返回「无损失」
@@ -865,7 +876,60 @@ impl ConversionReport {
                     .map(|(name, reason)| format!("  规则 {name}: {reason}")),
             );
         }
+        if !self.unsupported_blocks.is_empty() {
+            lines.push(format!("未支持块 {} 个:", self.unsupported_blocks.len()));
+            lines.extend(
+                self.unsupported_blocks
+                    .iter()
+                    .map(|(name, reason)| format!("  块 {name}: {reason}")),
+            );
+        }
         lines.join("\n")
+    }
+
+    /// 收敛为规范兼容诊断（RIL-002 契约，RIL-007 样本验收口径）：每条
+    /// 损失携带稳定码（`compat.unsupported`/`compat.lossy`）并定位到来源
+    /// 对象——节点 `proxies/<显示名>`、组 `proxy-groups/<名>`、规则
+    /// `rules/<rule-N>`、整块 `blocks/<块名>`。转换期 local_id 以显示名
+    /// 暂代；稳定 ID 派生随 RIL-008 来源快照接入切换。
+    pub fn diagnostics(&self, source: &SourceId) -> Vec<CompatibilityDiagnostic> {
+        let mut diagnostics = Vec::new();
+
+        for (name, reason) in &self.dropped_nodes {
+            let id = ObjectId::new(source.clone(), name.clone());
+            diagnostics.push(CompatibilityDiagnostic::unsupported(
+                Some(id),
+                SourceLocation::new(source.clone(), format!("proxies/{name}")),
+                reason.clone(),
+            ));
+        }
+        for (name, reason) in &self.degraded_groups {
+            let id = ObjectId::new(source.clone(), name.clone());
+            diagnostics.push(CompatibilityDiagnostic::lossy(
+                Some(id),
+                SourceLocation::new(source.clone(), format!("proxy-groups/{name}")),
+                None,
+                reason.clone(),
+            ));
+        }
+        for (name, reason) in &self.dropped_rules {
+            let id = ObjectId::new(source.clone(), name.clone());
+            diagnostics.push(CompatibilityDiagnostic::unsupported(
+                Some(id),
+                SourceLocation::new(source.clone(), format!("rules/{name}")),
+                reason.clone(),
+            ));
+        }
+        for (name, reason) in &self.unsupported_blocks {
+            let id = ObjectId::new(source.clone(), name.clone());
+            diagnostics.push(CompatibilityDiagnostic::unsupported(
+                Some(id),
+                SourceLocation::new(source.clone(), format!("blocks/{name}")),
+                reason.clone(),
+            ));
+        }
+
+        diagnostics
     }
 }
 
@@ -991,6 +1055,19 @@ impl ClashConverter {
 
         // 转换规则为路由规则
         let rules = self.convert_rules_to_routing_rules(&clash_config.rules, &mut report)?;
+
+        // proxy-providers 整块未吸收必须显式可见（RIL-007）：provider-only
+        // 输入的关键语义不得静默消失；完整 provider 生命周期归 RIL-009/
+        // RIL-010。宽松模式进清单随行返回，严格模式据此整体拒绝
+        if !clash_config.proxy_providers.is_empty() {
+            report.unsupported_blocks.push((
+                "proxy-providers".to_string(),
+                format!(
+                    "{} 个 provider 未吸收（provider 生命周期归 RIL-009/RIL-010，当前不支持）",
+                    clash_config.proxy_providers.len()
+                ),
+            ));
+        }
 
         // 严格导入：任何语义损失都拒绝，错误携带完整损失清单
         if self.strict && !report.is_empty() {

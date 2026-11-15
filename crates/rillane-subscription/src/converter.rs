@@ -479,6 +479,7 @@ impl SubscriptionConverter {
             bind_address: None,
             log_level: "info".to_string(),
             external_controller: None,
+            proxy_providers: Default::default(),
         };
 
         // 使用 Clash 转换器

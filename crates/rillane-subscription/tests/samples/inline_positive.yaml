@@ -1,0 +1,48 @@
+# RIL-007 订阅兼容样本：inline 完整配置正例（已脱敏）
+# 所有凭据为占位值（REDACTED-SAMPLE / 全零 UUID），地址用 RFC 5737/2606 文档段。
+# 预期：宽松/严格导入均无损——3 节点、2 组（select + url-test 300 秒）、3 规则。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-ss
+    type: ss
+    server: 203.0.113.10
+    port: 8388
+    cipher: aes-256-gcm
+    password: "REDACTED-SAMPLE"
+    udp: true
+  - name: sample-vmess
+    type: vmess
+    server: node1.example.com
+    port: 443
+    uuid: "00000000-0000-0000-0000-000000000000"
+    alterId: 0
+    cipher: auto
+    tls: true
+    servername: node1.example.com
+  - name: sample-trojan
+    type: trojan
+    server: 203.0.113.20
+    port: 443
+    password: "REDACTED-SAMPLE"
+    sni: node2.example.com
+    udp: true
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - sample-ss
+      - sample-vmess
+      - sample-trojan
+  - name: AUTO
+    type: url-test
+    proxies:
+      - sample-ss
+      - sample-vmess
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+rules:
+  - DOMAIN-SUFFIX,example.com,PROXY
+  - IP-CIDR,10.0.0.0/8,DIRECT
+  - MATCH,PROXY

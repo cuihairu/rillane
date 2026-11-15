@@ -1,0 +1,23 @@
+# RIL-007 订阅兼容样本：provider-only 输入（已脱敏）
+# 预期（RIL-009 接入前的诚实口径）：节点零吸收；proxy-providers 整块进
+# 未支持清单（宽松可见/严格拒绝），不得伪装成完整配置转换成功。
+# URL 不带任何 token/查询凭证（脱敏红线）。
+mixed-port: 7890
+proxies: []
+proxy-providers:
+  sample-provider:
+    type: http
+    url: https://provider.example.com/sub.yaml
+    interval: 3600
+    path: ./providers/sample.yaml
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+rules:
+  - MATCH,PROXY
