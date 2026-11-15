@@ -21,6 +21,7 @@ pub mod net_mark;
 pub mod outbound;
 pub mod performance;
 pub mod plan;
+pub mod pool;
 pub mod quality;
 pub mod schedule;
 pub mod scoring;
@@ -63,6 +64,11 @@ pub use scoring::{
     MetricContribution, MetricRefs, ObjectiveWeights, ScenarioProfile, ScenarioScorer,
     ScoreError, ScoreInputs, ScoreReport, SloSpec, SloUnknownReason, SloVerdict, StayReason,
     SwitchDecision, CODE_PROFILE_INVALID, CODE_WEIGHTS_INVALID,
+};
+pub use pool::{
+    Acquire, ConnPool, EvictionReason, PooledConn, PoolError, PoolLimits, PoolStats,
+    RecycledConn, TransportReuse, WarmDecision, CODE_POOL_CAPACITY_NODE,
+    CODE_POOL_CAPACITY_TOTAL, CODE_POOL_LIMITS_INVALID, CODE_POOL_UNSUPPORTED,
 };
 
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.
