@@ -31,7 +31,7 @@ pub use direct::DirectConnector;
 pub use http::HttpConnector;
 pub use hysteria2::Hysteria2Connector;
 pub use shadowsocks::{ShadowsocksConnector, ShadowsocksUdpConnector};
-pub use socks5::Socks5Connector;
+pub use socks5::{Socks5Connector, Socks5UdpConnector};
 pub use trojan::{TrojanConnector, TrojanUdpConnector};
 pub use vless::{VlessConnector, VlessUdpConnector};
 pub use vmess::{VmessConnector, VmessSecurity, VmessUdpConnector};

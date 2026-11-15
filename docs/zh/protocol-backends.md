@@ -80,19 +80,27 @@ armv7-ohos 桩）在对应小节如实记录。
 
 ## socks5
 
-- **结论**：选库 `tokio-socks`
+- **结论**：选库 `tokio-socks`（TCP 面）；UDP 面自写——0.5.2 源码仅
+  error/io/lib/tcp，无 udp 模块，无可选库（结论留证后自写，RIL-132）
 - **版本**：要求 `0.5`，lock 实测 0.5.2
 - **许可**：MIT
-- **平台**：全平台（tokio 兼容面，纯 Rust）
+- **平台**：全平台（tokio 兼容面，纯 Rust；UDP 面同栈）
 - **公开 API**：`tokio_socks::TcpStream`（CONNECT + 用户名/密码认证）；
-  包装为 `Socks5Connector`（crates/rillane-protocols/src/outbound/socks5.rs）
-- **旁路**：库自带拨号——不能旁路其内部 socket 建立；传输池/拨号策略
-  与库内建连不可组合（如实记录）
+  包装为 `Socks5Connector`；UDP 面自写 `Socks5UdpConnector`/`Socks5UdpRelay`
+  （RFC 1928 §6 ASSOCIATE + §7 数据报帧头，同文件 outbound/socks5.rs）
+- **旁路**：TCP 面库自带拨号——不能旁路其内部 socket 建立；传输池/拨号
+  策略与库内建连不可组合（如实记录）；UDP 面自写——控制流与数据报
+  socket 全在本仓，可组合
 - **取消**：库 `connect` 无取消参数——取消面在超时与任务丢弃层，库内
-  建连不可中断（如实记录）
-- **统计**：库无观测点——失败以 io::Error 形态透出（observed 口径）
-- **复用**：无连接池组合——每次 CONNECT 独立建连，不支持预热
-- UDP：不据此承诺出站 SOCKS5 UDP relay（目录 udp=false）。
+  建连不可中断（如实记录）；UDP 面控制流随 relay 生命周期持有，drop
+  即关闭 ASSOCIATE（RFC 1928 §7：控制流关闭即中继失效，对端可观测 EOF）
+- **统计**：库无观测点——失败以 io::Error 形态透出（observed 口径）；
+  UDP 面带来源校验/分片丢弃计数（foreign_dropped/frag_dropped）与丢弃日志
+- **复用**：无连接池组合——每次 CONNECT 独立建连，不支持预热；UDP 面经
+  `from_connector` 复用 TCP 连接器同节点配置（地址/凭据一致）
+- UDP：出站 UDP ASSOCIATE 自写面已交付（目录 udp=true）——tokio-socks
+  0.5.2 无 UDP 模块，无可选库结论留证后自写；来源验证（只接受中继端点
+  数据报）、FRAG≠0 丢弃、控制流生命周期绑定均有真实对端契约测试。
 
 ## http
 

@@ -103,7 +103,9 @@ pub const CATALOG: &[CatalogEntry] = &[
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#socks5",
         },
-        udp: false, // 不据此承诺出站 SOCKS5 UDP relay（PROTOCOLS.md 同口径）
+        // RIL-132：出站 UDP ASSOCIATE 自写面（tokio-socks 无 UDP 面——
+        // 选库结论留证于评估记录）
+        udp: true,
         backend: Backend::Library {
             crate_name: "tokio-socks",
             version_req: "0.5",
@@ -417,7 +419,7 @@ mod tests {
     /// UDP 能力列与构建期扫描口径一致（§3.1 支持集）。
     #[test]
     fn admitted_requires_evidence_and_backend() {
-        const UDP_SUPPORTED: [&str; 7] = [
+        const UDP_SUPPORTED: [&str; 8] = [
             "direct",
             "shadowsocks",
             "wireguard",
@@ -425,6 +427,7 @@ mod tests {
             "vmess",
             "vless",
             "trojan",
+            "socks5",
         ];
         for e in CATALOG {
             match e.registration {

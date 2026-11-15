@@ -431,8 +431,9 @@ HTTP MCP、远程公开管理、Android 按应用独立路由、iOS 受管 Per-A
   交付：TLS/WS/gRPC/H2/HTTPUpgrade、UoT/XUDP/多路复用；补齐实际缺口；完成后端评估后，通过统一适配器提供本项能力。验收：版本/角色/合法组合明确，与真实对端验证成功、失败、取消、资源释放、统计及平台旁路；不支持组合明确拒绝，订阅涉及的字段双向转换有样本；无可用后端结论留证后才允许自写。
 - [ ] **RIL-131｜P1｜Shadowsocks 算法矩阵 接入与验收**；依赖：RIL-104。
   交付：核实现有库算法，包含 SS2022 候选；已有能力复用不重写；完成后端评估后，通过统一适配器提供本项能力。验收：版本/角色/合法组合明确，与真实对端验证成功、失败、取消、资源释放、统计及平台旁路；不支持组合明确拒绝，订阅涉及的字段双向转换有样本；无可用后端结论留证后才允许自写。
-- [ ] **RIL-132｜P1｜SOCKS5 出站 UDP 接入与验收**；依赖：RIL-104。
+- [x] **RIL-132｜P1｜SOCKS5 出站 UDP 接入与验收**；依赖：RIL-104。
   交付：标准 UDP ASSOCIATE 与来源验证，区别入口现有能力；完成后端评估后，通过统一适配器提供本项能力。验收：版本/角色/合法组合明确，与真实对端验证成功、失败、取消、资源释放、统计及平台旁路；不支持组合明确拒绝，订阅涉及的字段双向转换有样本；无可用后端结论留证后才允许自写。
+  完成（commit `feat: add socks5 outbound udp associate`）：选库评估留证——tokio-socks 0.5.2 源码仅 error/io/lib/tcp 无 udp 模块，无可选库结论先录两语评估记录（protocol-backends.md#socks5），再按 RIL-104 阶梯自写；`Socks5UdpConnector`/`Socks5UdpRelay`（outbound/socks5.rs）——RFC 1928 §3 方法协商、RFC 1929 认证子协商、§6 ASSOCIATE（BND 不指定回退代理地址）、§7 数据报组帧/解析（ATYP 1/3/4）、来源验证（非中继端点数据报丢弃并计数 foreign_dropped）、FRAG≠0 不重组丢弃计数 frag_dropped、控制流随 relay 生命周期持有（drop 即关闭 ASSOCIATE，对端可观测 EOF）；目录 socks5 udp=true（UDP_SUPPORTED 增至 8）、runtime build_udp_connectors 装配 + 扫描列表同步；与入口能力区别在案（入口 SOCKS5 UDP 是入站 strict_udp_source 面，本项是出站 ASSOCIATE 面）。验收：与真实 RFC 1928 对端（完整实现的服务器，非 mock）6 契约测试——成功往返（IP/域名目标、文本/二进制载荷）、失败（ASSOCIATE REP 错误码点名透传）、认证（凭据正确放行/错误 status 0x01 透传）、取消（不可达代理失败面点名地址）、资源释放（relay drop → 对端 2s 内观测控制流 EOF）、来源验证与分片丢弃（噪声注入后仅合法回显下传）；不支持组合（域名超长/未知 ATYP）明确拒绝；订阅双向转换样本 `socks5_subscription_fields_convert_both_ways`（clash socks5 节点 → IR 逐字段断言 + IR serde 往返一致，样本脱敏守卫通过）。测试：契约 6/6 + 样本 7/7，各 10× 重复全过；clippy -D warnings exit 0；全仓 cargo test --workspace --all-features 82 测试二进制全绿 exit 0。
 - [ ] **RIL-133｜P1｜Hysteria2 UDP 接入与验收**；依赖：RIL-104。
   交付：适配具有数据报公开 API 的后端，TCP/UDP 独立验收；完成后端评估后，通过统一适配器提供本项能力。验收：版本/角色/合法组合明确，与真实对端验证成功、失败、取消、资源释放、统计及平台旁路；不支持组合明确拒绝，订阅涉及的字段双向转换有样本；无可用后端结论留证后才允许自写。
 - [ ] **RIL-134｜P2｜Shadowsocks 服务端 接入与验收**；依赖：RIL-104。

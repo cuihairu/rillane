@@ -294,6 +294,49 @@ fn ruleset_logic_sample_converts_with_tracked_references() {
     assert_eq!(direct.provider_type, "file");
 }
 
+// ---------- RIL-132：SOCKS5 出站——订阅字段双向转换样本 ----------
+
+#[test]
+fn socks5_subscription_fields_convert_both_ways() {
+    // 正向：clash 订阅 → IR（带认证与匿名各一，字段逐项断言）
+    let (config, report) = loose("socks5_auth.yaml");
+    assert!(
+        report.is_empty(),
+        "socks5 样本必须零损失，实际: {}",
+        report.summary()
+    );
+    let names: Vec<&str> = config.egress.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["sample-socks5-auth", "sample-socks5-plain"]);
+    let specs: Vec<rillane_config::EgressConfig> =
+        config.egress.iter().map(|e| e.spec.clone()).collect();
+    assert_eq!(
+        specs[0],
+        rillane_config::EgressConfig::Socks5 {
+            server: "203.0.113.30".into(),
+            port: 1080,
+            username: Some("sample-user".into()),
+            password: Some("REDACTED-SAMPLE".into()),
+        }
+    );
+    assert_eq!(
+        specs[1],
+        rillane_config::EgressConfig::Socks5 {
+            server: "socksgw.example.com".into(),
+            port: 1081,
+            username: None,
+            password: None,
+        }
+    );
+
+    // 反向：IR → serde → IR（序列化不丢字段，往返逐字段一致）
+    for spec in &specs {
+        let json = serde_json::to_string(spec).expect("IR 序列化");
+        let back: rillane_config::EgressConfig = serde_json::from_str(&json).expect("IR 反序列化");
+        assert_eq!(&back, spec, "serde 往返必须逐字段一致");
+    }
+}
+
+// ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
 // ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
 
 #[test]

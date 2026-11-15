@@ -56,16 +56,16 @@ Every admitted section carries these fields (the contract test checks each one; 
 
 ## socks5
 
-- **Conclusion**: selected library `tokio-socks`
+- **Conclusion**: selected library `tokio-socks` (TCP face); UDP face self-written — the 0.5.2 sources contain only error/io/lib/tcp, no udp module, so no selectable library exists (conclusion recorded before self-writing, RIL-132)
 - **Version**: requirement `0.5`, lock-resolved 0.5.2
 - **License**: MIT
-- **Platforms**: all platforms (tokio-compatible, pure Rust)
-- **Public API**: `tokio_socks::TcpStream` (CONNECT + username/password auth); wrapped as `Socks5Connector` (crates/rillane-protocols/src/outbound/socks5.rs)
-- **Bypass**: the library owns dialing — its internal socket establishment cannot be bypassed; transport pool / dial policy do not compose with library-owned connects (recorded honestly)
-- **Cancel**: the library's `connect` takes no cancellation — cancellation lives at the timeout and task-drop layers; in-library establishment is uninterruptible (recorded honestly)
-- **Stats**: the library has no observation points — failures surface as io::Error (observed semantics)
-- **Reuse**: no pool composition — each CONNECT dials independently; no prewarm
-- UDP: no outbound SOCKS5 UDP relay is promised (catalog udp=false).
+- **Platforms**: all platforms (tokio-compatible, pure Rust; UDP face on the same stack)
+- **Public API**: `tokio_socks::TcpStream` (CONNECT + username/password auth); wrapped as `Socks5Connector`; UDP face self-written as `Socks5UdpConnector`/`Socks5UdpRelay` (RFC 1928 §6 ASSOCIATE + §7 datagram framing, same file outbound/socks5.rs)
+- **Bypass**: TCP face — the library owns dialing, its internal socket establishment cannot be bypassed; transport pool / dial policy do not compose with library-owned connects (recorded honestly); UDP face — self-written, control stream and datagram socket both in-repo and composable
+- **Cancel**: TCP face — the library's `connect` takes no cancellation; cancellation lives at the timeout and task-drop layers; in-library establishment is uninterruptible (recorded honestly); UDP face — the control stream is held for the relay's lifetime and drop closes the ASSOCIATE (RFC 1928 §7: closing the control stream invalidates the relay, visible to the server as EOF)
+- **Stats**: TCP face — the library has no observation points, failures surface as io::Error (observed semantics); UDP face — source-verification and fragment-drop counters (foreign_dropped/frag_dropped) plus drop logs
+- **Reuse**: no pool composition — each CONNECT dials independently; no prewarm; the UDP face reuses the TCP connector's node config via `from_connector` (address/credentials consistent)
+- UDP: the outbound UDP ASSOCIATE self-written face is delivered (catalog udp=true) — tokio-socks 0.5.2 has no UDP module; the no-selectable-library conclusion was recorded before self-writing; source verification (only datagrams from the relay endpoint), FRAG≠0 drop, and control-stream lifetime binding all have real-peer contract tests.
 
 ## http
 

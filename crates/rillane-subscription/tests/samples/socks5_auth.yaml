@@ -1,0 +1,21 @@
+# RIL-132 订阅兼容样本：SOCKS5 出站节点（已脱敏）
+# 凭据为占位值（REDACTED-SAMPLE），地址用 RFC 5737/2606 文档段。
+# 预期：宽松/严格导入均无损——2 节点（带认证 + 匿名）。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-socks5-auth
+    type: socks5
+    server: 203.0.113.30
+    port: 1080
+    username: sample-user
+    password: "REDACTED-SAMPLE"
+    udp: true
+  - name: sample-socks5-plain
+    type: socks5
+    server: socksgw.example.com
+    port: 1081
+    udp: false
+proxy-groups: []
+rules: []

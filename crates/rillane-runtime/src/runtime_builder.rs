@@ -54,9 +54,9 @@ use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use rillane_protocols::{
     DirectConnector, HttpConnector, HttpIngress, Hysteria2Connector, MixedIngress,
     ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress,
-    TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool, TrojanConnector,
-    TrojanUdpConnector, VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity,
-    VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
+    Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool,
+    TrojanConnector, TrojanUdpConnector, VlessConnector, VlessUdpConnector, VmessConnector,
+    VmessSecurity, VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -2758,6 +2758,18 @@ fn build_udp_connectors(
     for desc in descriptors {
         let connector: Option<Arc<dyn EgressUdpConnector>> = match &desc.spec {
             EgressConfig::Direct => Some(Arc::new(rillane_core::udp::DirectUdpConnector)),
+            EgressConfig::Socks5 {
+                server,
+                port,
+                username,
+                password,
+            } => {
+                // 出站 UDP ASSOCIATE（RIL-132）：与 TCP 面同一节点配置
+                // （地址/凭据两侧一致）；无 UDP 能力声明留在目录与扫描面
+                let conn =
+                    Socks5Connector::new(server.clone(), *port, username.clone(), password.clone());
+                Some(Arc::new(Socks5UdpConnector::from_connector(&conn)))
+            }
             EgressConfig::Shadowsocks {
                 server,
                 port,
@@ -2983,7 +2995,7 @@ fn scan_udp_capability(
         anyhow::bail!(
             "udp.enabled 但以下出站节点不支持 UDP 转发（udp-relay-path.md §3.1 能力表）:\n\
              {detail}\n\
-             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard / reject / vmess / vless / trojan（均仅 network=tcp；hysteria2 归 V2，载具 quinn 未决）\n\
+             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard / reject / vmess / vless / trojan / socks5（vmess/vless/trojan 仅 network=tcp；hysteria2 归 V2，载具 quinn 未决）\n\
              请更换这些节点的出站类型，或将 udp.enabled 关闭并移除 UDP 相关规则"
         );
     }
