@@ -58,6 +58,7 @@
 | GET | `/trace/flow?id=` | 单流完整轨迹或显式缺席答复（`found:false` + 稳定码） | `trace flow` |
 | GET | `/trace/flow.svg?id=` | 单流路径 SVG 图（与 JSON 答复同一查询快照；标注路径层/时间/缺口） | `trace flow --svg` |
 | GET | `/trace/events?id=&from_seq=&limit=` | 事件增量读取（未知/缺席 ID → 404 + 稳定码） | `trace events` |
+| POST | `/explain` | 纯路由推演（生产求值器 + 冻结快照，零副作用；非法输入 → 400 + 稳定码） | `explain` |
 | GET | `/probe` | 探测作业列表（限额 + 作业快照） | `probe list` |
 | GET | `/probe/result?id=` | 单作业测量快照，或显式缺席答复（`found:false` + 稳定码） | `probe result` |
 | POST | `/probe` | 发起探测作业（目标必须在服务端 probe 范围登记过） | `probe submit` |
@@ -86,6 +87,7 @@
 | `diagnose` | 一键诊断信息收集（生成诊断目录） | 控制面 + 本机快照 |
 | `trace` | 逐连接轨迹查询（list / 单流详情 / 事件增量；显式缺席 = 退出码 2） | 控制面 `/trace/*` |
 | `probe` | 主动探测作业（submit/cancel/result/list；只展示测量，不推断机场内部路径） | 控制面 `/probe*` |
+| `explain` | 纯路由推演（「这个目标为什么会走这里」——生产求值器 + 冻结快照，零副作用） | 控制面 `/explain` |
 | `mtls` | Mesh mTLS 证书工具（init-ca/issue/rotate/bundle-ca/rotate-ca/revoke） | 离线（revoke status 例外走控制面） |
 
 ## 各命令旗标
@@ -213,6 +215,20 @@ rillanectl probe list [--json]
 显式发起的主动探测作业，目标限于操作员登记表（RIL-061）。目标必须在守护进程 `probe.targets` 范围内（只来自操作员本地配置——订阅文本永远无法扩范围）；范围外提交以稳定码拒绝（`probe.target.out_of_scope`）。配置无 `probe` 块时探测面整体关闭，所有端点答 `503 probe.disabled`——无授权无网络副作用。测量只含执行器实际观测：`failure`（稳定码 + 说明）或 null、`rtt_ms`（无回应即 null——绝不造数）、UDP 回显 `sent`/`replies`/`loss_ratio`/`payload_len`（丢包率由回应计数算得）。测量不含任何机场内部路径推断。代理握手探测本版不提供（egress connector 是流级 forward 面，无「拨号并测握手」形态），CLI 与配置面均无 handshake 种类。默认文本输出；`--json` 原样打印版本化信封（`schema_version=1`）。
 
 退出码：`0` 有答；`1` 连接、被拒或用法错误；`2` 显式缺席（`probe result` 未知作业 ID）。
+
+### explain
+
+```bash
+rillanectl explain <host> --port <N> --proto tcp|udp|quic
+                [--endpoint <base URL>] [--ingress <ID>] [--generation <G>]
+                [--domain-source unknown|user_provided|dns_observed|sniffed]
+                [--process-name <N>] [--process-path <P>]
+                [--annotation k=v]... [--json]
+```
+
+对守护进程生产求值器的纯路由推演（RIL-065）：回答「这个目标为什么会走这里」——服务端把当前组状态冻结成快照并原样重演规则，**零副作用**（不做 DNS 解析、不拨号、不查 OS 身份）。调用方未提供的证据（进程名/路径、注解）按证据缺失逐项评估并逐缺口列出；受缺失证据影响的结论标注条件性，不冒充确定。非确定性策略（`random`/`weighted`/`round_robin`）只报健康候选池，绝不伪造选中项。文本输出列出目标、确定性、命中来源、预测出口（组链 → 节点）、证据缺口与说明；`--json` 原样打印版本化信封（`schema_version=1`）。用法非法（`--proto smtp`、未知 `--domain-source`、`--annotation` 缺 `=`）在客户端即拒——请求不发出去。本命令经共享 `rillane-app` 边界——与未来 UI/MCP 表面共用同一闭合操作集。
+
+退出码：`0` 有答；`1` 连接、用法或服务端拒绝输入错误（服务端对畸形输入答 `400 explain.input.invalid`）。
 
 ### mtls
 

@@ -169,6 +169,7 @@ impl ControlPlane {
             (Method::GET, "/probe/result") => self.handle_probe_result(req).await,
             (Method::POST, "/probe") => self.handle_probe_submit(req).await,
             (Method::POST, "/probe/cancel") => self.handle_probe_cancel(req).await,
+            (Method::POST, "/explain") => self.handle_explain(req).await,
             (Method::GET, "/metrics") => self.handle_metrics().await,
             (Method::GET, "/udp/stats") => self.handle_udp_stats().await,
             (Method::GET, "/egress/pool/stats") => self.handle_egress_pool_stats().await,
@@ -1702,6 +1703,33 @@ impl ControlPlane {
         }
     }
 
+    /// 纯路由推演（RIL-065 共享应用服务面）：生产求值器 + 调用时刻冻结
+    /// 快照（RIL-054）——无 DNS/拨号/OS 查询、零副作用。入体的不可信
+    /// 回显字段（host/generation/ingress/进程证据/注解）逐字段消毒后才
+    /// 进推演——输出由消毒后的输入构造，解释面干净出自构造。输入校验
+    /// 错误（proto 非法等）答 400 + `explain.input.invalid` 稳定码。
+    async fn handle_explain(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        let input: rillane_routing::ExplainInput = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let input = sanitize_explain_input(input);
+        match self.runtime.explain_route(&input) {
+            Ok(explanation) => json(
+                StatusCode::OK,
+                &serde_json::json!({
+                    "schema_version": 1u32,
+                    "explanation": explanation,
+                }),
+            ),
+            Err(err) => trace_error(
+                StatusCode::BAD_REQUEST,
+                "explain.input.invalid",
+                &err.to_string(),
+            ),
+        }
+    }
+
     /// Clash 兼容 `/proxies`：只读子集——每个出口名映射到 Clash 代理对象。
     /// `type` 取 direct/reject/其余按 egress_kind；`now`/`udp`/`history` 提供
     /// 面板所需最小字段。metacubexd/yacd 可直连读取。
@@ -2928,6 +2956,39 @@ fn probe_id_from_query(query: &str) -> Option<u64> {
             None
         }
     })
+}
+
+/// explain 入体不可信回显字段消毒（RIL-065）：host/generation/ingress/
+/// 进程证据/注解逐字段过不可信文本闸——推演输出由消毒后输入构造，
+/// 解释面不含零宽/控制字符注入面。域名与 IP 字面量原样通过（仅不可见
+/// 字符移除与有界截断——正常目标语义不受影响）。
+fn sanitize_explain_input(
+    mut input: rillane_routing::ExplainInput,
+) -> rillane_routing::ExplainInput {
+    input.generation_id = rillane_core::redact::sanitize_untrusted(&input.generation_id, 128);
+    if let Some(ingress) = input.ingress.as_mut() {
+        *ingress = rillane_core::redact::sanitize_untrusted(ingress, 128);
+    }
+    input.host = rillane_core::redact::sanitize_untrusted(&input.host, 256);
+    if let Some(process) = input.process.as_mut() {
+        if let Some(name) = process.name.as_mut() {
+            *name = rillane_core::redact::sanitize_untrusted(name, 256);
+        }
+        if let Some(path) = process.path.as_mut() {
+            *path = rillane_core::redact::sanitize_untrusted(path, 256);
+        }
+    }
+    input.annotations = input
+        .annotations
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                rillane_core::redact::sanitize_untrusted(&k, 64),
+                rillane_core::redact::sanitize_untrusted(&v, 256),
+            )
+        })
+        .collect();
+    input
 }
 
 /// 作业快照 → 冻结 JSON 形（schema_version=1：失败/测量分列，快照原样）
@@ -5168,8 +5229,20 @@ mod tests {
     /// 不得进标签）。返回首个违规（None = 干净）。
     fn metrics_label_hygiene_violation(body: &str) -> Option<String> {
         const ALLOWED: [&str; 14] = [
-            "direction", "egress", "from", "ingress", "mode", "name", "origin", "quantile",
-            "reason", "result", "source", "subscription", "to", "type",
+            "direction",
+            "egress",
+            "from",
+            "ingress",
+            "mode",
+            "name",
+            "origin",
+            "quantile",
+            "reason",
+            "result",
+            "source",
+            "subscription",
+            "to",
+            "type",
         ];
         for line in body.lines() {
             let Some((metric, rest)) = line.split_once('{') else {
@@ -5243,7 +5316,8 @@ mod tests {
     /// RIL-064：DELETE /trace/history 显式清历史——空采集器答 0（不造数），
     /// 信封版本化
     #[tokio::test]
-    async fn trace_history_delete_answers_versioned_purge_count() {        let runtime = build_runtime(false, false).await;
+    async fn trace_history_delete_answers_versioned_purge_count() {
+        let runtime = build_runtime(false, false).await;
         let cp = ControlPlane::new(runtime, None, true);
 
         let req = Request::builder()
@@ -5265,6 +5339,105 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["schema_version"], serde_json::json!(1));
         assert_eq!(v["purged"], serde_json::json!(0), "空采集器不造清除数");
+    }
+
+    /// RIL-065：POST /explain 纯推演——生产求值器 + 冻结快照，答复带
+    /// 输入摘要（重放锚）与确定性级别；不可信回显字段（host 控制字符）
+    /// 在入口消毒——解释面不含注入面
+    #[tokio::test]
+    async fn explain_answers_frozen_snapshot_explanation_with_sanitized_echo() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let body = serde_json::json!({
+            "generation_id": "gen-1",
+            "host": "ex\u{1}ample.com\u{200b}",
+            "port": 443,
+            "proto": "tcp",
+            "ingress": "mixed-in",
+        })
+        .to_string();
+        let (status, text) = post_probe(&cp, "/explain", &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["schema_version"], serde_json::json!(1));
+        let explanation = &v["explanation"];
+        // 输入摘要 = 64 hex 重放锚
+        let digest = explanation["input_digest"].as_str().expect("digest");
+        assert_eq!(digest.len(), 64, "SHA-256 摘要 {digest}");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        // 确定性级别显式（default 面 = Definitive——确定性策略 + 证据齐）
+        assert!(explanation["certainty"].is_string());
+        // 回显面消毒：host 控制字符/零宽不可见于解释
+        let echoed_host = explanation["target"]["host"].as_str().expect("host");
+        assert!(!echoed_host.contains('\u{1}'));
+        assert!(!echoed_host.contains('\u{200b}'));
+    }
+
+    /// RIL-065：proto 非法 → 400 + `explain.input.invalid`（推演面不猜）
+    #[tokio::test]
+    async fn explain_rejects_invalid_proto_with_stable_code() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let body = serde_json::json!({
+            "generation_id": "gen-1",
+            "host": "example.com",
+            "port": 443,
+            "proto": "smtp",
+        })
+        .to_string();
+        let (status, text) = post_probe(&cp, "/explain", &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["error"]["code"],
+            serde_json::json!("explain.input.invalid")
+        );
+        assert!(v["error"]["context"]
+            .as_str()
+            .unwrap_or("")
+            .contains("proto"));
+    }
+
+    /// RIL-065：POST 属 mutating——配置 admin_token 后推演同样走鉴权门
+    /// （模型侧无法无凭据触发推演）
+    #[tokio::test]
+    async fn explain_requires_admin_token_when_configured() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, Some("sekrit-token-1".to_string()), true);
+
+        let body = serde_json::json!({
+            "generation_id": "gen-1",
+            "host": "example.com",
+            "port": 443,
+            "proto": "tcp",
+        })
+        .to_string();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/explain")
+            .body(RespBody::new(Bytes::from(body)))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/explain")
+            .header("x-admin-token", "sekrit-token-1")
+            .body(RespBody::new(Bytes::from(
+                serde_json::json!({
+                    "generation_id": "gen-1",
+                    "host": "example.com",
+                    "port": 443,
+                    "proto": "tcp",
+                })
+                .to_string(),
+            )))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     /// RIL-060：参数非法逐项显式拒绝——limit=0（内核 query.page.invalid）、

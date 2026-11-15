@@ -11,6 +11,8 @@ use rcgen::{
     KeyPair, KeyUsagePurpose,
 };
 use reqwest::blocking::Client;
+use rillane_app::client::BlockingApp;
+use rillane_app::ops::{AppOperation, FlowEventsParams, FlowListFilter};
 use rillane_config::{
     EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor, RillaneConfig,
 };
@@ -172,6 +174,42 @@ enum Command {
         endpoint: Option<String>,
         #[command(subcommand)]
         command: ProbeCommand,
+    },
+    /// 纯路由推演（RIL-065：生产求值器 + 冻结快照——无 DNS/拨号/OS 查询，
+    /// 零副作用。退出码 0=成功 / 1=用法或连接错误）
+    Explain {
+        /// 控制面 base URL，如 http://127.0.0.1:9090
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// 目标主机（域名或 IP 字面量）
+        host: String,
+        /// 目标端口
+        #[arg(long)]
+        port: u16,
+        /// 传输协议字面归类：tcp | udp | quic
+        #[arg(long)]
+        proto: String,
+        /// 入口标识（诊断可读；不参与匹配）
+        #[arg(long)]
+        ingress: Option<String>,
+        /// 计划代际（重放锚；缺省 = 未钉代际，如实标注）
+        #[arg(long)]
+        generation: Option<String>,
+        /// 域名来源：unknown | user_provided | dns_observed | sniffed
+        #[arg(long, default_value = "unknown")]
+        domain_source: String,
+        /// 进程名证据（/proc/<pid>/comm 口径；缺省 = 证据缺失）
+        #[arg(long)]
+        process_name: Option<String>,
+        /// 可执行路径证据（缺省 = 证据缺失）
+        #[arg(long)]
+        process_path: Option<String>,
+        /// 显式注解 k=v（可多次；生产注解面逐键重放）
+        #[arg(long = "annotation")]
+        annotations: Vec<String>,
+        /// 输出版本化 JSON（schema_version=1 信封原样）
+        #[arg(long)]
+        json: bool,
     },
     /// 一键诊断信息收集（生成诊断目录，按范围选择快照/日志/配置）
     Diagnose {
@@ -1255,11 +1293,12 @@ fn main() -> Result<()> {
         }
         Command::Trace { endpoint, command } => {
             // RIL-060 Trace CLI：语法冻结（文本/版本化 JSON 双形态），
-            // 退出码 0=成功 / 1=用法或连接错误 / 2=显式缺席
+            // 退出码 0=成功 / 1=用法或连接错误 / 2=显式缺席。
+            // RIL-065 起取数走共享应用服务边界（rillane-app 操作集）。
             let config = RillaneConfig::load_from_path(&cli.config)?;
             let base = endpoint.unwrap_or_else(|| format!("http://{}", config.control.api_bind));
             let token = config.control.admin_token.clone();
-            let client = Client::new();
+            let app = BlockingApp::new(&base, token.as_deref()).map_err(app_error_to_anyhow)?;
             match command {
                 TraceCommand::List {
                     state,
@@ -1269,22 +1308,11 @@ fn main() -> Result<()> {
                     limit,
                     json,
                 } => {
-                    validate_trace_filter(state.as_deref(), origin.as_deref())?;
-                    let mut url = trace_query_url(&base, "/trace/flows")?;
-                    url.push_str(&format!("&offset={offset}&limit={limit}"));
-                    if let Some(state) = &state {
-                        url.push_str(&format!("&state={state}"));
-                    }
-                    if let Some(origin) = &origin {
-                        url.push_str(&format!("&origin={origin}"));
-                    }
-                    if let Some(generation) = &generation {
-                        url.push_str(&format!(
-                            "&generation={}",
-                            rillane_core::redact::sanitize_untrusted(generation, 128)
-                        ));
-                    }
-                    let v = trace_fetch_json(&client, token.as_deref(), &url)?;
+                    let state = parse_state_filter(state.as_deref())?;
+                    let origin = parse_origin_filter(origin.as_deref())?;
+                    let filter = FlowListFilter::new(state, origin, generation, offset, limit)
+                        .map_err(app_error_to_anyhow)?;
+                    let v = app_json(&app, AppOperation::FlowList(filter))?;
                     if let Some(absent) = trace_absence(&v) {
                         print!("{}", render_trace_absent("-", &absent));
                         std::process::exit(2);
@@ -1303,27 +1331,29 @@ fn main() -> Result<()> {
                     if want_svg {
                         // SVG 路径图导出（RIL-062）：正文原样输出；404 =
                         // 显式缺席（退出码 2），其余失败退出码 1
-                        let url = trace_svg_url(&base, &id)?;
-                        match trace_fetch_svg(&client, token.as_deref(), &url) {
-                            Ok(body) => print!("{body}"),
-                            Err((status, body)) => {
-                                let (code, ctx) = trace_svg_error_parts(&body);
-                                if status.as_u16() == 404 {
-                                    eprintln!("trace flow svg: 显式缺席（HTTP 404，{code}）: {ctx}");
+                        match app.execute(AppOperation::FlowSvg { id: id.clone() }) {
+                            Ok(reply) => {
+                                let body =
+                                    reply.text.ok_or_else(|| anyhow::anyhow!("SVG 正文缺席"))?;
+                                print!("{body}");
+                            }
+                            Err(err) => {
+                                let code = err.code.as_str();
+                                let ctx = err.context.as_str();
+                                if err.status == Some(404) {
+                                    eprintln!(
+                                        "trace flow svg: 显式缺席（HTTP 404，{code}）: {ctx}"
+                                    );
                                     std::process::exit(2);
                                 }
+                                let status = err.status.map(|s| s.to_string()).unwrap_or_default();
                                 eprintln!("trace flow svg: HTTP {status}（{code}）: {ctx}");
                                 std::process::exit(1);
                             }
                         }
                         return Ok(());
                     }
-                    let mut url = trace_query_url(&base, "/trace/flow")?;
-                    url.push_str(&format!(
-                        "&id={}",
-                        rillane_core::redact::sanitize_untrusted(&id, 256)
-                    ));
-                    let v = trace_fetch_json(&client, token.as_deref(), &url)?;
+                    let v = app_json(&app, AppOperation::FlowTrace { id: id.clone() })?;
                     if let Some(absent) = trace_absence(&v) {
                         if json {
                             println!("{}", serde_json::to_string_pretty(&v)?);
@@ -1344,40 +1374,41 @@ fn main() -> Result<()> {
                     limit,
                     json,
                 } => {
-                    let mut url = trace_query_url(&base, "/trace/events")?;
-                    url.push_str(&format!(
-                        "&id={}&from_seq={from_seq}&limit={limit}",
-                        rillane_core::redact::sanitize_untrusted(&id, 256)
-                    ));
-                    let result = trace_fetch_json_or_404(&client, token.as_deref(), &url);
-                    let v = match result {
-                        Ok(v) => v,
-                        Err(status) => {
-                            // 404 显式缺席：退出码 2（打印已拿到的错误信封）
-                            if status.as_u16() == 404 {
+                    let params = FlowEventsParams::new(id.clone(), from_seq, limit)
+                        .map_err(app_error_to_anyhow)?;
+                    let reply = match app.execute(AppOperation::FlowEvents(params)) {
+                        Ok(reply) => reply,
+                        Err(err) => {
+                            // 404 显式缺席：退出码 2（稳定码与说明投影）
+                            if err.status == Some(404) {
                                 eprintln!(
-                                    "trace events: 显式缺席（HTTP 404，query.flow.unknown 口径）"
+                                    "trace events: 显式缺席（HTTP 404，{} 口径）: {}",
+                                    err.code, err.context
                                 );
                                 std::process::exit(2);
                             }
-                            anyhow::bail!("控制面返回错误: {status}");
+                            return Err(app_error_to_anyhow(err));
                         }
                     };
+                    let v = reply
+                        .json()
+                        .ok_or_else(|| anyhow::anyhow!("控制面返回非 JSON 正文"))?;
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&v)?);
+                        println!("{}", serde_json::to_string_pretty(v)?);
                     } else {
-                        print!("{}", render_trace_events(&v));
+                        print!("{}", render_trace_events(v));
                     }
                 }
             }
         }
         Command::Probe { endpoint, command } => {
             // RIL-061 Probe CLI：语法冻结（文本/版本化 JSON 双形态），
-            // 退出码 0=成功 / 1=用法或连接错误 / 2=显式缺席
+            // 退出码 0=成功 / 1=用法或连接错误 / 2=显式缺席。
+            // RIL-065 起取数走共享应用服务边界（rillane-app 操作集）。
             let config = RillaneConfig::load_from_path(&cli.config)?;
             let base = endpoint.unwrap_or_else(|| format!("http://{}", config.control.api_bind));
             let token = config.control.admin_token.clone();
-            let client = Client::new();
+            let app = BlockingApp::new(&base, token.as_deref()).map_err(app_error_to_anyhow)?;
             match command {
                 ProbeCommand::Submit {
                     kind,
@@ -1388,119 +1419,163 @@ fn main() -> Result<()> {
                 } => {
                     // 客户端侧用法校验（kind/参数对应/addr 可解析——非法
                     // 值不发请求，退出码 1）
-                    let body = validate_probe_submit(
-                        &kind,
-                        host.as_deref(),
-                        addr.as_deref(),
-                        payload_len,
-                    )?;
-                    let (status, text) =
-                        probe_post(&client, token.as_deref(), &base, "/probe", &body)?;
-                    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-                    if !status.is_success() {
-                        // 400 稳定码信封（范围外/预算）/ 503 探测面关闭——
-                        // 用法或授权问题，退出码 1
-                        if json {
-                            println!("{}", serde_json::to_string_pretty(&v)?);
-                        } else {
-                            eprintln!("probe submit: {}", render_probe_error(&v, &text));
+                    let spec =
+                        build_probe_spec(&kind, host.as_deref(), addr.as_deref(), payload_len)?;
+                    // 400 稳定码信封（范围外/预算）/ 503 探测面关闭——
+                    // 用法或授权问题，退出码 1
+                    match app.execute(AppOperation::ProbeSubmit(spec)) {
+                        Err(err) => {
+                            let v = error_envelope_for_display(&err);
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(&v)?);
+                            } else {
+                                let raw = v.to_string();
+                                eprintln!("probe submit: {}", render_probe_error(&v, &raw));
+                            }
+                            std::process::exit(1);
                         }
-                        std::process::exit(1);
-                    }
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&v)?);
-                    } else {
-                        let id = v.get("job_id").and_then(|x| x.as_u64()).unwrap_or(0);
-                        println!("作业 {id} 已提交（probe result {id} 查询结果）");
+                        Ok(reply) => {
+                            let v = reply
+                                .json()
+                                .ok_or_else(|| anyhow::anyhow!("控制面返回非 JSON 正文"))?;
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(v)?);
+                            } else {
+                                let id = v.get("job_id").and_then(|x| x.as_u64()).unwrap_or(0);
+                                println!("作业 {id} 已提交（probe result {id} 查询结果）");
+                            }
+                        }
                     }
                 }
                 ProbeCommand::Cancel { id, json } => {
                     let id = parse_probe_id(&id)?;
-                    let (status, text) = probe_post(
-                        &client,
-                        token.as_deref(),
-                        &base,
-                        &format!("/probe/cancel?id={id}"),
-                        "",
-                    )?;
-                    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-                    if status.as_u16() == 404 {
-                        // 未知作业：显式缺席（退出码 2）
-                        if json {
-                            println!("{}", serde_json::to_string_pretty(&v)?);
-                        } else {
-                            eprintln!("probe cancel {id}: 显式缺席（probe.job.unknown）");
+                    match app.execute(AppOperation::ProbeCancel { id }) {
+                        Err(err) if err.status == Some(404) => {
+                            // 未知作业：显式缺席（退出码 2）
+                            if json {
+                                let v = error_envelope_for_display(&err);
+                                println!("{}", serde_json::to_string_pretty(&v)?);
+                            } else {
+                                eprintln!("probe cancel {id}: 显式缺席（{}）", err.code);
+                            }
+                            std::process::exit(2);
                         }
-                        std::process::exit(2);
-                    }
-                    if !status.is_success() {
-                        if json {
-                            println!("{}", serde_json::to_string_pretty(&v)?);
-                        } else {
-                            eprintln!("probe cancel: {}", render_probe_error(&v, &text));
+                        Err(err) => {
+                            let v = error_envelope_for_display(&err);
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(&v)?);
+                            } else {
+                                let raw = v.to_string();
+                                eprintln!("probe cancel: {}", render_probe_error(&v, &raw));
+                            }
+                            std::process::exit(1);
                         }
-                        std::process::exit(1);
-                    }
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&v)?);
-                    } else {
-                        let verdict = v.get("verdict").and_then(|x| x.as_str()).unwrap_or("-");
-                        println!("作业 {id} 取消裁决: {verdict}");
+                        Ok(reply) => {
+                            let v = reply
+                                .json()
+                                .ok_or_else(|| anyhow::anyhow!("控制面返回非 JSON 正文"))?;
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(v)?);
+                            } else {
+                                let verdict =
+                                    v.get("verdict").and_then(|x| x.as_str()).unwrap_or("-");
+                                println!("作业 {id} 取消裁决: {verdict}");
+                            }
+                        }
                     }
                 }
                 ProbeCommand::Result { id, json } => {
                     let id = parse_probe_id(&id)?;
-                    let (status, text) = probe_fetch(
-                        &client,
-                        token.as_deref(),
-                        &base,
-                        &format!("/probe/result?id={id}"),
-                    )?;
-                    if status.as_u16() == 404 {
-                        // 显式缺席（probe.job.unknown）：退出码 2
-                        if json {
-                            println!("{text}");
-                        } else {
-                            let v: serde_json::Value =
-                                serde_json::from_str(&text).unwrap_or_default();
-                            let note = v
-                                .get("absence")
-                                .and_then(|a| a.get("note"))
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("");
-                            eprintln!("probe result {id}: 显式缺席（probe.job.unknown）{note}");
+                    match app.execute(AppOperation::ProbeResult { id }) {
+                        Err(err) if err.status == Some(404) => {
+                            // 显式缺席（probe.job.unknown）：退出码 2
+                            if json {
+                                let v = error_envelope_for_display(&err);
+                                println!("{}", serde_json::to_string_pretty(&v)?);
+                            } else {
+                                eprintln!(
+                                    "probe result {id}: 显式缺席（{}）{}",
+                                    err.code, err.context
+                                );
+                            }
+                            std::process::exit(2);
                         }
-                        std::process::exit(2);
-                    }
-                    if !status.is_success() {
-                        eprintln!("probe result: 控制面返回错误: {status}: {text}");
-                        std::process::exit(1);
-                    }
-                    let v: serde_json::Value = serde_json::from_str(&text)?;
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&v)?);
-                    } else {
-                        print!("{}", render_probe_job(&v));
+                        Err(err) => {
+                            eprintln!("probe result: {}", app_error_to_anyhow(err));
+                            std::process::exit(1);
+                        }
+                        Ok(reply) => {
+                            let v = reply
+                                .json()
+                                .ok_or_else(|| anyhow::anyhow!("控制面返回非 JSON 正文"))?;
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(v)?);
+                            } else {
+                                print!("{}", render_probe_job(v));
+                            }
+                        }
                     }
                 }
                 ProbeCommand::List { json } => {
-                    let (status, text) = probe_fetch(&client, token.as_deref(), &base, "/probe")?;
-                    if !status.is_success() {
-                        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-                        if json {
-                            println!("{}", serde_json::to_string_pretty(&v)?);
-                        } else {
-                            eprintln!("probe list: {}", render_probe_error(&v, &text));
+                    match app.execute(AppOperation::ProbeList) {
+                        Err(err) => {
+                            // 探测面关闭/用法问题：退出码 1（信封原样投影）
+                            let v = error_envelope_for_display(&err);
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(&v)?);
+                            } else {
+                                let raw = v.to_string();
+                                eprintln!("probe list: {}", render_probe_error(&v, &raw));
+                            }
+                            std::process::exit(1);
                         }
-                        std::process::exit(1);
-                    }
-                    let v: serde_json::Value = serde_json::from_str(&text)?;
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&v)?);
-                    } else {
-                        print!("{}", render_probe_list(&v));
+                        Ok(reply) => {
+                            let v = reply
+                                .json()
+                                .ok_or_else(|| anyhow::anyhow!("控制面返回非 JSON 正文"))?;
+                            if json {
+                                println!("{}", serde_json::to_string_pretty(v)?);
+                            } else {
+                                print!("{}", render_probe_list(v));
+                            }
+                        }
                     }
                 }
+            }
+        }
+        Command::Explain {
+            endpoint,
+            host,
+            port,
+            proto,
+            ingress,
+            generation,
+            domain_source,
+            process_name,
+            process_path,
+            annotations,
+            json,
+        } => {
+            // RIL-065 Explain CLI：生产求值器 + 冻结快照（无 DNS/拨号，
+            // 零副作用）。退出码 0=成功 / 1=用法或连接错误
+            let config = RillaneConfig::load_from_path(&cli.config)?;
+            let base = endpoint.unwrap_or_else(|| format!("http://{}", config.control.api_bind));
+            let token = config.control.admin_token.clone();
+            let app = BlockingApp::new(&base, token.as_deref()).map_err(app_error_to_anyhow)?;
+            let cli_args = ExplainCliArgs {
+                ingress: ingress.as_deref(),
+                generation: generation.as_deref(),
+                domain_source: &domain_source,
+                process_name: process_name.as_deref(),
+                process_path: process_path.as_deref(),
+                annotations: &annotations,
+            };
+            let input = build_explain_input(&host, port, &proto, &cli_args)?;
+            let v = app_json(&app, AppOperation::Explain(Box::new(input)))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                print!("{}", render_explanation(&v));
             }
         }
         Command::Mtls { command } => match command {
@@ -2623,118 +2698,62 @@ fn fetch_udp_stats(client: &Client, token: Option<&str>, base: &str) -> Option<U
     resp.json::<UdpStatsDto>().ok()
 }
 
-// Trace CLI 纯辅助（RIL-060）：URL 拼装/参数校验/渲染均抽纯函数
-// 便于单测——网络与进程退出只在 main 分发臂发生。
+// 应用服务边界辅助（RIL-065）：trace/probe/explain 取数统一走
+// rillane-app 操作集——URL 拼装/令牌注入/信封解码内聚在 BlockingApp，
+// 这里只留边界答复到 CLI 形态的投影（错误 anyhow 化、信封提取、
+// 枚举参数解析与推演输入构造——全是纯函数，网络与进程退出只在
+// main 分发臂发生）。
 
-/// 拼装 Trace 查询 URL（base 去尾斜杠 + path + `?`，调用方续接参数）
-fn trace_query_url(base: &str, path: &str) -> Result<String> {
-    let trimmed = base.trim_end_matches('/');
-    if trimmed.is_empty() {
-        anyhow::bail!("控制面地址为空");
-    }
-    Ok(format!("{trimmed}{path}?"))
-}
-
-/// 客户端侧过滤参数校验（state/origin 取值面冻结——非法值不发请求）
-fn validate_trace_filter(state: Option<&str>, origin: Option<&str>) -> Result<()> {
-    if let Some(state) = state {
-        if state != "active" && state != "closed" {
-            anyhow::bail!("state 只接受 active 或 closed，得到 {state}");
+/// 边界错误 → anyhow（退出码 1 路径；稳定码与上下文原样投影）
+fn app_error_to_anyhow(err: rillane_app::AppError) -> anyhow::Error {
+    match err.status {
+        Some(status) => {
+            anyhow::anyhow!(
+                "控制面返回错误（HTTP {status}，{}）: {}",
+                err.code,
+                err.context
+            )
         }
+        None => anyhow::anyhow!("{}: {}", err.code, err.context),
     }
-    if let Some(origin) = origin {
-        if origin != "stream" && origin != "association" {
-            anyhow::bail!("origin 只接受 stream 或 association，得到 {origin}");
-        }
-    }
-    Ok(())
 }
 
-/// GET + x-admin-token → JSON（非 2xx 一律 anyhow 错误——退出码 1 路径）
-fn trace_fetch_json(client: &Client, token: Option<&str>, url: &str) -> Result<serde_json::Value> {
-    let mut req = client.get(url);
-    if let Some(token) = token {
-        req = req.header("x-admin-token", token);
-    }
-    let resp = req.send().with_context(|| format!("无法访问 {url}"))?;
-    let status = resp.status();
-    let body = resp
-        .text()
-        .with_context(|| format!("读取 {url} 响应失败"))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&body).with_context(|| format!("解析 {url} 响应失败"))?;
-    if !status.is_success() {
-        anyhow::bail!("控制面返回错误: {status}: {body}");
-    }
-    Ok(v)
+/// 执行操作并取信封 JSON（JSON 面；文本正文面 SVG 不走此路）
+fn app_json(app: &BlockingApp, op: AppOperation) -> Result<serde_json::Value> {
+    let reply = app.execute(op).map_err(app_error_to_anyhow)?;
+    reply
+        .json()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("控制面返回非 JSON 正文"))
 }
 
-/// 同 [`trace_fetch_json`] 但非 2xx 返回状态码（404 显式缺席 → 退出码 2）
-fn trace_fetch_json_or_404(
-    client: &Client,
-    token: Option<&str>,
-    url: &str,
-) -> std::result::Result<serde_json::Value, reqwest::StatusCode> {
-    let mut req = client.get(url);
-    if let Some(token) = token {
-        req = req.header("x-admin-token", token);
-    }
-    let resp = req
-        .send()
-        .map_err(|_| reqwest::StatusCode::SERVICE_UNAVAILABLE)?;
-    let status = resp.status();
-    let body = resp.text().map_err(|_| status)?;
-    let v: serde_json::Value = serde_json::from_str(&body).map_err(|_| status)?;
-    if !status.is_success() {
-        return Err(status);
-    }
-    Ok(v)
+/// 边界错误 → 展示用信封（错误路径仍以版本化信封形态输出——JSON
+/// 模式原样、文本模式经 render_probe_error 投影）
+fn error_envelope_for_display(err: &rillane_app::AppError) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1u32,
+        "error": {"code": err.code, "context": err.context},
+    })
 }
 
-/// SVG 路径图 URL（RIL-062）：base URL 型 + id 消毒入查询串
-fn trace_svg_url(base: &str, id: &str) -> Result<String> {
-    let mut url = trace_query_url(base, "/trace/flow.svg")?;
-    url.push_str(&format!(
-        "&id={}",
-        rillane_core::redact::sanitize_untrusted(id, 256)
-    ));
-    Ok(url)
+/// state 过滤解析（取值面冻结 active|closed——非法值不发请求）
+fn parse_state_filter(state: Option<&str>) -> Result<Option<rillane_app::ops::StateFilter>> {
+    match state {
+        None => Ok(None),
+        Some("active") => Ok(Some(rillane_app::ops::StateFilter::Active)),
+        Some("closed") => Ok(Some(rillane_app::ops::StateFilter::Closed)),
+        Some(other) => anyhow::bail!("state 只接受 active 或 closed，得到 {other}"),
+    }
 }
 
-/// SVG 路径图原样取回（RIL-062）：成功 = SVG 正文；失败 =
-/// (status, 正文)——正文可能是 JSON 错误信封，由调用方投影
-fn trace_fetch_svg(
-    client: &Client,
-    token: Option<&str>,
-    url: &str,
-) -> std::result::Result<String, (reqwest::StatusCode, String)> {
-    let mut req = client.get(url);
-    if let Some(token) = token {
-        req = req.header("x-admin-token", token);
+/// origin 过滤解析（取值面冻结 stream|association）
+fn parse_origin_filter(origin: Option<&str>) -> Result<Option<rillane_app::ops::OriginFilter>> {
+    match origin {
+        None => Ok(None),
+        Some("stream") => Ok(Some(rillane_app::ops::OriginFilter::Stream)),
+        Some("association") => Ok(Some(rillane_app::ops::OriginFilter::Association)),
+        Some(other) => anyhow::bail!("origin 只接受 stream 或 association，得到 {other}"),
     }
-    let resp = req
-        .send()
-        .map_err(|_| (reqwest::StatusCode::SERVICE_UNAVAILABLE, String::new()))?;
-    let status = resp.status();
-    let body = resp.text().map_err(|e| (status, e.to_string()))?;
-    if !status.is_success() {
-        return Err((status, body));
-    }
-    Ok(body)
-}
-
-/// SVG 错误信封投影（code/context）——非 JSON 正文给占位码不 panic
-fn trace_svg_error_parts(body: &str) -> (String, String) {
-    let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
-    let code = v["error"]["code"]
-        .as_str()
-        .map(String::from)
-        .unwrap_or_else(|| "trace.flow.svg.failed".into());
-    let ctx = v["error"]["context"]
-        .as_str()
-        .map(String::from)
-        .unwrap_or_default();
-    (code, ctx)
 }
 
 /// 显式缺席答复（found:false 信封的 absence 对象投影）
@@ -2895,28 +2914,32 @@ fn parse_probe_id(id: &str) -> Result<u64> {
         .with_context(|| format!("作业 ID 须为非负整数（得到 {id}）"))
 }
 
-/// 客户端侧提交用法校验 + 请求体拼装：kind/参数对应、addr 可解析、
-/// 载荷为正——非法值不发请求（退出码 1 路径）
-fn validate_probe_submit(
+/// CLI kind/参数 → 边界提交规格（kind/参数对应/addr 可解析校验——
+/// 非法值不发请求，退出码 1；与控制面提交体同构）
+fn build_probe_spec(
     kind: &str,
     host: Option<&str>,
     addr: Option<&str>,
     payload_len: usize,
-) -> Result<String> {
+) -> Result<rillane_app::ops::ProbeJobSpec> {
     match kind {
         "dns" => {
             let h = host
                 .map(str::trim)
                 .filter(|h| !h.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("kind=dns 需要 --host"))?;
-            Ok(serde_json::json!({"kind": "dns", "host": h}).to_string())
+            Ok(rillane_app::ops::ProbeJobSpec::Dns {
+                host: h.to_string(),
+            })
         }
         "connect" => {
             let a = addr.ok_or_else(|| anyhow::anyhow!("kind=connect 需要 --addr"))?;
             let parsed: std::net::SocketAddr = a
                 .parse()
                 .with_context(|| format!("--addr 须为 ip:port（得到 {a}）"))?;
-            Ok(serde_json::json!({"kind": "connect", "addr": parsed}).to_string())
+            Ok(rillane_app::ops::ProbeJobSpec::Connect {
+                addr: parsed.to_string(),
+            })
         }
         "udp-echo" => {
             let a = addr.ok_or_else(|| anyhow::anyhow!("kind=udp-echo 需要 --addr"))?;
@@ -2926,66 +2949,152 @@ fn validate_probe_submit(
             if payload_len == 0 {
                 anyhow::bail!("--payload-len 须 ≥ 1");
             }
-            Ok(
-                serde_json::json!({"kind": "udp_echo", "addr": parsed, "payload_len": payload_len})
-                    .to_string(),
-            )
+            Ok(rillane_app::ops::ProbeJobSpec::UdpEcho {
+                addr: parsed.to_string(),
+                payload_len,
+            })
         }
         other => anyhow::bail!("kind 只接受 dns|connect|udp-echo，得到 {other}"),
     }
 }
 
-/// 控制面 URL 拼装（base 去尾斜杠 + path；query 由调用方续接）
-fn probe_url(base: &str, path: &str) -> Result<String> {
-    let trimmed = base.trim_end_matches('/');
-    if trimmed.is_empty() {
-        anyhow::bail!("控制面地址为空");
-    }
-    Ok(format!("{trimmed}{path}"))
+/// explain CLI 可选参数束（RIL-065）：可选面打包成结构传参——
+/// 构造与校验同处，函数签名只留必填三元组
+struct ExplainCliArgs<'a> {
+    ingress: Option<&'a str>,
+    generation: Option<&'a str>,
+    domain_source: &'a str,
+    process_name: Option<&'a str>,
+    process_path: Option<&'a str>,
+    annotations: &'a [String],
 }
 
-/// GET + x-admin-token → (status, body)；连接失败 → Err（退出码 1 路径）
-fn probe_fetch(
-    client: &Client,
-    token: Option<&str>,
-    base: &str,
-    path: &str,
-) -> Result<(reqwest::StatusCode, String)> {
-    let url = probe_url(base, path)?;
-    let mut req = client.get(&url);
-    if let Some(token) = token {
-        req = req.header("x-admin-token", token);
+/// CLI 参数 → 推演输入（RIL-065）：proto/域名来源取值面冻结，注解
+/// k=v 逐键解析——非法值不发请求（退出码 1）；generation 缺省 =
+/// 未钉代际（如实标注 unpinned，不冒充具体代际）
+fn build_explain_input(
+    host: &str,
+    port: u16,
+    proto: &str,
+    args: &ExplainCliArgs<'_>,
+) -> Result<rillane_routing::ExplainInput> {
+    let proto_lower = proto.to_ascii_lowercase();
+    if !matches!(proto_lower.as_str(), "tcp" | "udp" | "quic") {
+        anyhow::bail!("proto 只接受 tcp|udp|quic，得到 {proto}");
     }
-    let resp = req.send().with_context(|| format!("无法访问 {url}"))?;
-    let status = resp.status();
-    let body = resp
-        .text()
-        .with_context(|| format!("读取 {url} 响应失败"))?;
-    Ok((status, body))
+    let source = match args.domain_source {
+        "unknown" => rillane_routing::DomainSource::Unknown,
+        "user_provided" => rillane_routing::DomainSource::UserProvided,
+        "dns_observed" => rillane_routing::DomainSource::DnsObserved,
+        "sniffed" => rillane_routing::DomainSource::Sniffed,
+        other => anyhow::bail!(
+            "domain-source 只接受 unknown|user_provided|dns_observed|sniffed，得到 {other}"
+        ),
+    };
+    let mut map = std::collections::BTreeMap::new();
+    for kv in args.annotations {
+        let (key, value) = kv
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--annotation 须为 k=v（得到 {kv}）"))?;
+        map.insert(key.to_string(), value.to_string());
+    }
+    let process = if args.process_name.is_none() && args.process_path.is_none() {
+        None
+    } else {
+        Some(rillane_routing::ProcessEvidence {
+            name: args.process_name.map(String::from),
+            path: args.process_path.map(String::from),
+        })
+    };
+    Ok(rillane_routing::ExplainInput {
+        generation_id: args.generation.unwrap_or("unpinned").to_string(),
+        ingress: args.ingress.map(String::from),
+        host: host.to_string(),
+        port,
+        proto: proto_lower,
+        domain_source: source,
+        process,
+        annotations: map,
+    })
 }
 
-/// POST + x-admin-token → (status, body)；连接失败 → Err（退出码 1 路径）
-fn probe_post(
-    client: &Client,
-    token: Option<&str>,
-    base: &str,
-    path: &str,
-    body: &str,
-) -> Result<(reqwest::StatusCode, String)> {
-    let url = probe_url(base, path)?;
-    let mut req = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .body(body.to_string());
-    if let Some(token) = token {
-        req = req.header("x-admin-token", token);
+/// 推演答复文本形（RIL-065）：确定性级别/命中来源/预测出口/证据缺口
+/// 逐项显式——条件性结果不冒充确定，无预测不造出口
+fn render_explanation(v: &serde_json::Value) -> String {
+    let e = &v["explanation"];
+    let mut out = String::new();
+    let target = format!(
+        "{}:{}/{}",
+        e["target"]["host"].as_str().unwrap_or("-"),
+        e["target"]["port"].as_u64().unwrap_or(0),
+        e["target"]["proto"].as_str().unwrap_or("-"),
+    );
+    out.push_str(&format!(
+        "推演 {}（domain_source: {}）\n",
+        target,
+        e["domain_source"].as_str().unwrap_or("-"),
+    ));
+    out.push_str(&format!(
+        "确定性: {}\n",
+        e["certainty"].as_str().unwrap_or("-"),
+    ));
+    if let Some(m) = e["matched_by"].as_str() {
+        out.push_str(&format!("命中: {m}\n"));
     }
-    let resp = req.send().with_context(|| format!("无法访问 {url}"))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .with_context(|| format!("读取 {url} 响应失败"))?;
-    Ok((status, text))
+    if let Some(r) = e["reject"].as_str() {
+        out.push_str(&format!("拒绝: {r}\n"));
+    }
+    if let Some(err) = e["error"].as_str() {
+        out.push_str(&format!("错误: {err}\n"));
+    }
+    let predicted = &e["predicted"];
+    if !predicted.is_null() {
+        if let Some(chain) = predicted["group_chain"].as_array() {
+            let names: Vec<&str> = chain.iter().filter_map(|n| n.as_str()).collect();
+            if !names.is_empty() {
+                out.push_str(&format!("组链: {}\n", names.join(" → ")));
+            }
+        }
+        if let Some(node) = predicted["node"].as_str() {
+            out.push_str(&format!("预测节点: {node}\n"));
+        } else if let Some(pool) = predicted["member_pool"].as_array() {
+            let names: Vec<&str> = pool.iter().filter_map(|n| n.as_str()).collect();
+            if !names.is_empty() {
+                out.push_str(&format!("候选池: {}\n", names.join(", ")));
+            }
+        }
+        if let Some(reason) = predicted["unavailable_reason"].as_str() {
+            out.push_str(&format!("出口不可用: {reason}\n"));
+        }
+        if let Some(note) = predicted["note"].as_str() {
+            out.push_str(&format!("说明: {note}\n"));
+        }
+    } else {
+        out.push_str("预测出口: 无（未命中出口面——拒绝或错误见上）\n");
+    }
+    let unknowns = e["unknowns"].as_array().map(|a| a.len()).unwrap_or(0);
+    if unknowns > 0 {
+        out.push_str(&format!("证据缺口 {unknowns} 条:\n"));
+        for u in e["unknowns"].as_array().into_iter().flatten() {
+            let field = u["field"].as_str().unwrap_or("-");
+            let reason = u["reason"].as_str().unwrap_or("");
+            out.push_str(&format!("  - {field}: {reason}\n"));
+        }
+    }
+    let notes = e["notes"].as_array().map(|a| a.len()).unwrap_or(0);
+    if notes > 0 {
+        out.push_str(&format!("备注 {notes} 条:\n"));
+        for n in e["notes"].as_array().into_iter().flatten() {
+            if let Some(text) = n.as_str() {
+                out.push_str(&format!("  - {text}\n"));
+            }
+        }
+    }
+    out.push_str(&format!(
+        "输入摘要: {}\n",
+        e["input_digest"].as_str().unwrap_or("-"),
+    ));
+    out
 }
 
 /// 错误信封可读形（error.code + context；非 JSON 原样带出）
@@ -3900,49 +4009,21 @@ mod tests {
         );
     }
 
-    /// RIL-060：URL 拼装——base 尾斜杠剥除；空 base 显式拒绝
+    /// RIL-065：过滤参数解析——取值面冻结，非法值不发请求
     #[test]
-    fn trace_query_url_builds_and_rejects_empty_base() {
-        let url = trace_query_url("http://127.0.0.1:9090/", "/trace/flows").expect("合法 base");
-        assert_eq!(url, "http://127.0.0.1:9090/trace/flows?");
-        assert!(trace_query_url("", "/trace/flows").is_err(), "空 base 拒绝");
-    }
-
-    /// RIL-062：SVG 路径图 URL 拼装——剥尾斜杠 + id 消毒入查询串
-    #[test]
-    fn trace_svg_url_builds_with_sanitized_id() {
-        let url = trace_svg_url("http://127.0.0.1:9090/", "f-1").expect("合法 base");
-        assert_eq!(url, "http://127.0.0.1:9090/trace/flow.svg?&id=f-1");
-        assert!(trace_svg_url("", "f-1").is_err(), "空 base 拒绝");
-    }
-
-    /// RIL-062：SVG 错误信封投影——JSON 信封取 code/context，非 JSON
-    /// 正文给占位码不 panic
-    #[test]
-    fn trace_svg_error_parts_project_envelope_or_fallback() {
-        let (code, ctx) = trace_svg_error_parts(
-            r#"{"schema_version":1,"error":{"code":"query.flow.unknown","context":"no record is not evidence of no traffic"}}"#,
+    fn trace_filter_parse_rejects_unknown_values() {
+        assert!(parse_state_filter(Some("active")).is_ok());
+        assert!(parse_origin_filter(None).is_ok());
+        assert!(parse_state_filter(Some("open")).is_err(), "state 非法");
+        assert!(parse_origin_filter(Some("tcp")).is_err(), "origin 非法");
+        // 合法值映射到边界枚举（构造面会转成线上取值）
+        assert_eq!(
+            parse_state_filter(Some("closed")).unwrap(),
+            Some(rillane_app::ops::StateFilter::Closed)
         );
-        assert_eq!(code, "query.flow.unknown");
-        assert_eq!(ctx, "no record is not evidence of no traffic");
-
-        let (code, ctx) = trace_svg_error_parts("<html>gateway</html>");
-        assert_eq!(code, "trace.flow.svg.failed");
-        assert_eq!(ctx, "");
-    }
-
-    /// RIL-060：过滤参数客户端校验——非法值不发请求
-    #[test]
-    fn trace_filter_validation_rejects_unknown_values() {
-        assert!(validate_trace_filter(Some("active"), Some("association")).is_ok());
-        assert!(validate_trace_filter(None, Some("stream")).is_ok());
-        assert!(
-            validate_trace_filter(Some("open"), None).is_err(),
-            "state 非法"
-        );
-        assert!(
-            validate_trace_filter(None, Some("tcp")).is_err(),
-            "origin 非法"
+        assert_eq!(
+            parse_origin_filter(Some("association")).unwrap(),
+            Some(rillane_app::ops::OriginFilter::Association)
         );
     }
 
@@ -4056,27 +4137,172 @@ mod tests {
     // -------------------------------------------------------------------
 
     /// 提交用法校验：kind/参数对应 + addr 客户端预解析 + 载荷为正
+    /// RIL-065：CLI kind/参数 → 边界提交规格（与控制面提交体同构；
+    /// addr 解析成 SocketAddr 再回字符串——非法值不发请求）
     #[test]
-    fn probe_submit_validation_maps_kind_to_body() {
-        let dns = validate_probe_submit("dns", Some(" example.invalid "), None, 64).unwrap();
-        assert_eq!(dns, r#"{"host":"example.invalid","kind":"dns"}"#);
-
-        let connect = validate_probe_submit("connect", None, Some("192.0.2.1:443"), 64).unwrap();
-        assert_eq!(connect, r#"{"addr":"192.0.2.1:443","kind":"connect"}"#);
-
-        let echo = validate_probe_submit("udp-echo", None, Some("192.0.2.1:53"), 128).unwrap();
+    fn probe_submit_maps_kind_to_boundary_spec() {
+        let dns = build_probe_spec("dns", Some(" example.invalid "), None, 64).unwrap();
+        assert_eq!(
+            dns,
+            rillane_app::ops::ProbeJobSpec::Dns {
+                host: "example.invalid".to_string()
+            }
+        );
+        let connect = build_probe_spec("connect", None, Some("192.0.2.1:443"), 64).unwrap();
+        assert_eq!(
+            connect,
+            rillane_app::ops::ProbeJobSpec::Connect {
+                addr: "192.0.2.1:443".to_string()
+            }
+        );
+        let echo = build_probe_spec("udp-echo", None, Some("192.0.2.1:53"), 128).unwrap();
         assert_eq!(
             echo,
-            r#"{"addr":"192.0.2.1:53","kind":"udp_echo","payload_len":128}"#
+            rillane_app::ops::ProbeJobSpec::UdpEcho {
+                addr: "192.0.2.1:53".to_string(),
+                payload_len: 128
+            }
         );
 
-        // kind 与参数错配 / 非法值 → 不发请求
-        assert!(validate_probe_submit("dns", None, None, 64).is_err());
-        assert!(validate_probe_submit("dns", Some("  "), None, 64).is_err());
-        assert!(validate_probe_submit("connect", None, None, 64).is_err());
-        assert!(validate_probe_submit("connect", None, Some("no-port"), 64).is_err());
-        assert!(validate_probe_submit("udp-echo", None, Some("127.0.0.1:53"), 0).is_err());
-        assert!(validate_probe_submit("handshake", None, Some("127.0.0.1:1"), 64).is_err());
+        // 用法错误逐项拒绝
+        assert!(build_probe_spec("dns", None, None, 64).is_err());
+        assert!(build_probe_spec("dns", Some("  "), None, 64).is_err());
+        assert!(build_probe_spec("connect", None, None, 64).is_err());
+        assert!(build_probe_spec("connect", None, Some("no-port"), 64).is_err());
+        assert!(build_probe_spec("udp-echo", None, Some("127.0.0.1:53"), 0).is_err());
+        assert!(build_probe_spec("handshake", None, Some("127.0.0.1:1"), 64).is_err());
+    }
+
+    /// RIL-065：CLI 参数 → 推演输入——proto/域名来源取值面冻结、注解
+    /// k=v 逐键解析、generation 缺省如实 unpinned
+    #[test]
+    fn explain_args_map_to_validated_input() {
+        let input = build_explain_input(
+            "example.com",
+            443,
+            "TCP",
+            &ExplainCliArgs {
+                ingress: Some("mixed-in"),
+                generation: None,
+                domain_source: "sniffed",
+                process_name: Some("game.exe"),
+                process_path: None,
+                annotations: &["client.cidr=10.0.0.1/32".to_string()],
+            },
+        )
+        .expect("合法参数");
+        assert_eq!(input.proto, "tcp", "proto 归一小写");
+        assert_eq!(input.domain_source, rillane_routing::DomainSource::Sniffed);
+        assert_eq!(input.generation_id, "unpinned", "未钉代际如实标注");
+        assert_eq!(
+            input.process.as_ref().and_then(|p| p.name.clone()),
+            Some("game.exe".to_string())
+        );
+        assert_eq!(
+            input.annotations.get("client.cidr").map(String::as_str),
+            Some("10.0.0.1/32")
+        );
+        // 进程证据双缺省 = None（不是空结构冒充证据）
+        let no_process = build_explain_input(
+            "h",
+            1,
+            "udp",
+            &ExplainCliArgs {
+                ingress: None,
+                generation: Some("gen-9"),
+                domain_source: "unknown",
+                process_name: None,
+                process_path: None,
+                annotations: &[],
+            },
+        )
+        .unwrap();
+        assert!(no_process.process.is_none());
+        assert_eq!(no_process.generation_id, "gen-9");
+
+        // 用法错误逐项拒绝
+        let blank = ExplainCliArgs {
+            ingress: None,
+            generation: None,
+            domain_source: "unknown",
+            process_name: None,
+            process_path: None,
+            annotations: &[],
+        };
+        assert!(build_explain_input("h", 1, "smtp", &blank).is_err());
+        assert!(build_explain_input(
+            "h",
+            1,
+            "tcp",
+            &ExplainCliArgs {
+                domain_source: "telepathy",
+                ..blank
+            }
+        )
+        .is_err());
+        assert!(build_explain_input(
+            "h",
+            1,
+            "tcp",
+            &ExplainCliArgs {
+                annotations: &["novalue".to_string()],
+                ..blank
+            }
+        )
+        .is_err());
+    }
+
+    /// RIL-065：推演答复文本形——确定性/命中/预测/缺口逐项显式，
+    /// 缺预测不造出口行
+    #[test]
+    fn explanation_renders_certainty_prediction_and_unknowns() {
+        let v = serde_json::json!({
+            "schema_version": 1,
+            "explanation": {
+                "input_digest": "ab".repeat(32),
+                "generation_id": "gen-1",
+                "target": {"host": "example.com", "port": 443, "proto": "tcp"},
+                "domain_source": "sniffed",
+                "certainty": "conditional",
+                "matched_by": "default",
+                "predicted": {
+                    "group": "proxy",
+                    "group_chain": ["proxy", "auto"],
+                    "node": "node-a",
+                    "note": "fell back to first healthy member"
+                },
+                "unknowns": [
+                    {"field": "geoip.db", "reason": "database not loaded"}
+                ],
+                "notes": ["scenario fallback"]
+            }
+        });
+        let out = render_explanation(&v);
+        assert!(out.contains("example.com:443/tcp"), "目标回显 {out}");
+        assert!(out.contains("确定性: conditional"));
+        assert!(out.contains("命中: default"));
+        assert!(out.contains("组链: proxy → auto"));
+        assert!(out.contains("预测节点: node-a"));
+        assert!(out.contains("geoip.db"));
+        assert!(out.contains("scenario fallback"));
+        assert!(out.contains(&"ab".repeat(32)));
+
+        // 无预测：不造出口行（拒绝/错误面显式说明）
+        let rejected = serde_json::json!({
+            "schema_version": 1,
+            "explanation": {
+                "input_digest": "ab".repeat(32),
+                "generation_id": "gen-1",
+                "target": {"host": "x.invalid", "port": 1, "proto": "udp"},
+                "domain_source": "unknown",
+                "certainty": "definitive",
+                "reject": "scenario rejected"
+            }
+        });
+        let out = render_explanation(&rejected);
+        assert!(out.contains("拒绝: scenario rejected"));
+        assert!(out.contains("预测出口: 无"), "无预测不造出口 {out}");
+        assert!(!out.contains("预测节点"));
     }
 
     /// 作业 ID 手工解析：非负整数通过、负数/非数字拒绝（退出码 1 路径，
@@ -4091,16 +4317,6 @@ mod tests {
     }
 
     /// URL 拼装：尾斜杠归一 + 空地址拒绝
-    #[test]
-    fn probe_url_trims_base_slash() {
-        assert_eq!(
-            probe_url("http://127.0.0.1:9090/", "/probe").unwrap(),
-            "http://127.0.0.1:9090/probe"
-        );
-        assert!(probe_url("", "/probe").is_err());
-        assert!(probe_url("///", "/probe").is_err());
-    }
-
     /// 单作业渲染：头部 + 失败/测量三路标记分列（丢包由计数可算、
     /// 无回应 rtt=none 不造数、failure none/null 分明）
     #[test]

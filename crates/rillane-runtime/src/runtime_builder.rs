@@ -1627,6 +1627,18 @@ impl Runtime {
         self.router.group_quality_report()
     }
 
+    /// 纯路由推演（RIL-065 控制面 `/explain` 取数）：生产求值器 + 调用
+    /// 时刻冻结的组快照（RIL-054）——无 DNS/拨号/OS 查询，无副作用；
+    /// 输入校验错误（proto 非法等）由路由面原样上抛，控制面按稳定码
+    /// 映射 400。
+    pub fn explain_route(
+        &self,
+        input: &rillane_routing::ExplainInput,
+    ) -> anyhow::Result<rillane_routing::RouteExplanation> {
+        let snapshot = self.router.freeze_explain_snapshot();
+        self.router.explain(&snapshot, input)
+    }
+
     pub async fn update_config(&self, new_config: RillaneConfig) -> Result<()> {
         // P2（2026-11-03）：热交换串行化。曾为 check-then-act——读 config →
         // 长构建 → 四次独立写；并发 apply（控制面 PUT /runtime/config 与订阅
@@ -4601,7 +4613,10 @@ mod tests {
         let snap = runtime.trace_collector_config();
         assert!(snap.enabled, "采集默认开启（开销对照的 default 档）");
         assert!(snap.ttl_ms > 0, "TTL 有界可见——历史可过期的配置事实");
-        assert!(snap.capacity > 0 && snap.max_active_flows > 0, "容量双界可见");
+        assert!(
+            snap.capacity > 0 && snap.max_active_flows > 0,
+            "容量双界可见"
+        );
         assert_eq!(
             runtime.trace_sweep_expired(9_000_000_000),
             0,

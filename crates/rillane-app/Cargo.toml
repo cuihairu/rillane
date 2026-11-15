@@ -1,0 +1,22 @@
+[package]
+name = "rillane-app"
+version = "0.1.0"
+edition = "2021"
+
+# CLI/UI/MCP 共享的应用服务边界（RIL-065）：窄化诊断与配置调用契约——
+# 纯操作集 + 请求构造 + 答复解码，默认零 HTTP 栈依赖；`client-blocking`
+# 特性提供参考执行器（reqwest blocking），异步执行器随 MCP 装配落地。
+[features]
+default = []
+client-blocking = ["dep:reqwest"]
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rillane-core = { path = "../rillane-core" }
+rillane-routing = { path = "../rillane-routing" }
+reqwest = { workspace = true, optional = true, default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio.workspace = true

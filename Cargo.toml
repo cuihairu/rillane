@@ -3,6 +3,7 @@ members = [
     "crates/rillane-core",
     "crates/rillane-config",
     "crates/rillane-routing",
+    "crates/rillane-app",
     "crates/rillane-protocols",
     "crates/rillane-telemetry",
     "crates/rillane-platform",

@@ -58,6 +58,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | GET | `/trace/flow?id=` | one flow's full trace, or an explicit absence answer (`found:false` + stable code) | `trace flow` |
 | GET | `/trace/flow.svg?id=` | one flow's path as SVG (same query snapshot as the JSON answer; layers/time/gaps annotated) | `trace flow --svg` |
 | GET | `/trace/events?id=&from_seq=&limit=` | incremental event read (unknown/absent id → 404 + stable code) | `trace events` |
+| POST | `/explain` | pure route explanation (production evaluator + frozen snapshot, zero side effects; invalid input → 400 + stable code) | `explain` |
 | GET | `/probe` | probe job list (limits + job snapshots) | `probe list` |
 | GET | `/probe/result?id=` | one job's measurement snapshot, or an explicit absence answer (`found:false` + stable code) | `probe result` |
 | POST | `/probe` | submit a probe job (target must be registered in the server's probe scope) | `probe submit` |
@@ -86,6 +87,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | `diagnose` | one-shot diagnostics collection (creates a diagnostics directory) | control plane + local snapshot |
 | `trace` | per-connection trace queries (list / flow detail / incremental events; explicit absence = exit 2) | control plane `/trace/*` |
 | `probe` | active probe jobs (submit/cancel/result/list; measurements only, no provider-internal path inference) | control plane `/probe*` |
+| `explain` | pure route explanation ("why would this target route here" — production evaluator + frozen snapshot, zero side effects) | control plane `/explain` |
 | `mtls` | mesh mTLS certificate tools (init-ca/issue/rotate/bundle-ca/rotate-ca/revoke) | offline (except revoke status, which uses the control plane) |
 
 ## Flags per command
@@ -213,6 +215,20 @@ rillanectl probe list [--json]
 Explicit active-probe jobs against operator-registered targets (RIL-061). The target must be in the daemon's `probe.targets` scope (operator config only — subscription text can never extend the scope); an out-of-scope submit is rejected with a stable code (`probe.target.out_of_scope`). With no `probe` block in the config the whole surface is off and every endpoint answers `503 probe.disabled` — no authorization, no network side effects. Measurements are exactly what the executor observed: `failure` (stable code + detail) or null, `rtt_ms` (null when nothing answered — never synthesized), and for UDP echo `sent`/`replies`/`loss_ratio`/`payload_len` (loss ratio computed from the reply counts). Measurements never include provider-internal path inference. Proxy-handshake probing is not offered in this version (the egress connector is a flow-level forward surface without a dial-and-measure shape), so no handshake kind exists on the CLI or in the config. Text output is default; `--json` prints the versioned envelope (`schema_version=1`) verbatim.
 
 Exit codes: `0` answered; `1` connection, rejection or usage error; `2` explicit absence (`probe result` for an unknown job id).
+
+### explain
+
+```bash
+rillanectl explain <host> --port <N> --proto tcp|udp|quic
+                [--endpoint <base URL>] [--ingress <ID>] [--generation <G>]
+                [--domain-source unknown|user_provided|dns_observed|sniffed]
+                [--process-name <N>] [--process-path <P>]
+                [--annotation k=v]... [--json]
+```
+
+Pure route explanation against the daemon's production evaluator (RIL-065): the question is "why would this target route here" — the server freezes current group state into a snapshot and replays the exact rules, with **zero side effects** (no DNS resolution, no dialing, no OS identity queries). Evidence the caller does not supply (process name/path, annotations) is evaluated as missing and reported gap-by-gap; conclusions affected by missing evidence are marked conditional instead of certain. Non-deterministic strategies (`random`/`weighted`/`round_robin`) report only the healthy candidate pool, never a fabricated pick. Text output lists target, certainty, match source, predicted egress (group chain → node), unknowns and notes; `--json` prints the versioned envelope (`schema_version=1`) verbatim. Invalid usage (`--proto smtp`, unknown `--domain-source`, `--annotation` without `=`) is rejected client-side before any request is sent. The command goes through the shared `rillane-app` boundary — the same closed operation set future UI/MCP surfaces consume.
+
+Exit codes: `0` answered; `1` connection, usage or server-rejected input error (server rejects malformed input with `400 explain.input.invalid`).
 
 ### mtls
 

@@ -30,6 +30,8 @@ rillane-core = { path = "../../crates/rillane-core" }
 async-trait.workspace = true
 rillane-platform = { path = "../../crates/rillane-platform" }
 rillane-runtime = { path = "../../crates/rillane-runtime", default-features = false }
+# 纯路由推演面（RIL-065 `/explain`：ExplainInput 入体 + RouteExplanation 出体）
+rillane-routing = { path = "../../crates/rillane-routing" }
 rillane-telemetry = { path = "../../crates/rillane-telemetry" }
 rillane-mesh = { path = "../../crates/rillane-mesh" }
 rillane-subscription = { path = "../../crates/rillane-subscription" }

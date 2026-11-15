@@ -18,6 +18,9 @@ tokio.workspace = true
 tracing.workspace = true
 rillane-config = { path = "../../crates/rillane-config" }
 rillane-core = { path = "../../crates/rillane-core" }
+# 应用服务边界（RIL-065）：trace/probe/explain 面统一走共享操作集
+rillane-app = { path = "../../crates/rillane-app", features = ["client-blocking"] }
+rillane-routing = { path = "../../crates/rillane-routing" }
 rillane-protocols = { path = "../../crates/rillane-protocols" }
 rillane-runtime = { path = "../../crates/rillane-runtime", default-features = false }
 rillane-subscription = { path = "../../crates/rillane-subscription" }

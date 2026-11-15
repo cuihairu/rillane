@@ -3269,6 +3269,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rillane-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "rillane-core",
+ "rillane-routing",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rillane-config"
 version = "0.1.0"
 dependencies = [
@@ -3527,9 +3540,11 @@ dependencies = [
  "clap",
  "rcgen",
  "reqwest",
+ "rillane-app",
  "rillane-config",
  "rillane-core",
  "rillane-protocols",
+ "rillane-routing",
  "rillane-runtime",
  "rillane-subscription",
  "serde",
@@ -3555,6 +3570,7 @@ dependencies = [
  "rillane-core",
  "rillane-mesh",
  "rillane-platform",
+ "rillane-routing",
  "rillane-runtime",
  "rillane-subscription",
  "rillane-telemetry",

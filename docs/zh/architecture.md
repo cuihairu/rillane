@@ -13,6 +13,7 @@
 | `rillane-routing` | 条件匹配、逻辑组与路由选择；纯 Explain 推演（`explain` 模块：生产求值器 + 冻结快照的规则重演——无 DNS/拨号/OS 查询，证据缺失条件性结果，随机策略只给候选池，输入摘要可离线重放） |
 | `rillane-protocols` | 入站、出站、拨号与传输 |
 | `rillane-runtime` | 监听、会话、订阅接线、TUN 与 Mesh 装配 |
+| `rillane-app` | CLI/UI/MCP 共用的应用服务边界（RIL-065）：闭合操作集（`AppOperation`——每个调用映射恰一个固定 (method, path)，无通用 HTTP/shell/任意文件/管理员透传），参数类型化并在上线前校验、不可信文本消毒，版本化答复/错误信封解码、显式缺席与错误分立，feature 门控的阻塞 HTTP 执行器；核心不依赖 MCP SDK——配置读写属管理员级面，待提案生命周期（RIL-073+）另行进入 |
 | `rillane-platform` | 系统接管、路由/DNS、平台适配类型和 Linux 实现；系统副作用日志与所有权撤销契约（`side_effects` 模块） |
 | `rillane-subscription` | 拉取、识别、转换、缓存、内容摘要与刷新 |
 | `rillane-mesh` / `rillane-plugins` | 受管节点协作与 WASM 中间件；插件已为可选依赖（runtime `plugins` feature，RIL-040：default=`full`，`small`/`mobile` 档依赖图无 Wasmtime） |
@@ -36,7 +37,7 @@ RouteDecision/RoutePath 已包含组、链路与原因；v1 的 RoutePlan 在其
 
 配置已携带 `version` 字段（当前仅 `1`）：缺省按 V1 适配存量配置，显式未知版本在解析期以稳定原因码 `config.version.unknown` 拒绝。构建能力集（`CapabilitySet`）用于在配置校验期拒绝当前构建不支持的组合（稳定原因码 `config.combo.unsupported`），避免拨号期才失败；缺省能力集为全量，现有调用方零差异。内核 `rillane-core` 不依赖 `rillane-config` 与 Clash 格式，订阅转换收敛于 `rillane-subscription` 侧。
 
-控制面是 `control.api_bind` 上的 HTTP/REST，接口见 [CLI 参考](cli.md)。当前 `/flows` 为入口/出口组合的聚合；兼容 `/connections` 映射同一聚合面并在响应中显式声明语义（`rillane.view: aggregate`——`id` 是入口-出口组合键而非逐连接 flow ID，缺失的时间/域名/规则/链路序列化为 null/空而非伪造值；真实逐连接轨迹归内核查询服务，本聚合视图不替代之）。`diagnose` 按范围选择且默认安全：`safe` 不采集订阅列表/运行配置/完整日志，`full` 在每个出口剥除秘密（配置秘密键、订阅 URL 凭证、日志 key=value 秘密对与 PEM 块），`raw` 不脱敏并显式标注禁止上传；每份清单恒记录范围、需人工复核文件清单与仅限手动的上传政策——rillanectl 不做任何自动上传，诊断包不自动构成可安全上传 AI 的材料。trace 端点（`/trace/flows`、`/trace/flow`、`/trace/events`）以版本化信封（`schema_version=1`）暴露内核逐连接查询服务——以真实 flow ID 锚定、缺席逐因显式回答；Mesh dry-run 不冒充规则解释，也不冒充逐连接轨迹。
+控制面是 `control.api_bind` 上的 HTTP/REST，接口见 [CLI 参考](cli.md)。当前 `/flows` 为入口/出口组合的聚合；兼容 `/connections` 映射同一聚合面并在响应中显式声明语义（`rillane.view: aggregate`——`id` 是入口-出口组合键而非逐连接 flow ID，缺失的时间/域名/规则/链路序列化为 null/空而非伪造值；真实逐连接轨迹归内核查询服务，本聚合视图不替代之）。`diagnose` 按范围选择且默认安全：`safe` 不采集订阅列表/运行配置/完整日志，`full` 在每个出口剥除秘密（配置秘密键、订阅 URL 凭证、日志 key=value 秘密对与 PEM 块），`raw` 不脱敏并显式标注禁止上传；每份清单恒记录范围、需人工复核文件清单与仅限手动的上传政策——rillanectl 不做任何自动上传，诊断包不自动构成可安全上传 AI 的材料。trace 端点（`/trace/flows`、`/trace/flow`、`/trace/events`）以版本化信封（`schema_version=1`）暴露内核逐连接查询服务——以真实 flow ID 锚定、缺席逐因显式回答；Mesh dry-run 不冒充规则解释，也不冒充逐连接轨迹。`POST /explain` 以同一信封暴露纯 Explain 推演服务（生产求值器 + 冻结快照，零副作用；入口消毒，proto/域名来源非法值以 `explain.input.invalid` 拒绝）。CLI/UI/MCP 经共享 `rillane-app` 边界（RIL-065）消费控制面：闭合操作集——每个诊断调用是一个类型化操作、映射恰一个固定 (method, path)，答复经版本化信封解码、显式缺席与错误分立；管理员级面（原始配置读、订阅 URL、配置写）刻意留在边界之外。
 
 `rillaned` 从 `RILLANE_CONFIG` 读取启动配置；没有通用文件 watch、SIGHUP 重载或 `rillanectl reload`。已有订阅和控制面更新路径不等于 v1 的跨 OS 代际事务。路由/DNS/防火墙变更的副作用契约（`side_effects`：变更日志、所有权登记、幂等撤销——只撤销本实例条目，既有系统配置只登记不撤销）已就位，Linux 执行侧接线归配置发布协调器（RIL-019）。当前按名称追加的合并、组语义与 interval 单位缺陷见[研究证据](research/proxy-architectures-2026-11-14.md#verified-gaps)。
 
