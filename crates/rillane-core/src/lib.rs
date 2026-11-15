@@ -22,6 +22,7 @@ pub mod outbound;
 pub mod performance;
 pub mod plan;
 pub mod quality;
+pub mod schedule;
 pub mod udp;
 
 pub use outbound::{
@@ -35,6 +36,10 @@ pub use budgets::{
     MappingPermit, QueueReservation, SessionPermit, CODE_BUDGET_CONTROL, CODE_BUDGET_DIALING,
     CODE_BUDGET_QUEUE_SESSION, CODE_BUDGET_QUEUE_TOTAL, CODE_BUDGET_SESSION_SCOPE,
     CODE_BUDGET_SESSIONS, CODE_BUDGET_UDP_MAPPING,
+};
+pub use schedule::{
+    FairScheduler, Grant, ScheduleError, ScheduleShape, TrafficClass, CODE_EMPTY_REQUEST,
+    CODE_SHAPE_INVALID,
 };
 pub use drain::{
     DrainController, DrainError, DrainReason, ReclaimRecord, RevokeOutcome, SessionFlowState,
