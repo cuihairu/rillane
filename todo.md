@@ -61,8 +61,8 @@
 
 ## 3. 发布事务与共享数据面
 
-- [ ] **RIL-018｜P0｜系统副作用计划/补偿**；依赖：RIL-003、RIL-004。
-  交付：路由/DNS/防火墙变更日志、所有权与幂等撤销。验收：任一步失败只撤销本实例修改；已有系统配置不被误删。
+- [x] **RIL-018｜P0｜系统副作用计划/补偿**；依赖：RIL-003、RIL-004。（2026-11-15 完成）
+  交付：`crates/rillane-platform/src/network/side_effects.rs` 新增 `SideEffectJournal`（side_effects.rs:139）——路由/DNS/防火墙统一变更日志：`record_pre_existing`（:151，启动前既有系统配置只登记审计，恒无撤销动作）、`record_owned`（:165，apply 成功一步记一步，失败步骤从不入日志）、`rollback_plan`（:207，本实例 Owned 条目**逆序**撤销计划，后进先撤销保依赖安全）、`undo_entry`（:218，单条撤销，非本人条目拒绝）。所有权模型 `Ownership`（:44，Owned/PreExisting）；撤销动作 `InverseChange`（:54）显式携带不反推、全部幂等（目标不存在视为已撤销；DNS 撤销是 `RestoreDns` **还原先前内容而非删除**，None=还原系统默认）；稳定原因码 `side_effect.foreign`/`side_effect.unknown`（:15/:17，越权撤销与未知条目机器口径拒绝）；`SystemArea`（:21）route/dns/firewall `as_str` 恒定。纯契约零 OS 调用——Linux argv 构造与执行仍在 `linux.rs`，TUN 逃逸面现有 `AppliedStep` 日志归 RIL-019 配置发布协调器接线收敛。验收证据：side_effects.rs 6 单测全绿——撤销计划只含本实例 Owned 且逆序（PreExisting 不出现、序号单调）；PreExisting 撤销以 foreign 码拒绝且计划为空；双实例场景 a 的计划不含 b 条目、越权撤销 foreign 码拒绝、本人可撤销、未知条目 unknown 码；模拟 step1/2 成功 step3 失败（从未入日志）后回滚计划只含已成功条目；DNS 还原语义（Some 内容与 None 系统默认）不删除；area 字符串恒定。rillane-platform lib 71 测全绿、`cargo clippy -p rillane-platform --lib --all-features -- -D warnings` 干净。文档同步：docs/architecture.md（en/zh）平台行与控制更新节。commit：见 git log `feat: add side effect journal contract`。
 - [ ] **RIL-019｜P0｜配置发布协调器**；依赖：RIL-016、RIL-018。
   交付：prepare/apply/publish/drain/reclaim 和持久化顺序。验收：OS 应用失败保留旧代际；发布中崩溃可恢复，磁盘与有效状态可解释且可对账。
 - [ ] **RIL-020｜P0｜DNS 与代际一致性**；依赖：RIL-006、RIL-019。

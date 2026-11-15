@@ -13,7 +13,7 @@
 | `rillane-routing` | 条件匹配、逻辑组与路由选择 |
 | `rillane-protocols` | 入站、出站、拨号与传输 |
 | `rillane-runtime` | 监听、会话、订阅接线、TUN 与 Mesh 装配 |
-| `rillane-platform` | 系统接管、路由/DNS、平台适配类型和 Linux 实现 |
+| `rillane-platform` | 系统接管、路由/DNS、平台适配类型和 Linux 实现；系统副作用日志与所有权撤销契约（`side_effects` 模块） |
 | `rillane-subscription` | 拉取、识别、转换、缓存、内容摘要与刷新 |
 | `rillane-mesh` / `rillane-plugins` | 受管节点协作与 WASM 中间件；v1 规划将其裁剪为可选依赖 |
 | `rillane-telemetry` / `rillane-ffi` | 日志与移动 FFI 基础设施 |
@@ -38,6 +38,6 @@ RouteDecision/RoutePath 已包含组、链路与原因；v1 的 RoutePlan 在其
 
 控制面是 `control.api_bind` 上的 HTTP/REST，接口见 [CLI 参考](cli.md)。当前 `/flows` 为入口/出口组合的聚合；兼容 `/connections` 不是完整真实连接表。`diagnose` 包含敏感运行信息，不能默认视为可安全上传 AI 的材料。
 
-`rillaned` 从 `RILLANE_CONFIG` 读取启动配置；没有通用文件 watch、SIGHUP 重载或 `rillanectl reload`。已有订阅和控制面更新路径不等于 v1 的跨 OS 代际事务。当前按名称追加的合并、组语义与 interval 单位缺陷见[研究证据](research/proxy-architectures-2026-11-14.md#verified-gaps)。
+`rillaned` 从 `RILLANE_CONFIG` 读取启动配置；没有通用文件 watch、SIGHUP 重载或 `rillanectl reload`。已有订阅和控制面更新路径不等于 v1 的跨 OS 代际事务。路由/DNS/防火墙变更的副作用契约（`side_effects`：变更日志、所有权登记、幂等撤销——只撤销本实例条目，既有系统配置只登记不撤销）已就位，Linux 执行侧接线归配置发布协调器（RIL-019）。当前按名称追加的合并、组语义与 interval 单位缺陷见[研究证据](research/proxy-architectures-2026-11-14.md#verified-gaps)。
 
 使用说明：[协议](PROTOCOLS.md)、[配置](config.md)、[订阅](subscription.md)、[网络接管](networking.md)、[可选 Mesh](mesh.md)。新实现按根目录 `todo.md` 的依赖和验收条件推进。

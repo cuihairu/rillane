@@ -24,6 +24,8 @@ pub mod ipcodec;
 // RouteTransaction 最小接口，packet 与 socket 输入分别建模
 pub mod ports;
 pub mod route;
+// 系统副作用计划/补偿契约（RIL-018）：变更日志 + 所有权 + 幂等撤销
+pub mod side_effects;
 pub mod tun;
 // Linux TUN 真实现（tun-dataplane.md §1.4）；其余平台待落地
 #[cfg(target_os = "linux")]
@@ -55,6 +57,10 @@ pub use ports::{
 pub use route::{
     BypassAction, BypassCondition, BypassRule, RouteDestination, RouteManager, RouteRule,
     RouteStats, RouteType, RoutingConfig, RoutingMode,
+};
+pub use side_effects::{
+    ChangeEntry, InverseChange, Ownership, SideEffectError, SideEffectJournal, SystemArea,
+    CODE_SIDE_EFFECT_FOREIGN, CODE_SIDE_EFFECT_UNKNOWN,
 };
 pub use tun::{PacketInfo as TunPacketInfo, PacketType, TunConfig, TunProvider};
 // pub use platform::*;

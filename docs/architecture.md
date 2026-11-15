@@ -13,7 +13,7 @@ This is an implementation reference, not another architecture design. The **sing
 | `rillane-routing` | Conditions, logical groups and routing decisions |
 | `rillane-protocols` | Inbounds, outbounds, dialing and transports |
 | `rillane-runtime` | Listeners, sessions, subscriptions, TUN and Mesh assembly |
-| `rillane-platform` | Capture, route/DNS models and Linux integration |
+| `rillane-platform` | Capture, route/DNS models and Linux integration; side-effect journal and ownership-undo contract (`side_effects` module) |
 | `rillane-subscription` | Fetch, detect, convert, cache, digest and refresh |
 | `rillane-mesh` / `rillane-plugins` | Managed topology and WASM middleware; v1 will make dependencies optional |
 | `rillane-telemetry` / `rillane-ffi` | Logging and mobile FFI foundations |
@@ -38,6 +38,6 @@ Configurations carry a `version` field (currently only `1`): missing version ada
 
 Control uses HTTP/REST on `control.api_bind`; see [CLI reference](cli.md). `/flows` aggregates ingress/egress pairs; compatibility `/connections` is not a complete real connection table. Diagnose bundles may contain sensitive runtime information and are not automatically safe for AI upload.
 
-`rillaned` loads `RILLANE_CONFIG` at startup. There is no general file watch, SIGHUP reload or `rillanectl reload`. Existing subscription/control updates are not v1 cross-OS transactions. See [verified gaps](research/proxy-architectures-2026-11-14.md#verified-gaps) for append-only merging, group semantics and interval units.
+`rillaned` loads `RILLANE_CONFIG` at startup. There is no general file watch, SIGHUP reload or `rillanectl reload`. Existing subscription/control updates are not v1 cross-OS transactions. The side-effect contract for route/DNS/firewall changes (`side_effects`: journal, ownership records, idempotent undo — only this instance's entries are undone; pre-existing system config is recorded, never reverted) is in place; Linux-side execution wiring lands with the config publish coordinator (RIL-019). See [verified gaps](research/proxy-architectures-2026-11-14.md#verified-gaps) for append-only merging, group semantics and interval units.
 
 References: [protocols](PROTOCOLS.md), [configuration](config.md), [subscriptions](subscription.md), [capture](networking.md), [optional Mesh](mesh.md). Follow root `todo.md` for implementation dependencies and acceptance.
