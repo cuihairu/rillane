@@ -8,7 +8,7 @@
 |---|---|
 | `apps/rillaned` | 配置加载、运行时装配、HTTP 控制面 |
 | `apps/rillanectl` | 配置工具、控制面查询、订阅与证书管理 |
-| `rillane-core` | Flow、FlowContext、RouteDecision/RoutePath、转发接口与 UDP 基础类型；流/计划/会话契约（`plan` 模块：RoutePlan 单向映射、SessionPin、TCP/UDP 绑定边界）；出口建立通道契约（`outbound` 模块：`StreamOutbound`/`DatagramOutbound`、`OpenContext`、已建立通道/关联、分阶段 `OpenError`） |
+| `rillane-core` | Flow、FlowContext、RouteDecision/RoutePath、转发接口与 UDP 基础类型；流/计划/会话契约（`plan` 模块：RoutePlan 单向映射、SessionPin、TCP/UDP 绑定边界）；入口两阶段接入契约（`inbound` 模块：`InboundSpec`/`InboundFactory`、一次性 responder 的 `PendingStream`/`PendingAssociation`、TUN 的 Capture 来源）；出口建立通道契约（`outbound` 模块：`StreamOutbound`/`DatagramOutbound`、`OpenContext`、已建立通道/关联、分阶段 `OpenError`） |
 | `rillane-config` | 配置模型、校验、profile 预设展开；配置版本与能力契约（`contract` 模块） |
 | `rillane-routing` | 条件匹配、逻辑组与路由选择 |
 | `rillane-protocols` | 入站、出站、拨号与传输 |
@@ -30,7 +30,7 @@
 | 多场景 | `profile` 在配置期填充默认值；已有规则可分别选出口 | 并列 ScenarioPolicy、资源预算和有类型的质量闭环 |
 | 诊断 | 聚合统计、组状态、Mesh dry-run、diagnose | 真正逐流轨迹、纯 Explain、显式 Probe；可选 MCP 尚无实现 |
 
-RouteDecision/RoutePath 已包含组、链路与原因；v1 的 RoutePlan 在其上扩展，不新增第二套路由器。`plan` 模块（RIL-006）把规则结果冻结为只读 `DecisionSnapshot`，执行结果（拨号成功/失败）与规则结果分离，经 `SessionPin` 把流钉在明确代际上，TCP 字节流与 UDP 数据报关联在类型层面分侧。质量样本契约（RIL-026 `quality` 模块）：metric/source/target/count/time/validity 全字段类型化，连接失败率与丢包率是不同指标（拨号来源的旧 `packet_loss_rate` 迁移时改名），未知/过期显式报错不当零，丢包样本必须说明测量对端。订阅已有 SHA-256 变更检测，但不能据此声称有来源签名或新代际事务；不可变代际契约在 `rillane-config`（RIL-003 `RuntimeGeneration`）。出口建立通道契约（`outbound` 模块，RIL-097）把「建立通道」与「业务搬运」分开：`OpenContext` 携带 session/attempt/generation 身份与截止时间、取消信号，但**不持有可重新求值的路由器**——出口只做一次建立尝试，回退归会话执行器按 RoutePlan 编排；`OpenedStream`/`OpenedAssociation` 持有协议包装后的 IO 与握手结果（加密/分帧状态随 IO 生命周期，不泄露给普通复制循环）；`TargetBinding` 区分固定目标与多目标映射；`OpenError` 分阶段携带稳定原因码、可重试性、证据类型（预测/观测/推断/未知）与已脱敏上下文。
+RouteDecision/RoutePath 已包含组、链路与原因；v1 的 RoutePlan 在其上扩展，不新增第二套路由器。`plan` 模块（RIL-006）把规则结果冻结为只读 `DecisionSnapshot`，执行结果（拨号成功/失败）与规则结果分离，经 `SessionPin` 把流钉在明确代际上，TCP 字节流与 UDP 数据报关联在类型层面分侧。质量样本契约（RIL-026 `quality` 模块）：metric/source/target/count/time/validity 全字段类型化，连接失败率与丢包率是不同指标（拨号来源的旧 `packet_loss_rate` 迁移时改名），未知/过期显式报错不当零，丢包样本必须说明测量对端。订阅已有 SHA-256 变更检测，但不能据此声称有来源签名或新代际事务；不可变代际契约在 `rillane-config`（RIL-003 `RuntimeGeneration`）。出口建立通道契约（`outbound` 模块，RIL-097）把「建立通道」与「业务搬运」分开：`OpenContext` 携带 session/attempt/generation 身份与截止时间、取消信号，但**不持有可重新求值的路由器**——出口只做一次建立尝试，回退归会话执行器按 RoutePlan 编排；`OpenedStream`/`OpenedAssociation` 持有协议包装后的 IO 与握手结果（加密/分帧状态随 IO 生命周期，不泄露给普通复制循环）；`TargetBinding` 区分固定目标与多目标映射；`OpenError` 分阶段携带稳定原因码、可重试性、证据类型（预测/观测/推断/未知）与已脱敏上下文。入口两阶段接入契约（`inbound` 模块，RIL-096）把「认证/解析」与「路由」分开：`PendingStream` 独占客户端通道与一次性 responder，**出口成功后才回复成功**（成功回复写失败在 `accept` 内就地释放已建立出口），丢弃不消费即关闭通道且不触发回复；UDP 准入（`PendingAssociation`）钉住来源校验、显式目标绑定与控制链回收；TUN 会话带 `Capture` 来源标记，回复由网络栈驱动，不套用代理回复模型。
 
 ## 控制与配置更新
 

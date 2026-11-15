@@ -17,6 +17,7 @@ pub mod drain;
 pub mod executor;
 pub mod fake_ip;
 pub mod hosts;
+pub mod inbound;
 pub mod net_mark;
 pub mod outbound;
 pub mod performance;
@@ -27,21 +28,11 @@ pub mod schedule;
 pub mod scoring;
 pub mod udp;
 
-pub use outbound::{
-    CancelToken, DatagramIo, DatagramOutbound, EvidenceKind, OpenContext, OpenError, OpenStage,
-    OpenedAssociation, OpenedStream, OutboundCapabilities, StreamIo, StreamOutbound, TargetBinding,
-    CODE_OPEN_CANCELLED, CODE_OPEN_HANDSHAKE, CODE_OPEN_POOL_EXHAUSTED, CODE_OPEN_REFUSED,
-    CODE_OPEN_TIMEOUT, CODE_OPEN_UNSUPPORTED,
-};
 pub use budgets::{
     BudgetKind, BudgetLimits, BudgetRejection, BudgetUsage, Budgets, ControlPermit, DialPermit,
     MappingPermit, QueueReservation, SessionPermit, CODE_BUDGET_CONTROL, CODE_BUDGET_DIALING,
-    CODE_BUDGET_QUEUE_SESSION, CODE_BUDGET_QUEUE_TOTAL, CODE_BUDGET_SESSION_SCOPE,
-    CODE_BUDGET_SESSIONS, CODE_BUDGET_UDP_MAPPING,
-};
-pub use schedule::{
-    FairScheduler, Grant, ScheduleError, ScheduleShape, TrafficClass, CODE_EMPTY_REQUEST,
-    CODE_SHAPE_INVALID,
+    CODE_BUDGET_QUEUE_SESSION, CODE_BUDGET_QUEUE_TOTAL, CODE_BUDGET_SESSIONS,
+    CODE_BUDGET_SESSION_SCOPE, CODE_BUDGET_UDP_MAPPING,
 };
 pub use drain::{
     DrainController, DrainError, DrainReason, ReclaimRecord, RevokeOutcome, SessionFlowState,
@@ -52,23 +43,41 @@ pub use executor::{
     SessionExecutor, SessionLedger, CODE_ENDPOINT_INVALID, CODE_GENERATION_MISMATCH,
     CODE_NODE_UNKNOWN,
 };
+pub use inbound::{
+    AcceptInfo, AssociationResponder, ClientChannel, ControlLink, DatagramIngress, InboundAcceptor,
+    InboundError, InboundFactory, InboundResponder, InboundSpec, InboundStage, IngressOrigin,
+    PendingAssociation, PendingIngress, PendingStream, RejectCause, SourceKey, CODE_INBOUND_AUTH,
+    CODE_INBOUND_CANCELLED, CODE_INBOUND_HANDSHAKE, CODE_INBOUND_REJECTED,
+    CODE_INBOUND_REPLY_FAILED, CODE_INBOUND_RESPONDER_CONSUMED, CODE_INBOUND_SOURCE_INVALID,
+    CODE_INBOUND_UNSUPPORTED,
+};
+pub use outbound::{
+    CancelToken, DatagramIo, DatagramOutbound, EvidenceKind, OpenContext, OpenError, OpenStage,
+    OpenedAssociation, OpenedStream, OutboundCapabilities, StreamIo, StreamOutbound, TargetBinding,
+    CODE_OPEN_CANCELLED, CODE_OPEN_HANDSHAKE, CODE_OPEN_POOL_EXHAUSTED, CODE_OPEN_REFUSED,
+    CODE_OPEN_TIMEOUT, CODE_OPEN_UNSUPPORTED,
+};
 pub use plan::{
     DecisionSnapshot, EndpointRef, ExecutionOutcome, FlowAssociation, GenerationRef,
     MetadataOrigin, ObjectRef, Provenanced, RoutePlan, SessionPin,
+};
+pub use pool::{
+    Acquire, ConnPool, EvictionReason, PoolError, PoolLimits, PoolStats, PooledConn, RecycledConn,
+    TransportReuse, WarmDecision, CODE_POOL_CAPACITY_NODE, CODE_POOL_CAPACITY_TOTAL,
+    CODE_POOL_LIMITS_INVALID, CODE_POOL_UNSUPPORTED,
 };
 pub use quality::{
     QualityMetric, QualitySample, QualitySampleError, SampleSource, SampleStatus, SampleValue,
     CODE_QUALITY_EXPIRED, CODE_QUALITY_PEER_MISSING, CODE_QUALITY_UNKNOWN,
 };
-pub use scoring::{
-    MetricContribution, MetricRefs, ObjectiveWeights, ScenarioProfile, ScenarioScorer,
-    ScoreError, ScoreInputs, ScoreReport, SloSpec, SloUnknownReason, SloVerdict, StayReason,
-    SwitchDecision, CODE_PROFILE_INVALID, CODE_WEIGHTS_INVALID,
+pub use schedule::{
+    FairScheduler, Grant, ScheduleError, ScheduleShape, TrafficClass, CODE_EMPTY_REQUEST,
+    CODE_SHAPE_INVALID,
 };
-pub use pool::{
-    Acquire, ConnPool, EvictionReason, PooledConn, PoolError, PoolLimits, PoolStats,
-    RecycledConn, TransportReuse, WarmDecision, CODE_POOL_CAPACITY_NODE,
-    CODE_POOL_CAPACITY_TOTAL, CODE_POOL_LIMITS_INVALID, CODE_POOL_UNSUPPORTED,
+pub use scoring::{
+    MetricContribution, MetricRefs, ObjectiveWeights, ScenarioProfile, ScenarioScorer, ScoreError,
+    ScoreInputs, ScoreReport, SloSpec, SloUnknownReason, SloVerdict, StayReason, SwitchDecision,
+    CODE_PROFILE_INVALID, CODE_WEIGHTS_INVALID,
 };
 
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.
