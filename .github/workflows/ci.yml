@@ -65,6 +65,43 @@ jobs:
     - name: Run tests
       run: cargo test --verbose --workspace --all-features
 
+  # RIL-040 small/mobile 构建面：test job 的 --all-features 恒开 plugins，
+  # 看不见 small 档 cfg 分支——本 job 单独把三档裁剪面编译 + 钉依赖图断言
+  # （small 依赖图无 wasmtime/JIT 是验收项，不钉 CI 就会无声倒退）。
+  small:
+    name: Small build (no wasmtime)
+    runs-on: [self-hosted, rillane]
+    steps:
+    - name: Checkout source code
+      uses: actions/checkout@v7.0.1
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache dependencies
+      uses: actions/cache@v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Check small/mobile profiles
+      run: |
+        cargo check -p rillaned --no-default-features --features small
+        cargo check -p rillane-ffi --no-default-features --features mobile
+        cargo check -p rillanectl --no-default-features --features small
+
+    - name: Assert no wasmtime in small dep graph
+      # -c 计数取 0 为过；非零时先打命中行再退 1，失败现场不丢
+      run: |
+        hits=$(cargo tree -p rillaned --no-default-features --features small -e normal | grep -ci wasmtime || true)
+        if [ "$hits" != "0" ]; then
+          cargo tree -p rillaned --no-default-features --features small -e normal | grep -i wasmtime
+          exit 1
+        fi
+
   coverage:
     name: Code coverage
     runs-on: [self-hosted, rillane]

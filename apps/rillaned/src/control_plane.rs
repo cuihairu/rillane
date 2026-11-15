@@ -1275,7 +1275,9 @@ impl ControlPlane {
     /// 观测轮（plugin-loader.md §0 计数面）`GET /plugins/stats`：per-plugin
     /// 计数快照（calls/denied/traps/fuel_exhausted）。空表 = obfs 未启用或
     /// 无 plugins 声明（形态稳定恒 200，/dns/stats 先例同款——插件面缺席
-    /// 不是错误态）。
+    /// 不是错误态）。RIL-040：small 档恒空表（无 WASM 插件面，路由形态不变
+    /// ——TUN「恒渲染、数据源门控」同口径）。
+    #[cfg(feature = "full")]
     async fn handle_plugins_stats(&self) -> Response<RespBody> {
         let plugins: Vec<PluginStatsDto> = self
             .runtime
@@ -1290,6 +1292,17 @@ impl ControlPlane {
             })
             .collect();
         json(StatusCode::OK, &PluginsStatsDto { plugins })
+    }
+
+    /// RIL-040：small/mobile 档（无插件面）——路由形态稳定恒 200 空表。
+    #[cfg(not(feature = "full"))]
+    async fn handle_plugins_stats(&self) -> Response<RespBody> {
+        json(
+            StatusCode::OK,
+            &PluginsStatsDto {
+                plugins: Vec::new(),
+            },
+        )
     }
 
     /// P2-7 M0 §2.2：撤销生效面快照（静态 env 条目 + 文件载体态）。
@@ -3876,6 +3889,8 @@ mod tests {
     /// 观测轮：plugins 声明 → 名字与四计数键齐备（装配期零流量 → 全零；
     /// 计数语义由 rillane-plugins 单测钉，此处钉控制面暴露面与 runtime 旁路
     /// 同实例性——getter 名字与 wasm plugin_name 固化名一致）。
+    /// RIL-040：small 档无 WASM 面，本测试仅 full 档。
+    #[cfg(feature = "full")]
     #[tokio::test]
     async fn plugins_stats_present_renders_counts_shape() {
         // 最小 wasm 插件（内联 WAT 落盘，同 obfs_config §4.3 测试法）

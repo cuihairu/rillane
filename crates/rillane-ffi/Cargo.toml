@@ -10,9 +10,17 @@ description = "RILLANE 移动端 FFI：C ABI 最小通路（P3-4）——cdylib 
 # cdylib：Android/iOS 侧动态库；rlib：宿主机测试与复用
 crate-type = ["cdylib", "rlib"]
 
+# 构建档位（RIL-040）：`full` 挂 wasmtime/JIT；mobile 档 = 无 WASM 插件面
+# （small 语义同名转发——移动 cdylib 依赖图无 wasmtime）。default = full 档，
+# 移动宿主构建须 `--no-default-features --features mobile`。
+[features]
+default = ["full"]
+full = ["rillane-runtime/plugins"]
+mobile = ["rillane-runtime/small"]
+
 [dependencies]
 rillane-config = { path = "../rillane-config" }
-rillane-runtime = { path = "../rillane-runtime" }
+rillane-runtime = { path = "../rillane-runtime", default-features = false }
 anyhow.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

@@ -11,6 +11,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::warn;
 
+#[cfg(not(feature = "plugins"))]
+use rillane_config::CODE_UNSUPPORTED_COMBINATION;
 use rillane_config::{
     ApplyTo, ObfuscationConfig, PaddingBlockConfig, ShapingBlockConfig, TimingBlockConfig,
 };
@@ -294,24 +296,22 @@ pub fn build_middleware_chain(
     cfg: Option<&ObfuscationConfig>,
     known_egress: &[&str],
 ) -> Result<MiddlewareChain> {
-    build_middleware_chain_with_plugins(cfg, known_egress).map(|(chain, _)| chain)
+    #[cfg(feature = "plugins")]
+    {
+        build_middleware_chain_with_plugins(cfg, known_egress).map(|(chain, _)| chain)
+    }
+    #[cfg(not(feature = "plugins"))]
+    {
+        build_middleware_chain_small(cfg, known_egress)
+    }
 }
 
-/// 装配并同时旁路插件具体类型句柄（观测轮：控制面 /plugins/stats 取数——
-/// 与链内同一实例，不二次 JIT；无 obfs/未启用 → (空链, 空表)）。
-pub fn build_middleware_chain_with_plugins(
-    cfg: Option<&ObfuscationConfig>,
+/// 内置混淆链装配（两 feature 态共用）：padding/latency_probe/timing/shaping
+/// 按声明序（§3.3-5）；未知名字 → Err（validate §3.3-5 已拦，此处直调防御）。
+fn builtin_middlewares(
+    cfg: &ObfuscationConfig,
     known_egress: &[&str],
-) -> Result<(
-    MiddlewareChain,
-    Vec<Arc<rillane_plugins::WasmPluginMiddleware>>,
-)> {
-    let Some(cfg) = cfg else {
-        return Ok((MiddlewareChain::default(), Vec::new()));
-    };
-    if !cfg.enabled {
-        return Ok((MiddlewareChain::default(), Vec::new()));
-    }
+) -> Result<Vec<Arc<dyn FlowMiddleware>>> {
     let padding_policy = to_padding_policy(cfg, known_egress)?;
     let timing_policy = to_timing_policy(cfg, known_egress)?;
     let shaping_policy = to_shaping_policy(cfg, known_egress)?;
@@ -348,6 +348,52 @@ pub fn build_middleware_chain_with_plugins(
             ),
         }
     }
+    Ok(mws)
+}
+
+/// small/mobile 档装配（RIL-040：依赖图无 wasmtime/JIT）：仅内置链；
+/// `obfuscation.plugins` 声明点名硬错误（稳定码 `config.combo.unsupported`）
+/// ——不是隐藏配置入口，是配置校验期拒绝。
+#[cfg(not(feature = "plugins"))]
+pub fn build_middleware_chain_small(
+    cfg: Option<&ObfuscationConfig>,
+    known_egress: &[&str],
+) -> Result<MiddlewareChain> {
+    let Some(cfg) = cfg else {
+        return Ok(MiddlewareChain::default());
+    };
+    if !cfg.enabled {
+        return Ok(MiddlewareChain::default());
+    }
+    if !cfg.plugins.is_empty() {
+        anyhow::bail!(
+            "{CODE_UNSUPPORTED_COMBINATION}: obfuscation.plugins 需要 wasmtime/JIT（WASM 插件），\
+             small/mobile 构建不支持；请改用 full 构建或移除 plugins 声明"
+        );
+    }
+    Ok(MiddlewareChain::new(builtin_middlewares(
+        cfg,
+        known_egress,
+    )?))
+}
+
+/// 装配并同时旁路插件具体类型句柄（观测轮：控制面 /plugins/stats 取数——
+/// 与链内同一实例，不二次 JIT；无 obfs/未启用 → (空链, 空表)）。
+#[cfg(feature = "plugins")]
+pub fn build_middleware_chain_with_plugins(
+    cfg: Option<&ObfuscationConfig>,
+    known_egress: &[&str],
+) -> Result<(
+    MiddlewareChain,
+    Vec<Arc<rillane_plugins::WasmPluginMiddleware>>,
+)> {
+    let Some(cfg) = cfg else {
+        return Ok((MiddlewareChain::default(), Vec::new()));
+    };
+    if !cfg.enabled {
+        return Ok((MiddlewareChain::default(), Vec::new()));
+    }
+    let mut mws = builtin_middlewares(cfg, known_egress)?;
     // P3-2（plugin-loader.md §2.1/§2.3）：插件在内置链之后按声明序追加——
     // 链序 = 内置声明序 + plugins 声明序；JIT 编译在此同步发生（装配期，不占运行期）
     let mut plugins: Vec<Arc<rillane_plugins::WasmPluginMiddleware>> = Vec::new();
@@ -366,7 +412,9 @@ pub fn build_middleware_chain_with_plugins(
 mod tests {
     use std::collections::BTreeMap;
 
-    use rillane_config::{ObfsPluginConfig, ObfsProfileConfig};
+    #[cfg(feature = "plugins")]
+    use rillane_config::ObfsPluginConfig;
+    use rillane_config::ObfsProfileConfig;
     use rillane_core::{PaddingMode, PaddingSpec};
 
     use super::*;
@@ -776,6 +824,7 @@ mod tests {
     }
     /// P3-2（plugin-loader.md §4.3）：build_middleware_chain 装配——plugins 在
     /// 内置链之后按声明序追加（链名序断言）、坏路径构建期 Err。
+    #[cfg(feature = "plugins")]
     #[test]
     fn build_chain_appends_plugins_after_builtins() {
         // 最小 wasm 插件（与 rillane-plugins §4.1 同 ABI 面；wat 内联编译落盘）
@@ -818,5 +867,34 @@ mod tests {
         assert!(err.to_string().contains("ghost.wasm"), "{err:#}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// RIL-040：small/mobile 档（无 `plugins` feature）声明 obfs.plugins →
+    /// 配置校验期点名硬错误（稳定码 `config.combo.unsupported`），
+    /// 不是隐藏配置入口；无插件声明时内置链照常装配。
+    #[cfg(not(feature = "plugins"))]
+    #[test]
+    fn small_mode_rejects_plugin_declarations() {
+        // 有插件声明 → 硬错误，错误带稳定码
+        let mut cfg = profile_cfg();
+        cfg.plugins = vec![rillane_config::ObfsPluginConfig {
+            path: std::path::PathBuf::from("/tmp/unused.wasm"),
+            fuel: None,
+        }];
+        let err = build_middleware_chain(Some(&cfg), &[]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(rillane_config::CODE_UNSUPPORTED_COMBINATION),
+            "错误应带稳定码：{msg}"
+        );
+        assert!(
+            msg.contains("plugins"),
+            "错误应点名 obfuscation.plugins：{msg}"
+        );
+
+        // 无插件声明 → 内置链不受裁剪影响
+        let cfg = profile_cfg();
+        let chain = build_middleware_chain(Some(&cfg), &[]).expect("内置链应照常装配");
+        assert_eq!(chain.len(), 1, "内置 padding 链仍应工作");
     }
 }

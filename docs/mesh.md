@@ -20,7 +20,7 @@ TCP chains use versioned MeshEnvelope and require hop-by-hop mTLS by default. Ho
 
 UDP has envelope/session/replay state, but combinations without complete secure carriage remain rejected. Development plaintext switches are not a production solution; sequence windows do not replace authentication.
 
-Padding, timing/shaping and WASM middleware are explicit features with no automatic performance benefit. v1 small/mobile builds will prune dependencies further; current runtime still brings Wasmtime through plugins.
+Padding, timing/shaping and WASM middleware are explicit features with no automatic performance benefit. Build profiles are pruned: the runtime `plugins` feature (default `full`) carries Wasmtime; `small`/`mobile` builds (`--no-default-features --features small`) drop Wasmtime from the dependency graph and reject `obfuscation.plugins` declarations at validation time with the stable code `config.combo.unsupported` — the builtin padding/timing/shaping chain and standard subscriptions keep working.
 
 ## Observability
 

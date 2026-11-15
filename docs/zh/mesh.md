@@ -20,7 +20,7 @@ TCP 多跳通过版本化 MeshEnvelope 描述链路，默认要求逐跳 mTLS。
 
 UDP 有 envelope、会话映射与防重放状态，但缺少完整安全承载的部署组合仍拒绝构建。不能以开发明文开关作为生产交付，也不能把序号窗口当成消息认证。
 
-包长、timing/shaping 与 WASM 中间件需要显式配置，且不自动提高延迟/吞吐。v1 的 small/mobile 构建会进一步裁剪这些依赖；当前 runtime 仍经 plugins 带入 Wasmtime。
+包长、timing/shaping 与 WASM 中间件需要显式配置，且不自动提高延迟/吞吐。构建档位已可裁剪：runtime 的 `plugins` feature（default=`full`）携带 Wasmtime；`small`/`mobile` 档（`--no-default-features --features small`）依赖图无 Wasmtime，`obfuscation.plugins` 声明在配置校验期以稳定原因码 `config.combo.unsupported` 点名拒绝——内置 padding/timing/shaping 链与标准订阅照常工作。
 
 ## 观测口径
 

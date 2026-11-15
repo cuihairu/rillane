@@ -213,6 +213,8 @@ impl RuntimeBuilder {
         // P1-4 §1.2/§3.2：混淆 middleware 链（块缺席/关闭 = 空链零开销，§2.5）。
         // known_egress = 配置 egress 名 ∪ build 期已注册输出名（E5 判定输入；
         // 并集覆盖 with_output 显式注册的自定义出口）。
+        // small 档无 struct 字段消费 plugin_middlewares → 允许未用绑定
+        #[cfg_attr(not(feature = "plugins"), allow(unused_variables))]
         let (middleware_chain, plugin_middlewares) = {
             let mut names: Vec<String> = config_snapshot
                 .egress
@@ -226,11 +228,22 @@ impl RuntimeBuilder {
             }
             let refs: Vec<&str> = names.iter().map(String::as_str).collect();
             // 观测轮（plugin-loader.md §0 计数面）：插件具体类型句柄经元组旁路
-            // 留存（控制面 /plugins/stats 取数）——与链内同一实例
-            crate::obfs_config::build_middleware_chain_with_plugins(
+            // 留存（控制面 /plugins/stats 取数）——与链内同一实例；
+            // RIL-040：small 档（无 plugins feature）仅内置链，无插件旁路面
+            #[cfg(feature = "plugins")]
+            let pair = crate::obfs_config::build_middleware_chain_with_plugins(
                 config_snapshot.obfuscation.as_ref(),
                 &refs,
-            )?
+            )?;
+            #[cfg(not(feature = "plugins"))]
+            let pair = (
+                crate::obfs_config::build_middleware_chain(
+                    config_snapshot.obfuscation.as_ref(),
+                    &refs,
+                )?,
+                (),
+            );
+            pair
         };
 
         // TUN 模式属主裁决（tun-dataplane.md §2.6）：TunIngress 组合设备+路由
@@ -632,6 +645,7 @@ impl RuntimeBuilder {
             #[cfg(target_os = "linux")]
             tun_ingress,
             dns_service,
+            #[cfg(feature = "plugins")]
             plugin_middlewares,
             subscription_manager,
             event_tx,
@@ -934,7 +948,9 @@ pub struct Runtime {
     /// /dns/stats 经 getter 取数；None = network.dns 块缺席/关闭）
     dns_service: Option<Arc<crate::dns_config::DnsService>>,
     /// 观测轮（plugin-loader.md §0 计数面）：插件具体类型句柄旁路（控制面
-    /// /plugins/stats 经 getter 取数；空 = obfs 未启用/无 plugins 声明）
+    /// /plugins/stats 经 getter 取数；空 = obfs 未启用/无 plugins 声明；
+    /// RIL-040 small 档无此面）
+    #[cfg(feature = "plugins")]
     plugin_middlewares: Vec<Arc<rillane_plugins::WasmPluginMiddleware>>,
     subscription_manager: Option<Arc<SubscriptionManager>>,
     event_tx: broadcast::Sender<RuntimeEvent>,
@@ -1627,7 +1643,8 @@ impl Runtime {
 
     /// 观测轮（plugin-loader.md §0 计数面）：per-plugin 计数快照（控制面
     /// /plugins/stats 取数；空 = obfs 未启用/无 plugins 声明）。即时快照、
-    /// 不暴露内部句柄。
+    /// 不暴露内部句柄。RIL-040：small 档无 WASM 插件面，getter 缺席。
+    #[cfg(feature = "plugins")]
     pub fn get_plugin_stats(&self) -> Vec<(String, rillane_plugins::PluginStatsSnapshot)> {
         self.plugin_middlewares
             .iter()

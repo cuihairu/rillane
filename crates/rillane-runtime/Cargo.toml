@@ -3,6 +3,16 @@ name = "rillane-runtime"
 version = "0.1.0"
 edition = "2021"
 
+# 构建档位（RIL-040）：`plugins` 挂 wasmtime/JIT（WASM 插件中间件）。
+# default = full 档；small/mobile 档须 `--no-default-features --features small`
+# （cargo feature 叠加语义下，small 不关 default 仍是全量）——small 依赖图
+# 无 wasmtime/JIT；obfs.plugins 声明在 small 档点名硬错误，不是隐藏配置入口。
+[features]
+default = ["plugins"]
+plugins = ["dep:rillane-plugins"]
+small = []
+mobile = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -24,7 +34,7 @@ rillane-routing = { path = "../rillane-routing" }
 rillane-telemetry = { path = "../rillane-telemetry" }
 rillane-mesh = { path = "../rillane-mesh" }
 rillane-subscription = { path = "../rillane-subscription" }
-rillane-plugins = { path = "../rillane-plugins" }
+rillane-plugins = { path = "../rillane-plugins", optional = true }
 notify.workspace = true
 futures.workspace = true
 whoami.workspace = true

@@ -15,7 +15,7 @@
 | `rillane-runtime` | 监听、会话、订阅接线、TUN 与 Mesh 装配 |
 | `rillane-platform` | 系统接管、路由/DNS、平台适配类型和 Linux 实现；系统副作用日志与所有权撤销契约（`side_effects` 模块） |
 | `rillane-subscription` | 拉取、识别、转换、缓存、内容摘要与刷新 |
-| `rillane-mesh` / `rillane-plugins` | 受管节点协作与 WASM 中间件；v1 规划将其裁剪为可选依赖 |
+| `rillane-mesh` / `rillane-plugins` | 受管节点协作与 WASM 中间件；插件已为可选依赖（runtime `plugins` feature，RIL-040：default=`full`，`small`/`mobile` 档依赖图无 Wasmtime） |
 | `rillane-telemetry` / `rillane-ffi` | 日志与移动 FFI 基础设施 |
 | `platforms/` | 各平台宿主、安装和打包模板；有模板不等于代理已运行验收 |
 

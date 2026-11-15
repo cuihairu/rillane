@@ -3,6 +3,16 @@ name = "rillaned"
 version = "0.1.0"
 edition = "2021"
 
+# 构建档位（RIL-040）：`full` 挂 wasmtime/JIT（WASM 插件中间件）。
+# default = full 档；small/mobile 档须 `--no-default-features --features small`
+# （cargo feature 叠加语义下，small 不关 default 仍是全量）——small 依赖图
+# 无 wasmtime/JIT；obfs.plugins 声明在 small 档配置校验期点名硬错误。
+[features]
+default = ["full"]
+full = ["rillane-runtime/plugins"]
+small = []
+mobile = []
+
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
@@ -17,7 +27,7 @@ uuid.workspace = true
 rillane-config = { path = "../../crates/rillane-config" }
 rillane-core = { path = "../../crates/rillane-core" }
 rillane-platform = { path = "../../crates/rillane-platform" }
-rillane-runtime = { path = "../../crates/rillane-runtime" }
+rillane-runtime = { path = "../../crates/rillane-runtime", default-features = false }
 rillane-telemetry = { path = "../../crates/rillane-telemetry" }
 rillane-mesh = { path = "../../crates/rillane-mesh" }
 rillane-subscription = { path = "../../crates/rillane-subscription" }

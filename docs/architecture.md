@@ -15,7 +15,7 @@ This is an implementation reference, not another architecture design. The **sing
 | `rillane-runtime` | Listeners, sessions, subscriptions, TUN and Mesh assembly |
 | `rillane-platform` | Capture, route/DNS models and Linux integration; side-effect journal and ownership-undo contract (`side_effects` module) |
 | `rillane-subscription` | Fetch, detect, convert, cache, digest and refresh |
-| `rillane-mesh` / `rillane-plugins` | Managed topology and WASM middleware; v1 will make dependencies optional |
+| `rillane-mesh` / `rillane-plugins` | Managed topology and WASM middleware; plugins are optional behind the runtime `plugins` feature (RIL-040: `full` default, `small`/`mobile` builds carry no Wasmtime) |
 | `rillane-telemetry` / `rillane-ffi` | Logging and mobile FFI foundations |
 | `platforms/` | Hosts, installers and packages; scaffolding is not runtime acceptance |
 

@@ -3,6 +3,14 @@ name = "rillanectl"
 version = "0.1.0"
 edition = "2021"
 
+# 构建档位（RIL-040）：`full` 挂 wasmtime/JIT；small/mobile = 无 WASM 插件面
+# （ctl 自身无插件调用，仅透传 runtime 档位——依赖图随档位裁剪）。
+[features]
+default = ["full"]
+full = ["rillane-runtime/plugins"]
+small = []
+mobile = []
+
 [dependencies]
 clap.workspace = true
 anyhow.workspace = true
@@ -11,7 +19,7 @@ tracing.workspace = true
 rillane-config = { path = "../../crates/rillane-config" }
 rillane-core = { path = "../../crates/rillane-core" }
 rillane-protocols = { path = "../../crates/rillane-protocols" }
-rillane-runtime = { path = "../../crates/rillane-runtime" }
+rillane-runtime = { path = "../../crates/rillane-runtime", default-features = false }
 rillane-subscription = { path = "../../crates/rillane-subscription" }
 reqwest.workspace = true
 serde.workspace = true
