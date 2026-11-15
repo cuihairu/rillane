@@ -108,16 +108,19 @@ Every admitted section carries these fields (the contract test checks each one; 
 
 ## vless
 
-- **Conclusion**: self-written (same as vmess — REALITY needs byte-level ClientHello control, which the rustls route does not offer; RIL-107 runs its own evaluation per the registration spec)
-- **Version**: in-tree implementation
-- **License**: repository license (self-written)
-- **Platforms**: all platforms
-- **Public API**: `VlessConnector` (crates/rillane-protocols/src/outbound/vless.rs)
-- **Bypass**: composes with the transport factories
-- **Cancel**: open-phase checks
-- **Stats**: flow/REALITY refused at dial time by name (G1-6 — config is kept, no build-time refusal, preventing silent degradation)
-- **Reuse**: no prewarm composition; the UDP face (network=tcp only) reuses the node config
-- UDP: network=tcp only.
+- **Conclusion**: the VLESS protocol face is self-written; the REALITY transport face selects the cfal/rustls fork of `rustls` — upstream 049d39b9 (0.23.46) plus 5 REALITY commits (client hooks / target-shaped server hello / isolation hardening / rebase validation), swapped workspace-wide via a `[patch.crates-io]` pin at rev `d17d0fc304c03fe6e2c96ade6cd39c33b951c3af`. The fork's REALITY face deliberately does not authenticate peers (authentication and certificate policy are the caller's job) — authentication (x25519 + HKDF + AES-GCM session-id seal/open, format per the xray REALITY spec) and certificate binding are assembled in rillane-protocols (RIL-107). Alternatives on record: xray-rs (abc15018045126) 1.0.3 is 279 lines of crypto primitives only (derive_auth_key/seal_session_id), no TLS transport or ClientHello crafting — unusable as a transport backend (its MIT auth format serves as reference); shoes (cfal) 0.3.x has a complete REALITY (2940 lines) but keeps `mod reality` private, no library face — unusable; xray-rust (aimalygin) 0.10.0 has a client face with rigorous Go-oracle vectors, but MPL-2.0, not on crates.io, no server face, heavy deps (quinn/h3/ml-dsa) — recorded as a fallback, not taken; reality-rs (YC-Lammy) is a dead placeholder.
+- **Version**: requires `rustls = "0.23"` + a `[patch.crates-io]` git pin at `d17d0fc3` (version stays 0.23.46 inside the fork); lock resolves rustls 0.23.46 (fork source), aws-lc-rs 1.18.1
+- **License**: Apache-2.0 OR ISC OR MIT (same as upstream rustls; the fork does not change it)
+- **Platforms**: all platforms; REALITY record padding depends on the aws-lc-rs backend (see the provider constraint below), which needs a C toolchain — build and tests verified on this machine and CI
+- **Public API**: VLESS face `VlessConnector` (crates/rillane-protocols/src/outbound/vless.rs); REALITY face in the fork: `ClientHooks` (start_key_exchange/session_id/server_hello) + `ClientConnection::new_reality` (rejects TLS1.2 configs), `PreparedServerHello::new` (validates a target-shaped ServerHello — TLS1.3 only, 32-byte session_id echo equality, no HRR/PSK/early-data/unknown extensions, a three-suite whitelist, only the target key-share bytes are replaced) + `ServerConnection::new_reality` (rejects non-empty ALPN, client auth, early data, fragment settings)
+- **Bypass**: none — the fork owns byte-level ClientHello crafting and record padding (the essence of REALITY); dialing and target connections remain composed by rillane (same shape as the existing TLS face)
+- **Cancel**: the fork's connection face is plain tokio AsyncRead/AsyncWrite — open-phase cancellation lives at the task-drop layer (same as the existing TLS face, stated as-is)
+- **Stats**: VLESS face as before; REALITY handshake failures surface as named rustls `Error`s (e.g. `PeerIncompatible::RealityUnsupported` — session-id echo mismatch / short-id mismatch takes this shape), never silent degradation
+- **Reuse**: no prewarm composition; resumption, early data and compression are disabled on REALITY connections (explicit in the fork — one full handshake per connection), stated as-is; the UDP face (network=tcp only) reuses the node config
+- **Provider constraint**: the REALITY flight shaping on both faces (finish_reality → send_reality_record → encrypt_with_padding) pads records to the target's real record lengths; the `encrypt_with_padding` default implementation rejects nonzero padding and only the aws_lc_rs backend implements it — REALITY connections pass the aws_lc_rs provider explicitly, coexisting with the global ring default (explicit per-config, no impact on the existing TLS faces)
+- **Fingerprint honesty**: the fork shapes the ClientHello with rustls' own encoder — a rustls-shaped fingerprint, not a uTLS browser clone; anti-probing strength is weaker than the uTLS face; subscription client-fingerprint stays out of the IR (named in the conversion report)
+- **Role boundary**: outbound client only (`Vless { reality }` wiring); the fork's server face (PreparedServerHello/ServerConnection::new_reality) serves as the test real-peer; rillane ingress does not catalog a REALITY listener. Legal combinations: reality requires public_key, short_id is optional; flow (XTLS Vision) is still refused at dial time by name (RIL-108 scope, no silent degradation)
+- UDP: network=tcp only (ws/grpc/h2 UDP faces unimplemented, refused by the build-time scan); the UDP face of vless+reality goes through the VLESS UDP face (gate lifted in RIL-107).
 
 ## trojan
 

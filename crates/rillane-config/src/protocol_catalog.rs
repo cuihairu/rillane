@@ -149,7 +149,9 @@ pub const CATALOG: &[CatalogEntry] = &[
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#vless",
         },
-        udp: true, // 仅 network=tcp；flow/reality 拨号期点名拒绝（G1-6）
+        // RIL-107：reality 传输面随客户端交付（rustls fork pin）；flow
+        // （Vision）仍拨号期点名拒绝（RIL-108，防静默降级）
+        udp: true, // 仅 network=tcp；vless+reality 的 UDP 面走 VLESS UDP 面
         backend: Backend::InTree {
             path: "crates/rillane-protocols/src/outbound/vless.rs",
         },

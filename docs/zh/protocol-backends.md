@@ -152,18 +152,60 @@ armv7-ohos 桩）在对应小节如实记录。
 
 ## vless
 
-- **结论**：自写（同 vmess——REALITY 依赖 ClientHello 字节级控制，
-  rustls 路线不支持；RIL-107 按注册规范单独评估）
-- **版本**：仓库内实现
-- **许可**：本仓库许可（自写）
-- **平台**：全平台
-- **公开 API**：`VlessConnector`（crates/rillane-protocols/src/outbound/vless.rs）
-- **旁路**：与传输工厂组合
-- **取消**：建立期检查
-- **统计**：flow/REALITY 拨号期点名拒绝（G1-6——配置保留不判负，防静
-  默降级）
-- **复用**：无预热组合；UDP 面（仅 network=tcp）同节点配置
-- UDP：仅 network=tcp。
+- **结论**：VLESS 协议面自写；REALITY 传输面选库 `rustls` 的
+  cfal/rustls fork——上游 049d39b9（0.23.46）+ 5 个 REALITY 提交
+  （client hooks / server hello 构造 / 隔离加固 / rebase 验证），
+  以 `[patch.crates-io]` 固定 rev `d17d0fc304c03fe6e2c96ade6cd39c33b951c3af`
+  全仓换用。fork 的 REALITY 面显式不认证对端（认证与证书策略留给调用
+  方）——认证（x25519 + HKDF + AES-GCM session-id seal/open，格式同
+  xray REALITY 规范）与证书绑定由 rillane-protocols 自写装配（RIL-107）。
+  备选评估在案：xray-rs（abc15018045126）1.0.3 仅 279 行加密原语
+  （derive_auth_key/seal_session_id），无 TLS 传输与 ClientHello 构造
+  ——不可作传输后端（其 MIT 认证格式作参考）；shoes（cfal）0.3.x
+  REALITY 完整（2940 行）但 `mod reality` 私有、无库面——不可作后端；
+  xray-rust（aimalygin）0.10.0 有客户端面 + Go oracle 向量严谨，但
+  MPL-2.0 许可、不在 crates.io、无服务端面、重依赖（quinn/h3/ml-dsa）
+  ——备选在案不取；reality-rs（YC-Lammy）为死占位。
+- **版本**：要求 `rustls = "0.23"` + `[patch.crates-io]` git pin
+  `d17d0fc3`（fork 内版本保持 0.23.46）；lock 实测 rustls 0.23.46
+  （fork 源）、aws-lc-rs 1.18.1
+- **许可**：Apache-2.0 OR ISC OR MIT（上游 rustls 同许可，fork 未改许可）
+- **平台**：全平台；REALITY 记录层填充依赖 aws-lc-rs 后端（见下
+  提供者约束），需 C 工具链——本机与 CI 实测构建+测试通过
+- **公开 API**：VLESS 面 `VlessConnector`
+  （crates/rillane-protocols/src/outbound/vless.rs）；REALITY 面 fork 的
+  `ClientHooks`（start_key_exchange/session_id/server_hello）+
+  `ClientConnection::new_reality`（拒绝 TLS1.2 配置）、
+  `PreparedServerHello::new`（校验目标形 ServerHello——仅 TLS1.3、
+  session_id 32 字节回显相等、禁 HRR/PSK/early-data/未知扩展、套件白
+  名单三件、只替换目标 key-share 字节）+ `ServerConnection::new_reality`
+  （拒绝 ALPN/客户端认证/early-data/分片设置非零）
+- **旁路**：无旁路——fork 拥有 ClientHello 字节级构造与记录层填充
+  （REALITY 本体所在）；拨号与目标连接仍由 rillane 组合（与既有 TLS
+  面同构）
+- **取消**：fork 连接面是标准 tokio AsyncRead/AsyncWrite——建连取消
+  在任务丢弃层（与既有 TLS 面同口径，如实记录）
+- **统计**：VLESS 面同前；REALITY 握手失败以 rustls `Error` 命名错误
+  透出（如 `PeerIncompatible::RealityUnsupported`——session_id 回显
+  不等/短 id 不匹配即此形态），不静默降级
+- **复用**：无预热组合；REALITY 连接禁 resumption/early-data/压缩
+  （fork 显式禁用——每连接一次完整握手），如实记录；UDP 面（仅
+  network=tcp）同节点配置
+- **提供者约束**：REALITY 双面的握手指令流（finish_reality →
+  send_reality_record → encrypt_with_padding）按目标真实记录长度做
+  记录层填充；`encrypt_with_padding` 默认实现拒绝非零填充，仅
+  aws_lc_rs 后端实现——REALITY 连接显式传入 aws_lc_rs provider，
+  与全局 ring 默认 provider 共存（按配置显式传入，不影响既有 TLS 面）
+- **指纹诚实声明**：fork 用 rustls 自身编码构造 ClientHello——是
+  rustls 形指纹，非 uTLS 浏览器克隆；防探测强度弱于 uTLS 面；订阅
+  client-fingerprint 不入 IR（转换报告点名损失，宁缺毋滥）
+- **角色边界**：仅出站客户端（`Vless { reality }` 装配）；fork 的
+  服务端面（PreparedServerHello/ServerConnection::new_reality）用于
+  测试真实对端；rillane 入站面不编目 REALITY 监听。合法组合：
+  reality 必带 public_key，short_id 可选；flow（XTLS Vision）仍拨号
+  期点名拒绝（RIL-108 范围，防静默降级）
+- UDP：仅 network=tcp（ws/grpc/h2 的 UDP 面未实现，构建期扫描判负）；
+  vless+reality 的 UDP 面走 VLESS UDP 面（RIL-107 放开 gate）。
 
 ## trojan
 
