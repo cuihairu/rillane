@@ -233,7 +233,10 @@ fn strip_url_secrets(url: &str) -> String {
 
 /// 剥除 PEM 私钥块（-----BEGIN ... PRIVATE KEY----- 到 -----END ...）：
 /// 密钥材料整体替换为占位符
-fn strip_pem(text: &str) -> String {
+/// 多行 PEM 私钥块整体剥除（BEGIN/END 之间的内容含标记行替换为
+/// 占位符）。跨行边界处理只能整段做——诊断包/日志出口在逐行消毒前
+/// 先过本闸（RIL-058 错误日志出口复用同一实现）。
+pub fn strip_pem(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_block = false;
     for line in text.lines() {

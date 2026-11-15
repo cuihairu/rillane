@@ -14,6 +14,7 @@ use reqwest::blocking::Client;
 use rillane_config::{
     EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor, RillaneConfig,
 };
+use rillane_core::redact::{RedactionScope, Redactor};
 use rillane_subscription::{ClashConverter, ClashExporter};
 use serde::Deserialize;
 use time::{Duration as TimeDuration, OffsetDateTime};
@@ -153,7 +154,7 @@ enum Command {
         #[command(subcommand)]
         command: RouteCommand,
     },
-    /// 一键诊断信息收集（生成诊断目录）
+    /// 一键诊断信息收集（生成诊断目录，按范围选择快照/日志/配置）
     Diagnose {
         /// 控制面 base URL，如 http://127.0.0.1:9090
         #[arg(long)]
@@ -161,7 +162,12 @@ enum Command {
         /// 输出目录（默认 rillane-diagnose-<epoch>）
         #[arg(long)]
         output: Option<String>,
-        /// 不对配置做脱敏（默认会脱敏 token/password/private_key 等）
+        /// 包范围：safe（默认——不含订阅/运行配置/完整日志）/ full
+        /// （全快照，秘密仍剥除）/ raw（不脱敏——仅供本地人工排查，
+        /// 清单标注严禁直接上传 AI）
+        #[arg(long, default_value = "safe")]
+        scope: String,
+        /// 不对配置做脱敏（等价 --scope raw）
         #[arg(long)]
         no_redact: bool,
         /// 不采集本机快照（路由/DNS/接口等）
@@ -908,9 +914,11 @@ fn main() -> Result<()> {
         Command::Diagnose {
             endpoint,
             output,
+            scope,
             no_redact,
             no_local,
         } => {
+            let scope = parse_diagnose_scope(&scope, no_redact)?;
             let epoch = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -928,16 +936,19 @@ fn main() -> Result<()> {
 
             let mut log = String::new();
 
-            // Config (redacted by default).
+            // Config：raw 范围原样落盘（清单标注禁止上传）；其余范围脱敏。
             let raw_config = fs::read_to_string(&cli.config)
                 .with_context(|| format!("无法读取 {}", cli.config))?;
-            let rendered_config = if no_redact {
-                raw_config
+            let config_file = if scope == DiagnoseScope::Raw {
+                fs::write(out_dir.join("config.raw"), &raw_config)
+                    .context("写入 config.raw 失败")?;
+                "config.raw"
             } else {
-                redact_config_by_extension(&raw_config, &cli.config)
+                let rendered_config = redact_config_by_extension(&raw_config, &cli.config);
+                fs::write(out_dir.join("config.redacted"), rendered_config)
+                    .context("写入 config.redacted 失败")?;
+                "config.redacted"
             };
-            fs::write(out_dir.join("config.redacted"), rendered_config)
-                .context("写入 config.redacted 失败")?;
 
             if !no_local {
                 collect_local_snapshots(&out_dir, &mut log);
@@ -992,42 +1003,96 @@ fn main() -> Result<()> {
                 &out_dir.join("runtime_stats.json"),
                 &mut log,
             );
-            fetch_json_snapshot(
-                &client,
-                token.as_deref(),
-                &format!("{base}/runtime/config"),
-                &out_dir.join("runtime_config.json"),
-                &mut log,
-            );
-            fetch_text_snapshot(
+            // 按范围选择敏感快照（RIL-058）：safe 不采集订阅列表与
+            // 运行配置；full 采集但秘密仍剥除；raw 原样（清单标注禁止
+            // 上传 AI）。
+            let mut review_files: Vec<&str> = vec![config_file, "events.log", "logs.txt"];
+            match scope {
+                DiagnoseScope::Safe => {}
+                DiagnoseScope::Full => {
+                    fetch_json_snapshot_with(
+                        &client,
+                        token.as_deref(),
+                        &format!("{base}/runtime/config"),
+                        &out_dir.join("runtime_config.json"),
+                        &mut log,
+                        &redact_json_value,
+                    );
+                    fetch_json_snapshot_with(
+                        &client,
+                        token.as_deref(),
+                        &format!("{base}/subscriptions"),
+                        &out_dir.join("subscriptions.json"),
+                        &mut log,
+                        &strip_json_url_secrets,
+                    );
+                    review_files.push("runtime_config.json");
+                    review_files.push("subscriptions.json");
+                }
+                DiagnoseScope::Raw => {
+                    fetch_json_snapshot(
+                        &client,
+                        token.as_deref(),
+                        &format!("{base}/runtime/config"),
+                        &out_dir.join("runtime_config.json"),
+                        &mut log,
+                    );
+                    fetch_json_snapshot(
+                        &client,
+                        token.as_deref(),
+                        &format!("{base}/subscriptions"),
+                        &out_dir.join("subscriptions.json"),
+                        &mut log,
+                    );
+                    review_files.push("runtime_config.json");
+                    review_files.push("subscriptions.json");
+                }
+            }
+            // 错误日志/事件流出：raw 原样；其余逐行剥除私钥块与
+            // key=value 秘密对 + 不可信文本消毒
+            let log_transform: &dyn Fn(&str) -> String = match scope {
+                DiagnoseScope::Raw => &|text: &str| text.to_string(),
+                _ => &sanitize_diagnostic_log,
+            };
+            fetch_text_snapshot_with(
                 &client,
                 token.as_deref(),
                 &format!("{base}/events"),
                 &out_dir.join("events.log"),
                 &mut log,
+                log_transform,
             );
-            fetch_text_snapshot(
+            fetch_text_snapshot_with(
                 &client,
                 token.as_deref(),
                 &format!("{base}/logs?lines=2000"),
                 &out_dir.join("logs.txt"),
                 &mut log,
+                log_transform,
             );
 
+            if !no_local {
+                review_files.push("local_system.txt");
+                review_files.push("local_routes.txt");
+                review_files.push("local_dns.txt");
+                review_files.push("local_interfaces.txt");
+            }
+
             let mut files: Vec<&str> = vec![
-                "config.redacted",
+                config_file,
                 "health.txt",
                 "flows.json",
                 "nodes.json",
                 "chains_stats.json",
-                "subscriptions.json",
                 "metrics.txt",
                 "runtime_stats.json",
-                "runtime_config.json",
                 "events.log",
                 "logs.txt",
                 "requests.log",
             ];
+            if scope != DiagnoseScope::Safe {
+                files.splice(5..5, ["subscriptions.json", "runtime_config.json"]);
+            }
             if !no_local {
                 files.splice(
                     1..1,
@@ -1040,13 +1105,35 @@ fn main() -> Result<()> {
                 );
             }
 
+            let (scope_name, ai_policy, note) = match scope {
+                DiagnoseScope::Safe => (
+                    "safe",
+                    "review-before-sharing",
+                    "safe by omission: subscription list, runtime config and full logs are not collected; collected text is still secret-stripped but may contain identities",
+                ),
+                DiagnoseScope::Full => (
+                    "full",
+                    "review-before-sharing",
+                    "secrets are stripped (config secret keys, subscription url credentials, log key=value pairs and pem blocks) but identities remain; review before sharing",
+                ),
+                DiagnoseScope::Raw => (
+                    "raw",
+                    "do-not-upload",
+                    "raw bundle contains secrets; for local human inspection only; never feed to AI models automatically",
+                ),
+            };
             let meta = serde_json::json!({
                 "generated_at_epoch": epoch,
                 "config_path": cli.config,
                 "control_base": base,
-                "redacted": !no_redact,
+                "scope": scope_name,
+                "redacted": scope != DiagnoseScope::Raw,
                 "local_snapshots": !no_local,
-                "files": files
+                "files": files,
+                "review_required_files": review_files,
+                "ai_upload_policy": ai_policy,
+                "upload_policy": "manual only - rillanectl never uploads the bundle anywhere",
+                "note": note,
             });
             fs::write(
                 out_dir.join("meta.json"),
@@ -1055,7 +1142,8 @@ fn main() -> Result<()> {
             .context("写入 meta.json 失败")?;
             fs::write(out_dir.join("requests.log"), log).context("写入 requests.log 失败")?;
 
-            println!("诊断信息已生成: {}", out_dir.display());
+            println!("诊断信息已生成: {}（范围 {scope_name}）", out_dir.display());
+            println!("上传政策: {ai_policy}——rillanectl 不做任何自动上传，分享前先看 meta.json");
         }
         Command::Mtls { command } => match command {
             MtlsCommand::InitCa {
@@ -1406,6 +1494,19 @@ fn fetch_json_snapshot(
     out_path: &std::path::Path,
     log: &mut String,
 ) {
+    fetch_json_snapshot_with(client, token, url, out_path, log, &|_v| {});
+}
+
+/// 带 JSON 出口变换的快照抓取（RIL-058：runtime_config/订阅列表经
+/// 变换剥除秘密后才落盘——出口闸在写入之前）。
+fn fetch_json_snapshot_with(
+    client: &Client,
+    token: Option<&str>,
+    url: &str,
+    out_path: &std::path::Path,
+    log: &mut String,
+    transform: &dyn Fn(&mut serde_json::Value),
+) {
     let mut req = client.get(url);
     if let Some(t) = token {
         req = req.header("x-admin-token", t);
@@ -1413,7 +1514,8 @@ fn fetch_json_snapshot(
 
     match req.send() {
         Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>() {
-            Ok(v) => {
+            Ok(mut v) => {
+                transform(&mut v);
                 let body = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
                 match fs::write(out_path, body) {
                     Ok(()) => log.push_str(&format!(
@@ -1465,6 +1567,19 @@ fn fetch_text_snapshot(
     out_path: &std::path::Path,
     log: &mut String,
 ) {
+    fetch_text_snapshot_with(client, token, url, out_path, log, &|text| text.to_string());
+}
+
+/// 带文本出口变换的快照抓取（RIL-058：事件/日志流出逐行剥除秘密
+/// + 消毒后才落盘）。
+fn fetch_text_snapshot_with(
+    client: &Client,
+    token: Option<&str>,
+    url: &str,
+    out_path: &std::path::Path,
+    log: &mut String,
+    transform: &dyn Fn(&str) -> String,
+) {
     let mut req = client.get(url);
     if let Some(t) = token {
         req = req.header("x-admin-token", t);
@@ -1472,7 +1587,7 @@ fn fetch_text_snapshot(
 
     match req.send() {
         Ok(r) if r.status().is_success() => match r.text() {
-            Ok(t) => match fs::write(out_path, t) {
+            Ok(t) => match fs::write(out_path, transform(&t)) {
                 Ok(()) => log.push_str(&format!(
                     "{}: ok\n",
                     out_path
@@ -1623,6 +1738,75 @@ fn write_cmd_snapshot_candidates(
         Ok(()) => log.push_str(&format!("{file_name}: ok\n")),
         Err(e) => log.push_str(&format!("{file_name}: write failed: {e}\n")),
     }
+}
+
+/// 诊断包范围（RIL-058）：按范围选择快照/日志/配置，默认安全。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiagnoseScope {
+    /// 默认：不含订阅列表、运行配置与完整错误日志的包（出口面最小）
+    Safe,
+    /// 全快照：订阅 URL 与运行配置仍剥除秘密后落盘（身份字段保留）
+    Full,
+    /// 原始包：不脱敏——仅供本地人工排查，清单标注禁止直接上传 AI
+    Raw,
+}
+
+/// 范围解析（`--no-redact` 显式覆盖为 raw——向后兼容旧参数）。
+fn parse_diagnose_scope(scope: &str, no_redact: bool) -> Result<DiagnoseScope> {
+    if no_redact {
+        return Ok(DiagnoseScope::Raw);
+    }
+    match scope {
+        "safe" => Ok(DiagnoseScope::Safe),
+        "full" => Ok(DiagnoseScope::Full),
+        "raw" => Ok(DiagnoseScope::Raw),
+        other => anyhow::bail!("不支持的诊断范围 {other:?}（支持 safe/full/raw）"),
+    }
+}
+
+/// 订阅/URL 类 JSON 出口（RIL-058）：任意字符串值里的 URL 剥除秘密
+/// ——userinfo 凭证与 token/password/secret/key/sign 类查询参数整体
+/// 移除。语义与 RIL-057 `Redactor::url`（Detailed 档剥除面）一致：
+/// 诊断导出内秘密永不出边界（身份字段原样保留，供本机排查）。
+fn strip_json_url_secrets(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, vv) in map.iter_mut() {
+                let url_key = k.eq_ignore_ascii_case("url")
+                    || k.eq_ignore_ascii_case("subscription_url")
+                    || k.eq_ignore_ascii_case("webhook_url");
+                if url_key {
+                    if let serde_json::Value::String(text) = vv {
+                        let mut red = Redactor::new(RedactionScope::Detailed);
+                        *text = red.url(text);
+                        continue;
+                    }
+                }
+                strip_json_url_secrets(vv);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                strip_json_url_secrets(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 错误日志/事件流出（RIL-058）：逐行剥除私钥块与 key=value 秘密对
+/// + 不可信文本消毒（RIL-057 `Redactor::error_message` 同一语义）。
+///
+/// 日志是不可信数据：不能以原始形态成为诊断包的一部分。
+fn sanitize_diagnostic_log(text: &str) -> String {
+    // 整体先剥多行 PEM 块（块边界跨行——逐行消毒匹配不到完整块）
+    let no_pem = rillane_core::redact::strip_pem(text);
+    let mut red = Redactor::new(RedactionScope::Detailed);
+    no_pem
+        .lines()
+        .map(|line| red.error_message(line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn redact_config_by_extension(raw: &str, path: &str) -> String {
@@ -2774,5 +2958,75 @@ mod tests {
         assert!(render_import_rules("a.com", "n", "x", "lan").is_err());
         assert!(render_import_rules("a.com", "bogus", "x", "dns").is_err());
         assert!(render_import_rules("10.0.0.0/8", "domestic", "x", "dns").is_err());
+    }
+
+    /// RIL-058：范围解析——默认 safe；--no-redact 显式覆盖 raw；
+    /// 非法值报错。
+    #[test]
+    fn diagnose_scope_parsing() {
+        assert_eq!(
+            parse_diagnose_scope("safe", false).unwrap(),
+            DiagnoseScope::Safe
+        );
+        assert_eq!(
+            parse_diagnose_scope("full", false).unwrap(),
+            DiagnoseScope::Full
+        );
+        assert_eq!(
+            parse_diagnose_scope("raw", false).unwrap(),
+            DiagnoseScope::Raw
+        );
+        // --no-redact 是显式的 raw 意图：覆盖任何 scope 参数
+        assert_eq!(
+            parse_diagnose_scope("safe", true).unwrap(),
+            DiagnoseScope::Raw
+        );
+        assert!(parse_diagnose_scope("everything", false).is_err());
+    }
+
+    /// RIL-058：订阅/URL 类 JSON 出口——嵌套与数组里的 url 字段剥除
+    /// 秘密（userinfo 凭证 + token/password 类查询参数），非 URL 字段
+    /// 原样。
+    #[test]
+    fn subscription_json_urls_strip_secrets() {
+        let mut v: serde_json::Value = serde_json::from_str(
+            r#"{
+                "items": [
+                    {"name": "provider-a", "url": "https://user:secret@example.com/sub?token=abc&flag=1"},
+                    {"nested": {"subscription_url": "https://host.example/path"}},
+                    {"name": "plain", "endpoint": "http://10.0.0.1:9090"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        strip_json_url_secrets(&mut v);
+        let items = v["items"].as_array().unwrap();
+        let stripped = items[0]["url"].as_str().unwrap();
+        assert!(!stripped.contains("user:secret"), "userinfo 凭证剥除");
+        assert!(!stripped.contains("token=abc"), "token 查询参数剥除");
+        assert!(stripped.starts_with("https://example.com"), "剥除后仍可读");
+        // 无秘密的 URL 原样；非 URL 字段不受影响
+        assert_eq!(
+            items[1]["nested"]["subscription_url"],
+            "https://host.example/path"
+        );
+        assert_eq!(items[2]["endpoint"], "http://10.0.0.1:9090");
+        assert_eq!(items[2]["name"], "plain");
+    }
+
+    /// RIL-058：错误日志/事件流出——私钥块与 key=value 秘密对逐行
+    /// 剥除，行数保持（结构不丢）。
+    #[test]
+    fn diagnostic_log_lines_strip_secrets() {
+        let raw = "connect failed to 10.0.0.1:443\npassword=hunter2 rejected\n-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\ndone";
+        let clean = sanitize_diagnostic_log(raw);
+        assert!(!clean.contains("hunter2"), "key=value 秘密对剥除");
+        assert!(!clean.contains("PRIVATE KEY"), "私钥块剥除");
+        assert!(clean.contains("connect failed"), "非秘密内容保留");
+        assert!(clean.contains("done"), "块外尾行保留");
+        assert!(
+            clean.lines().count() <= raw.lines().count(),
+            "PEM 块塌缩为占位——行数只减不增"
+        );
     }
 }

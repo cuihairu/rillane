@@ -172,10 +172,10 @@ rillanectl route status              # device state + table of applied steps
 ### diagnose
 
 ```bash
-rillanectl diagnose [--endpoint <base URL>] [--output <dir>] [--no-redact] [--no-local]
+rillanectl diagnose [--endpoint <base URL>] [--output <dir>] [--scope safe|full|raw] [--no-redact] [--no-local]
 ```
 
-By default the config is redacted (token/password/private_key etc.); `--no-local` skips the local snapshot (routes/DNS/interfaces).
+Scope selection (default `safe`): `safe` omits the subscription list, runtime config and full logs and redacts the config; `full` collects everything but strips secrets on every exit (config secret keys, subscription URL credentials, log key=value pairs and PEM blocks); `raw` writes the bundle unredacted — the manifest marks it `ai_upload_policy: do-not-upload` (local human inspection only). `--no-redact` is equivalent to `--scope raw`; `--no-local` skips the local snapshot (routes/DNS/interfaces). `meta.json` always records the scope, the review-required file list, and the upload policy — rillanectl never uploads a bundle anywhere; bundles are not automatically safe for AI upload, review before sharing.
 
 ### mtls
 

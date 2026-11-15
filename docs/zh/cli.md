@@ -172,10 +172,10 @@ rillanectl route status              # 设备态 + 已应用步骤表
 ### diagnose
 
 ```bash
-rillanectl diagnose [--endpoint <base URL>] [--output <目录>] [--no-redact] [--no-local]
+rillanectl diagnose [--endpoint <base URL>] [--output <目录>] [--scope safe|full|raw] [--no-redact] [--no-local]
 ```
 
-缺省对配置做脱敏（token/password/private_key 等）；`--no-local` 跳过本机快照（路由/DNS/接口）。
+按范围选择包内容（默认 `safe`）：`safe` 不采集订阅列表/运行配置/完整日志并对配置脱敏；`full` 全量采集但每个出口都剥除秘密（配置秘密键、订阅 URL 凭证、日志 key=value 秘密对与 PEM 块）；`raw` 不脱敏落盘——清单标注 `ai_upload_policy: do-not-upload`（仅供本地人工排查）。`--no-redact` 等价 `--scope raw`；`--no-local` 跳过本机快照（路由/DNS/接口）。`meta.json` 恒记录范围、需人工复核文件清单与上传政策——rillanectl 不做任何自动上传；诊断包不自动构成可安全上传 AI 的材料，分享前先复核。
 
 ### mtls
 
