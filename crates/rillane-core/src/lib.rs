@@ -29,6 +29,7 @@ pub mod redact;
 pub mod schedule;
 pub mod scoring;
 pub mod session;
+pub mod session_trace;
 pub mod trace;
 pub mod udp;
 
@@ -85,9 +86,15 @@ pub use scoring::{
     CODE_PROFILE_INVALID, CODE_WEIGHTS_INVALID,
 };
 pub use session::{
-    run_association_session, run_stream_session, DatagramForwardReport, SessionRunError,
-    StreamForwardReport, TransferDirection, CANCEL_POLL_MS, CHUNK, CODE_SESSION_CANCELLED,
-    CODE_SESSION_TRANSFER,
+    run_association_session, run_stream_session, DatagramForwardReport, DatagramPumpStats,
+    SessionRunError, StreamForwardReport, StreamPumpStats, TransferDirection, CANCEL_POLL_MS,
+    CHUNK, CODE_SESSION_CANCELLED, CODE_SESSION_TRANSFER,
+};
+pub use session_trace::{
+    evidence_from_str, SessionTracer, CODE_ASSOCIATION_CLOSED, CODE_ASSOCIATION_MAPPED,
+    CODE_ASSOCIATION_RECLAIMED, CODE_ATTEMPT_DIALED, CODE_EGRESS_ESTABLISHED, CODE_REPLY_FAILED,
+    CODE_STREAM_CLOSED, CODE_TRACE_PLAN, CODE_TRACE_RULE, CODE_TRACE_TAKEOVER,
+    CODE_TRANSFER_FIRST_DOWN, CODE_TRANSFER_FIRST_UP,
 };
 
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.

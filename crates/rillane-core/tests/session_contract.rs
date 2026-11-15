@@ -14,13 +14,17 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use rillane_core::collector::{CollectorConfig, FlowCollector};
+use rillane_core::trace::{AttemptId, FlowId, FlowOrigin, TraceStage};
 use rillane_core::{
     AttemptOutcome, CancelToken, ClientChannel, ControlLink, DatagramIo, DatagramOutbound,
-    EndpointRef, FallbackCatalog, GenerationRef, InboundError, InboundResponder, IngressOrigin,
-    OpenContext, OpenError, OpenStage, OpenedAssociation, OpenedStream, OutboundCapabilities,
-    PendingAssociation, PendingStream, RejectCause, RouteDecision, RoutePlan, SessionExecutor,
-    SessionRunError, SourceKey, StreamForwardReport, StreamIo, StreamOutbound, TargetBinding,
-    CODE_OPEN_TIMEOUT,
+    EndpointRef, EvidenceKind, FallbackCatalog, GenerationRef, InboundError, InboundResponder,
+    IngressOrigin, OpenContext, OpenError, OpenStage, OpenedAssociation, OpenedStream,
+    OutboundCapabilities, PendingAssociation, PendingStream, RejectCause, RouteDecision, RoutePlan,
+    SessionExecutor, SessionRunError, SessionTracer, SourceKey, StreamForwardReport, StreamIo,
+    StreamOutbound, TargetBinding, CODE_ASSOCIATION_MAPPED, CODE_ASSOCIATION_RECLAIMED,
+    CODE_EGRESS_ESTABLISHED, CODE_OPEN_TIMEOUT, CODE_STREAM_CLOSED, CODE_TRACE_PLAN,
+    CODE_TRACE_RULE, CODE_TRACE_TAKEOVER, CODE_TRANSFER_FIRST_DOWN, CODE_TRANSFER_FIRST_UP,
 };
 
 // ---------- 回退目录与计划 ----------
@@ -420,6 +424,7 @@ async fn stream_fallback_traceable_end_to_end() {
         outbound.clone(),
         ctx_for("s-1"),
         0,
+        None,
     )
     .await
     .expect("A 失败 B 成功应建立成功");
@@ -477,6 +482,7 @@ async fn stream_all_candidates_fail_rejects_with_egress_code() {
         outbound,
         ctx_for("s-2"),
         0,
+        None,
     )
     .await
     .unwrap_err();
@@ -519,6 +525,7 @@ async fn stream_cancel_before_establishment_never_replies() {
         outbound.clone(),
         ctx,
         0,
+        None,
     )
     .await
     .unwrap_err();
@@ -556,6 +563,7 @@ async fn stream_transfer_failure_never_replays() {
         outbound.clone(),
         ctx_for("s-4"),
         0,
+        None,
     )
     .await
     .unwrap_err();
@@ -611,6 +619,7 @@ async fn stream_cancel_mid_transfer_stops_without_new_open() {
         outbound.clone(),
         ctx,
         0,
+        None,
     )
     .await
     .unwrap_err();
@@ -688,6 +697,7 @@ async fn association_binding_reject_and_control_reclaim() {
         &EndpointRef::new("10.0.0.2", 8388),
         &client_endpoint,
         &mut client_relay,
+        None,
     )
     .await
     .expect("关联会话应建立并回收");
@@ -751,6 +761,7 @@ async fn association_establish_failure_rejects() {
         &EndpointRef::new("10.0.0.2", 8388),
         &EndpointRef::new("192.168.1.5", 50001),
         &mut idle_relay,
+        None,
     )
     .await
     .unwrap_err();
@@ -768,4 +779,356 @@ async fn association_establish_failure_rejects() {
             code: CODE_OPEN_TIMEOUT,
         }]
     );
+}
+
+// ---------- RIL-053 生命周期埋点 ----------
+
+/// 开轨助手：锚注入 + 可选采集器（时钟基准由测试固定，流逝为真实测量）
+fn tracer_for(
+    collector: Option<Arc<Mutex<FlowCollector>>>,
+    flow: &str,
+    origin: FlowOrigin,
+) -> SessionTracer {
+    SessionTracer::start(
+        collector,
+        FlowId::new(flow).expect("合法 flow id"),
+        origin,
+        "gen-1",
+        1_000,
+        1_760_000_000_000,
+        "tcp 8.8.8.8:443",
+    )
+    .expect("开轨")
+}
+
+/// ⑧ A 失败 B 成功的完整轨迹：序列连续、终态闭合、事件逐段可解释
+/// （接管→规则→计划→尝试×2→实际出口→首字节上/下行→关闭），采集器
+/// 汇聚与本地权威轨迹一致；无 RTT/丢包造数
+#[tokio::test]
+async fn trace_stream_full_lifecycle_explains_fallback() {
+    let collector = Arc::new(Mutex::new(FlowCollector::new(
+        CollectorConfig::new(64, 8, 64, 3_600_000, 1, true).expect("合法配置"),
+    )));
+    let outbound = Arc::new(ScriptedStream {
+        fail_hosts: vec!["9.9.9.9"],
+        opens: AtomicU32::new(0),
+        egress_script: vec![
+            DgramScript::Packet(Bytes::from_static(b"pong")),
+            DgramScript::Eof,
+        ],
+    });
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let mut pending = stream_pending(
+        vec![
+            DgramScript::Packet(Bytes::from_static(b"ping")),
+            DgramScript::Eof,
+        ],
+        None,
+        replies,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let executor = SessionExecutor::new(Arc::new(catalog_ab()));
+    // 显式供因：规则事件只在计划携带决策原因时落点（无原因不造数）
+    let decision = RouteDecision {
+        reason: Some("rule match: direct".to_string()),
+        ..RouteDecision::direct("A".to_string())
+    };
+    let mut plan = RoutePlan::from_decision(&decision, GenerationRef::new("gen-1").unwrap())
+        .expect("合法计划");
+
+    let mut tracer = tracer_for(Some(collector.clone()), "flow-tcp-1", FlowOrigin::Stream);
+
+    let report = rillane_core::run_stream_session(
+        &executor,
+        &mut pending,
+        &mut plan,
+        outbound.clone(),
+        ctx_for("s-t1"),
+        0,
+        Some(&mut tracer),
+    )
+    .await
+    .expect("A 失败 B 成功应建立成功");
+    assert_eq!(report.client_to_egress, 4);
+    assert!(report.first_up_ms.is_some(), "首字节上行实测");
+    assert!(report.first_down_ms.is_some(), "首字节下行实测");
+
+    let trace = tracer.into_trace();
+    trace.validate().expect("序列连续且终态闭合");
+
+    // 逐段齐全：接管→规则→计划→尝试×2→出口→首字节上/下行→关闭
+    let codes: Vec<&str> = trace.events.iter().map(|e| e.code).collect();
+    assert_eq!(codes.first(), Some(&CODE_TRACE_TAKEOVER));
+    assert!(codes.contains(&CODE_TRACE_RULE), "规则命中入轨");
+    assert!(codes.contains(&CODE_TRACE_PLAN), "计划形成入轨");
+    let attempts: Vec<_> = trace
+        .events
+        .iter()
+        .filter(|e| e.stage == TraceStage::Attempt)
+        .collect();
+    assert_eq!(attempts.len(), 2, "A 失败 B 成功逐条入轨");
+    for (i, event) in attempts.iter().enumerate() {
+        assert_eq!(
+            event.attempt,
+            Some(AttemptId(i as u32)),
+            "尝试事件必须携带 attempt_id"
+        );
+    }
+    assert!(codes.contains(&CODE_EGRESS_ESTABLISHED), "实际出口入轨");
+    assert!(codes.contains(&CODE_TRANSFER_FIRST_UP));
+    assert!(codes.contains(&CODE_TRANSFER_FIRST_DOWN));
+    assert_eq!(codes.last(), Some(&CODE_STREAM_CLOSED));
+
+    // 证据不混淆：规则/计划 = 预测；内核落点 = 观测；绝无 Unknown
+    for event in &trace.events {
+        match event.stage {
+            TraceStage::Rule | TraceStage::Plan => {
+                assert_eq!(event.evidence, EvidenceKind::Predicted);
+            }
+            TraceStage::Attempt => {
+                assert_ne!(event.evidence, EvidenceKind::Unknown);
+            }
+            _ => assert_eq!(event.evidence, EvidenceKind::Observed),
+        }
+        // 缺少测量证据不造数：无 RTT/丢包字样
+        assert!(!event.code.contains("rtt") && !event.code.contains("loss"));
+    }
+    // 内核供钟单调不减，墙钟与单调成对推进
+    let first = trace.events.first().expect("首事件存在");
+    let mut last_mono = first.monotonic_ms;
+    for event in &trace.events {
+        assert!(event.monotonic_ms >= last_mono);
+        assert!(event.wall_ms >= first.wall_ms);
+        last_mono = event.monotonic_ms;
+    }
+
+    // 采集器汇聚同一流：flow id 一致、事件数一致（首流必入选）
+    let drained = collector.lock().unwrap().drain_closed(4);
+    assert_eq!(drained.len(), 1, "首流必被采集器收录");
+    assert_eq!(drained[0].flow.as_str(), "flow-tcp-1");
+    assert_eq!(
+        drained[0].events.len(),
+        trace.events.len(),
+        "汇聚轨迹与本地权威轨迹事件一致"
+    );
+    assert_eq!(
+        drained[0].events.last().map(|e| e.code),
+        Some(CODE_STREAM_CLOSED)
+    );
+}
+
+/// ⑨ 建立失败轨迹：终态码与拒绝回复同源（最近一次出口稳定码），
+/// 尝试逐条入轨，无出口建立/传输事件
+#[tokio::test]
+async fn trace_stream_rejection_carries_egress_code() {
+    let outbound = Arc::new(ScriptedStream {
+        fail_hosts: vec!["9.9.9.9", "10.0.0.1"],
+        opens: AtomicU32::new(0),
+        egress_script: Vec::new(),
+    });
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let mut pending = stream_pending(Vec::new(), None, replies, Arc::new(AtomicBool::new(false)));
+    let executor = SessionExecutor::new(Arc::new(catalog_ab()));
+    let mut plan = plan_for("A");
+
+    let mut tracer = tracer_for(None, "flow-tcp-2", FlowOrigin::Stream);
+    let err = rillane_core::run_stream_session(
+        &executor,
+        &mut pending,
+        &mut plan,
+        outbound,
+        ctx_for("s-t2"),
+        0,
+        Some(&mut tracer),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err,
+        SessionRunError::Rejected {
+            code: CODE_OPEN_TIMEOUT,
+            attempts: 2,
+        }
+    );
+
+    let trace = tracer.into_trace();
+    trace.validate().expect("拒绝路径同样完整闭合");
+    let attempts: Vec<_> = trace
+        .events
+        .iter()
+        .filter(|e| e.stage == TraceStage::Attempt)
+        .collect();
+    assert_eq!(attempts.len(), 2, "两次失败尝试逐条入轨");
+    let codes: Vec<&str> = trace.events.iter().map(|e| e.code).collect();
+    assert!(
+        !codes.contains(&CODE_EGRESS_ESTABLISHED) && !codes.contains(&CODE_TRANSFER_FIRST_UP),
+        "失败轨迹无出口建立/传输事件"
+    );
+    let close = trace.events.last().expect("终态存在");
+    assert_eq!(close.stage, TraceStage::Close);
+    assert_eq!(close.code, CODE_OPEN_TIMEOUT, "轨迹终态码与拒绝回复同源");
+}
+
+/// ⑩ UDP 关联轨迹：起止语义为 association 侧——出口事件 = 映射建立
+/// （TCP 出口码不出现），控制链关闭 → association.reclaimed 终态；
+/// 首报文上/下行入轨
+#[tokio::test]
+async fn trace_association_mapped_and_reclaimed() {
+    let control = ControlLink::new();
+    let t1 = EndpointRef::new("10.0.0.9", 53);
+    let client_endpoint = EndpointRef::new("192.168.1.5", 50000);
+
+    let mut client_relay = ScriptDgramIo {
+        script: Mutex::new(VecDeque::from([
+            DgramAction::Packet(t1.clone(), Bytes::from_static(b"ok")),
+            DgramAction::Hang,
+        ])),
+        sent: Mutex::new(Vec::new()),
+    };
+    let outbound = Arc::new(ScriptedDatagram {
+        fail: false,
+        opens: AtomicU32::new(0),
+        // 数据报先于控制链关闭入队（脚本逐弹出队）——两条数据报文
+        // 必然先于回收被处理，回收经出口读侧观察到控制链已关闭
+        egress_script: vec![
+            DgramAction::Packet(EndpointRef::new("8.8.8.8", 53), Bytes::from_static(b"back")),
+            DgramAction::CloseAndEof(control.clone()),
+        ],
+    });
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let mut pending = PendingAssociation::new(
+        SourceKey::new("client-t:50000").unwrap(),
+        TargetBinding::Multi {
+            allowed: vec![t1.clone()],
+        },
+        1500,
+        control,
+        Box::new(AssocResponder { replies }),
+    );
+    let executor = SessionExecutor::new(Arc::new(catalog_ab()));
+    let mut plan = plan_for("A");
+
+    let mut tracer = tracer_for(None, "flow-udp-1", FlowOrigin::Association);
+    let report = rillane_core::run_association_session(
+        &executor,
+        &mut pending,
+        &mut plan,
+        outbound,
+        TargetBinding::Multi { allowed: vec![t1] },
+        ctx_for("u-t1"),
+        0,
+        &EndpointRef::new("10.0.0.2", 8388),
+        &client_endpoint,
+        &mut client_relay,
+        Some(&mut tracer),
+    )
+    .await
+    .expect("关联会话应建立并回收");
+    assert_eq!(report.client_to_egress, 1);
+    assert!(report.reclaimed_by_control);
+
+    let trace = tracer.into_trace();
+    trace.validate().expect("关联轨迹完整闭合");
+    assert_eq!(
+        trace.origin,
+        FlowOrigin::Association,
+        "起止语义在类型上分侧"
+    );
+    let codes: Vec<&str> = trace.events.iter().map(|e| e.code).collect();
+    assert!(
+        codes.contains(&CODE_ASSOCIATION_MAPPED),
+        "映射建立为关联出口事件"
+    );
+    assert!(
+        !codes.contains(&CODE_EGRESS_ESTABLISHED),
+        "TCP 出口码不进关联轨迹"
+    );
+    assert!(codes.contains(&CODE_TRANSFER_FIRST_UP));
+    assert!(codes.contains(&CODE_TRANSFER_FIRST_DOWN));
+    assert_eq!(
+        codes.last(),
+        Some(&CODE_ASSOCIATION_RECLAIMED),
+        "控制链关闭 → 回收终态"
+    );
+}
+
+/// ⑪ 采样剔除不伤本地权威轨迹：第二流被确定性采样剔除后，其本地轨迹
+/// 仍完整（逐会话契约），采集器只留首流、剔除显式计数
+#[tokio::test]
+async fn trace_local_authority_survives_sampling_out() {
+    let collector = Arc::new(Mutex::new(FlowCollector::new(
+        CollectorConfig::new(64, 8, 64, 3_600_000, 2, true).expect("合法配置"),
+    )));
+    let executor = SessionExecutor::new(Arc::new(catalog_ab()));
+
+    // 第一流：确定性采样入选（第 1 条新流）
+    let outbound_a = Arc::new(ScriptedStream {
+        fail_hosts: vec![],
+        opens: AtomicU32::new(0),
+        egress_script: vec![DgramScript::Eof],
+    });
+    let mut pending_a = stream_pending(
+        vec![DgramScript::Eof],
+        None,
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let mut plan_a = plan_for("A");
+    let mut tracer_a = tracer_for(Some(collector.clone()), "flow-tcp-a", FlowOrigin::Stream);
+    rillane_core::run_stream_session(
+        &executor,
+        &mut pending_a,
+        &mut plan_a,
+        outbound_a,
+        ctx_for("s-t3"),
+        0,
+        Some(&mut tracer_a),
+    )
+    .await
+    .expect("第一流应成功");
+
+    // 第二流：确定性采样剔除（第 2 条新流：(2-1)%2 != 0）
+    let outbound_b = Arc::new(ScriptedStream {
+        fail_hosts: vec![],
+        opens: AtomicU32::new(0),
+        egress_script: vec![DgramScript::Eof],
+    });
+    let mut pending_b = stream_pending(
+        vec![DgramScript::Eof],
+        None,
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let mut plan_b = plan_for("A");
+    let mut tracer_b = tracer_for(Some(collector.clone()), "flow-tcp-b", FlowOrigin::Stream);
+    rillane_core::run_stream_session(
+        &executor,
+        &mut pending_b,
+        &mut plan_b,
+        outbound_b,
+        ctx_for("s-t4"),
+        0,
+        Some(&mut tracer_b),
+    )
+    .await
+    .expect("第二流应成功");
+
+    // 本地权威轨迹不受采样影响：仍完整且终态闭合
+    let trace_b = tracer_b.into_trace();
+    trace_b.validate().expect("被剔除流本地轨迹仍完整闭合");
+    assert_eq!(trace_b.flow.as_str(), "flow-tcp-b");
+    assert_eq!(
+        trace_b.events.first().map(|e| e.code),
+        Some(CODE_TRACE_TAKEOVER)
+    );
+    assert_eq!(
+        trace_b.events.last().map(|e| e.code),
+        Some(CODE_STREAM_CLOSED)
+    );
+
+    // 采集器只留首流；剔除显式计数
+    let drained = collector.lock().unwrap().drain_closed(8);
+    assert_eq!(drained.len(), 1, "采样剔除流不进采集器");
+    assert_eq!(drained[0].flow.as_str(), "flow-tcp-a");
+    assert_eq!(collector.lock().unwrap().stats().traces_sampled_out, 1);
 }

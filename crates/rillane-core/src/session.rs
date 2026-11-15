@@ -15,7 +15,11 @@
 //!   一片，无内部队列；半关闭按 TCP 语义驱动对侧 `shutdown_write`；
 //! - **取消**：建立期取消直接返回、不回复客户端（调用方丢弃
 //!   PendingStream 关闭资源——不重复回复）；搬运期取消按稳定码
-//!   `session.cancelled` 终止，同样不重放。
+//!   `session.cancelled` 终止，同样不重放；
+//! - **生命周期埋点**（RIL-053，[`crate::session_trace`]）：可选
+//!   `SessionTracer` 贯穿每条退出路径——规则/计划（预测）、尝试对账
+//!   （逐条 attempt_id）、实际出口/映射、首字节（上/下行分立）、终态
+//!   关闭（关闭码区分正常/取消/失败/回收）；缺少测量证据不造数。
 
 use std::fmt;
 use std::sync::Arc;
@@ -26,10 +30,14 @@ use crate::inbound::{
     ClientChannel, ControlLink, InboundError, PendingAssociation, PendingStream, RejectCause,
 };
 use crate::outbound::{
-    CancelToken, DatagramIo, DatagramOutbound, OpenContext, OpenError, StreamIo, StreamOutbound,
-    TargetBinding,
+    CancelToken, DatagramIo, DatagramOutbound, EvidenceKind, OpenContext, OpenError, StreamIo,
+    StreamOutbound, TargetBinding,
 };
 use crate::plan::{EndpointRef, RoutePlan};
+use crate::session_trace::{
+    SessionTracer, CODE_ASSOCIATION_CLOSED, CODE_ASSOCIATION_RECLAIMED, CODE_REPLY_FAILED,
+    CODE_STREAM_CLOSED,
+};
 
 /// 稳定原因码：搬运期调用方取消（不重放）
 pub const CODE_SESSION_CANCELLED: &str = "session.cancelled";
@@ -126,6 +134,36 @@ impl fmt::Display for SessionRunError {
 
 impl std::error::Error for SessionRunError {}
 
+/// 泵实测统计（含首字节时刻——网页阶段耗时区分 HTTP TTFB 与首个下行
+/// 字节的量化面：两个方向的首字节流逝独立可算）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamPumpStats {
+    pub client_to_egress: u64,
+    pub egress_to_client: u64,
+    pub client_closed: bool,
+    pub egress_closed: bool,
+    /// 首个上行字节距泵启动的单调流逝（毫秒；None = 未观测到上行字节）
+    pub first_up_ms: Option<u64>,
+    /// 首个下行字节距泵启动的单调流逝（毫秒；None = 未观测到下行字节）
+    pub first_down_ms: Option<u64>,
+}
+
+/// 数据报泵实测统计（首报文时刻 + 显式拒绝计数）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatagramPumpStats {
+    pub client_to_egress: u64,
+    pub egress_to_client: u64,
+    pub rejected_too_large: u64,
+    pub rejected_target: u64,
+    pub reclaimed_by_control: bool,
+    pub client_closed: bool,
+    pub egress_closed: bool,
+    /// 首个上行报文距泵启动的单调流逝（毫秒；None = 未观测到）
+    pub first_up_ms: Option<u64>,
+    /// 首个下行报文距泵启动的单调流逝（毫秒；None = 未观测到）
+    pub first_down_ms: Option<u64>,
+}
+
 /// 流会话转发报告：已建立会话（含回退对账）+ 业务字节统计与半关闭状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamForwardReport {
@@ -139,6 +177,10 @@ pub struct StreamForwardReport {
     pub client_closed: bool,
     /// 出口读侧是否正常关闭（EOF → 客户端写侧半关闭）
     pub egress_closed: bool,
+    /// 首个上行字节流逝（毫秒；None = 未观测到）
+    pub first_up_ms: Option<u64>,
+    /// 首个下行字节流逝（毫秒；None = 未观测到）
+    pub first_down_ms: Option<u64>,
 }
 
 /// 关联会话转发报告：绑定校验与回收语义显式可见。
@@ -160,6 +202,10 @@ pub struct DatagramForwardReport {
     pub client_closed: bool,
     /// 出口读侧是否关闭
     pub egress_closed: bool,
+    /// 首个上行报文流逝（毫秒；None = 未观测到）
+    pub first_up_ms: Option<u64>,
+    /// 首个下行报文流逝（毫秒；None = 未观测到）
+    pub first_down_ms: Option<u64>,
 }
 
 /// 流会话权威路径：出口建立（计划内回退，复用执行器唯一选路）→
@@ -168,6 +214,9 @@ pub struct DatagramForwardReport {
 /// 建立失败且非取消时，拒绝回复经 `RejectCause::Egress` 携带**最近一次
 /// 真实拨号错误**（稳定码/阶段/证据原样透传）；取消时不回复——调用方
 /// 丢弃 `PendingStream` 即关闭资源（取消不重复回复）。
+///
+/// `tracer`（RIL-053）可选：传入即记录规则/计划/尝试对账/实际出口/
+/// 传输首字节/关闭事件——每条退出路径（含失败）都以终态关闭事件收口。
 pub async fn run_stream_session(
     executor: &SessionExecutor,
     pending: &mut PendingStream,
@@ -175,8 +224,14 @@ pub async fn run_stream_session(
     outbound: Arc<dyn StreamOutbound>,
     ctx: OpenContext,
     now_ms: u64,
+    mut tracer: Option<&mut SessionTracer>,
 ) -> Result<StreamForwardReport, SessionRunError> {
     let cancel = ctx.cancel.clone();
+    // 埋点：规则命中与计划形成（预测证据——选中 ≠ 连通）
+    if let Some(t) = tracer.as_deref_mut() {
+        t.rule(plan);
+        t.plan(plan);
+    }
     let established = match executor
         .open_stream_channel(plan, outbound, ctx, now_ms)
         .await
@@ -185,6 +240,14 @@ pub async fn run_stream_session(
         Err(failure) => {
             if failure.plan.code() == crate::outbound::CODE_OPEN_CANCELLED {
                 // 取消/截止：不回复，调用方丢弃 pending 关闭资源
+                if let Some(t) = tracer.as_deref_mut() {
+                    t.attempts(failure.attempts());
+                    t.close(
+                        CODE_SESSION_CANCELLED,
+                        EvidenceKind::Observed,
+                        "cancelled before establishment",
+                    );
+                }
                 return Err(SessionRunError::Cancelled {
                     client_to_egress: 0,
                     egress_to_client: 0,
@@ -197,6 +260,10 @@ pub async fn run_stream_session(
                 Some(open_err) => open_err.code,
                 None => failure.code(),
             };
+            if let Some(t) = tracer {
+                t.attempts(failure.attempts());
+                t.close(code, EvidenceKind::Observed, "establish failed");
+            }
             match failure.last_open_error {
                 Some(open_err) => {
                     pending
@@ -216,22 +283,97 @@ pub async fn run_stream_session(
         }
     };
     let (session, opened) = (established.session, established.stream);
+    // 埋点：尝试对账 + 实际出口（观测证据——A 失败 B 成功逐条可解释）
+    if let Some(t) = tracer.as_deref_mut() {
+        t.attempts(session.attempts());
+        t.egress(
+            session.pin().egress(),
+            &format!("{}:{}", session.endpoint().host, session.endpoint().port),
+            false,
+        );
+    }
     // 接入确认：成功回复失败 → 出口已在 accept 内就地释放（无泄漏）
-    let accepted = pending
-        .accept(opened)
-        .await
-        .map_err(SessionRunError::ReplyFailed)?;
+    let accepted = match pending.accept(opened).await {
+        Ok(accepted) => accepted,
+        Err(err) => {
+            if let Some(t) = tracer.as_deref_mut() {
+                t.close(
+                    CODE_REPLY_FAILED,
+                    EvidenceKind::Observed,
+                    "success reply failed",
+                );
+            }
+            return Err(SessionRunError::ReplyFailed(err));
+        }
+    };
     let (mut client, egress) = accepted.into_parts();
     let (_endpoint, _transport, mut egress_io) = egress.into_parts();
 
-    let stats = pump_stream(&mut *client, &mut *egress_io, &cancel).await?;
-    Ok(StreamForwardReport {
-        session,
-        client_to_egress: stats.0,
-        egress_to_client: stats.1,
-        client_closed: stats.2,
-        egress_closed: stats.3,
-    })
+    let stats = pump_stream(&mut *client, &mut *egress_io, &cancel).await;
+    match stats {
+        Ok(s) => {
+            // 埋点：首字节（上/下行分立——TTFB 与首个下行字节可区分）+
+            // 终态关闭
+            if let Some(t) = tracer.as_deref_mut() {
+                if let Some(elapsed) = s.first_up_ms {
+                    t.transfer_first(TransferDirection::ClientToEgress, elapsed);
+                }
+                if let Some(elapsed) = s.first_down_ms {
+                    t.transfer_first(TransferDirection::EgressToClient, elapsed);
+                }
+                t.close(
+                    CODE_STREAM_CLOSED,
+                    EvidenceKind::Observed,
+                    format!(
+                        "c2e={} e2c={} client_closed={} egress_closed={}",
+                        s.client_to_egress, s.egress_to_client, s.client_closed, s.egress_closed
+                    ),
+                );
+            }
+            Ok(StreamForwardReport {
+                session,
+                client_to_egress: s.client_to_egress,
+                egress_to_client: s.egress_to_client,
+                client_closed: s.client_closed,
+                egress_closed: s.egress_closed,
+                first_up_ms: s.first_up_ms,
+                first_down_ms: s.first_down_ms,
+            })
+        }
+        Err(err) => {
+            if let Some(t) = tracer {
+                match &err {
+                    SessionRunError::Cancelled {
+                        client_to_egress: c2e,
+                        egress_to_client: e2c,
+                    } => t.close(
+                        CODE_SESSION_CANCELLED,
+                        EvidenceKind::Observed,
+                        format!("cancelled c2e={c2e} e2c={e2c}"),
+                    ),
+                    SessionRunError::TransferFailed {
+                        direction,
+                        code,
+                        client_to_egress,
+                        egress_to_client,
+                    } => t.close(
+                        code,
+                        EvidenceKind::Observed,
+                        format!(
+                            "{} c2e={client_to_egress} e2c={egress_to_client}",
+                            direction.as_str()
+                        ),
+                    ),
+                    other => t.close(
+                        CODE_SESSION_TRANSFER,
+                        EvidenceKind::Observed,
+                        format!("transfer ended: {other:?}"),
+                    ),
+                }
+            }
+            Err(err)
+        }
+    }
 }
 
 /// 关联会话权威路径：数据报出口建立 → 准入回复（中继地址）→ 数据报泵。
@@ -240,8 +382,10 @@ pub async fn run_stream_session(
 ///
 /// `client_endpoint` 是出口 → 客户端方向数据报的回程元组（客户端中继
 /// 适配器按它投递）；`client_relay` 是客户端中继 IO（RIL-096 保持
-/// 适配器持有，此处只借用泵送）。
-#[allow(clippy::too_many_arguments)] // 参数即契约：执行器/准入/计划/出口/绑定/取消/回程各占其一
+/// 适配器持有，此处只借用泵送）。`tracer`（RIL-053）可选：关联生命
+/// 周期同流会话埋点——出口事件为映射建立（association.mapped），关闭
+/// 事件区分控制链回收（association.reclaimed）与正常关闭。
+#[allow(clippy::too_many_arguments)] // 参数即契约：执行器/准入/计划/出口/绑定/取消/回程/埋点各占其一
 pub async fn run_association_session(
     executor: &SessionExecutor,
     pending: &mut PendingAssociation,
@@ -253,8 +397,13 @@ pub async fn run_association_session(
     relay: &EndpointRef,
     client_endpoint: &EndpointRef,
     client_relay: &mut dyn DatagramIo,
+    mut tracer: Option<&mut SessionTracer>,
 ) -> Result<DatagramForwardReport, SessionRunError> {
     let cancel = ctx.cancel.clone();
+    if let Some(t) = tracer.as_deref_mut() {
+        t.rule(plan);
+        t.plan(plan);
+    }
     let established = match executor
         .open_association_channel(plan, outbound, binding, ctx, now_ms)
         .await
@@ -262,6 +411,14 @@ pub async fn run_association_session(
         Ok(channel) => channel,
         Err(failure) => {
             if failure.plan.code() == crate::outbound::CODE_OPEN_CANCELLED {
+                if let Some(t) = tracer.as_deref_mut() {
+                    t.attempts(failure.attempts());
+                    t.close(
+                        CODE_SESSION_CANCELLED,
+                        EvidenceKind::Observed,
+                        "cancelled before establishment",
+                    );
+                }
                 return Err(SessionRunError::Cancelled {
                     client_to_egress: 0,
                     egress_to_client: 0,
@@ -273,6 +430,10 @@ pub async fn run_association_session(
                 Some(open_err) => open_err.code,
                 None => failure.code(),
             };
+            if let Some(t) = tracer.as_deref_mut() {
+                t.attempts(failure.attempts());
+                t.close(code, EvidenceKind::Observed, "establish failed");
+            }
             match failure.last_open_error {
                 Some(open_err) => {
                     pending
@@ -294,11 +455,30 @@ pub async fn run_association_session(
     let max_datagram_len = association.max_datagram_len();
     let (_, egress_binding, mut egress_io) = association.into_parts();
 
+    // 埋点：尝试对账 + 映射建立（切网重建的对照面）
+    if let Some(t) = tracer.as_deref_mut() {
+        t.attempts(session.attempts());
+        t.egress(
+            session.pin().egress(),
+            &format!("{}:{}", session.endpoint().host, session.endpoint().port),
+            true,
+        );
+    }
+
     // 准入：回复中继地址；回复失败 → 控制链已在 accept 内就地释放
-    let ingress = pending
-        .accept(relay)
-        .await
-        .map_err(SessionRunError::ReplyFailed)?;
+    let ingress = match pending.accept(relay).await {
+        Ok(ingress) => ingress,
+        Err(err) => {
+            if let Some(t) = tracer.as_deref_mut() {
+                t.close(
+                    CODE_REPLY_FAILED,
+                    EvidenceKind::Observed,
+                    "admit reply failed",
+                );
+            }
+            return Err(SessionRunError::ReplyFailed(err));
+        }
+    };
     let (_source, _targets, control) = ingress.into_parts();
 
     let stats = pump_association(
@@ -310,27 +490,95 @@ pub async fn run_association_session(
         &control,
         &cancel,
     )
-    .await?;
-    Ok(DatagramForwardReport {
-        session,
-        client_to_egress: stats.0,
-        egress_to_client: stats.1,
-        rejected_too_large: stats.2,
-        rejected_target: stats.3,
-        reclaimed_by_control: stats.4,
-        client_closed: stats.5,
-        egress_closed: stats.6,
-    })
+    .await;
+    match stats {
+        Ok(s) => {
+            // 埋点：首报文 + 终态（回收 = 切网的内核可见面；关闭 detail
+            // 携带显式拒绝计数——超限/旁落逐报文计数不静默）
+            if let Some(t) = tracer.as_deref_mut() {
+                if let Some(elapsed) = s.first_up_ms {
+                    t.transfer_first(TransferDirection::ClientToEgress, elapsed);
+                }
+                if let Some(elapsed) = s.first_down_ms {
+                    t.transfer_first(TransferDirection::EgressToClient, elapsed);
+                }
+                let close_code = if s.reclaimed_by_control {
+                    CODE_ASSOCIATION_RECLAIMED
+                } else {
+                    CODE_ASSOCIATION_CLOSED
+                };
+                t.close(
+                    close_code,
+                    EvidenceKind::Observed,
+                    format!(
+                        "c2e={} e2c={} reject_too_large={} reject_target={}",
+                        s.client_to_egress,
+                        s.egress_to_client,
+                        s.rejected_too_large,
+                        s.rejected_target
+                    ),
+                );
+            }
+            Ok(DatagramForwardReport {
+                session,
+                client_to_egress: s.client_to_egress,
+                egress_to_client: s.egress_to_client,
+                rejected_too_large: s.rejected_too_large,
+                rejected_target: s.rejected_target,
+                reclaimed_by_control: s.reclaimed_by_control,
+                client_closed: s.client_closed,
+                egress_closed: s.egress_closed,
+                first_up_ms: s.first_up_ms,
+                first_down_ms: s.first_down_ms,
+            })
+        }
+        Err(err) => {
+            if let Some(t) = tracer {
+                match &err {
+                    SessionRunError::Cancelled {
+                        client_to_egress: c2e,
+                        egress_to_client: e2c,
+                    } => t.close(
+                        CODE_SESSION_CANCELLED,
+                        EvidenceKind::Observed,
+                        format!("cancelled c2e={c2e} e2c={e2c}"),
+                    ),
+                    SessionRunError::TransferFailed {
+                        direction,
+                        code,
+                        client_to_egress,
+                        egress_to_client,
+                    } => t.close(
+                        code,
+                        EvidenceKind::Observed,
+                        format!(
+                            "{} c2e={client_to_egress} e2c={egress_to_client}",
+                            direction.as_str()
+                        ),
+                    ),
+                    other => t.close(
+                        CODE_SESSION_TRANSFER,
+                        EvidenceKind::Observed,
+                        format!("transfer ended: {other:?}"),
+                    ),
+                }
+            }
+            Err(err)
+        }
+    }
 }
 
 /// 双向字节泵：有界分片读一写一（未写出前不读下一片——背压），
 /// 单侧 EOF 驱动对侧半关闭，双侧 EOF 结束，取消按轮询间隔响应。
-/// 返回 (c2e 字节, e2c 字节, client 是否正常关闭, egress 是否正常关闭)。
+/// 首字节时刻按方向实测（距泵启动流逝——TTFB 与首个下行字节分立）。
 async fn pump_stream(
     client: &mut dyn ClientChannel,
     egress: &mut dyn StreamIo,
     cancel: &CancelToken,
-) -> Result<(u64, u64, bool, bool), SessionRunError> {
+) -> Result<StreamPumpStats, SessionRunError> {
+    let started = std::time::Instant::now();
+    let mut first_up_ms: Option<u64> = None;
+    let mut first_down_ms: Option<u64> = None;
     let (mut c2e, mut e2c) = (0u64, 0u64);
     let mut client_closed = false;
     let mut egress_closed = false;
@@ -343,13 +591,23 @@ async fn pump_stream(
             });
         }
         if client_closed && egress_closed {
-            return Ok((c2e, e2c, client_closed, egress_closed));
+            return Ok(StreamPumpStats {
+                client_to_egress: c2e,
+                egress_to_client: e2c,
+                client_closed,
+                egress_closed,
+                first_up_ms,
+                first_down_ms,
+            });
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(CANCEL_POLL_MS)) => continue,
             r = client.read(CHUNK), if !client_closed => match r {
                 Ok(Some(data)) => {
                     let n = data.len() as u64;
+                    if first_up_ms.is_none() {
+                        first_up_ms = Some(started.elapsed().as_millis() as u64);
+                    }
                     egress
                         .write_all(data)
                         .await
@@ -370,6 +628,9 @@ async fn pump_stream(
             r = egress.read(CHUNK), if !egress_closed => match r {
                 Ok(Some(data)) => {
                     let n = data.len() as u64;
+                    if first_down_ms.is_none() {
+                        first_down_ms = Some(started.elapsed().as_millis() as u64);
+                    }
                     client
                         .write_all(data)
                         .await
@@ -392,8 +653,7 @@ async fn pump_stream(
 }
 
 /// 数据报泵：逐报文校验上限与目标绑定（显式计数拒绝），控制链关闭
-/// 即回收。返回 (c2e 报文, e2c 报文, 拒超限, 拒旁落, 是否控制链回收,
-/// client 关闭, egress 关闭)。
+/// 即回收。首报文时刻按方向实测（距泵启动流逝）。
 #[allow(clippy::too_many_arguments)]
 async fn pump_association(
     client_relay: &mut dyn DatagramIo,
@@ -403,8 +663,27 @@ async fn pump_association(
     client_endpoint: &EndpointRef,
     control: &ControlLink,
     cancel: &CancelToken,
-) -> Result<(u64, u64, u64, u64, bool, bool, bool), SessionRunError> {
+) -> Result<DatagramPumpStats, SessionRunError> {
+    let started = std::time::Instant::now();
+    let mut first_up_ms: Option<u64> = None;
+    let mut first_down_ms: Option<u64> = None;
     let (mut c2e, mut e2c, mut too_large, mut wrong_target) = (0u64, 0u64, 0u64, 0u64);
+
+    macro_rules! settle {
+        ($reclaimed:expr, $client_closed:expr, $egress_closed:expr) => {
+            Ok(DatagramPumpStats {
+                client_to_egress: c2e,
+                egress_to_client: e2c,
+                rejected_too_large: too_large,
+                rejected_target: wrong_target,
+                reclaimed_by_control: $reclaimed,
+                client_closed: $client_closed,
+                egress_closed: $egress_closed,
+                first_up_ms,
+                first_down_ms,
+            })
+        };
+    }
 
     loop {
         if cancel.is_cancelled() {
@@ -414,7 +693,7 @@ async fn pump_association(
             });
         }
         if control.is_closed() {
-            return Ok((c2e, e2c, too_large, wrong_target, true, false, false));
+            return settle!(true, false, false);
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(CANCEL_POLL_MS)) => continue,
@@ -430,6 +709,9 @@ async fn pump_association(
                         wrong_target += 1;
                         continue;
                     }
+                    if first_up_ms.is_none() {
+                        first_up_ms = Some(started.elapsed().as_millis() as u64);
+                    }
                     egress
                         .send(&target, payload)
                         .await
@@ -440,9 +722,9 @@ async fn pump_association(
                     // 控制链已关闭 → 按回收口径结束（关闭与客户端关闭同时
                     // 发生也归回收——控制链关闭是关联生命的终点）
                     if control.is_closed() {
-                        return Ok((c2e, e2c, too_large, wrong_target, true, false, false));
+                        return settle!(true, false, false);
                     }
-                    return Ok((c2e, e2c, too_large, wrong_target, false, true, false));
+                    return settle!(false, true, false);
                 }
                 Err(e) => {
                     return Err(transfer_err(TransferDirection::ClientToEgress, e, c2e, e2c));
@@ -450,6 +732,9 @@ async fn pump_association(
             },
             r = egress.recv() => match r {
                 Ok(Some((_peer, payload))) => {
+                    if first_down_ms.is_none() {
+                        first_down_ms = Some(started.elapsed().as_millis() as u64);
+                    }
                     client_relay
                         .send(client_endpoint, payload)
                         .await
@@ -457,7 +742,12 @@ async fn pump_association(
                     e2c += 1;
                 }
                 Ok(None) => {
-                    return Ok((c2e, e2c, too_large, wrong_target, false, false, true));
+                    // 出口读侧结束：控制链若已关闭仍归回收（关联生命
+                    // 终点与客户侧口径一致——不因观察到关闭的一侧而异）
+                    if control.is_closed() {
+                        return settle!(true, false, false);
+                    }
+                    return settle!(false, false, true);
                 }
                 Err(e) => {
                     return Err(transfer_err(TransferDirection::EgressToClient, e, c2e, e2c));
