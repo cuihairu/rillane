@@ -30,6 +30,10 @@ pub mod tun;
 // Linux TUN 真实现（tun-dataplane.md §1.4）；其余平台待落地
 #[cfg(target_os = "linux")]
 pub mod linux;
+// Linux 接管端口迁移（RIL-029）：RIL-004 四契约的 Linux 实现——复用
+// 现有 TUN 数据面与逃逸表
+#[cfg(target_os = "linux")]
+pub mod takeover;
 // TODO: 平台特定实现待完成（死稿，见 platform.rs 头部注记）
 // pub mod platform;
 
@@ -53,6 +57,13 @@ pub use ports::{
     CapturePort, CapturedInput, InMemoryNetworkEvents, InMemoryRouteTransaction, IpProtocol,
     NetworkEvent, NetworkEvents, PacketInput, PacketMeta, RouteTransaction, SocketBypass,
     SocketHandle, SocketInput, SystemChange, TransportProtocol,
+};
+#[cfg(target_os = "linux")]
+pub use takeover::{
+    parse_default_ifaces, parse_packet_meta, parse_resolv_nameservers, parse_step_payload,
+    pump_tun, read_net_snapshot, read_so_mark, step_payload, LinuxNetworkEvents,
+    LinuxRouteTransaction, LinuxSocketBypass, LinuxTakeoverPort, NetSnapshot, StepExecutor,
+    TakeoverPortStats, TAKEOVER_FWMARK,
 };
 pub use route::{
     BypassAction, BypassCondition, BypassRule, RouteDestination, RouteManager, RouteRule,
