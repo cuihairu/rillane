@@ -15,11 +15,18 @@ use uuid::Uuid;
 pub mod fake_ip;
 pub mod hosts;
 pub mod net_mark;
+pub mod outbound;
 pub mod performance;
 pub mod plan;
 pub mod quality;
 pub mod udp;
 
+pub use outbound::{
+    CancelToken, DatagramIo, DatagramOutbound, EvidenceKind, OpenContext, OpenError, OpenStage,
+    OpenedAssociation, OpenedStream, OutboundCapabilities, StreamIo, StreamOutbound, TargetBinding,
+    CODE_OPEN_CANCELLED, CODE_OPEN_HANDSHAKE, CODE_OPEN_POOL_EXHAUSTED, CODE_OPEN_REFUSED,
+    CODE_OPEN_TIMEOUT, CODE_OPEN_UNSUPPORTED,
+};
 pub use plan::{
     DecisionSnapshot, EndpointRef, ExecutionOutcome, FlowAssociation, GenerationRef,
     MetadataOrigin, ObjectRef, Provenanced, RoutePlan, SessionPin,
