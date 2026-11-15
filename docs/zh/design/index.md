@@ -16,3 +16,5 @@
 实施任务统一维护在仓库根目录 [todo.md](https://github.com/cuihairu/rillane/blob/main/todo.md)，不在其他文档复制完成清单。按进程分流只要求 Windows/macOS/Linux 本机；OpenWrt/Android/iOS 按可得域名、IP、端口或设备证据分流。
 
 [当前实现与边界](../architecture.md)、[配置参考](../config.md)、[CLI 参考](../cli.md)描述已有代码的用法，不代表 v1 设计已交付。旧设计、旧路线图与历史审计已从当前文档移除，需要追溯时查阅 Git 历史。
+
+[极简水流 R Logo 候选](../../design/brand/README.md)：三张未选定的独立概念稿，附提示词与文件清单。

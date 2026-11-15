@@ -1,0 +1,38 @@
+{
+  "status": "unselected generated concepts",
+  "generator": "built-in image_gen",
+  "model": "not exposed by tool",
+  "constraint_delivery": "main-prompt constraints",
+  "images": [
+    {
+      "name": "A-flow",
+      "label": "A · 柔和流线",
+      "idea": "圆润连贯的水流形成 R，强调顺畅连接。",
+      "prompt": "Create one complete 1:1 square image, about 1536x1536. A single ultra-minimal abstract capital R formed from flowing water-like paths. Exactly one solid deep teal #007F78 on a perfectly uniform off-white #F7F8FA field. One symbol only, no wordmark or accompanying typography. Strong simple geometry, generous negative space, no tiny details, few broad shapes, readable at very small scale. Center this abstract symbol optically with generous whitespace, occupying 55–65 percent of canvas width. Flat graphic appearance, no gradients, texture, shadows, 3D, frames, mockup objects, decorative waves or extra symbols. The capital R must be recognisable at first glance. No animal or face. Direction A: soft fluid silhouette. Build the R from two broad rounded flowing ribbons, with a clear short vertical stem, an open flowing bowl and a smooth gently curved outward leg. Calm rather than playful. The water quality is expressed solely by the main contour. Avoid resembling a generic wifi signal or a P.",
+      "file": "A-flow.png",
+      "width": 1254,
+      "height": 1254,
+      "sha256": "13d53b95627c58018a3831376d2d813a1de3d9ff1552b312c2a5875d7b56b31e"
+    },
+    {
+      "name": "B-compact",
+      "label": "B · 紧凑几何",
+      "idea": "用更紧凑的几何轮廓表达稳定内核。",
+      "prompt": "Create one complete 1:1 square image, about 1536x1536. A single ultra-minimal abstract capital R formed from flowing water-like paths. Exactly one solid deep teal #007F78 on a perfectly uniform off-white #F7F8FA field. One symbol only, no wordmark or accompanying typography. Strong simple geometry, generous negative space, no tiny details, few broad shapes, readable at very small scale. Center this abstract symbol optically with generous whitespace, occupying 55–65 percent of canvas width. Flat graphic appearance, no gradients, texture, shadows, 3D, frames, mockup objects, decorative waves or extra symbols. The capital R must be recognisable at first glance. No animal or face. Direction B: compact geometric silhouette. A strong monolithic rounded R with a large open counter and a blunt diagonal leg. Construct from simple rounded rectangles and a single broad circular sweep. One continuous broad solid teal silhouette with one clean generous negative-space cut. Balanced, compact and stable, not italicised. Water flow expressed through the bowl transition, no extra graphic element. Preserve clear R recognition.",
+      "file": "B-compact.png",
+      "width": 1254,
+      "height": 1254,
+      "sha256": "80b8f03df8ff6c370970439051cd7d63ea65d29451419e0dc67f7c6178fed337"
+    },
+    {
+      "name": "C-dual",
+      "label": "C · 双通道融合",
+      "idea": "两条并行通道汇成 R，呼应网页与游戏并行。",
+      "prompt": "Create one complete 1:1 square image, about 1536x1536. A single ultra-minimal abstract capital R formed from flowing water-like paths. Exactly one solid deep teal #007F78 on a perfectly uniform off-white #F7F8FA field. One symbol only, no wordmark or accompanying typography. Strong simple geometry, generous negative space, no tiny details, few broad shapes, readable at very small scale. Center this abstract symbol optically with generous whitespace, occupying 55–65 percent of canvas width. Flat graphic appearance, no gradients, texture, shadows, 3D, frames, mockup objects, decorative waves or extra symbols. The capital R must be recognisable at first glance. No animal or face. Direction C: dual-channel construction. Two thick parallel rounded paths flow together into one clearly readable upright capital R. Use a single deliberate wide channel of background between the paths, not many stripes. The upper loop and descending leg must remain recognisable as R. Compact, clean, continuous movement with two visible lanes. Do not draw disconnected random waves, road signs, arrows or decorative ripples.",
+      "file": "C-dual.png",
+      "width": 1254,
+      "height": 1254,
+      "sha256": "3ff4311cbea4ca84fd484c0b10490eb54df66a47a751c4358fc8496dd9a826db"
+    }
+  ]
+}

@@ -16,3 +16,5 @@ This directory maintains only the current v1 design. **Proposal, not implemented
 The repository-root [todo.md](https://github.com/cuihairu/rillane/blob/main/todo.md) is the single execution backlog. Other pages do not duplicate completion checklists. Process routing is required only on local Windows/macOS/Linux hosts; OpenWrt/Android/iOS use available domain/IP/port/device evidence.
 
 [Current implementation](../architecture.md), [configuration](../config.md) and [CLI reference](../cli.md) describe existing behavior, not completed v1 delivery. Old designs, roadmaps and audits have been removed from the active documentation tree; consult Git history for historical material.
+
+[Minimal R logo concepts](brand/README.md): three unselected PNG concepts, with saved prompts and metadata.
