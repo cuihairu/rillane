@@ -17,6 +17,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use super::grpc::grpc_tunnel;
+use super::reality::RealityDial;
 use super::h2::h2_tunnel;
 use super::httpupgrade::httpupgrade_client_handshake;
 use super::ws::{ws_client_handshake, WsClient};
@@ -24,15 +25,33 @@ use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
 use crate::tls::{create_tls_connector_with_profile, TlsConnectorFactory};
 
-/// REALITY/Vision 拨号期门（G1-6 配置保留面，TCP/UDP 面共用）：配置保留至
-/// 此拦，拒绝静默降级——普通 TLS 会被 REALITY 服务端回落伪装站点（流量
-/// 不走代理且无报错），普通 VLESS 连不上期望 Vision 分帧的服务端且无报错。
-fn gate_reality_flow(reality: &Option<RealityConfig>, flow: &Option<String>) -> Result<()> {
-    if reality.is_some() {
+/// REALITY 传输合法性门（TCP/UDP 面共用，RIL-107）：非法组合拨号期点名拒绝
+/// ——ws/grpc/h2/httpupgrade 叠加面未交付（宁缺毋滥），明文组合非法
+/// （REALITY 即 TLS 握手面）；拒绝静默降级。
+fn gate_reality_transport(
+    reality: &Option<RealityConfig>,
+    network: &str,
+    tls: bool,
+) -> Result<()> {
+    if reality.is_none() {
+        return Ok(());
+    }
+    if network != "tcp" {
         return Err(anyhow!(
-            "REALITY 出站未实现（G1-6）：需要 ClientHello 字节级控制（session_id 认证材料/浏览器指纹仿冒），rustls 不暴露且无维护中的 Rust uTLS 等价物（设计文档 §4.3 栈决策待定）；拒绝静默降级为普通 TLS——服务端将回落伪装站点且无报错"
+            "vless+reality 仅支持 network=tcp（ws/grpc/h2/httpupgrade 叠加面未交付）：拒绝静默降级"
         ));
     }
+    if !tls {
+        return Err(anyhow!(
+            "vless+reality 需叠 TLS（REALITY 即 TLS 握手面）：拒绝静默降级为明文 VLESS——连接真实服务端必失败"
+        ));
+    }
+    Ok(())
+}
+
+/// Vision 流控门（G1-6 保留面，RIL-108 前置）：flow 拨号期点名拒绝——
+/// 静默降级为普通 VLESS 连不上期望 Vision 分帧的服务端且无报错。
+fn gate_vless_flow(flow: &Option<String>) -> Result<()> {
     if let Some(f) = flow {
         return Err(anyhow!(
             "VLESS flow {f}（XTLS-Vision 等流控）分帧未实现（G1-6 M3）；拒绝静默降级为普通 VLESS——服务端期望 Vision 分帧，连接将失败且无报错"
@@ -161,7 +180,8 @@ impl VlessConnector {
     /// 期在此拦——拒绝静默降级（普通 TLS 会被 REALITY 服务端回落伪装站点，
     /// 普通 VLESS 连不上期望 Vision 分帧的服务端且无报错）。
     fn gate_reality_and_flow(&self) -> Result<()> {
-        gate_reality_flow(&self.reality, &self.flow)
+        gate_reality_transport(&self.reality, &self.network, self.tls)?;
+        gate_vless_flow(&self.flow)
     }
 
     /// 传输键（§4.2）：TLS 走五元组键（sni = 实际握手 SNI，tcp/ws 分支各异），
@@ -248,8 +268,10 @@ impl EgressConnector for VlessConnector {
 
     async fn forward(&self, flow: Flow) -> Result<FlowReport> {
         match &self.pool {
-            Some(pool) => self.forward_pooled(flow, pool).await,
-            None => self.forward_inline(flow).await,
+            // REALITY 每连接一次完整握手、fork 侧禁 resumption——不进传输池
+            //（RIL-107；per-connection 握手是 REALITY 认证面 essence）
+            Some(pool) if self.reality.is_none() => self.forward_pooled(flow, pool).await,
+            _ => self.forward_inline(flow).await,
         }
     }
 }
@@ -508,7 +530,34 @@ impl VlessConnector {
 
         match self.network.as_str() {
             "tcp" => {
-                if self.tls {
+                if let Some(reality) = &self.reality {
+                    // RIL-107：REALITY 传输面（rustls fork pin，认证面自装配）：
+                    // x25519 认证 ECDH + session-id seal/open + HMAC 证书绑定，
+                    // 见 outbound/reality.rs；门已拦非法组合（仅 tcp、恒叠 TLS）
+                    let dial = RealityDial::new(&reality.public_key, reality.short_id.as_deref())
+                        .context("REALITY 配置无效")?;
+                    let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
+                    let server_name =
+                        rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+                    let mut stream = dial.connect(tcp, server_name).await?;
+
+                    let req = self.build_vless_tcp_request(&flow.target.host, flow.target.port)?;
+                    stream.write_all(&req).await?;
+                    stream.flush().await?;
+                    Self::read_vless_response_header(&mut stream).await?;
+
+                    let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                        &mut flow.io,
+                        &mut stream,
+                        rillane_core::performance::relay_buffer(),
+                        rillane_core::performance::relay_buffer(),
+                    )
+                    .await?;
+                    Ok(FlowReport {
+                        upstream: up,
+                        downstream: down,
+                    })
+                } else if self.tls {
                     let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
                     let connector = match &self.factory {
                         Some(factory) => factory.connector(
@@ -747,6 +796,14 @@ impl VlessUdpConnector {
             .await
             .with_context(|| format!("连接 VLESS 服务器失败: {}", self.server_addr()))?;
         let _ = tcp.set_nodelay(true);
+        if let Some(reality) = &self.reality {
+            // RIL-107：UDP 面同叠 REALITY 握手（VLESS UDP command 0x02 不变）
+            let dial = RealityDial::new(&reality.public_key, reality.short_id.as_deref())
+                .context("REALITY 配置无效")?;
+            let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
+            let server_name = rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+            return Ok(Box::new(dial.connect(tcp, server_name).await?));
+        }
         if !self.tls {
             return Ok(Box::new(tcp));
         }
@@ -779,7 +836,8 @@ impl EgressUdpConnector for VlessUdpConnector {
         ctx: FlowContext,
         _decision: &RouteDecision,
     ) -> Result<Arc<dyn UdpRelay>> {
-        gate_reality_flow(&self.reality, &self.flow)?;
+        gate_reality_transport(&self.reality, "tcp", self.tls)?;
+        gate_vless_flow(&self.flow)?;
         let mut stream = self.open_transport().await?;
         let req = self.build_vless_udp_request(&ctx.target.host, ctx.target.port)?;
         stream.write_all(&req).await?;
@@ -1332,22 +1390,23 @@ mod tests {
         assert!(report.downstream >= 40 * 1024 + 23);
     }
 
-    /// G1-6 拨号期门（防静默降级）：REALITY 连接器 forward 必须在任何网络
-    /// I/O 前点名报错——若静默降级为普通 TLS，REALITY 服务端会按非 REALITY
-    /// 握手回落伪装站点，流量不走向代理且无任何报错。duplex io 足以证明
-    /// 门先于 connect 触发（端口不可达，真 connect 必报连接错而非点名）。
+    /// RIL-107 拨号期门（非法组合点名拒绝，宁缺毋滥）：vless+reality+ws
+    /// 叠加面未交付——若静默降级为 ws 裸 VLESS，流量不走向 REALITY 通道。
+    /// duplex io 足以证明门先于 connect 触发（端口不可达，真 connect 必报
+    /// 连接错而非点名组合）。
     #[tokio::test]
-    async fn forward_rejects_reality_named_before_io() {
+    async fn forward_rejects_reality_with_ws_before_io() {
         let connector = VlessConnector::new(
             "127.0.0.1".to_string(),
-            1, // 不可达端口：门未先拦时必然是连接失败而非点名 REALITY
+            1, // 不可达端口：门未先拦时必然是连接失败而非点名组合
             TEST_UUID.to_string(),
             None,
             Some(RealityConfig {
-                public_key: "PBQh7j2tWxQmZHVub3RUYXJnZXQ".to_string(),
+                public_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
                 short_id: Some("0123ac".to_string()),
             }),
-            "tcp".to_string(),
+            "ws".to_string(),
             None,
             None,
             None,
@@ -1372,8 +1431,52 @@ mod tests {
         };
         let err = connector.forward(flow).await.unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("REALITY"), "应点名 REALITY: {msg}");
-        assert!(msg.contains("未实现"), "应说明未实现而非连接失败: {msg}");
+        assert!(
+            msg.contains("network=tcp"),
+            "应点名仅支持 network=tcp: {msg}"
+        );
+    }
+
+    /// RIL-107 拨号期门：vless+reality+tls=false 非法组合点名拒绝——
+    /// REALITY 即 TLS 握手面，明文组合无意义且必失败。
+    #[tokio::test]
+    async fn forward_rejects_reality_without_tls_before_io() {
+        let connector = VlessConnector::new(
+            "127.0.0.1".to_string(),
+            1,
+            TEST_UUID.to_string(),
+            None,
+            Some(RealityConfig {
+                public_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+                short_id: None,
+            }),
+            "tcp".to_string(),
+            None,
+            None,
+            None,
+            false, // tls=false：门必拦
+            true,
+            None,
+            None,
+            TlsFingerprint::None,
+            None,
+            None,
+        );
+        let (client, _peer) = tokio::io::duplex(64);
+        let flow = Flow {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "example.com".to_string(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            io: Box::new(client),
+            metadata: FlowMetadata::default(),
+        };
+        let err = connector.forward(flow).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("需叠 TLS"), "应点名需叠 TLS: {msg}");
     }
 
     /// G1-6 拨号期门：flow（XTLS-Vision）连接器 forward 点名报错——
@@ -1414,23 +1517,25 @@ mod tests {
         assert!(msg.contains("xtls-rprx-vision"), "应点名 flow 值: {msg}");
     }
 
-    /// G1-6 UDP 面（command 0x02）同门：REALITY UDP 关联在 associate 期点名拒绝。
+    /// RIL-107 UDP 关联门：reality+tls=false 非法组合在 associate 期点名拒绝
+    /// （合法 reality UDP 面由合约测试真实对端 e2e 覆盖）。
     #[tokio::test]
-    async fn udp_associate_rejects_reality_named() {
+    async fn udp_associate_rejects_reality_without_tls() {
         let conn = VlessConnector::new(
             "127.0.0.1".to_string(),
-            1,
+            1, // 不可达端口：门未先拦时必然是连接失败而非点名
             TEST_UUID.to_string(),
             None,
             Some(RealityConfig {
-                public_key: "PBQh7j2tWxQmZHVub3RUYXJnZXQ".to_string(),
+                public_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
                 short_id: None,
             }),
             "tcp".to_string(),
             None,
             None,
             None,
-            true,
+            false, // tls=false：门必拦
             false,
             None,
             None,
@@ -1444,8 +1549,8 @@ mod tests {
             .associate(ctx, &decision)
             .await
             .err()
-            .expect("REALITY UDP 应被点名拒绝");
+            .expect("reality+tls=false 应被点名拒绝");
         let msg = format!("{err:#}");
-        assert!(msg.contains("REALITY"), "应点名 REALITY: {msg}");
+        assert!(msg.contains("需叠 TLS"), "应点名需叠 TLS: {msg}");
     }
 }
