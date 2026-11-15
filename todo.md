@@ -171,8 +171,13 @@
   交付：App/Extension 配置传递、共享凭证引用、状态与诊断通道。验收：未授权宿主读不到秘密；不假设可得任意第三方 PID，不默认启动入站 MCP。
 - [ ] **RIL-049｜P1｜iOS 真机生命周期**；依赖：RIL-022、RIL-048。
   交付：签名产物、扩展内存预算、切网与后台恢复。验收：真机 DNS/双栈/UDP/QUIC/网站与游戏并行，暂停恢复和系统终止有证据。
-- [ ] **RIL-050｜P2｜可选 Mesh/插件装配**；依赖：RIL-022、RIL-040。
+- [x] **RIL-050｜P2｜可选 Mesh/插件装配**；依赖：RIL-022、RIL-040。
   交付：标准代理不依赖 Mesh，受管能力协商与插件隔离。验收：普通订阅产物关闭扩展可用；未完成安全承载的 UDP Mesh 明确拒绝，不能明文旁路发布。
+  完成（2026-11-16）：决策核 `crates/rillane-mesh/src/negotiation.rs`（新模块 + 5 单测，lib 根重导出）+ 验收 `crates/rillane-runtime/tests/optional_extension_assembly.rs` 3 测试（新增文件，不触并发 Actor 脏面），验收 10× 重复全绿、mesh 17 测 3× 全绿，`cargo clippy -p rillane-mesh -p rillane-runtime --all-targets --all-features -- -D warnings` 干净（存量 manifest 未用依赖提示先于本项，非失败面），rillane-runtime 全量 187 lib + 13 集成测绿；文档落 `docs/zh/mesh.md` + 英文孪生 `docs/mesh.md`（受管能力协商 / 标准代理独立性与明文门两节）。逐验收条款映射如下。
+  ① 普通订阅产物关闭扩展可用（subscription_product_works_with_extensions_off）：订阅样例（RIL-095 同款转换→本地兜底合并）→ 运行时 `enable_mesh/enable_chain` 显式 false（Default 同值）+ obfuscation 缺席 → 真实 SOCKS5 接管/转发（文本+二进制载荷）；装配面如实缺席断言：`get_mesh_registry()` 与 `get_mesh_udp_snapshot()` 均 None——可选能力不开就没有面，不是「开着空转」。
+  ② 受管能力协商（negotiation.rs 5 单测 + udp_mesh_and_capability_negotiation_refuse_incomplete_security 引用面）：信任优先——非 mTLS 认证信道声明一律 `mesh.cap.untrusted` 拒绝（点名对端身份，协商面绝不把缺失声明当具备能力；与 P1-4 发送侧「无法确认版本不填充」连通性兜底正交）；版本交集取最大公共版本、无交集 `mesh.cap.incompatible` 点名两侧版本集；显式保守——单侧缺填充即关闭并留原因（双向各验一路）、任一侧 UDP 安全承载未完成即拒绝并写明「不能明文旁路发布」，回退全部进 `Negotiated.notes` 可审计，绝不静默 fail-open。
+  ③ 插件隔离（plugins_do_not_alter_policy_or_standard_path）：真实 wasm 插件（inline wat 编译落盘，§1.2 ABI 完整面——含 §1.3 on_flow 写出 `{"action":"allow"}` 决策 JSON 与 wants_payload=0 透传声明）在场的运行时与同构无插件运行时三组流路由决策逐流一致（扩展面不触策略面）；插件运行时标准转发照常真实往返（插件只做字节层工作，不改向不拦截）。附注：本测试是套件中首个「真实流量穿过 wasm 插件」的路径——链装配单测只装配不转发，空决策输出会在真实路径上炸流（本次实测发现并钉死该语义）。
+  ④ 未完成安全承载的 UDP Mesh 明确拒绝（udp_mesh_and_capability_negotiation_refuse_incomplete_security）：`MeshUdpGate::new(false).ensure_usable(None)` 拒绝且原因点名明文；TLS 齐备同一门放行；显式明文开关（new(true)）是 dev 面——默认面恒拒绝，不能明文旁路发布（与 mesh.md「安全与数据面」口径一致）。
 
 ## 5. Debug、真实路径与诊断工具
 

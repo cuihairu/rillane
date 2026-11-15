@@ -15,6 +15,13 @@ use tokio::time::interval;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+pub mod negotiation;
+
+pub use negotiation::{
+    negotiate, CapabilityOffer, Negotiated, NegotiationError, PeerHello, PeerTrust,
+    CODE_CAP_INCOMPATIBLE, CODE_CAP_UNTRUSTED,
+};
+
 pub type NodeId = String;
 pub type SessionId = Uuid;
 
