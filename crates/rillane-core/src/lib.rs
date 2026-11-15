@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
+pub mod executor;
 pub mod fake_ip;
 pub mod hosts;
 pub mod net_mark;
@@ -26,6 +27,11 @@ pub use outbound::{
     OpenedAssociation, OpenedStream, OutboundCapabilities, StreamIo, StreamOutbound, TargetBinding,
     CODE_OPEN_CANCELLED, CODE_OPEN_HANDSHAKE, CODE_OPEN_POOL_EXHAUSTED, CODE_OPEN_REFUSED,
     CODE_OPEN_TIMEOUT, CODE_OPEN_UNSUPPORTED,
+};
+pub use executor::{
+    AttemptOutcome, AttemptRecord, EstablishedSession, FallbackCatalog, LedgerEntry, PlanExecError,
+    SessionExecutor, SessionLedger, CODE_ENDPOINT_INVALID, CODE_GENERATION_MISMATCH,
+    CODE_NODE_UNKNOWN,
 };
 pub use plan::{
     DecisionSnapshot, EndpointRef, ExecutionOutcome, FlowAssociation, GenerationRef,
