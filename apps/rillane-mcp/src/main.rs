@@ -659,4 +659,141 @@ mod tests {
             );
         }
     }
+
+    /// 一次性捕获应答器：记录完整请求行（GET 查询串或 POST 正文），
+    /// 回给定状态与正文——断言面同时覆盖「守护进程收到了什么」与
+    /// 「模型看到了什么」。只接受一条连接：一次 tools/call 若隐式发出
+    /// 第二个边界请求，将无应答超时而被测试捕获。
+    fn capturing_one_shot(
+        status: &'static str,
+        body: &'static str,
+    ) -> (std::sync::Arc<std::sync::Mutex<Option<String>>>, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let seen2 = seen.clone();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 8192];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                *seen2.lock().expect("lock") = Some(String::from_utf8_lossy(&buf[..n]).to_string());
+                let response = format!(
+                    "{status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes());
+            }
+        });
+        (seen, format!("http://{addr}"))
+    }
+
+    fn state_at(base: &str) -> ServerState {
+        // 连接/轨迹面需详细身份档（flow_trace/flow_events 是
+        // DetailedIdentity 档工具——RIL-068 范围门放行）
+        let mut st = state_with(GrantedScopes::parse("read,detailed").expect("parse"), 0);
+        st.app = BlockingApp::new(base, None).expect("app");
+        st
+    }
+
+    #[test]
+    fn flow_list_paging_reaches_daemon_and_totals_stay_honest() {
+        // 分页参数原样到达守护进程查询串；匹配总数诚实贯通——查询
+        // 服务口径（匹配总数 + 近期优先）不被适配层改写
+        let payload = r#"{"schema_version":1,"total":42,"returned":2,"flows":[
+            {"flow_id":"f-a","generation":"g-9","origin":"stream","state":"closed"},
+            {"flow_id":"f-b","generation":"g-9","origin":"association","state":"closed"}]}"#;
+        let (seen, base) = capturing_one_shot("HTTP/1.1 200 OK", payload);
+        let mut st = state_at(&base);
+        let line = call_line(
+            40,
+            "flow_list",
+            json!({"state": "closed", "origin": "stream", "generation": "gen-1",
+                   "offset": 40, "limit": 2}),
+        );
+        let out = handle_line(&mut st, &line).expect("answer");
+        let request = seen.lock().expect("lock").clone().expect("one request");
+        assert!(
+            request.starts_with(
+                "GET /trace/flows?state=closed&origin=stream&generation=gen-1&offset=40&limit=2"
+            ),
+            "分页与过滤参数原样到达守护进程: {request}"
+        );
+        let expected: Value = serde_json::from_str(payload).expect("payload");
+        assert_eq!(out["result"]["structuredContent"], expected, "信封原文贯通");
+        assert_eq!(out["result"]["structuredContent"]["total"], 42);
+    }
+
+    #[test]
+    fn flow_trace_and_events_preserve_generation_and_evidence_kinds() {
+        // 代际与证据类型贯通：predicted/observed 逐事件原样保留（RIL-051
+        // 口径——证据类型不混淆），代际 g-9 不被适配层改写
+        let payload = r#"{"schema_version":1,"found":true,"trace":{
+            "flow_id":"f-1","generation":"g-9","events":[
+            {"seq":0,"stage":"rule","code":"route.selected","evidence":"predicted"},
+            {"seq":1,"stage":"egress","code":"egress.established","evidence":"observed"},
+            {"seq":2,"stage":"close","code":"association.reclaimed","evidence":"observed"}]}}"#;
+        let (seen, base) = capturing_one_shot("HTTP/1.1 200 OK", payload);
+        let mut st = state_at(&base);
+        let line = call_line(41, "flow_trace", json!({"id": "f-1"}));
+        let out = handle_line(&mut st, &line).expect("answer");
+        let request = seen.lock().expect("lock").clone().expect("one request");
+        assert!(request.starts_with("GET /trace/flow?id=f-1"), "{request}");
+        let expected: Value = serde_json::from_str(payload).expect("payload");
+        assert_eq!(out["result"]["structuredContent"], expected);
+        let events = out["result"]["structuredContent"]["trace"]["events"]
+            .as_array()
+            .expect("events");
+        assert_eq!(events[0]["evidence"], "predicted");
+        assert_eq!(events[1]["evidence"], "observed");
+        assert_eq!(
+            out["result"]["structuredContent"]["trace"]["generation"],
+            "g-9"
+        );
+
+        // 增量页：from_seq/limit 到达查询串
+        let (seen, base) = capturing_one_shot("HTTP/1.1 200 OK", payload);
+        let mut st = state_at(&base);
+        let line = call_line(
+            42,
+            "flow_events",
+            json!({"id": "f-1", "from_seq": 5, "limit": 50}),
+        );
+        let out = handle_line(&mut st, &line).expect("answer");
+        let request = seen.lock().expect("lock").clone().expect("one request");
+        assert!(
+            request.starts_with("GET /trace/events?id=f-1&from_seq=5&limit=50"),
+            "{request}"
+        );
+        assert_eq!(out["result"]["structuredContent"]["found"], true);
+    }
+
+    #[test]
+    fn explain_posts_sanitized_input_and_answers_conditionality_verbatim() {
+        // 纯推演面：POST /explain 零副作用（RIL-054 契约——无 DNS/拨号/
+        // OS 查询），输入消毒在 ops 层（RIL-065 钉住），答复的条件性
+        // 结论 + 证据缺口 + 输入摘要原文贯通——条件性不冒充确定
+        let payload = r#"{"schema_version":1,"explain":{
+            "conclusion":{"chain":["A"],"matched":false,"conditional":true},
+            "gaps":["process annotation missing","geo database unloaded"],
+            "input_digest":"3f7a…"} }"#;
+        let (seen, base) = capturing_one_shot("HTTP/1.1 200 OK", payload);
+        let mut st = state_at(&base);
+        let line = call_line(
+            43,
+            "explain",
+            json!({"host": "example.com", "port": 443, "proto": "tcp",
+                   "process_name": "game.exe"}),
+        );
+        let out = handle_line(&mut st, &line).expect("answer");
+        let request = seen.lock().expect("lock").clone().expect("one request");
+        assert!(request.starts_with("POST /explain"), "{request}");
+        assert!(request.contains(r#""host":"example.com""#), "{request}");
+        assert!(request.contains(r#""proto":"tcp""#), "{request}");
+        let expected: Value = serde_json::from_str(payload).expect("payload");
+        assert_eq!(out["result"]["structuredContent"], expected);
+        let sc = &out["result"]["structuredContent"];
+        assert_eq!(sc["explain"]["conclusion"]["conditional"], true);
+        assert_eq!(sc["explain"]["conclusion"]["matched"], false);
+        assert_eq!(sc["explain"]["gaps"].as_array().map(Vec::len), Some(2));
+    }
 }
