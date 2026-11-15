@@ -30,6 +30,31 @@ use crate::trace::{AttemptId, FlowId, FlowOrigin, FlowTrace, TraceError, TraceSt
 /// 稳定原因码：采集器配置非法（零容量/零上限/零 TTL/零采样分母）
 pub const CODE_COLLECTOR_CONFIG_INVALID: &str = "trace.collector.config_invalid";
 
+/// 稳定原因码：迹已被环形溢出逐出（最旧被顶掉）
+pub const CODE_TRACE_GONE_EVICTED: &str = "collector.flow.evicted";
+/// 稳定原因码：迹已按 TTL 过期清除
+pub const CODE_TRACE_GONE_EXPIRED: &str = "collector.flow.expired";
+/// 稳定原因码：新流被活动上限拒绝（从未入环形缓冲）
+pub const CODE_TRACE_GONE_ACTIVE_LIMIT: &str = "collector.flow.active_limit";
+/// 稳定原因码：新流被确定性采样淘汰（从未入环形缓冲）
+pub const CODE_TRACE_GONE_SAMPLED_OUT: &str = "collector.flow.sampled_out";
+/// 稳定原因码：已关闭迹被订阅侧取走（合法离场——事件已交付订阅者）
+pub const CODE_TRACE_GONE_DRAINED: &str = "collector.flow.drained";
+
+/// 一条流离开采集器的墓碑记录（有界——容量与环形缓冲一致）。查询面
+/// 据此区分「从未见过」与「见过但已离开」，离开原因显式。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowTombstone {
+    /// 离开的流 ID
+    pub flow: FlowId,
+    /// 离开原因（稳定码）
+    pub reason: &'static str,
+    /// 最后已知墙钟（毫秒；准入/最后事件时刻）
+    pub wall_ms: u64,
+    /// 离开前已见事件数（0 = 未入环形缓冲即被剔除）
+    pub events_seen: usize,
+}
+
 /// 采集器配置（构造期校验，运行期只读）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectorConfig {
@@ -135,6 +160,8 @@ pub struct CollectorStats {
 pub struct FlowCollector {
     config: CollectorConfig,
     ring: VecDeque<FlowTrace>,
+    /// 离场墓碑（有界：容量与环形缓冲一致——查询面的显式缺席依据）
+    tombstones: VecDeque<FlowTombstone>,
     /// 采样计数（确定性：第 k 条新流，k % sample_rate == 0 入选）
     flow_counter: u64,
     stats: CollectorStats,
@@ -146,6 +173,7 @@ impl FlowCollector {
         FlowCollector {
             config,
             ring: VecDeque::new(),
+            tombstones: VecDeque::new(),
             flow_counter: 0,
             stats: CollectorStats::default(),
         }
@@ -188,11 +216,13 @@ impl FlowCollector {
         // 第一条新流永远入选，采样窗口可复现
         if !(self.flow_counter - 1).is_multiple_of(self.config.sample_rate as u64) {
             self.stats.traces_sampled_out += 1;
+            self.entomb(flow, CODE_TRACE_GONE_SAMPLED_OUT, wall_ms, 0);
             return Admission::SampledOut;
         }
         let active = self.ring.iter().filter(|t| !t.closed).count();
         if active >= self.config.max_active_flows {
             self.stats.flows_dropped_active_limit += 1;
+            self.entomb(flow, CODE_TRACE_GONE_ACTIVE_LIMIT, wall_ms, 0);
             return Admission::ActiveLimit;
         }
         // 环形容量：满则逐出最旧迹（无论活动与否——有界承诺优先）
@@ -200,6 +230,13 @@ impl FlowCollector {
             if let Some(evicted) = self.ring.pop_front() {
                 self.stats.traces_dropped_overflow += 1;
                 self.stats.events_dropped_overflow += evicted.events.len() as u64;
+                let wall = evicted.events.last().map(|e| e.wall_ms).unwrap_or(0);
+                self.entomb(
+                    evicted.flow,
+                    CODE_TRACE_GONE_EVICTED,
+                    wall,
+                    evicted.events.len(),
+                );
             }
         }
         let mut trace = FlowTrace::new(flow, origin, generation)
@@ -286,14 +323,52 @@ impl FlowCollector {
     /// TTL 清扫：按迹首事件墙钟过期清除（调用方供钟）。返回清除数。
     pub fn sweep(&mut self, now_wall_ms: u64) -> usize {
         let ttl = self.config.ttl_ms;
-        let before = self.ring.len();
-        self.ring.retain(|t| {
+        let taken = std::mem::take(&mut self.ring);
+        let (kept, expired): (Vec<_>, Vec<_>) = taken.into_iter().partition(|t| {
             let anchor = t.events.first().map(|e| e.wall_ms).unwrap_or(0);
             now_wall_ms.saturating_sub(anchor) < ttl
         });
-        let removed = before - self.ring.len();
+        self.ring = kept.into();
+        let removed = expired.len();
+        for trace in expired {
+            let wall = trace.events.last().map(|e| e.wall_ms).unwrap_or(0);
+            self.entomb(
+                trace.flow,
+                CODE_TRACE_GONE_EXPIRED,
+                wall,
+                trace.events.len(),
+            );
+        }
         self.stats.traces_expired += removed as u64;
         removed
+    }
+
+    /// 只读遍历环形缓冲（准入序）。查询服务在此之上做过滤/分页——
+    /// 本方法不改变缓冲，与订阅侧 `drain_closed` 互不影响。
+    pub fn iter_traces(&self) -> std::collections::vec_deque::Iter<'_, FlowTrace> {
+        self.ring.iter()
+    }
+
+    /// 墓碑查找：流离开采集器的显式记录。`None` = 从未见过（不是
+    /// 「离开」——缺席原因的机器口径由查询服务落码）。
+    pub fn tombstone(&self, flow: &FlowId) -> Option<&FlowTombstone> {
+        self.tombstones
+            .iter()
+            .rev()
+            .find(|t| t.flow.as_str() == flow.as_str())
+    }
+
+    /// 离场墓碑登记（有界：满则挤掉最旧墓碑——承诺与环形缓冲同界）
+    fn entomb(&mut self, flow: FlowId, reason: &'static str, wall_ms: u64, events_seen: usize) {
+        while self.tombstones.len() >= self.config.capacity {
+            self.tombstones.pop_front();
+        }
+        self.tombstones.push_back(FlowTombstone {
+            flow,
+            reason,
+            wall_ms,
+            events_seen,
+        });
     }
 
     /// 订阅侧有界拉取：取走至多 `max_batch` 条已关闭迹。慢消费者拉不
@@ -310,6 +385,15 @@ impl FlowCollector {
             }
         }
         self.ring = kept;
+        for trace in &batch {
+            let wall = trace.events.last().map(|e| e.wall_ms).unwrap_or(0);
+            self.entomb(
+                trace.flow.clone(),
+                CODE_TRACE_GONE_DRAINED,
+                wall,
+                trace.events.len(),
+            );
+        }
         batch
     }
 }

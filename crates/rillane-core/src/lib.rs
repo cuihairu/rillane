@@ -25,6 +25,7 @@ pub mod performance;
 pub mod plan;
 pub mod pool;
 pub mod quality;
+pub mod query;
 pub mod redact;
 pub mod schedule;
 pub mod scoring;
