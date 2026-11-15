@@ -188,6 +188,30 @@ pub enum AppOperation {
         scope: Vec<String>,
         ttl_ms: u64,
     },
+    /// 配置审计（GET /config/receipts——回执链 seq 降序 + reconcile
+    /// 对账摘要，只读。RIL-081）
+    ConfigAudit,
+    /// 应用配置提案（POST /config/apply——消费**操作员签发**的批准
+    /// 凭证；幂等键由 dispatch 缺省派生 [`MCP_PROPOSAL_OWNER`] 归属
+    /// 不变。凭证签发不在本边界。RIL-081）
+    ConfigApply {
+        proposal_id: String,
+        approval_id: String,
+        idempotency_key: String,
+    },
+    /// 回滚准备（POST /config/rollback-proposal——目标回执须在册、
+    /// Applied 且属于 [`MCP_PROPOSAL_OWNER`]；答复是待批准提案，
+    /// 激活仍须操作员批准。RIL-081）
+    ConfigRollbackPrepare { target_key: String },
+    /// 回滚执行（POST /config/rollback——消费操作员对回滚提案的凭证；
+    /// 盲覆盖防线/候选恢复/连接真相归服务端。RIL-081）
+    ConfigRollbackExecute {
+        target_key: String,
+        proposal_id: String,
+        approval_id: String,
+        idempotency_key: String,
+        drain_deadline_ms: Option<u64>,
+    },
 }
 
 impl AppOperation {
@@ -207,6 +231,10 @@ impl AppOperation {
             AppOperation::ProbeResult { .. } => "probe_result",
             AppOperation::ConfigPreview { .. } => "validate_config",
             AppOperation::ConfigPropose { .. } => "preview_config_change",
+            AppOperation::ConfigAudit => "config_audit",
+            AppOperation::ConfigApply { .. } => "apply_config_change",
+            AppOperation::ConfigRollbackPrepare { .. } => "rollback_config",
+            AppOperation::ConfigRollbackExecute { .. } => "rollback_config",
         }
     }
 
@@ -340,6 +368,63 @@ impl AppOperation {
                     "ttl_ms": ttl_ms,
                 })),
             }),
+            AppOperation::ConfigAudit => Ok(OpRequest {
+                method: Method::Get,
+                path: "/config/receipts",
+                query: Vec::new(),
+                body: None,
+            }),
+            AppOperation::ConfigApply {
+                proposal_id,
+                approval_id,
+                idempotency_key,
+            } => Ok(OpRequest {
+                method: Method::Post,
+                path: "/config/apply",
+                query: Vec::new(),
+                // owner 恒适配器标签：只能消费为本归属签发的凭证——
+                // CLI 为其他所有者签发的凭证在此结构性失配
+                body: Some(serde_json::json!({
+                    "idempotency_key": idempotency_key,
+                    "proposal_id": proposal_id,
+                    "approval_id": approval_id,
+                    "owner": MCP_PROPOSAL_OWNER,
+                })),
+            }),
+            AppOperation::ConfigRollbackPrepare { target_key } => Ok(OpRequest {
+                method: Method::Post,
+                path: "/config/rollback-proposal",
+                query: Vec::new(),
+                body: Some(serde_json::json!({
+                    "owner": MCP_PROPOSAL_OWNER,
+                    "target_key": target_key,
+                    "ttl_ms": MCP_PROPOSE_TTL_MS,
+                })),
+            }),
+            AppOperation::ConfigRollbackExecute {
+                target_key,
+                proposal_id,
+                approval_id,
+                idempotency_key,
+                drain_deadline_ms,
+            } => {
+                let mut body = serde_json::json!({
+                    "idempotency_key": idempotency_key,
+                    "target_key": target_key,
+                    "proposal_id": proposal_id,
+                    "approval_id": approval_id,
+                    "owner": MCP_PROPOSAL_OWNER,
+                });
+                if let Some(deadline) = drain_deadline_ms {
+                    body["drain_deadline_ms"] = serde_json::json!(deadline);
+                }
+                Ok(OpRequest {
+                    method: Method::Post,
+                    path: "/config/rollback",
+                    query: Vec::new(),
+                    body: Some(body),
+                })
+            }
         }
     }
 }

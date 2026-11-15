@@ -451,7 +451,7 @@ mod tests {
         );
         let out = handle_line(&mut state(), &line).expect("answer");
         assert_eq!(out["result"]["resultType"], "complete");
-        assert_eq!(out["result"]["tools"].as_array().map(Vec::len), Some(13));
+        assert_eq!(out["result"]["tools"].as_array().map(Vec::len), Some(16));
     }
 
     #[test]
@@ -591,6 +591,13 @@ mod tests {
                 json!({"patch": {"telemetry": {}}}),
                 "write",
             ),
+            // RIL-081：应用/回滚是写档执行面——只读会话在范围门即拒
+            (
+                "apply_config_change",
+                json!({"proposal_id": "p", "approval_id": "a"}),
+                "write",
+            ),
+            ("rollback_config", json!({"target_key": "k"}), "write"),
         ] {
             let line = call_line(20, name, args);
             let out = handle_line(&mut state(), &line).expect("answer");
@@ -1382,6 +1389,182 @@ mod tests {
             seen.lock().expect("lock").len(),
             0,
             "被拒请求不进入执行——无边界请求"
+        );
+    }
+
+    /// RIL-081 应用面：apply_config_change 恰一次打到 /config/apply；
+    /// owner 适配器固定 + 幂等键缺省确定性派生（同参重试领同一键——
+    /// 服务端按键回放同一回执，重复调用天然安全）。凭证（proposal_id/
+    /// approval_id）必须由操作员签发后经参数进入——工具面没有
+    /// 「自批准」入口。
+    #[test]
+    fn apply_consumes_operator_credentials_with_derived_key() {
+        let payload = r#"{"schema_version":1,"seq":7,"kind":"apply","proposal_id":"p1","approval_id":"a1","generation":"g2","label":"mcp-p1-a1"}"#;
+        let (seen, base) = scripted_stub(vec![
+            ("HTTP/1.1 200 OK", payload),
+            ("HTTP/1.1 200 OK", payload),
+        ]);
+        let mut st = state_with(GrantedScopes::parse("read,write").expect("parse"), 0);
+        st.app = BlockingApp::new(&base, None).expect("app");
+        let args = json!({"proposal_id": "p1", "approval_id": "a1"});
+        let first = handle_line(&mut st, &call_line(47, "apply_config_change", args.clone()))
+            .expect("answer");
+        let replay =
+            handle_line(&mut st, &call_line(48, "apply_config_change", args)).expect("answer");
+        let requests = seen.lock().expect("lock").clone();
+        assert_eq!(requests.len(), 2, "两次调用各一次边界请求");
+        for request in &requests {
+            assert!(request.starts_with("POST /config/apply"), "{request}");
+            assert!(
+                request.contains(r#""owner":"mcp""#),
+                "owner 适配器固定: {request}"
+            );
+            assert!(
+                request.contains(r#""idempotency_key":"mcp-p1-a1""#),
+                "缺省幂等键确定性派生: {request}"
+            );
+        }
+        assert_eq!(first["result"]["isError"], false);
+        assert_eq!(replay["result"]["structuredContent"]["label"], "mcp-p1-a1");
+    }
+
+    /// RIL-081 回滚两阶段：无凭证 → /config/rollback-proposal（登记
+    /// 待批准提案，owner 固定 + 限制面 ttl）；双凭证 → /config/rollback
+    /// （回滚专用键前缀 mcp-rb-，drain 缺省不入体、显式值透传）。
+    /// 半凭证在参数校验面即拒——不产生边界请求。
+    #[test]
+    fn rollback_two_phase_hits_distinct_endpoints() {
+        let proposal = r#"{"schema_version":1,"id":"rb-p1","base_generation":"g2","base_hash":"h2","owner":"mcp","scope":[],"created_ms":1,"expires_ms":2,"preview":{"applicable":true,"diff":[],"diagnostics":[]}}"#;
+        let receipt = r#"{"schema_version":1,"seq":8,"kind":"rollback","target_key":"k-1","generation":"g1","label":"mcp-rb-rb9-a7"}"#;
+        let (seen, base) = scripted_stub(vec![
+            ("HTTP/1.1 201 Created", proposal),
+            ("HTTP/1.1 200 OK", receipt),
+        ]);
+        let mut st = state_with(GrantedScopes::parse("read,write").expect("parse"), 0);
+        st.app = BlockingApp::new(&base, None).expect("app");
+
+        // 阶段一：准备（无凭证参数）
+        let out = handle_line(
+            &mut st,
+            &call_line(49, "rollback_config", json!({"target_key": "k-1"})),
+        )
+        .expect("answer");
+        assert_eq!(out["result"]["isError"], false);
+        assert_eq!(out["result"]["structuredContent"]["id"], "rb-p1");
+
+        // 阶段二：执行（操作员批准后的双凭证 + 显式 drain）
+        let out = handle_line(
+            &mut st,
+            &call_line(
+                50,
+                "rollback_config",
+                json!({"target_key": "k-1", "proposal_id": "rb9", "approval_id": "a7",
+                       "drain_deadline_ms": 1_500}),
+            ),
+        )
+        .expect("answer");
+        assert_eq!(out["result"]["isError"], false);
+        assert_eq!(out["result"]["structuredContent"]["generation"], "g1");
+
+        let requests = seen.lock().expect("lock").clone();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0].starts_with("POST /config/rollback-proposal"),
+            "{}",
+            requests[0]
+        );
+        assert!(requests[0].contains(r#""owner":"mcp""#), "{}", requests[0]);
+        assert!(
+            requests[0].contains(r#""ttl_ms":60000"#),
+            "限制面与提案同口径: {}",
+            requests[0]
+        );
+        assert!(
+            requests[1].starts_with("POST /config/rollback"),
+            "{}",
+            requests[1]
+        );
+        assert!(requests[1].contains(r#""owner":"mcp""#), "{}", requests[1]);
+        assert!(
+            requests[1].contains(r#""idempotency_key":"mcp-rb-rb9-a7""#),
+            "回滚键专用前缀: {}",
+            requests[1]
+        );
+        assert!(
+            requests[1].contains(r#""drain_deadline_ms":1500"#),
+            "显式 drain 透传: {}",
+            requests[1]
+        );
+    }
+
+    /// RIL-081 审计面：config_audit 是 Read 档——只读会话即可读回执链
+    /// （GET /config/receipts，恰一次请求）。
+    #[test]
+    fn config_audit_reads_receipts_under_read_scope() {
+        let payload = r#"{"schema_version":1,"receipts":[{"seq":7,"kind":"apply","label":"mcp-p1-a1"}],"reconcile":{"in_sync":true}}"#;
+        let (seen, base) = scripted_stub(vec![("HTTP/1.1 200 OK", payload)]);
+        let mut st = state_with(GrantedScopes::parse("read").expect("parse"), 0);
+        st.app = BlockingApp::new(&base, None).expect("app");
+        let out = handle_line(&mut st, &call_line(51, "config_audit", json!({}))).expect("answer");
+        let requests = seen.lock().expect("lock").clone();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].starts_with("GET /config/receipts"),
+            "{}",
+            requests[0]
+        );
+        assert_eq!(out["result"]["isError"], false);
+        let sc = &out["result"]["structuredContent"];
+        assert_eq!(sc["receipts"][0]["seq"], 7);
+        assert_eq!(sc["reconcile"]["in_sync"], true);
+    }
+
+    /// RIL-081 稳定码贯通：服务端冲突（409 apply.base.conflict）→
+    /// isError 答复 + 稳定码进 structuredContent——失败理由不含敏感
+    /// 值（context 为守护进程侧稳定文案）。
+    #[test]
+    fn apply_conflict_answers_stable_code() {
+        let body = r#"{"error":{"code":"apply.base.conflict","context":"base generation moved"}}"#;
+        let (seen, base) = scripted_stub(vec![("HTTP/1.1 409 Conflict", body)]);
+        let mut st = state_with(GrantedScopes::parse("read,write").expect("parse"), 0);
+        st.app = BlockingApp::new(&base, None).expect("app");
+        let out = handle_line(
+            &mut st,
+            &call_line(
+                52,
+                "apply_config_change",
+                json!({"proposal_id": "p1", "approval_id": "a1"}),
+            ),
+        )
+        .expect("answer");
+        let _ = seen.lock().expect("lock").clone();
+        assert_eq!(out["result"]["isError"], true);
+        assert_eq!(
+            out["result"]["structuredContent"]["error"]["code"],
+            "apply.base.conflict"
+        );
+    }
+
+    /// RIL-081 半凭证即拒：回滚只带一侧凭证不是授权面——参数校验面
+    /// 拒绝（mcp.input.invalid）且零边界请求。
+    #[test]
+    fn rollback_half_credentials_rejected_before_boundary() {
+        let (seen, base) = scripted_stub(vec![("HTTP/1.1 200 OK", "{}")]);
+        let mut st = state_with(GrantedScopes::parse("read,write").expect("parse"), 0);
+        st.app = BlockingApp::new(&base, None).expect("app");
+        for half in [
+            json!({"target_key": "k-1", "proposal_id": "rb9"}),
+            json!({"target_key": "k-1", "approval_id": "a7"}),
+        ] {
+            let out = handle_line(&mut st, &call_line(53, "rollback_config", half.clone()))
+                .expect("answer");
+            assert_eq!(out["error"]["code"], -32602, "{half}");
+            assert_eq!(out["error"]["data"]["code"], "mcp.input.invalid", "{half}");
+        }
+        assert_eq!(
+            seen.lock().expect("lock").len(),
+            0,
+            "半凭证不产生任何边界请求"
         );
     }
 }

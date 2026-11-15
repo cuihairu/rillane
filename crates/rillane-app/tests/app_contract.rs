@@ -27,6 +27,10 @@ fn wire_of(op: &AppOperation) -> (Method, &'static str) {
         AppOperation::ProbeResult { .. } => (Method::Get, "/probe/result"),
         AppOperation::ConfigPreview { .. } => (Method::Post, "/config/preview"),
         AppOperation::ConfigPropose { .. } => (Method::Post, "/config/proposals"),
+        AppOperation::ConfigAudit => (Method::Get, "/config/receipts"),
+        AppOperation::ConfigApply { .. } => (Method::Post, "/config/apply"),
+        AppOperation::ConfigRollbackPrepare { .. } => (Method::Post, "/config/rollback-proposal"),
+        AppOperation::ConfigRollbackExecute { .. } => (Method::Post, "/config/rollback"),
     }
 }
 
@@ -80,13 +84,29 @@ fn sample_ops() -> Vec<AppOperation> {
             scope: vec!["telemetry".to_string()],
             ttl_ms: 60_000,
         },
+        AppOperation::ConfigAudit,
+        AppOperation::ConfigApply {
+            proposal_id: "p-1".to_string(),
+            approval_id: "a-1".to_string(),
+            idempotency_key: "mcp-p-1-a-1".to_string(),
+        },
+        AppOperation::ConfigRollbackPrepare {
+            target_key: "k-1".to_string(),
+        },
+        AppOperation::ConfigRollbackExecute {
+            target_key: "k-1".to_string(),
+            proposal_id: "rb-1".to_string(),
+            approval_id: "a-2".to_string(),
+            idempotency_key: "mcp-rb-rb-1-a-2".to_string(),
+            drain_deadline_ms: None,
+        },
     ]
 }
 
 #[test]
 fn operation_set_is_closed_and_each_maps_one_wire_shape() {
     let ops = sample_ops();
-    assert_eq!(ops.len(), 13, "全集样例与操作数一致（新操作漏登记即失败）");
+    assert_eq!(ops.len(), 17, "全集样例与操作数一致（新操作漏登记即失败）");
     for op in &ops {
         let req = op.request().expect("request builds");
         let (method, path) = wire_of(op);
@@ -96,7 +116,7 @@ fn operation_set_is_closed_and_each_maps_one_wire_shape() {
 }
 
 /// 线上路径审查名单（与 wire_of 对账——路径不来自操作之外的任何来源）
-const PATH_ALLOWLIST: [&str; 12] = [
+const PATH_ALLOWLIST: [&str; 16] = [
     "/runtime/stats",
     "/routing/stats",
     "/trace/flows",
@@ -109,6 +129,10 @@ const PATH_ALLOWLIST: [&str; 12] = [
     "/probe/result",
     "/config/preview",
     "/config/proposals",
+    "/config/receipts",
+    "/config/apply",
+    "/config/rollback-proposal",
+    "/config/rollback",
 ];
 
 #[test]
@@ -155,6 +179,48 @@ fn config_operations_carry_fixed_owner_and_minimal_body() {
     assert_eq!(body["ttl_ms"], serde_json::json!(5));
     assert_eq!(body["patch"], serde_json::json!({"a": 1}));
     assert_eq!(body["scope"], serde_json::json!(["a"]));
+
+    // RIL-081：应用体 owner 恒 mcp + 幂等键原样；回滚执行体带专用
+    // 键前缀面（键由 dispatch 派生——op 只携带终形）与 drain 缺省缺席
+    let apply = AppOperation::ConfigApply {
+        proposal_id: "p".to_string(),
+        approval_id: "a".to_string(),
+        idempotency_key: "mcp-p-a".to_string(),
+    }
+    .request()
+    .expect("request");
+    assert_eq!(apply.method, Method::Post);
+    assert_eq!(apply.path, "/config/apply");
+    let body = apply.body.expect("body");
+    assert_eq!(body["owner"], "mcp");
+    assert_eq!(body["idempotency_key"], "mcp-p-a");
+
+    let prepare = AppOperation::ConfigRollbackPrepare {
+        target_key: "k".to_string(),
+    }
+    .request()
+    .expect("request");
+    assert_eq!(prepare.path, "/config/rollback-proposal");
+    assert_eq!(prepare.body.expect("body")["owner"], "mcp");
+
+    let execute = AppOperation::ConfigRollbackExecute {
+        target_key: "k".to_string(),
+        proposal_id: "rb".to_string(),
+        approval_id: "a".to_string(),
+        idempotency_key: "mcp-rb-rb-a".to_string(),
+        drain_deadline_ms: None,
+    }
+    .request()
+    .expect("request");
+    assert_eq!(execute.path, "/config/rollback");
+    let body = execute.body.expect("body");
+    assert_eq!(body["owner"], "mcp");
+    assert_eq!(body.get("drain_deadline_ms"), None, "缺省不入体");
+
+    let audit = AppOperation::ConfigAudit.request().expect("request");
+    assert_eq!(audit.method, Method::Get);
+    assert_eq!(audit.path, "/config/receipts");
+    assert_eq!(audit.body, None);
 }
 
 #[test]

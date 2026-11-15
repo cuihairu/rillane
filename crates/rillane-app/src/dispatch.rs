@@ -163,6 +163,36 @@ fn build_validated(name: &str, args: &Value) -> Result<AppOperation, JsonRpcErro
                 ttl_ms: get_u64("ttl_ms").unwrap_or(crate::ops::MCP_PROPOSE_TTL_MS),
             })
         }
+        "apply_config_change" => {
+            let proposal_id = get_str("proposal_id").ok_or_else(|| invalid("proposal_id"))?;
+            let approval_id = get_str("approval_id").ok_or_else(|| invalid("approval_id"))?;
+            // 幂等键缺省确定性派生：同参重试领同一回执（重放语义），
+            // 换显式键重复执行同一提案会撞已核销凭证（服务端稳定码）
+            let idempotency_key = get_str("idempotency_key")
+                .unwrap_or_else(|| format!("mcp-{}-{}", proposal_id, approval_id));
+            Ok(AppOperation::ConfigApply {
+                proposal_id,
+                approval_id,
+                idempotency_key,
+            })
+        }
+        "rollback_config" => {
+            let target_key = get_str("target_key").ok_or_else(|| invalid("target_key"))?;
+            match (get_str("proposal_id"), get_str("approval_id")) {
+                (Some(proposal_id), Some(approval_id)) => Ok(AppOperation::ConfigRollbackExecute {
+                    idempotency_key: format!("mcp-rb-{}-{}", proposal_id, approval_id),
+                    target_key,
+                    proposal_id,
+                    approval_id,
+                    drain_deadline_ms: get_u64("drain_deadline_ms"),
+                }),
+                // 只给一半凭证即拒——半凭证不是授权面（两阶段以
+                // 「都缺席 = 准备 / 都在场 = 执行」为界，无中间态）
+                (Some(_), None) | (None, Some(_)) => Err(invalid("proposal_id/approval_id")),
+                (None, None) => Ok(AppOperation::ConfigRollbackPrepare { target_key }),
+            }
+        }
+        "config_audit" => Ok(AppOperation::ConfigAudit),
         other => Err(
             JsonRpcError::invalid_params(format!("unknown tool: {other}"))
                 .with_code_data("mcp.tool.unknown", json!({"tool": other})),
@@ -466,5 +496,109 @@ mod tests {
             }
             other => panic!("expected config propose, got {other:?}"),
         }
+    }
+
+    /// RIL-081：应用/回滚/审计工具映射——幂等键缺省确定性派生（同参
+    /// 重试领同一回执）；回滚两阶段（都缺席=准备 / 都在场=执行 / 半
+    /// 凭证即拒）；审计是只读单端点。
+    #[test]
+    fn apply_rollback_audit_tools_map_and_derive_keys() {
+        // 应用：缺省键 = mcp-{proposal_id}-{approval_id}；显式键覆盖
+        let (op, _) = build_operation(
+            "apply_config_change",
+            Some(&json!({"proposal_id": "p1", "approval_id": "a1"})),
+        )
+        .expect("op");
+        match op {
+            AppOperation::ConfigApply {
+                proposal_id,
+                approval_id,
+                idempotency_key,
+            } => {
+                assert_eq!(proposal_id, "p1");
+                assert_eq!(approval_id, "a1");
+                assert_eq!(idempotency_key, "mcp-p1-a1");
+                let req = AppOperation::ConfigApply {
+                    proposal_id,
+                    approval_id,
+                    idempotency_key,
+                }
+                .request()
+                .expect("req");
+                assert_eq!(req.path, "/config/apply");
+                assert_eq!(
+                    req.body.expect("body")["owner"],
+                    crate::ops::MCP_PROPOSAL_OWNER
+                );
+            }
+            other => panic!("expected config apply, got {other:?}"),
+        }
+        let (op, _) = build_operation(
+            "apply_config_change",
+            Some(&json!({"proposal_id": "p1", "approval_id": "a1", "idempotency_key": "k-x"})),
+        )
+        .expect("op");
+        match op {
+            AppOperation::ConfigApply {
+                idempotency_key, ..
+            } => assert_eq!(idempotency_key, "k-x"),
+            other => panic!("expected config apply, got {other:?}"),
+        }
+
+        // 回滚准备（无凭证参数）
+        let (op, _) =
+            build_operation("rollback_config", Some(&json!({"target_key": "k-1"}))).expect("op");
+        match op {
+            AppOperation::ConfigRollbackPrepare { target_key } => assert_eq!(target_key, "k-1"),
+            other => panic!("expected rollback prepare, got {other:?}"),
+        }
+        // 回滚执行（双凭证在场）：回滚专用键前缀 mcp-rb-（不与正向
+        // apply 键空间相撞）；drain 缺省不入体
+        let (op, _) = build_operation(
+            "rollback_config",
+            Some(&json!({"target_key": "k-1", "proposal_id": "rb1", "approval_id": "a2"})),
+        )
+        .expect("op");
+        match op {
+            AppOperation::ConfigRollbackExecute {
+                target_key,
+                proposal_id,
+                approval_id,
+                idempotency_key,
+                drain_deadline_ms,
+            } => {
+                assert_eq!(
+                    (
+                        target_key.as_str(),
+                        proposal_id.as_str(),
+                        approval_id.as_str()
+                    ),
+                    ("k-1", "rb1", "a2")
+                );
+                assert_eq!(idempotency_key, "mcp-rb-rb1-a2");
+                assert_eq!(drain_deadline_ms, None);
+            }
+            other => panic!("expected rollback execute, got {other:?}"),
+        }
+        // 半凭证即拒
+        for half in [
+            json!({"target_key": "k-1", "proposal_id": "rb1"}),
+            json!({"target_key": "k-1", "approval_id": "a2"}),
+        ] {
+            let err = build_operation("rollback_config", Some(&half)).unwrap_err();
+            assert_eq!(
+                err.data.expect("data")["code"],
+                "mcp.input.invalid",
+                "{half}"
+            );
+        }
+
+        // 审计：只读单端点
+        let (op, tool) = build_operation("config_audit", None).expect("op");
+        assert_eq!(tool.name, "config_audit");
+        assert!(matches!(op, AppOperation::ConfigAudit));
+        let req = op.request().expect("req");
+        assert_eq!(req.method, crate::ops::Method::Get);
+        assert_eq!(req.path, "/config/receipts");
     }
 }

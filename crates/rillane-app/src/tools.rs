@@ -183,6 +183,42 @@ fn config_propose_input_schema() -> Value {
     })
 }
 
+/// 应用面（RIL-081）：提案 ID + **操作员签发的批准凭证**（两者都是
+/// 服务端 ID——模型只转述，不能自造授权；无 owner 字段——适配器固定）。
+/// 幂等键可选：缺省由 (proposal_id, approval_id) 确定性派生（同参重试
+/// 领同一回执）。
+fn config_apply_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["proposal_id", "approval_id"],
+        "properties": {
+            "proposal_id": {"type": "string", "maxLength": 128},
+            "approval_id": {"type": "string", "maxLength": 128},
+            "idempotency_key": {"type": "string", "maxLength": 64},
+        },
+    })
+}
+
+/// 回滚面（RIL-081，两阶段）：target_key（目标回执幂等键）必填；
+/// proposal_id+approval_id 都缺席 = 准备阶段（登记回滚提案、返回待
+/// 批准 ID）；都在场 = 执行阶段（消费操作员对回滚提案的凭证）。只给
+/// 一半即拒（半凭证不是授权面）。drain_deadline_ms 上限 1h（排空窗口
+/// 契约）。
+fn config_rollback_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target_key"],
+        "properties": {
+            "target_key": {"type": "string", "maxLength": 128},
+            "proposal_id": {"type": "string", "maxLength": 128},
+            "approval_id": {"type": "string", "maxLength": 128},
+            "drain_deadline_ms": {"type": "integer", "minimum": 1, "maximum": 3_600_000},
+        },
+    })
+}
+
 /// 工具目录（冻结——顺序即 tools/list 输出顺序；扩工具 = 显式加行
 /// + 契约测试同步。目录构造含运行时 schema 值——OnceLock 装载一次）
 pub fn catalog() -> &'static [ToolContract] {
@@ -359,6 +395,43 @@ fn build_catalog() -> Vec<ToolContract> {
             input_schema: config_propose_input_schema(),
             output_schema: Some(envelope_output_schema()),
         },
+        ToolContract {
+            name: "apply_config_change",
+            title: "Apply config change",
+            description: "应用配置变更提案（消费操作员已签发的批准凭证——本工具不签发凭证；幂等：同参数重试领同一回执；版本冲突/过期/已核销以服务端稳定码拒绝）",
+            scope: Scope::Write,
+            annotations: ToolAnnotations {
+                read_only_hint: false,
+                destructive_hint: false,
+                idempotent_hint: true,
+                open_world_hint: false,
+            },
+            input_schema: config_apply_input_schema(),
+            output_schema: Some(envelope_output_schema()),
+        },
+        ToolContract {
+            name: "rollback_config",
+            title: "Roll back config",
+            description: "按回执回滚配置（两阶段：无凭证参数时登记回滚提案并返回待批准的提案 ID——须操作员经 CLI 批准；携凭证时执行回滚并给出排空计划与连接真相；盲覆盖防线在服务端——现役已被带外推进即拒）",
+            scope: Scope::Write,
+            annotations: ToolAnnotations {
+                read_only_hint: false,
+                destructive_hint: false,
+                idempotent_hint: true,
+                open_world_hint: false,
+            },
+            input_schema: config_rollback_input_schema(),
+            output_schema: Some(envelope_output_schema()),
+        },
+        ToolContract {
+            name: "config_audit",
+            title: "Config audit",
+            description: "配置事务回执链与对账摘要（seq 降序；回执面与现役代际的 reconcile 对账——只读审计）",
+            scope: Scope::Read,
+            annotations: read_hints(),
+            input_schema: json!({"type": "object", "additionalProperties": false, "properties": {}}),
+            output_schema: Some(envelope_output_schema()),
+        },
     ]
 }
 
@@ -389,7 +462,7 @@ pub fn tool_entry(t: &ToolContract) -> Value {
     entry
 }
 
-/// tools/list 答复（本版工具集一页全出——13 个工具不设游标分页；
+/// tools/list 答复（本版工具集一页全出——16 个工具不设游标分页；
 /// resultType 恒 complete，目录随二进制冻结故可缓存）
 pub fn tools_list_result() -> Value {
     json!({
@@ -677,7 +750,7 @@ mod tests {
     #[test]
     fn catalog_is_closed_and_matches_operation_set() {
         let cat = catalog();
-        assert_eq!(cat.len(), 13, "工具数 = 闭合操作集大小（扩集两边同步）");
+        assert_eq!(cat.len(), 16, "工具数 = 闭合操作集大小（扩集两边同步）");
         for op_name in [
             AppOperation::RuntimeStats,
             AppOperation::RoutingQuality,
@@ -705,8 +778,12 @@ mod tests {
             "probe_result",
             "validate_config",
             "preview_config_change",
+            "apply_config_change",
+            "rollback_config",
+            "config_audit",
         ];
         op_names.sort_unstable();
+        op_names.dedup();
         assert_eq!(tool_names, op_names);
     }
 
@@ -842,7 +919,7 @@ mod tests {
         assert_eq!(result["resultType"], "complete");
         assert_eq!(result["cacheScope"], "public");
         let tools = result["tools"].as_array().expect("tools");
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 16);
         for entry in tools {
             assert!(entry.get("inputSchema").is_some());
             assert!(entry.get("annotations").is_some());
@@ -979,5 +1056,47 @@ mod tests {
             Some(&json!({"patch": {"telemetry": {}}, "ttl_ms": 60_000})),
         )
         .expect("propose ok");
+
+        // RIL-081：应用面双 ID 必填、无 owner 字段；回滚面只 target_key
+        // 必填（两阶段由 dispatch 裁决）；audit 空参
+        let apply = tool("apply_config_change").expect("apply entry");
+        assert_eq!(apply.scope, Scope::Write);
+        assert!(apply.annotations.idempotent_hint);
+        let err = validate_arguments(apply, Some(&json!({"proposal_id": "p"}))).unwrap_err();
+        assert_eq!(err.data.expect("data")["code"], "mcp.input.required");
+        let err = validate_arguments(
+            apply,
+            Some(&json!({"proposal_id": "p", "approval_id": "a", "owner": "cli"})),
+        )
+        .unwrap_err();
+        assert_eq!(err.data.expect("data")["code"], "mcp.input.unknown_field");
+        validate_arguments(
+            apply,
+            Some(&json!({"proposal_id": "p", "approval_id": "a"})),
+        )
+        .expect("apply ok");
+
+        let rollback = tool("rollback_config").expect("rollback entry");
+        assert_eq!(rollback.scope, Scope::Write);
+        assert!(!rollback.annotations.destructive_hint, "回滚是恢复不是破坏");
+        let err = validate_arguments(rollback, Some(&json!({}))).unwrap_err();
+        assert_eq!(err.data.expect("data")["code"], "mcp.input.required");
+        // 半凭证在 schema 面合法（双可选）——由 dispatch 拒（mcp.input.invalid）
+        validate_arguments(
+            rollback,
+            Some(&json!({"target_key": "k", "proposal_id": "p"})),
+        )
+        .expect("schema allows half credentials");
+        let err = validate_arguments(
+            rollback,
+            Some(&json!({"target_key": "k", "drain_deadline_ms": 3_600_001})),
+        )
+        .unwrap_err();
+        assert_eq!(err.data.expect("data")["code"], "mcp.input.range");
+
+        let audit = tool("config_audit").expect("audit entry");
+        assert_eq!(audit.scope, Scope::Read);
+        assert!(audit.annotations.read_only_hint);
+        validate_arguments(audit, None).expect("audit empty args ok");
     }
 }
