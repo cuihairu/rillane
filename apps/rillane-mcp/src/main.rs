@@ -6,12 +6,13 @@
 //! stdio 契约（官方 2026-07-28 modern era，RIL-066 冻结）：
 //! - stdout **只有**协议消息（一行一条 JSON-RPC）；日志全走 stderr；
 //! - EOF（stdin 关闭）→ 干净退出（退出码 0）——进程不遗留后台任务：
-//!   探测作业活在守护进程侧（服务端配额/TTL 管束），本进程退出即
-//!   不再有调用方；
+//!   本会话已提交且未释放的探测作业逐个补发取消（RIL-071；作业本就
+//!   受守护进程配额/TTL 管束，补发是会话礼貌）；
 //! - 单请求限时（边界执行器 [`rillane_app::client::BlockingApp`] 内
 //!   置 30 s 上限）——卡死的控制面不会无限占住会话；
-//! - 取消：`notifications/cancelled` 登记后，被取消请求的答复**不写**
-//!   （官方契约：停止处理、释放资源、不答复；登记集有界，超限挤最旧）。
+//! - 取消：`notifications/cancelled` 登记后，被取消请求的答复**不写**；
+//!   该请求已提交的探测作业同步补发释放（官方契约：停止处理、释放
+//!   资源、不答复；登记集有界，超限挤最旧）。
 //! - 授权（RIL-068）：授权档**只**来自启动配置（默认只读——最小面），
 //!   请求面没有任何字段能改变它（模型声称授权不能升级范围是结构性
 //!   保证）；越权/超限在执行前拒绝（稳定码 -32001/-32002），被拒请求
@@ -22,6 +23,7 @@ use rillane_app::authz::{self, GrantedScopes, RateLimiter};
 use rillane_app::client::BlockingApp;
 use rillane_app::dispatch;
 use rillane_app::mcp::{self, IncomingMessage, JsonRpcError, RequestId, ServerMethod};
+use rillane_app::ops::AppOperation;
 use rillane_app::reply::AppError;
 use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
@@ -29,6 +31,10 @@ use std::io::BufRead;
 
 /// 取消登记集上限（有界——恶意客户端的取消风暴不涨内存）
 const CANCELLED_SET_CAP: usize = 4096;
+
+/// 探测作业追踪上限（RIL-071）：会话最多追踪这么多个「已提交未释放」
+/// 的探测作业；溢出挤最旧（追踪是会话礼貌——硬边界在守护进程侧配额）
+const PROBE_TRACK_CAP: usize = 256;
 
 /// 速率限制固定窗口宽（每窗 = 每分钟）
 const RATE_WINDOW_SECS: u64 = 60;
@@ -58,13 +64,15 @@ struct Cli {
 }
 
 /// 会话状态：边界执行器 + 授权态（RIL-068：只来自启动配置）+ 被取消
-/// 请求登记（有界队列 + 成员集）
+/// 请求登记（有界队列 + 成员集）+ 本会话已提交未释放的探测作业追踪
+/// （RIL-071：(请求, 作业) 关联——取消命中或会话退出时补发释放）
 struct ServerState {
     app: BlockingApp,
     grants: GrantedScopes,
     rate: RateLimiter,
     cancelled_queue: VecDeque<RequestId>,
     cancelled_set: HashSet<RequestId>,
+    probe_jobs: VecDeque<(RequestId, u64)>,
 }
 
 impl ServerState {
@@ -75,7 +83,34 @@ impl ServerState {
             rate,
             cancelled_queue: VecDeque::new(),
             cancelled_set: HashSet::new(),
+            probe_jobs: VecDeque::new(),
         }
+    }
+
+    /// 登记一次成功提交的探测作业（容量有界——溢出挤最旧；被挤掉的
+    /// 作业仍受守护进程配额/TTL 管束，追踪面只欠会话礼貌不欠硬保证）
+    fn track_probe_job(&mut self, req: RequestId, job: u64) {
+        if self.probe_jobs.len() >= PROBE_TRACK_CAP {
+            self.probe_jobs.pop_front();
+        }
+        self.probe_jobs.push_back((req, job));
+    }
+
+    /// 按请求 ID 取出关联作业（取消命中时补发释放——取出即不再追踪）
+    fn take_tracked_job(&mut self, req: &RequestId) -> Option<u64> {
+        let pos = self.probe_jobs.iter().position(|(r, _)| r == req)?;
+        let (_, job) = self.probe_jobs.remove(pos)?;
+        Some(job)
+    }
+
+    /// 按作业 ID 解除登记（显式 probe_cancel 成功后——EOF 不再重复补发）
+    fn forget_job(&mut self, job: u64) {
+        self.probe_jobs.retain(|(_, j)| *j != job);
+    }
+
+    /// 未释放作业清单（EOF 退出时逐个补发取消）
+    fn outstanding_jobs(&self) -> Vec<u64> {
+        self.probe_jobs.iter().map(|(_, j)| *j).collect()
     }
 
     fn mark_cancelled(&mut self, id: RequestId) {
@@ -113,15 +148,25 @@ fn handle_line(state: &mut ServerState, line: &str) -> Option<Value> {
         Ok(Some(IncomingMessage::Notification { method, params })) => {
             if method == mcp::methods::CANCELLED_NOTIFICATION {
                 if let Some(notice) = mcp::parse_cancelled(params.as_ref()) {
+                    // 迟到的取消（请求已答完）：关联的探测作业若还挂着，
+                    // 此刻补发释放——资源随取消归还，不活得比取消久
+                    if let Some(job) = state.take_tracked_job(&notice.request_id) {
+                        release_probe_job(state, job);
+                    }
                     state.mark_cancelled(notice.request_id);
                 }
             }
             None
         }
         Ok(Some(IncomingMessage::Request { id, method, params })) => {
-            let outcome = dispatch_request(state, &method, params.as_ref());
-            // 取消语义：处理期间收到取消 → 丢弃答复（不写）
+            let outcome = dispatch_request(state, &id, &method, params.as_ref());
+            // 取消语义：处理期间收到取消 → 丢弃答复（不写）。若该请求
+            // 已提交探测作业（取消先于答复到达的竞态），补发释放——
+            // 调用方看不到 job_id 不等于作业可以无人认领
             if state.take_cancelled(&id) {
+                if let Some(job) = state.take_tracked_job(&id) {
+                    release_probe_job(state, job);
+                }
                 return None;
             }
             Some(match outcome {
@@ -137,6 +182,7 @@ fn handle_line(state: &mut ServerState, line: &str) -> Option<Value> {
 /// JSON-RPC error。
 fn dispatch_request(
     state: &mut ServerState,
+    id: &RequestId,
     method: &str,
     params: Option<&Value>,
 ) -> Result<Value, JsonRpcError> {
@@ -177,8 +223,32 @@ fn dispatch_request(
                 }
             }
             let (op, _tool) = dispatch::build_operation(name, args.get("arguments"))?;
+            // 显式取消面（RIL-071）：取消成功即解除登记——EOF 不再重复补发
+            let explicitly_cancelled = match &op {
+                AppOperation::ProbeCancel { id: job } => Some(*job),
+                _ => None,
+            };
             let started = std::time::Instant::now();
             let reply = state.app.execute(op);
+            // 探测作业登记（RIL-071）：提交成功即关联 (请求, 作业)——
+            // 取消命中或会话退出时补发释放；拒绝不产生作业（服务面契约），
+            // 失败答复无可登记面
+            if name == "probe_submit" {
+                if let Ok(ok_reply) = &reply {
+                    if let Some(job) = ok_reply
+                        .json()
+                        .and_then(|j| j.get("job_id"))
+                        .and_then(Value::as_u64)
+                    {
+                        state.track_probe_job(id.clone(), job);
+                    }
+                }
+            }
+            if name == "probe_cancel" && reply.is_ok() {
+                if let Some(job) = explicitly_cancelled {
+                    state.forget_job(job);
+                }
+            }
             eprintln!(
                 "rillane-mcp: tool {} executed in {:?}",
                 name,
@@ -197,6 +267,33 @@ fn dispatch_request(
 fn log_and_result(tool: &str, err: &AppError) -> Value {
     eprintln!("rillane-mcp: tool {} failed with code {}", tool, err.code);
     rillane_app::tools::result_from_error(err)
+}
+
+/// 会话礼貌释放（RIL-071）：对本会话已提交、尚未释放的探测作业补发
+/// 取消。这不是工具调用——不过范围门/限速门、不消耗配额（能留下作业
+/// 的会话必然持有 probe 档：范围门已在提交时把守）；尽力而为——失败
+/// 只记稳定码（正文可能携带目标面），作业本就受守护进程配额/TTL 管束。
+fn release_probe_job(state: &mut ServerState, job: u64) {
+    match state.app.execute(AppOperation::ProbeCancel { id: job }) {
+        Ok(_) => eprintln!("rillane-mcp: probe job {job} released"),
+        Err(err) => {
+            eprintln!(
+                "rillane-mcp: probe job {job} release failed with code {}",
+                err.code
+            )
+        }
+    }
+}
+
+/// 释放全部未释放作业（EOF 退出路径）——返回补发数供测试断言；
+/// 登记随会话终结一并清空（追踪面已消费）
+fn release_outstanding_jobs(state: &mut ServerState) -> usize {
+    let outstanding = state.outstanding_jobs();
+    for job in &outstanding {
+        release_probe_job(state, *job);
+    }
+    state.probe_jobs.clear();
+    outstanding.len()
 }
 
 fn main() {
@@ -264,7 +361,13 @@ fn main() {
         }
     }
     eprintln!("rillane-mcp: stdin closed, exiting");
-    // EOF 干净退出：无后台任务可遗留（探测作业在守护进程侧配额管束）
+    // EOF 干净退出（RIL-071）：本会话已提交且未释放的探测作业逐个补发
+    // 取消（尽力而为——守护进程不在也只记稳定码）；作业本就受守护进程
+    // 配额/TTL 管束，补发取消是会话礼貌：探测不活得比会话久
+    let released = release_outstanding_jobs(&mut state);
+    if released > 0 {
+        eprintln!("rillane-mcp: released {released} probe job(s) at exit");
+    }
     std::process::exit(0);
 }
 
@@ -584,6 +687,223 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_probe_submission_releases_the_job() {
+        // 迟到的取消（请求已答完）：提交成功登记 (请求, 作业)，取消命中
+        // 即补发 POST /probe/cancel——资源随取消归还，不留无人认领作业
+        let (seen, base) = scripted_stub(vec![
+            ("HTTP/1.1 200 OK", r#"{"schema_version":1,"job_id":41}"#),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"schema_version":1,"id":41,"verdict":"cancelled"}"#,
+            ),
+        ]);
+        let mut st = state_probe_at(&base);
+        let out = handle_line(
+            &mut st,
+            &call_line(
+                50,
+                "probe_submit",
+                json!({"kind": "connect", "addr": "203.0.113.9:443"}),
+            ),
+        )
+        .expect("answer");
+        assert_eq!(out["result"]["structuredContent"]["job_id"], 41);
+        assert_eq!(st.probe_jobs.len(), 1, "提交成功即登记");
+        assert!(
+            handle_line(&mut st, &cancel_notice(50)).is_none(),
+            "取消通知不产生输出"
+        );
+        let requests = seen.lock().expect("lock").clone();
+        assert_eq!(requests.len(), 2, "提交 + 释放各恰一次边界请求");
+        assert!(requests[0].starts_with("POST /probe"), "{}", requests[0]);
+        assert!(requests[0].contains("203.0.113.9:443"));
+        assert!(
+            requests[1].starts_with("POST /probe/cancel?id=41"),
+            "{}",
+            requests[1]
+        );
+        assert!(st.probe_jobs.is_empty(), "释放后追踪清空");
+    }
+
+    #[test]
+    fn cancelled_before_answer_probe_job_is_still_released() {
+        // 取消先于答复到达（投机取消竞态）：probe_submit 执行、job 已
+        // 产生、调用方永远看不到 job_id——补发释放把资源收回（孤儿作业
+        // 在结构上不可能：登记先于取消检查）
+        let (seen, base) = scripted_stub(vec![
+            ("HTTP/1.1 200 OK", r#"{"schema_version":1,"job_id":7}"#),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"schema_version":1,"id":7,"verdict":"cancelled"}"#,
+            ),
+        ]);
+        let mut st = state_probe_at(&base);
+        assert!(handle_line(&mut st, &cancel_notice(51)).is_none());
+        let out = handle_line(
+            &mut st,
+            &call_line(
+                51,
+                "probe_submit",
+                json!({"kind": "dns", "host": "example.com"}),
+            ),
+        );
+        assert!(out.is_none(), "被取消请求的答复不写");
+        let requests = seen.lock().expect("lock").clone();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /probe"));
+        assert!(
+            requests[1].starts_with("POST /probe/cancel?id=7"),
+            "{}",
+            requests[1]
+        );
+        assert!(st.probe_jobs.is_empty());
+    }
+
+    #[test]
+    fn eof_releases_outstanding_probe_jobs() {
+        // 会话退出：未释放作业逐个补发取消（探测不活得比会话久）
+        let (seen, base) = scripted_stub(vec![
+            ("HTTP/1.1 200 OK", r#"{"schema_version":1,"job_id":3}"#),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"schema_version":1,"id":3,"verdict":"cancelled"}"#,
+            ),
+        ]);
+        let mut st = state_probe_at(&base);
+        handle_line(
+            &mut st,
+            &call_line(
+                52,
+                "probe_submit",
+                json!({"kind": "dns", "host": "example.com"}),
+            ),
+        )
+        .expect("answer");
+        assert_eq!(st.outstanding_jobs(), vec![3]);
+        assert_eq!(release_outstanding_jobs(&mut st), 1);
+        let requests = seen.lock().expect("lock").clone();
+        assert!(
+            requests[1].starts_with("POST /probe/cancel?id=3"),
+            "{}",
+            requests[1]
+        );
+        assert!(st.probe_jobs.is_empty());
+    }
+
+    #[test]
+    fn explicit_cancel_forgets_tracked_job() {
+        // 显式 probe_cancel 成功即解除登记——EOF 退出不再重复补发（作业
+        // 的资源已由调用方自己的取消动作归还）
+        let (seen, base) = scripted_stub(vec![
+            ("HTTP/1.1 200 OK", r#"{"schema_version":1,"job_id":8}"#),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"schema_version":1,"id":8,"verdict":"cancelled"}"#,
+            ),
+        ]);
+        let mut st = state_probe_at(&base);
+        handle_line(
+            &mut st,
+            &call_line(
+                53,
+                "probe_submit",
+                json!({"kind": "dns", "host": "example.com"}),
+            ),
+        )
+        .expect("answer");
+        let out =
+            handle_line(&mut st, &call_line(54, "probe_cancel", json!({"id": 8}))).expect("answer");
+        assert_eq!(out["result"]["structuredContent"]["verdict"], "cancelled");
+        assert!(st.probe_jobs.is_empty());
+        assert_eq!(
+            release_outstanding_jobs(&mut st),
+            0,
+            "已显式取消——退出无补发"
+        );
+        assert_eq!(seen.lock().expect("lock").len(), 2);
+    }
+
+    #[test]
+    fn out_of_scope_intranet_target_is_rejected_by_daemon_policy() {
+        // 任意内网目标被目标策略拒绝：适配层不预审目标（原样转发——
+        // 允许/拒绝只由守护进程登记面裁决），拒绝信封原文贯通、拒绝不
+        // 产生作业（无登记面可释放）
+        let (seen, base) = scripted_stub(vec![(
+            "HTTP/1.1 400 Bad Request",
+            r#"{"schema_version":1,"error":{"code":"probe.target.out_of_scope","context":"target not in registered probe scope"}}"#,
+        )]);
+        let mut st = state_probe_at(&base);
+        let out = handle_line(
+            &mut st,
+            &call_line(
+                55,
+                "probe_submit",
+                json!({"kind": "connect", "addr": "192.168.1.1:443"}),
+            ),
+        )
+        .expect("answer");
+        assert_eq!(out["result"]["isError"], true);
+        assert_eq!(
+            out["result"]["structuredContent"]["error"]["code"],
+            "probe.target.out_of_scope"
+        );
+        let requests = seen.lock().expect("lock").clone();
+        assert!(requests[0].starts_with("POST /probe"));
+        assert!(
+            requests[0].contains("192.168.1.1:443"),
+            "内网目标原样到达守护进程: {}",
+            requests[0]
+        );
+        assert!(st.probe_jobs.is_empty(), "拒绝不产生作业");
+    }
+
+    #[test]
+    fn budget_exhausted_answer_passes_through_verbatim() {
+        // 单独配额面：预算耗尽显式拒绝（probe.limit.budget）原文贯通
+        // ——适配层不吞码、不重试（重试会放大守护进程负载）
+        let (seen, base) = scripted_stub(vec![(
+            "HTTP/1.1 400 Bad Request",
+            r#"{"schema_version":1,"error":{"code":"probe.limit.budget","context":"probe budget exhausted"}}"#,
+        )]);
+        let mut st = state_probe_at(&base);
+        let out = handle_line(
+            &mut st,
+            &call_line(
+                56,
+                "probe_submit",
+                json!({"kind": "udp_echo", "addr": "203.0.113.9:53", "payload_len": 64}),
+            ),
+        )
+        .expect("answer");
+        assert_eq!(
+            out["result"]["structuredContent"]["error"]["code"],
+            "probe.limit.budget"
+        );
+        assert_eq!(
+            out["result"]["structuredContent"]["error"]["context"],
+            "probe budget exhausted"
+        );
+        assert!(st.probe_jobs.is_empty());
+        assert_eq!(seen.lock().expect("lock").len(), 1, "拒绝后无重试、无补发");
+    }
+
+    #[test]
+    fn probe_job_tracking_is_bounded() {
+        // 追踪面有界（溢出挤最旧）——提交风暴不涨内存；硬边界仍在守护
+        // 进程配额
+        let mut st = state_probe_at("http://127.0.0.1:1");
+        for i in 0..PROBE_TRACK_CAP + 9 {
+            st.track_probe_job(RequestId::Num(i as i64), i as u64);
+        }
+        assert_eq!(st.probe_jobs.len(), PROBE_TRACK_CAP);
+        assert_eq!(st.outstanding_jobs()[0], 9, "最旧 9 条被挤出");
+        assert_eq!(
+            *st.outstanding_jobs().last().expect("last"),
+            (PROBE_TRACK_CAP + 8) as u64
+        );
+    }
+
+    #[test]
     fn status_quality_answers_are_byte_faithful_envelopes() {
         // /routing/stats 形载荷（守护进程 DTO，无信封版本字段）逐字段
         // 贯通：时效（source=legacy/real）与缺失（p95/loss/gate null）
@@ -693,6 +1013,50 @@ mod tests {
         let mut st = state_with(GrantedScopes::parse("read,detailed").expect("parse"), 0);
         st.app = BlockingApp::new(base, None).expect("app");
         st
+    }
+
+    /// 探测档会话（read,probe——probe_submit/probe_cancel 过 RIL-068 范围门）
+    fn state_probe_at(base: &str) -> ServerState {
+        let mut st = state_with(GrantedScopes::parse("read,probe").expect("parse"), 0);
+        st.app = BlockingApp::new(base, None).expect("app");
+        st
+    }
+
+    /// 逐连接脚本应答器：按顺序接受 N 条连接、记录每条完整请求行、
+    /// 各回脚本里的状态行与正文（每请求一条连接——Connection: close）。
+    /// 请求序 = 适配层发出的边界请求序，断言面同时覆盖次序与内容。
+    fn scripted_stub(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (std::sync::Arc<std::sync::Mutex<Vec<String>>>, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 8192];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                seen2
+                    .lock()
+                    .expect("lock")
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let response = format!(
+                    "{status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes());
+            }
+        });
+        (seen, format!("http://{addr}"))
+    }
+
+    fn cancel_notice(id: u64) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","method":"notifications/cancelled","params":{{"requestId":{id},"reason":"user"}}}}"#
+        )
     }
 
     #[test]
