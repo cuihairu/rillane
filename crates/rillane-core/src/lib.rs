@@ -26,6 +26,7 @@ pub mod pool;
 pub mod quality;
 pub mod schedule;
 pub mod scoring;
+pub mod session;
 pub mod udp;
 
 pub use budgets::{
@@ -39,7 +40,8 @@ pub use drain::{
     CODE_AUTHORITY_MISSING,
 };
 pub use executor::{
-    AttemptOutcome, AttemptRecord, EstablishedSession, FallbackCatalog, LedgerEntry, PlanExecError,
+    AttemptOutcome, AttemptRecord, ChannelFailure, EstablishedAssociationChannel,
+    EstablishedChannel, EstablishedSession, FallbackCatalog, LedgerEntry, PlanExecError,
     SessionExecutor, SessionLedger, CODE_ENDPOINT_INVALID, CODE_GENERATION_MISMATCH,
     CODE_NODE_UNKNOWN,
 };
@@ -78,6 +80,11 @@ pub use scoring::{
     MetricContribution, MetricRefs, ObjectiveWeights, ScenarioProfile, ScenarioScorer, ScoreError,
     ScoreInputs, ScoreReport, SloSpec, SloUnknownReason, SloVerdict, StayReason, SwitchDecision,
     CODE_PROFILE_INVALID, CODE_WEIGHTS_INVALID,
+};
+pub use session::{
+    run_association_session, run_stream_session, DatagramForwardReport, SessionRunError,
+    StreamForwardReport, TransferDirection, CANCEL_POLL_MS, CHUNK, CODE_SESSION_CANCELLED,
+    CODE_SESSION_TRANSFER,
 };
 
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.

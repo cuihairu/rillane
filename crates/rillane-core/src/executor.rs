@@ -22,8 +22,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::outbound::{
-    DatagramOutbound, OpenContext, OpenStage, StreamOutbound, TargetBinding, CODE_OPEN_CANCELLED,
-    CODE_OPEN_UNSUPPORTED,
+    DatagramOutbound, OpenContext, OpenError, OpenStage, OpenedAssociation, OpenedStream,
+    StreamOutbound, TargetBinding, CODE_OPEN_CANCELLED, CODE_OPEN_UNSUPPORTED,
 };
 use crate::plan::{EndpointRef, GenerationRef, RoutePlan, SessionPin};
 
@@ -182,6 +182,46 @@ impl fmt::Display for PlanExecError {
 
 impl std::error::Error for PlanExecError {}
 
+/// 建立失败（RIL-098 会话接线面）：计划层错误 + 最近一次真实拨号错误。
+/// `last_open_error` 供入口协议错误映射**原样透传**稳定码/阶段/证据
+/// （未发生拨号时为 None——静态跳过、代际错配、建立期取消）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelFailure {
+    /// 计划执行错误（稳定码/尝试对账）
+    pub plan: PlanExecError,
+    /// 最近一次真实拨号错误
+    pub last_open_error: Option<OpenError>,
+}
+
+impl ChannelFailure {
+    /// 稳定原因码（计划层口径）
+    pub fn code(&self) -> &'static str {
+        self.plan.code()
+    }
+
+    /// 尝试记录（诊断对账）
+    pub fn attempts(&self) -> &[AttemptRecord] {
+        self.plan.attempts()
+    }
+}
+
+/// 已建立的流通道（RIL-098）：会话对账 + 协议包装 IO 配对交付——
+/// 通道所有权随本结构走，转发面由 session 模块统一接线。
+pub struct EstablishedChannel {
+    /// 已建立会话（计划节点/实际端点/尝试对账冻结）
+    pub session: EstablishedSession,
+    /// 协议包装后的出口流
+    pub stream: OpenedStream,
+}
+
+/// 已建立的数据报关联通道（RIL-098）：会话对账 + 关联 IO 配对交付。
+pub struct EstablishedAssociationChannel {
+    /// 已建立会话
+    pub session: EstablishedSession,
+    /// 协议包装后的数据报关联
+    pub association: OpenedAssociation,
+}
+
 /// 候选：节点名 + 目录端点（None = 代际中无此节点，尝试层显式跳过）
 struct Candidate {
     node: String,
@@ -242,9 +282,32 @@ impl SessionExecutor {
         base_ctx: OpenContext,
         now_ms: u64,
     ) -> Result<EstablishedSession, PlanExecError> {
-        check_generation(plan, &base_ctx)?;
+        Ok(self
+            .open_stream_channel(plan, outbound, base_ctx, now_ms)
+            .await
+            .map_err(|failure| failure.plan)?
+            .session)
+    }
+
+    /// 建立流通道并**配对交付**协议包装 IO（RIL-098 会话接线面）。
+    /// 选路与回退编排与 [`SessionExecutor::open_stream`] 完全同源——
+    /// 只有一条候选序列实现；差别仅在成功时保留 [`OpenedStream`]
+    /// （旧方法不保留，转发面无法接线）并在失败时携带最近一次真实
+    /// 拨号错误（供入口协议错误原样映射）。
+    pub async fn open_stream_channel(
+        &self,
+        plan: &mut RoutePlan,
+        outbound: Arc<dyn StreamOutbound>,
+        base_ctx: OpenContext,
+        now_ms: u64,
+    ) -> Result<EstablishedChannel, ChannelFailure> {
+        check_generation(plan, &base_ctx).map_err(|plan| ChannelFailure {
+            plan,
+            last_open_error: None,
+        })?;
         let via_chain = via_chain(plan);
         let mut attempts = Vec::new();
+        let mut last_open_error = None;
         for (index, candidate) in self.candidates(plan).into_iter().enumerate() {
             // 静态校验先于拨号：端点缺口 / 能力缺口都按预测证据跳过
             let outcome = if let Some((code, detail)) = candidate.gap() {
@@ -257,7 +320,10 @@ impl SessionExecutor {
             } else if let Err(err) = base_ctx.check_openable(now_ms) {
                 attempts.push(record(index, &candidate, failed_outcome(&err)));
                 plan.record_failed(err.stage.as_str(), err.context.clone());
-                return Err(PlanExecError::Cancelled { attempts });
+                return Err(ChannelFailure {
+                    plan: PlanExecError::Cancelled { attempts },
+                    last_open_error,
+                });
             } else {
                 let ctx = dial_context(&base_ctx, index);
                 match outbound
@@ -265,20 +331,28 @@ impl SessionExecutor {
                     .await
                 {
                     Ok(opened) => {
-                        return Ok(finish(
+                        let session = finish(
                             plan,
                             index,
                             &candidate,
                             opened.endpoint(),
                             attempts,
                             via_chain,
-                        ));
+                        );
+                        return Ok(EstablishedChannel {
+                            session,
+                            stream: opened,
+                        });
                     }
                     Err(err) => {
+                        last_open_error = Some(err.clone());
                         attempts.push(record(index, &candidate, failed_outcome(&err)));
                         if err.code == CODE_OPEN_CANCELLED {
                             plan.record_failed(err.stage.as_str(), err.context.clone());
-                            return Err(PlanExecError::Cancelled { attempts });
+                            return Err(ChannelFailure {
+                                plan: PlanExecError::Cancelled { attempts },
+                                last_open_error: Some(err),
+                            });
                         }
                         continue;
                     }
@@ -287,7 +361,10 @@ impl SessionExecutor {
             attempts.push(record(index, &candidate, outcome));
         }
         plan.record_failed(OpenStage::Dial.as_str(), "all dial candidates exhausted");
-        Err(PlanExecError::Exhausted { attempts })
+        Err(ChannelFailure {
+            plan: PlanExecError::Exhausted { attempts },
+            last_open_error,
+        })
     }
 
     /// 建立 UDP 数据报关联（与字节流同一编排纪律；能力校验按数据报面）。
@@ -299,9 +376,32 @@ impl SessionExecutor {
         base_ctx: OpenContext,
         now_ms: u64,
     ) -> Result<EstablishedSession, PlanExecError> {
-        check_generation(plan, &base_ctx)?;
+        Ok(self
+            .open_association_channel(plan, outbound, binding, base_ctx, now_ms)
+            .await
+            .map_err(|failure| failure.plan)?
+            .session)
+    }
+
+    /// 建立数据报关联通道并**配对交付**关联 IO（RIL-098 会话接线面）。
+    /// 选路与回退编排与 [`SessionExecutor::open_association`] 完全同源；
+    /// 差别仅在成功时保留 [`OpenedAssociation`] 并在失败时携带最近一次
+    /// 真实拨号错误。
+    pub async fn open_association_channel(
+        &self,
+        plan: &mut RoutePlan,
+        outbound: Arc<dyn DatagramOutbound>,
+        binding: TargetBinding,
+        base_ctx: OpenContext,
+        now_ms: u64,
+    ) -> Result<EstablishedAssociationChannel, ChannelFailure> {
+        check_generation(plan, &base_ctx).map_err(|plan| ChannelFailure {
+            plan,
+            last_open_error: None,
+        })?;
         let via_chain = via_chain(plan);
         let mut attempts = Vec::new();
+        let mut last_open_error = None;
         for (index, candidate) in self.candidates(plan).into_iter().enumerate() {
             let outcome = if let Some((code, detail)) = candidate.gap() {
                 AttemptOutcome::Skipped { code, detail }
@@ -313,25 +413,36 @@ impl SessionExecutor {
             } else if let Err(err) = base_ctx.check_openable(now_ms) {
                 attempts.push(record(index, &candidate, failed_outcome(&err)));
                 plan.record_failed(err.stage.as_str(), err.context.clone());
-                return Err(PlanExecError::Cancelled { attempts });
+                return Err(ChannelFailure {
+                    plan: PlanExecError::Cancelled { attempts },
+                    last_open_error,
+                });
             } else {
                 let ctx = dial_context(&base_ctx, index);
                 match outbound.open_association(&binding, &ctx).await {
                     Ok(opened) => {
-                        return Ok(finish(
+                        let session = finish(
                             plan,
                             index,
                             &candidate,
                             opened.endpoint(),
                             attempts,
                             via_chain,
-                        ));
+                        );
+                        return Ok(EstablishedAssociationChannel {
+                            session,
+                            association: opened,
+                        });
                     }
                     Err(err) => {
+                        last_open_error = Some(err.clone());
                         attempts.push(record(index, &candidate, failed_outcome(&err)));
                         if err.code == CODE_OPEN_CANCELLED {
                             plan.record_failed(err.stage.as_str(), err.context.clone());
-                            return Err(PlanExecError::Cancelled { attempts });
+                            return Err(ChannelFailure {
+                                plan: PlanExecError::Cancelled { attempts },
+                                last_open_error: Some(err),
+                            });
                         }
                         continue;
                     }
@@ -340,7 +451,10 @@ impl SessionExecutor {
             attempts.push(record(index, &candidate, outcome));
         }
         plan.record_failed(OpenStage::Dial.as_str(), "all dial candidates exhausted");
-        Err(PlanExecError::Exhausted { attempts })
+        Err(ChannelFailure {
+            plan: PlanExecError::Exhausted { attempts },
+            last_open_error,
+        })
     }
 
     /// 候选序列：计划节点优先，随后目录声明的回退（声明序、去重、
