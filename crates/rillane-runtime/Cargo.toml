@@ -36,7 +36,6 @@ rillane-telemetry = { path = "../rillane-telemetry" }
 rillane-mesh = { path = "../rillane-mesh" }
 rillane-subscription = { path = "../rillane-subscription" }
 rillane-plugins = { path = "../rillane-plugins", optional = true }
-notify.workspace = true
 futures.workspace = true
 whoami.workspace = true
 num_cpus.workspace = true
