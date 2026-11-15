@@ -156,6 +156,15 @@ enum Command {
         #[command(subcommand)]
         command: RouteCommand,
     },
+    /// 配置事务闭环（RIL-079：提案/预览/批准/应用/回滚/回执审计——
+    /// 全部走守护进程端点，授权与版本检查无本地旁路）
+    Config {
+        /// 控制面 base URL，如 http://127.0.0.1:9090
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     /// 真实连接轨迹查询（Trace CLI，RIL-060；语法冻结：
     /// 退出码 0=成功 / 1=用法或连接错误 / 2=显式缺席）
     Trace {
@@ -537,6 +546,510 @@ enum RouteCommand {
     Clear,
     /// 查看路由应用状态（设备态 + 已应用步骤表）
     Status,
+}
+
+/// 配置事务子命令（RIL-079）：提案/预览/批准/应用/回滚/回执审计。
+/// 与 MCP 同门——全部走守护进程端点，基准代际由 daemon 自填，CLI
+/// 无法绕过授权与版本检查。
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// 查看现役配置面快照（代际 / 摘要 / 各账计数）
+    State {
+        /// 控制面 base URL
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+    /// 登记正向提案（补丁为 JSON 文件；base 由守护进程自填）
+    Propose {
+        /// 控制面 base URL
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// 所有者标签（如 cli:local；后续步骤须逐一匹配）
+        #[arg(long)]
+        owner: String,
+        /// 范围（逗号分隔，如 routing,dns）
+        #[arg(long)]
+        scope: String,
+        /// 补丁 JSON 文件路径（RFC 7396 merge patch）
+        #[arg(long)]
+        patch_file: String,
+        /// 提案有效期（毫秒）
+        #[arg(long, default_value = "60000")]
+        ttl_ms: u64,
+    },
+    /// 预览补丁（只读：diff / 诊断 / 受影响类别 / 副作用提示）
+    Preview {
+        /// 控制面 base URL
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// 补丁 JSON 文件路径
+        #[arg(long)]
+        patch_file: String,
+        /// 范围过滤（逗号分隔，可省）
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// 显式批准提案（凭证绑定提案摘要——批准后提案再变即失配）
+    Approve {
+        /// 控制面 base URL
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// 提案 ID（Propose 输出）
+        #[arg(long)]
+        proposal_id: String,
+        /// 所有者标签（须与提案一致）
+        #[arg(long)]
+        owner: String,
+        /// 授权范围（逗号分隔；缺省 = 提案全范围）
+        #[arg(long)]
+        scope: Option<String>,
+        /// 凭证有效期（毫秒）
+        #[arg(long, default_value = "60000")]
+        ttl_ms: u64,
+    },
+    /// 正向应用（幂等键：重试须逐字同键同身份）
+    Apply {
+        /// 控制面 base URL
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// 幂等键（回执寻址；重试须逐字同键）
+        #[arg(long)]
+        idempotency_key: String,
+        /// 提案 ID
+        #[arg(long)]
+        proposal_id: String,
+        /// 凭证 ID（Approve 输出）
+        #[arg(long)]
+        approval_id: String,
+        /// 所有者标签
+        #[arg(long)]
+        owner: String,
+    },
+    /// 回滚到指定回执的前置代际（回滚提案 → 批准 → 执行一条龙；
+    /// 候选身份与 live 基准全部 daemon 自填——客户端无法谎报）
+    Rollback {
+        /// 控制面 base URL
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// 回滚自身的幂等键（重试须逐字同键）
+        #[arg(long)]
+        idempotency_key: String,
+        /// 被回退 apply 的幂等键（回执寻址）
+        #[arg(long)]
+        target_key: String,
+        /// 所有者标签（须与目标回执一致）
+        #[arg(long)]
+        owner: String,
+        /// 回滚提案 / 凭证有效期（毫秒）
+        #[arg(long, default_value = "60000")]
+        ttl_ms: u64,
+        /// 排空时限（epoch 毫秒，可省——计划仍产出）
+        #[arg(long)]
+        drain_deadline_ms: Option<u64>,
+    },
+    /// 回执审计摘要（回执链 seq 降序 + 对账闭合判定）
+    Receipts {
+        /// 控制面 base URL
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+}
+
+/// 逗号分隔范围标签 → 列表（空白条目剔除）。
+fn config_scope_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// 读取补丁 JSON 文件（客户端侧只做 JSON 解析——形状/合法性裁决在
+/// daemon 提案期 preview 预检发生）。
+fn read_patch_file(path: &str) -> Result<serde_json::Value> {
+    let raw = std::fs::read_to_string(path).with_context(|| format!("读取补丁文件失败: {path}"))?;
+    serde_json::from_str(&raw).with_context(|| format!("补丁文件不是合法 JSON: {path}"))
+}
+
+/// 配置事务端点统一请求（稳定码信封错误透出为 CLI 错误）。
+#[allow(clippy::result_large_err)]
+fn config_request(
+    client: &Client,
+    with_auth: &dyn Fn(reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder,
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let url = format!("{base}{path}");
+    let mut req = match method {
+        reqwest::Method::POST => client.post(&url),
+        reqwest::Method::GET => client.get(&url),
+        _ => anyhow::bail!("不支持的方法"),
+    };
+    if let Some(b) = body {
+        req = req.json(b);
+    }
+    let resp = with_auth(req)
+        .send()
+        .with_context(|| format!("无法访问 {url}"))?;
+    let status = resp.status();
+    let v: serde_json::Value = resp.json().context("解析控制面返回数据失败")?;
+    if !status.is_success() {
+        let code = v["error"]["code"].as_str().unwrap_or("unknown");
+        let msg = v["error"]["message"].as_str().unwrap_or("");
+        anyhow::bail!("控制面拒绝: {status} [{code}] {msg}");
+    }
+    Ok(v)
+}
+
+fn render_config_preview(v: &serde_json::Value) {
+    println!("applicable: {}", v["applicable"].as_bool().unwrap_or(false));
+    for d in v["diagnostics"].as_array().unwrap_or(&vec![]) {
+        println!(
+            "诊断: [{}] {}",
+            d["code"].as_str().unwrap_or("-"),
+            d["message"].as_str().unwrap_or("")
+        );
+    }
+    let empty = Vec::new();
+    let diff = v["diff"].as_array().unwrap_or(&empty);
+    println!("diff 条目: {}", diff.len());
+    for d in diff {
+        println!(
+            "  {} {} | {} -> {}",
+            d["op"].as_str().unwrap_or("-"),
+            d["path"].as_str().unwrap_or("-"),
+            d["before"],
+            d["after"]
+        );
+    }
+    for a in v["affected"].as_array().unwrap_or(&vec![]) {
+        println!(
+            "受影响: {}（{}）",
+            a["category"].as_str().unwrap_or("-"),
+            a["note"].as_str().unwrap_or("")
+        );
+    }
+    for s in v["side_effects"].as_array().unwrap_or(&vec![]) {
+        println!(
+            "副作用: {} {}（{}）",
+            s["kind"].as_str().unwrap_or("-"),
+            s["path"].as_str().unwrap_or("-"),
+            s["note"].as_str().unwrap_or("")
+        );
+    }
+    let viol = v["scope_violations"].as_array().unwrap_or(&empty);
+    if !viol.is_empty() {
+        println!("范围外路径（仅报告）: {}", viol.len());
+        for p in viol {
+            println!("  {}", p.as_str().unwrap_or("-"));
+        }
+    }
+}
+
+fn render_config_receipt(r: &serde_json::Value) {
+    println!(
+        "  #{} {} | {} | {} | 代际 {} | os_applied {}",
+        r["seq"],
+        r["idempotency_key"].as_str().unwrap_or("-"),
+        r["status"].as_str().unwrap_or("-"),
+        r["owner"].as_str().unwrap_or("-"),
+        r["generation"].as_str().unwrap_or("-"),
+        r["os_applied"].as_bool().unwrap_or(false)
+    );
+    if let Some(reason) = r["failure_reason"].as_str() {
+        println!("    失败理由: {reason}");
+    }
+}
+
+fn render_config_apply_outcome(v: &serde_json::Value) {
+    println!(
+        "phase: {}（{}）",
+        v["phase"].as_str().unwrap_or("-"),
+        if v["phase"] == "replayed" {
+            "幂等重试领回执——未再执行"
+        } else {
+            "本次执行"
+        }
+    );
+    let r = &v["receipt"];
+    println!("receipt:");
+    render_config_receipt(r);
+}
+
+fn render_config_rollback(v: &serde_json::Value) {
+    println!("receipt:");
+    render_config_receipt(&v["receipt"]);
+    let drain = &v["drain"];
+    if drain.is_object() {
+        println!(
+            "排空计划: 退役 {} -> 重接入 {} | 时限 {}",
+            drain["retired_generation"].as_str().unwrap_or("-"),
+            drain["readmitted_generation"].as_str().unwrap_or("-"),
+            drain["deadline_ms"]
+        );
+        println!("  note: {}", drain["note"].as_str().unwrap_or("-"));
+    }
+    let connections = &v["connections"];
+    if connections.is_object() {
+        println!(
+            "连接真相: 既有会话钉在 {}（不迁移）",
+            connections["pinned_generation"].as_str().unwrap_or("-")
+        );
+        println!("  {}", connections["statement"].as_str().unwrap_or("-"));
+    }
+}
+
+fn render_config_receipts(v: &serde_json::Value) {
+    println!("现役代际: {}", v["live_generation"].as_str().unwrap_or("-"));
+    let rc = &v["reconcile"];
+    println!(
+        "对账: agrees={} | applied={} | failed={} | 链尾 {:?}",
+        rc["agrees"].as_bool().unwrap_or(false),
+        rc["applied_count"],
+        rc["failed_count"],
+        rc["last_applied_generation"].as_str()
+    );
+    let empty = Vec::new();
+    let receipts = v["receipts"].as_array().unwrap_or(&empty);
+    if receipts.is_empty() {
+        println!("回执链: 空");
+    } else {
+        println!("回执链（seq 降序）:");
+        for r in receipts {
+            render_config_receipt(r);
+        }
+    }
+}
+
+/// 配置事务子命令执行（全部走 daemon 端点——CLI 只是装配）。
+fn run_config_command(
+    client: &Client,
+    with_auth: &dyn Fn(reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder,
+    base: &str,
+    command: &ConfigCommand,
+) -> Result<()> {
+    match command {
+        ConfigCommand::State { .. } => {
+            let v = config_request(
+                client,
+                with_auth,
+                base,
+                reqwest::Method::GET,
+                "/config/state",
+                None,
+            )?;
+            println!("现役代际: {}", v["live_generation"].as_str().unwrap_or("-"));
+            println!("现役摘要: {}", v["live_hash"].as_str().unwrap_or("-"));
+            println!(
+                "提案 {} | 凭证 {} | 回执 {} | 内容历史 {}",
+                v["proposals"], v["approvals"], v["receipts"], v["history"]
+            );
+        }
+        ConfigCommand::Propose {
+            owner,
+            scope,
+            patch_file,
+            ttl_ms,
+            ..
+        } => {
+            let patch = read_patch_file(patch_file)?;
+            let body = serde_json::json!({
+                "owner": owner,
+                "scope": config_scope_list(scope),
+                "patch": patch,
+                "ttl_ms": ttl_ms,
+            });
+            let v = config_request(
+                client,
+                with_auth,
+                base,
+                reqwest::Method::POST,
+                "/config/proposals",
+                Some(&body),
+            )?;
+            println!("提案已登记:");
+            println!("  proposal_id: {}", v["id"].as_str().unwrap_or("-"));
+            println!(
+                "  base_generation: {}",
+                v["base_generation"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  scope: {}",
+                v["scope"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default()
+            );
+            println!("  expires_ms: {}", v["expires_ms"]);
+        }
+        ConfigCommand::Preview {
+            patch_file, scope, ..
+        } => {
+            let patch = read_patch_file(patch_file)?;
+            let mut body = serde_json::json!({ "patch": patch });
+            if let Some(s) = scope {
+                body["scope"] = serde_json::json!(config_scope_list(s));
+            }
+            let v = config_request(
+                client,
+                with_auth,
+                base,
+                reqwest::Method::POST,
+                "/config/preview",
+                Some(&body),
+            )?;
+            render_config_preview(&v);
+        }
+        ConfigCommand::Approve {
+            proposal_id,
+            owner,
+            scope,
+            ttl_ms,
+            ..
+        } => {
+            let mut body = serde_json::json!({
+                "proposal_id": proposal_id,
+                "owner": owner,
+                "ttl_ms": ttl_ms,
+            });
+            if let Some(s) = scope {
+                body["scope"] = serde_json::json!(config_scope_list(s));
+            }
+            let v = config_request(
+                client,
+                with_auth,
+                base,
+                reqwest::Method::POST,
+                "/config/approve",
+                Some(&body),
+            )?;
+            println!("凭证已签发:");
+            println!(
+                "  approval_id: {}",
+                v["approval_id"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  proposal_digest: {}",
+                v["proposal_digest"].as_str().unwrap_or("-")
+            );
+            println!(
+                "  scope: {}",
+                v["scope"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default()
+            );
+            println!("  expires_ms: {}", v["expires_ms"]);
+        }
+        ConfigCommand::Apply {
+            idempotency_key,
+            proposal_id,
+            approval_id,
+            owner,
+            ..
+        } => {
+            let body = serde_json::json!({
+                "idempotency_key": idempotency_key,
+                "proposal_id": proposal_id,
+                "approval_id": approval_id,
+                "owner": owner,
+            });
+            let v = config_request(
+                client,
+                with_auth,
+                base,
+                reqwest::Method::POST,
+                "/config/apply",
+                Some(&body),
+            )?;
+            render_config_apply_outcome(&v);
+        }
+        ConfigCommand::Rollback {
+            idempotency_key,
+            target_key,
+            owner,
+            ttl_ms,
+            drain_deadline_ms,
+            ..
+        } => {
+            // 一条龙：回滚提案 → 批准 → 执行（同一组 daemon 端点——
+            // 凭证仍是 daemon 授权权威签发的真实一次性核销）
+            let body =
+                serde_json::json!({ "owner": owner, "target_key": target_key, "ttl_ms": ttl_ms });
+            let proposal = config_request(
+                client,
+                with_auth,
+                base,
+                reqwest::Method::POST,
+                "/config/rollback-proposal",
+                Some(&body),
+            )?;
+            let proposal_id = proposal["id"]
+                .as_str()
+                .context("回滚提案响应缺 id")?
+                .to_string();
+            let approve_body = serde_json::json!({
+                "proposal_id": proposal_id,
+                "owner": owner,
+                "ttl_ms": ttl_ms,
+            });
+            let approval = config_request(
+                client,
+                with_auth,
+                base,
+                reqwest::Method::POST,
+                "/config/approve",
+                Some(&approve_body),
+            )?;
+            let approval_id = approval["approval_id"]
+                .as_str()
+                .context("凭证响应缺 approval_id")?
+                .to_string();
+            let mut rollback_body = serde_json::json!({
+                "idempotency_key": idempotency_key,
+                "target_key": target_key,
+                "proposal_id": proposal_id,
+                "approval_id": approval_id,
+                "owner": owner,
+            });
+            if let Some(d) = drain_deadline_ms {
+                rollback_body["drain_deadline_ms"] = serde_json::json!(d);
+            }
+            let v = config_request(
+                client,
+                with_auth,
+                base,
+                reqwest::Method::POST,
+                "/config/rollback",
+                Some(&rollback_body),
+            )?;
+            render_config_rollback(&v);
+        }
+        ConfigCommand::Receipts { .. } => {
+            let v = config_request(
+                client,
+                with_auth,
+                base,
+                reqwest::Method::GET,
+                "/config/receipts",
+                None,
+            )?;
+            render_config_receipts(&v);
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -1065,6 +1578,20 @@ fn main() -> Result<()> {
                     print!("{}", render_route_status(&v));
                 }
             }
+        }
+        Command::Config { endpoint, command } => {
+            let config = RillaneConfig::load_from_path(&cli.config)?;
+            let base = endpoint.unwrap_or_else(|| format!("http://{}", config.control.api_bind));
+            let client = Client::new();
+            let token = config.control.admin_token.clone();
+            let with_auth = |req: reqwest::blocking::RequestBuilder| {
+                if let Some(t) = &token {
+                    req.header("x-admin-token", t)
+                } else {
+                    req
+                }
+            };
+            run_config_command(&client, &with_auth, &base, &command)?;
         }
         Command::Diagnose {
             endpoint,
@@ -4681,5 +5208,47 @@ mod tests {
 
         let out = render_probe_error(&serde_json::Value::Null, "probe disabled plain text");
         assert_eq!(out, "probe disabled plain text");
+    }
+
+    /// RIL-079 CLI 侧纯助手：范围标签拆分（trim + 空条目剔除）。
+    #[test]
+    fn config_scope_list_trims_and_drops_empty() {
+        assert_eq!(
+            config_scope_list(" telemetry , routing ,, dns  "),
+            vec![
+                "telemetry".to_string(),
+                "routing".to_string(),
+                "dns".to_string()
+            ]
+        );
+        assert!(config_scope_list("").is_empty());
+        assert!(config_scope_list(" , , ").is_empty());
+        assert_eq!(config_scope_list("solo"), vec!["solo".to_string()]);
+    }
+
+    /// RIL-079 CLI 侧纯助手：补丁文件只做 JSON 解析（形状裁决在 daemon）。
+    /// 三分支：正常解析 / 非 JSON 报错 / 文件缺失报错。
+    #[test]
+    fn read_patch_file_parses_json_and_reports_errors() {
+        let dir = std::env::temp_dir().join(format!("rillanectl-patch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = dir.join("ok.json");
+        std::fs::write(&ok, r#"{"telemetry":{"log_level":"debug"}}"#).unwrap();
+        let parsed = read_patch_file(ok.to_str().unwrap()).unwrap();
+        assert_eq!(parsed["telemetry"]["log_level"], "debug");
+
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, "{not json").unwrap();
+        let err = format!("{}", read_patch_file(bad.to_str().unwrap()).unwrap_err());
+        assert!(err.contains("补丁文件不是合法 JSON"), "got: {err}");
+
+        let missing = dir.join("missing.json");
+        let err = format!(
+            "{}",
+            read_patch_file(missing.to_str().unwrap()).unwrap_err()
+        );
+        assert!(err.contains("读取补丁文件失败"), "got: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

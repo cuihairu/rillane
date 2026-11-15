@@ -13,6 +13,7 @@ use rillane_runtime::{RuntimeBuilder, RuntimeConfig};
 use rillane_telemetry::TelemetryOptions;
 use tracing::info;
 
+mod config_tx;
 mod control_plane;
 
 /// 早期退出参数面（无 clap 依赖的最小实现）：`--version`/`-V` → 版本行。
@@ -165,7 +166,11 @@ async fn main() -> Result<()> {
         config.control.admin_token.clone(),
         config.telemetry.enable_metrics,
     )
-    .with_probe_service(probe_service);
+    .with_probe_service(probe_service)
+    .with_config_service(Some(Arc::new(config_tx::ConfigTxService::new(
+        config.clone(),
+        rillane_config::CapabilitySet::full(),
+    ))));
     let cp_task = tokio::spawn(async move { cp.serve(bind, shutdown_rx).await });
 
     // Start runtime background tasks.

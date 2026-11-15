@@ -260,6 +260,14 @@ impl ApplyLedger {
         self.receipts.get(idempotency_key)
     }
 
+    /// 全部回执（审计只读口——seq 降序快照：回执链「最近优先」；
+    /// HashMap 无序，审计面的稳定次序由本方法定）。
+    pub fn receipts(&self) -> Vec<&ApplyReceipt> {
+        let mut all: Vec<&ApplyReceipt> = self.receipts.values().collect();
+        all.sort_by_key(|r| std::cmp::Reverse(r.seq));
+        all
+    }
+
     /// 清扫早于窗口的回执（显式回收——绝不自动逐出：回执在册期重试
     /// 才有「只执行一次」保证）。返回回收数。
     pub fn prune_older_than(&mut self, now_ms: u64, older_than_ms: u64) -> usize {
@@ -1047,5 +1055,46 @@ mod apply_tests {
         let p = proposals.create(new_proposal_id(), input, 0).expect("登记");
         let a = approvals.approve(&p, None, 0, 60_000).expect("批准");
         (p.id, a.approval_id)
+    }
+
+    /// 审计只读口：receipts() 按 seq 降序返回全部回执（成败混列，
+    /// 「最近优先」次序稳定）。
+    #[test]
+    fn receipts_lists_full_chain_newest_first() {
+        let mut ledger = ApplyLedger::new();
+        let mut proposals = ProposalStore::new();
+        let mut approvals = ApprovalAuthority::new();
+
+        let (pid1, aid1) = seeded(&mut proposals, &mut approvals);
+        let applied = ledger
+            .execute(
+                &mut proposals,
+                &mut approvals,
+                request("k-ok", &pid1, &aid1),
+                1,
+                ok_executor(GEN_2),
+            )
+            .expect("应用");
+        let (pid2, aid2) = seeded(&mut proposals, &mut approvals);
+        let failed = ledger
+            .execute(
+                &mut proposals,
+                &mut approvals,
+                request("k-bad", &pid2, &aid2),
+                2,
+                |_| Err("失败".to_string()),
+            )
+            .expect("失败也是终态登记");
+
+        let all = ledger.receipts();
+        assert_eq!(all.len(), 2, "全部回执（含失败）");
+        assert_eq!(all[0].seq, all[1].seq + 1, "seq 降序");
+        assert_eq!(all[0].idempotency_key, "k-bad", "最近优先");
+        assert_eq!(all[0].status, ApplyStatus::Failed);
+        assert_eq!(all[1].idempotency_key, "k-ok");
+        assert_eq!(all[1].status, ApplyStatus::Applied);
+        // 终态产物与审计口同账（status 已验）；单键查询口与审计口同源
+        let _ = (applied, failed);
+        assert_eq!(ledger.receipt("k-ok").map(|r| r.seq), Some(all[1].seq));
     }
 }

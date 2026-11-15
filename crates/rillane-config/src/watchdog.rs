@@ -27,11 +27,11 @@
 //!
 //! **验收「客户端断开/daemon 重启时仍按事务恢复并验证」**：
 //! - 客户端断开：确认窗口是 daemon 侧状态，与客户端连接无关——窗口
-//!    不重置、miss 不清零（测试钉住断开后窗口语义原样）。
+//!   不重置、miss 不清零（测试钉住断开后窗口语义原样）。
 //! - daemon 重启：[`WatchdogSnapshot`] 落盘归宿主；`resume` **不信快照
-//!    单方面之言**——快照须与回执账对得上（目标回执仍在册、仍
-//!    Applied、产物代际逐字一致）才重立窗口，账本才是权威（对账纪律
-//!    与 RIL-019 journal 同源）。
+//!   单方面之言**——快照须与回执账对得上（目标回执仍在册、仍
+//!   Applied、产物代际逐字一致）才重立窗口，账本才是权威（对账纪律
+//!   与 RIL-019 journal 同源）。
 //!
 //! **边界**：定时器、管理通路探测（HTTP/路由存活检查）、快照落盘、
 //! 回滚执行全部归宿主与控制面（RIL-079/081 接线）；盲覆盖防线与
@@ -647,9 +647,9 @@ mod watchdog_tests {
     const HASH_A: &str = "hash-a";
     const HASH_B: &str = "hash-b";
 
-    fn input_on(gen: &str, hash: &str) -> ProposalInput {
+    fn input_on(gen_id: &str, hash: &str) -> ProposalInput {
         ProposalInput {
-            base_generation: gen.to_string(),
+            base_generation: gen_id.to_string(),
             base_hash: hash.to_string(),
             owner: OWNER.to_string(),
             scope: vec!["management".to_string()],

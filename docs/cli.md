@@ -11,10 +11,10 @@ This page describes existing commands; use `rillanectl <command> --help` for cur
 
 ## Data sources
 
-- **Control-plane commands** (`stats` / `group` / `switches` / `nodes` / `chain` / `pool` / `subscription` / `route` / `diagnose` / `mtls revoke status`): HTTP against the `rillaned` control plane; when `control.admin_token` is non-empty an `x-admin-token` header is attached, otherwise the request is anonymous.
+- **Control-plane commands** (`stats` / `group` / `switches` / `nodes` / `chain` / `pool` / `subscription` / `route` / `config` / `diagnose` / `mtls revoke status`): HTTP against the `rillaned` control plane; when `control.admin_token` is non-empty an `x-admin-token` header is attached, otherwise the request is anonymous.
   - `--endpoint` comes in two flavors (easy to confuse):
     - **Full-URL flavor** (replaces the whole target URL, must include the path): `stats` (default `http://{api_bind}/flows`), `group` (`/routing/stats`), `switches` (`/mesh/switches`), `pool status` (`/egress/pool/stats`), `nodes` (`/nodes`);
-    - **Base-URL flavor** (replaces only the base, path appended internally): `chain`, `subscription`, `route`, `diagnose`, `trace`, `mtls revoke status`.
+    - **Base-URL flavor** (replaces only the base, path appended internally): `chain`, `subscription`, `route`, `config`, `diagnose`, `trace`, `mtls revoke status`.
 - **Offline commands** (`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / the `mtls` cert tools): no control plane, only local files are read (exception: `udp-probe` dials the SOCKS5 ingress directly).
 - There is no `rillanectl reload` subcommand: rillaned reads config once at startup, and runtime hot reloads are driven only by subscription refresh and control-plane endpoints (see the hot-reload scope in [architecture.md](architecture.md)).
 
@@ -63,6 +63,14 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | GET | `/probe/result?id=` | one job's measurement snapshot, or an explicit absence answer (`found:false` + stable code) | `probe result` |
 | POST | `/probe` | submit a probe job (target must be registered in the server's probe scope) | `probe submit` |
 | POST | `/probe/cancel?id=` | cancel a job (queued → immediate final state; running → cooperative cancel request) | `probe cancel` |
+| GET | `/config/state` | live config-face snapshot (generation / content digest + proposal/approval/receipt/history counts) | `config state` |
+| GET | `/config/receipts` | receipt chain (seq desc) + reconcile against the daemon's live face | `config receipts` |
+| POST | `/config/proposals` | register a forward proposal (base generation filled by the daemon — a client cannot state the live face; invalid patches rejected at proposal time) | `config propose` |
+| POST | `/config/rollback-proposal` | register a rollback proposal (marker scope `rollback`; target receipt must be Applied and owned by the caller) | `config rollback` (step 1) |
+| POST | `/config/preview` | read-only patch preview (diff / diagnostics / affected categories / side-effect hints) | `config preview` |
+| POST | `/config/approve` | operator approval (credential binds proposal digest / owner / scope / TTL; single-use consumption) | `config approve` |
+| POST | `/config/apply` | idempotent apply (version + content prechecks, consume, terminal receipt; retries with the same key replay the receipt) | `config apply` |
+| POST | `/config/rollback` | verifiable rollback (candidate identity daemon-filled from the target receipt; blind-overwrite guard) | `config rollback` (step 3) |
 
 ## Command overview
 
@@ -84,6 +92,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | `export-clash` | Rillane config -> Clash YAML reverse export (offline) | offline |
 | `subscription` | subscription management (list/add/remove/refresh) | control plane |
 | `route` | system route management (apply/clear/status) | control plane + local ip commands |
+| `config` | config transaction closure (propose/preview/approve/apply/rollback/state/receipts; RIL-079) | control plane `/config/*` |
 | `diagnose` | one-shot diagnostics collection (creates a diagnostics directory) | control plane + local snapshot |
 | `trace` | per-connection trace queries (list / flow detail / incremental events; explicit absence = exit 2) | control plane `/trace/*` |
 | `probe` | active probe jobs (submit/cancel/result/list; measurements only, no provider-internal path inference) | control plane `/probe*` |
@@ -180,6 +189,20 @@ rillanectl route status              # device state + table of applied steps
 ```
 
 `--endpoint` is the base-URL flavor. apply/clear need root or `CAP_NET_ADMIN`.
+
+### config
+
+```bash
+rillanectl config state                                  # live generation / digest + ledger counts
+rillanectl config preview  --patch-file p.json [--scope routing]   # read-only: diff / diagnostics / side effects
+rillanectl config propose  --owner cli:local --scope telemetry --patch-file p.json   # register proposal (base daemon-filled)
+rillanectl config approve  --proposal-id <ID> --owner cli:local                     # sign credential (single-use)
+rillanectl config apply    --idempotency-key k1 --proposal-id <ID> --approval-id <AID> --owner cli:local
+rillanectl config rollback --idempotency-key k2 --target-key k1 --owner cli:local    # rollback proposal + approve + execute
+rillanectl config receipts                               # receipt chain (seq desc) + reconcile
+```
+
+The closure mirrors the MCP path: the daemon fills the base generation, live digest and rollback candidate identity itself, so a client cannot bypass the version/content prechecks (`apply.base.conflict` / `apply.hash.conflict` arrive as 409 stable-code envelopes; the CLI prints them as `Control plane rejected: ... [code]`). `config rollback` performs all three authorized steps (rollback proposal → approval → execution) through the same daemon endpoints — approval stays a real daemon-signed credential. Retry discipline: `apply`/`rollback` retries must repeat the idempotency key verbatim (same key + same identity replays the receipt); a different proposal under the same key is refused (`apply.key.mismatch`).
 
 ### diagnose
 

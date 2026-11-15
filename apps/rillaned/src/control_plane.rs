@@ -27,6 +27,8 @@ use rillane_runtime::{
 };
 use rillane_subscription::{Subscription, SubscriptionConverter, SubscriptionType};
 
+use crate::config_tx::{ConfigTxService, TxApplyRequest, TxError, TxRollbackRequest};
+
 /// 请求体统一形（hyper 1.x 迁移）：产线路径 `Incoming`（服务）与测试
 /// 直调 `Full<Bytes>`（`Incoming` 无公开构造）共用 handle/路由/read_json。
 trait RequestBody: hyper::body::Body<Data = Bytes> + Unpin + Send + 'static {}
@@ -49,6 +51,10 @@ pub struct ControlPlane {
     /// 装配在 rillaned 侧（build_probe_service）：探测授权只来自操作员
     /// 本地 config 的 probe 块，与 runtime 数据面零耦合。
     probe: Option<Arc<ProbeService>>,
+    /// RIL-079：配置事务服务（None = 配置事务面关闭——端点 503）。
+    /// 装配在 rillaned 侧（with_config_service）：提案/批准/应用/回滚/
+    /// 审计的单一权威——CLI 与 MCP 同门，授权与版本检查无本地旁路。
+    config_tx: Option<Arc<ConfigTxService>>,
 }
 
 impl ControlPlane {
@@ -63,6 +69,7 @@ impl ControlPlane {
             telemetry_export: Arc::new(tokio::sync::RwLock::new(TelemetryExport::new(2000))),
             event_counters: Arc::new(tokio::sync::RwLock::new(CounterExport::new(2000))),
             probe: None,
+            config_tx: None,
         };
         // 立即订阅事件：ControlPlane::new 在 runtime.start() 之前构造（main.rs），
         // 提前 subscribe 避免启动初段事件（ConfigUpdated/链路建链等）在 serve 才
@@ -76,6 +83,239 @@ impl ControlPlane {
     pub fn with_probe_service(mut self, probe: Option<Arc<ProbeService>>) -> Self {
         self.probe = probe;
         self
+    }
+
+    /// RIL-079：挂配置事务服务（builder 风格同上；None 保持配置事务
+    /// 面关闭——端点 503）。
+    pub fn with_config_service(mut self, service: Option<Arc<ConfigTxService>>) -> Self {
+        self.config_tx = service;
+        self
+    }
+
+    // —— RIL-079 配置事务面（提案/批准/应用/回滚/审计）——
+    //
+    // 端点只是装配：裁决全在 ConfigTxService + 纯面（提案守卫 / 版本
+    // 前置检查 / 凭证核销 / 回执审计）。CLI / MCP 同门——授权与版本
+    // 检查没有本地旁路。全部写端点过 admin_token 门（is_mutating）。
+
+    /// 配置事务服务取用口（None = 503——探测面同分层口径）。Err 响应体
+    /// 大小与 read_json 同款豁免（端点惯例，见下 `#[allow]`）。
+    #[allow(clippy::result_large_err)]
+    fn config_tx_or_503(&self) -> Result<Arc<ConfigTxService>, Response<RespBody>> {
+        self.config_tx.clone().ok_or_else(|| {
+            text(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "config tx service not configured",
+            )
+        })
+    }
+
+    /// TxError → 稳定码信封（与 trace_error 同形：code + message，
+    /// 消息面已脱敏——不含补丁值原文）。
+    fn tx_error_response(err: &TxError) -> Response<RespBody> {
+        let out = serde_json::json!({
+            "error": {
+                "code": err.code,
+                "message": err.message,
+            },
+        });
+        json(
+            StatusCode::from_u16(err.status).unwrap_or(StatusCode::BAD_REQUEST),
+            &out,
+        )
+    }
+
+    async fn handle_config_state(&self) -> Response<RespBody> {
+        let service = match self.config_tx_or_503() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        json(StatusCode::OK, &service.state())
+    }
+
+    async fn handle_config_receipts(&self) -> Response<RespBody> {
+        let service = match self.config_tx_or_503() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        json(StatusCode::OK, &service.audit())
+    }
+
+    /// POST /config/proposals：登记正向提案（base 由 daemon 自填——
+    /// 客户端不转述 live 面；坏 patch 在提案期就 400，不落账）。
+    async fn handle_config_propose(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        #[derive(Deserialize)]
+        struct Body {
+            owner: String,
+            scope: Vec<String>,
+            patch: serde_json::Value,
+            ttl_ms: u64,
+        }
+        let service = match self.config_tx_or_503() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let body: Body = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match service.create_proposal(
+            &body.owner,
+            &body.scope,
+            &body.patch,
+            body.ttl_ms,
+            crate::config_tx::now_ms(),
+        ) {
+            Ok(proposal) => json(StatusCode::CREATED, &proposal),
+            Err(err) => Self::tx_error_response(&err),
+        }
+    }
+
+    /// POST /config/rollback-proposal：登记回滚提案（标记范围 rollback；
+    /// 目标回执须在册且 Applied 且属调用者）。
+    async fn handle_config_rollback_proposal(
+        &self,
+        req: Request<impl RequestBody>,
+    ) -> Response<RespBody> {
+        #[derive(Deserialize)]
+        struct Body {
+            owner: String,
+            target_key: String,
+            ttl_ms: u64,
+        }
+        let service = match self.config_tx_or_503() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let body: Body = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match service.create_rollback_proposal(
+            &body.owner,
+            &body.target_key,
+            body.ttl_ms,
+            crate::config_tx::now_ms(),
+        ) {
+            Ok(proposal) => json(StatusCode::CREATED, &proposal),
+            Err(err) => Self::tx_error_response(&err),
+        }
+    }
+
+    /// POST /config/preview：只读投影面（diff / 诊断 / 受影响类别 /
+    /// 副作用提示）——不落任何状态。
+    async fn handle_config_preview(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        #[derive(Deserialize)]
+        struct Body {
+            patch: serde_json::Value,
+            scope: Option<Vec<String>>,
+        }
+        let service = match self.config_tx_or_503() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let body: Body = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        json(
+            StatusCode::OK,
+            &service.preview(&body.patch, body.scope.as_deref()),
+        )
+    }
+
+    /// POST /config/approve：操作员显式批准（凭证绑定提案摘要 + 所有
+    /// 者 + 范围 + 有效期；一次性核销归 apply/rollback）。
+    async fn handle_config_approve(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        #[derive(Deserialize)]
+        struct Body {
+            proposal_id: String,
+            owner: String,
+            scope: Option<Vec<String>>,
+            ttl_ms: u64,
+        }
+        let service = match self.config_tx_or_503() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let body: Body = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match service.approve(
+            &body.proposal_id,
+            &body.owner,
+            body.scope,
+            body.ttl_ms,
+            crate::config_tx::now_ms(),
+        ) {
+            Ok(approval) => json(StatusCode::OK, &approval),
+            Err(err) => Self::tx_error_response(&err),
+        }
+    }
+
+    /// POST /config/apply：正向应用（版本/内容前置检查 + 凭证核销 +
+    /// 执行 + 终态回执；幂等重试领回执）。live 身份 daemon 自填。
+    async fn handle_config_apply(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        #[derive(Deserialize)]
+        struct Body {
+            idempotency_key: String,
+            proposal_id: String,
+            approval_id: Option<String>,
+            owner: String,
+        }
+        let service = match self.config_tx_or_503() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let body: Body = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let request = TxApplyRequest {
+            idempotency_key: body.idempotency_key,
+            proposal_id: body.proposal_id,
+            approval_id: body.approval_id,
+            caller_owner: body.owner,
+        };
+        match service.apply(request, crate::config_tx::now_ms()) {
+            Ok(outcome) => json(StatusCode::OK, &outcome),
+            Err(err) => Self::tx_error_response(&err),
+        }
+    }
+
+    /// POST /config/rollback：可校验回滚（候选身份 daemon 自目标回执
+    /// 取得——客户端不供 candidate/live；报告三份如实）。
+    async fn handle_config_rollback(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        #[derive(Deserialize)]
+        struct Body {
+            idempotency_key: String,
+            target_key: String,
+            proposal_id: String,
+            approval_id: Option<String>,
+            owner: String,
+            drain_deadline_ms: Option<u64>,
+        }
+        let service = match self.config_tx_or_503() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let body: Body = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let request = TxRollbackRequest {
+            idempotency_key: body.idempotency_key,
+            target_key: body.target_key,
+            proposal_id: body.proposal_id,
+            approval_id: body.approval_id,
+            caller_owner: body.owner,
+            drain_deadline_ms: body.drain_deadline_ms,
+        };
+        match service.rollback(request, crate::config_tx::now_ms()) {
+            Ok(report) => json(StatusCode::OK, &report),
+            Err(err) => Self::tx_error_response(&err),
+        }
     }
 
     pub async fn serve(
@@ -223,6 +463,17 @@ impl ControlPlane {
             (Method::POST, "/network/route/apply") => self.handle_route_apply(req).await,
             (Method::POST, "/network/route/clear") => self.handle_route_clear(req).await,
             (Method::GET, "/network/route/status") => self.handle_route_status().await,
+            // —— RIL-079 配置事务面 ——
+            (Method::GET, "/config/state") => self.handle_config_state().await,
+            (Method::GET, "/config/receipts") => self.handle_config_receipts().await,
+            (Method::POST, "/config/proposals") => self.handle_config_propose(req).await,
+            (Method::POST, "/config/rollback-proposal") => {
+                self.handle_config_rollback_proposal(req).await
+            }
+            (Method::POST, "/config/preview") => self.handle_config_preview(req).await,
+            (Method::POST, "/config/approve") => self.handle_config_approve(req).await,
+            (Method::POST, "/config/apply") => self.handle_config_apply(req).await,
+            (Method::POST, "/config/rollback") => self.handle_config_rollback(req).await,
 
             _ => text(StatusCode::NOT_FOUND, "not found"),
         }
@@ -5879,5 +6130,244 @@ mod tests {
         );
         assert_eq!(v["job"]["failure"]["detail"], serde_json::json!("boom"));
         assert_eq!(v["job"]["outcome"], serde_json::Value::Null);
+    }
+
+    // —— RIL-079 配置事务面（HTTP 契约）——
+
+    /// 装配带配置事务服务的控制面（config 与 build_runtime 同源——
+    /// 同一份 config/rillane.yaml；admin_token 可选）。
+    async fn cp_with_config_tx(admin_token: Option<&str>) -> ControlPlane {
+        let runtime = build_runtime(false, false).await;
+        let cfg_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/rillane.yaml");
+        let cfg = RillaneConfig::load_from_path(cfg_path).unwrap();
+        ControlPlane::new(runtime, admin_token.map(str::to_string), true).with_config_service(Some(
+            Arc::new(crate::config_tx::ConfigTxService::new(
+                cfg,
+                rillane_config::CapabilitySet::full(),
+            )),
+        ))
+    }
+
+    async fn post_config(
+        cp: &ControlPlane,
+        path: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .body(RespBody::new(Bytes::from(body.to_string())))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    async fn get_config(cp: &ControlPlane, path: &str) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .body(RespBody::new(Bytes::new()))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    /// 未装配配置事务服务 → 全部 /config 端点 503（探测面同分层口径）。
+    #[tokio::test]
+    async fn config_endpoints_503_without_service() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true); // 无 with_config_service
+        for (method, path) in [
+            (Method::GET, "/config/state"),
+            (Method::GET, "/config/receipts"),
+            (Method::POST, "/config/proposals"),
+            (Method::POST, "/config/preview"),
+            (Method::POST, "/config/apply"),
+            (Method::POST, "/config/rollback"),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(RespBody::new(Bytes::new()))
+                .unwrap();
+            let resp = cp.handle(req).await;
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        }
+    }
+
+    /// 授权与版本检查不能被 CLI/HTTP 绕过：admin_token 配置时写端点
+    /// 无 token 401（门在装配面之前）；正确 token 进门后无凭证仍被
+    /// 纯面拒（403 approval.required 稳定码信封）。
+    #[tokio::test]
+    async fn config_write_requires_admin_token_and_approval() {
+        let cp = cp_with_config_tx(Some("secret")).await;
+        let body = r#"{"idempotency_key":"k","proposal_id":"p","approval_id":null,"owner":"cli"}"#;
+
+        // 无 token → 401
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/config/apply")
+            .body(RespBody::new(Bytes::from(body)))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 正确 token → 进门；无凭证 → 纯面 approval.required（403 信封）
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/config/apply")
+            .header("x-admin-token", "secret")
+            .body(RespBody::new(Bytes::from(body)))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!("approval.required"));
+    }
+
+    /// e2e 闭环：提案（daemon 自填 base）→ preview → 批准 → 应用 →
+    /// 现役翻新 → 回执审计闭合；同键重试领回执（replayed）不再翻新。
+    #[tokio::test]
+    async fn config_lifecycle_end_to_end() {
+        let cp = cp_with_config_tx(None).await;
+
+        let (g1, state) = get_config(&cp, "/config/state").await;
+        assert_eq!(g1, StatusCode::OK);
+        let base_gen = state["live_generation"].as_str().unwrap().to_string();
+
+        // preview（只读——不落提案）
+        let (s, v) = post_config(
+            &cp,
+            "/config/preview",
+            r#"{"patch":{"telemetry":{"log_level":"debug"}},"scope":["telemetry"]}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["applicable"], serde_json::json!(true));
+
+        // 提案（daemon 自填 base）
+        let (s, v) = post_config(
+            &cp,
+            "/config/proposals",
+            r#"{"owner":"cli","scope":["telemetry"],"patch":{"telemetry":{"log_level":"debug"}},"ttl_ms":60000}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let proposal_id = v["id"].as_str().unwrap().to_string();
+        assert_eq!(v["base_generation"], serde_json::json!(base_gen));
+
+        // 批准
+        let (s, v) = post_config(
+            &cp,
+            "/config/approve",
+            &format!(r#"{{"proposal_id":"{proposal_id}","owner":"cli","ttl_ms":60000}}"#),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let approval_id = v["approval_id"].as_str().unwrap().to_string();
+
+        // 应用
+        let apply_body = format!(
+            r#"{{"idempotency_key":"e2e-1","proposal_id":"{proposal_id}","approval_id":"{approval_id}","owner":"cli"}}"#
+        );
+        let (s, v) = post_config(&cp, "/config/apply", &apply_body).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["phase"], serde_json::json!("executed"));
+        assert_eq!(v["receipt"]["status"], serde_json::json!("apply.applied"));
+
+        // 现役翻新
+        let (_, state) = get_config(&cp, "/config/state").await;
+        let new_gen = state["live_generation"].as_str().unwrap().to_string();
+        assert_ne!(new_gen, base_gen, "现役已翻新");
+        assert_eq!(state["history"], serde_json::json!(1));
+
+        // 回执审计闭合
+        let (_, audit) = get_config(&cp, "/config/receipts").await;
+        assert_eq!(audit["reconcile"]["agrees"], serde_json::json!(true));
+        assert_eq!(audit["receipts"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            audit["receipts"][0]["idempotency_key"],
+            serde_json::json!("e2e-1")
+        );
+
+        // 幂等重试：同键领回执，现役不动
+        let (s, v) = post_config(&cp, "/config/apply", &apply_body).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["phase"], serde_json::json!("replayed"));
+        let (_, state) = get_config(&cp, "/config/state").await;
+        assert_eq!(state["live_generation"], serde_json::json!(new_gen));
+    }
+
+    /// 版本检查不可绕过（HTTP 面）：旧提案（base = 翻新前）在新现役上
+    /// 应用 → 409 apply.base.conflict 稳定码信封——live 身份 daemon
+    /// 自填，客户端无法谎报基准。
+    #[tokio::test]
+    async fn config_apply_base_conflict_envelope() {
+        let cp = cp_with_config_tx(None).await;
+
+        // 旧提案（trace）先登记（base = g1）
+        let (_, v) = post_config(
+            &cp,
+            "/config/proposals",
+            r#"{"owner":"cli","scope":["telemetry"],"patch":{"telemetry":{"log_level":"trace"}},"ttl_ms":60000}"#,
+        )
+        .await;
+        let stale_id = v["id"].as_str().unwrap().to_string();
+        let (_, v) = post_config(
+            &cp,
+            "/config/approve",
+            &format!(r#"{{"proposal_id":"{stale_id}","owner":"cli","ttl_ms":60000}}"#),
+        )
+        .await;
+        let stale_approval = v["approval_id"].as_str().unwrap().to_string();
+
+        // 另一提案（debug）翻新内容（g1 → g2）
+        let (_, v) = post_config(
+            &cp,
+            "/config/proposals",
+            r#"{"owner":"cli","scope":["telemetry"],"patch":{"telemetry":{"log_level":"debug"}},"ttl_ms":60000}"#,
+        )
+        .await;
+        let fresh_id = v["id"].as_str().unwrap().to_string();
+        let (_, v) = post_config(
+            &cp,
+            "/config/approve",
+            &format!(r#"{{"proposal_id":"{fresh_id}","owner":"cli","ttl_ms":60000}}"#),
+        )
+        .await;
+        let fresh_approval = v["approval_id"].as_str().unwrap().to_string();
+        let (s, v) = post_config(
+            &cp,
+            "/config/apply",
+            &format!(
+                r#"{{"idempotency_key":"k-fresh","proposal_id":"{fresh_id}","approval_id":"{fresh_approval}","owner":"cli"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "内容翻新应成功: {v}");
+
+        // 旧提案对翻新后现役 → 409 信封
+        let (s, v) = post_config(
+            &cp,
+            "/config/apply",
+            &format!(
+                r#"{{"idempotency_key":"k-stale","proposal_id":"{stale_id}","approval_id":"{stale_approval}","owner":"cli"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT);
+        assert_eq!(
+            v["error"]["code"],
+            serde_json::json!("apply.base.conflict"),
+            "旧提案必须撞版本门"
+        );
     }
 }

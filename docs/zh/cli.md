@@ -11,10 +11,10 @@
 
 ## 取数口径
 
-- **控制面命令**（`stats` / `group` / `switches` / `nodes` / `chain` / `pool` / `subscription` / `route` / `diagnose` / `mtls revoke status`）：HTTP 取 `rillaned` 控制面；`control.admin_token` 非空时附 `x-admin-token` 头，未配置即匿名请求。
+- **控制面命令**（`stats` / `group` / `switches` / `nodes` / `chain` / `pool` / `subscription` / `route` / `config` / `diagnose` / `mtls revoke status`）：HTTP 取 `rillaned` 控制面；`control.admin_token` 非空时附 `x-admin-token` 头，未配置即匿名请求。
   - `--endpoint` 语义分两型（易混）：
     - **完整 URL 型**（替换整个目标 URL，须含路径）：`stats`（缺省 `http://{api_bind}/flows`）、`group`（`/routing/stats`）、`switches`（`/mesh/switches`）、`pool status`（`/egress/pool/stats`）、`nodes`（`/nodes`）；
-    - **base URL 型**（仅替换 base，路径内部拼接）：`chain`、`subscription`、`route`、`diagnose`、`trace`、`mtls revoke status`。
+    - **base URL 型**（仅替换 base，路径内部拼接）：`chain`、`subscription`、`route`、`config`、`diagnose`、`trace`、`mtls revoke status`。
 - **离线命令**（`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / `mtls` 证书工具）：不经控制面，只读本地文件（`udp-probe` 例外——直接连 SOCKS5 入口实测）。
 - 无 `rillanectl reload` 子命令：rillaned 启动一次性读配置，运行期热更新仅由订阅刷新与控制面端点驱动（见 [architecture.md](architecture.md) 热更新口径）。
 
@@ -63,6 +63,14 @@
 | GET | `/probe/result?id=` | 单作业测量快照，或显式缺席答复（`found:false` + 稳定码） | `probe result` |
 | POST | `/probe` | 发起探测作业（目标必须在服务端 probe 范围登记过） | `probe submit` |
 | POST | `/probe/cancel?id=` | 取消作业（排队中 → 立即终态；运行中 → 协作取消请求） | `probe cancel` |
+| GET | `/config/state` | 现役配置面快照（代际 / 内容摘要 + 提案/凭证/回执/历史计数） | `config state` |
+| GET | `/config/receipts` | 回执链（seq 降序）+ 对 daemon 现役面的 reconcile | `config receipts` |
+| POST | `/config/proposals` | 登记正向提案（基准代际由 daemon 自填——客户端无法转述 live 面；坏补丁提案期即拒） | `config propose` |
+| POST | `/config/rollback-proposal` | 登记回滚提案（标记范围 `rollback`；目标回执须 Applied 且属调用者） | `config rollback`（第 1 步） |
+| POST | `/config/preview` | 只读补丁预览（diff / 诊断 / 受影响类别 / 副作用提示） | `config preview` |
+| POST | `/config/approve` | 操作员批准（凭证绑定提案摘要 / 所有者 / 范围 / 有效期；一次性核销） | `config approve` |
+| POST | `/config/apply` | 幂等应用（版本 + 内容前置检查、核销、终态回执；同键重试领回执） | `config apply` |
+| POST | `/config/rollback` | 可校验回滚（候选身份由 daemon 自目标回执取得；盲覆盖防线） | `config rollback`（第 3 步） |
 
 ## 命令总览
 
@@ -84,6 +92,7 @@
 | `export-clash` | Rillane 配置 → Clash YAML 回导出（离线） | 离线 |
 | `subscription` | 订阅管理（list/add/remove/refresh） | 控制面 |
 | `route` | 系统路由管理（apply/clear/status） | 控制面 + 本机 ip 命令 |
+| `config` | 配置事务闭环（propose/preview/approve/apply/rollback/state/receipts；RIL-079） | 控制面 `/config/*` |
 | `diagnose` | 一键诊断信息收集（生成诊断目录） | 控制面 + 本机快照 |
 | `trace` | 逐连接轨迹查询（list / 单流详情 / 事件增量；显式缺席 = 退出码 2） | 控制面 `/trace/*` |
 | `probe` | 主动探测作业（submit/cancel/result/list；只展示测量，不推断机场内部路径） | 控制面 `/probe*` |
@@ -180,6 +189,20 @@ rillanectl route status              # 设备态 + 已应用步骤表
 ```
 
 `--endpoint` 为 base URL 型。apply/clear 需 root 或 `CAP_NET_ADMIN`。
+
+### config
+
+```bash
+rillanectl config state                                  # 现役代际 / 摘要 + 各账计数
+rillanectl config preview  --patch-file p.json [--scope routing]   # 只读：diff / 诊断 / 副作用提示
+rillanectl config propose  --owner cli:local --scope telemetry --patch-file p.json   # 登记提案（base 由 daemon 自填）
+rillanectl config approve  --proposal-id <ID> --owner cli:local                     # 签发凭证（一次性核销）
+rillanectl config apply    --idempotency-key k1 --proposal-id <ID> --approval-id <AID> --owner cli:local
+rillanectl config rollback --idempotency-key k2 --target-key k1 --owner cli:local    # 回滚提案 + 批准 + 执行一条龙
+rillanectl config receipts                               # 回执链（seq 降序）+ 对账
+```
+
+闭环与 MCP 同门：基准代际、live 摘要与回滚候选身份全部由 daemon 自填，客户端无法绕过版本/内容前置检查（`apply.base.conflict` / `apply.hash.conflict` 以 409 稳定码信封作答，CLI 打印为 `控制面拒绝: ... [稳定码]`）。`config rollback` 经同一组 daemon 端点连做授权三步（回滚提案 → 批准 → 执行）——批准仍是 daemon 授权权威签发的真实凭证。重试纪律：`apply` / `rollback` 重试须逐字同幂等键（同键 + 同身份领回执）；同键换提案即拒（`apply.key.mismatch`）。
 
 ### diagnose
 
