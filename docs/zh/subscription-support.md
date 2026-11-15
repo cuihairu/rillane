@@ -51,14 +51,14 @@
 | NETWORK（逻辑规则内） | ✅ | → `proto` 条件 |
 | MATCH（兜底） | ✅ | 必须保持最后 |
 | PROCESS-NAME / PROCESS-PATH | ✅ | → `process`（comm 口径短名）/ `process_path`（完整可执行路径）条件（RIL-015）；比较精确且区分大小写。按引擎降级显式报告：命中依赖 TUN 进程归因（`process.name` / `process.path` 注解），其它入口流与归因不可得平台恒不命中；不以短名冒充路径 |
-| RULE-SET / rule-providers | ✅ | 引用策略（RIL-014）：provider 声明落 `routing.rule_providers`（interval 秒口径原样），RULE-SET 匹配期按 `routing.rule_sets` 库解析；未声明引用拒绝+报告；载荷下载随 RIL-010 |
+| RULE-SET / rule-providers | ✅ | 引用策略（RIL-014）：provider 声明落 `routing.rule_providers`（interval 秒口径原样），RULE-SET 匹配期按 `routing.rule_sets` 库解析；未声明引用拒绝+报告；载荷下载共用 RIL-010 生命周期（条件缓存、退避、预置摘要），控制面装配归 RIL-019 |
 | 逻辑表达式（AND/OR/NOT） | ✅ | AND 平铺进规则条件列表；OR → `any`、NOT → `not`；OR/NOT 内嵌套 AND 拒绝+报告（需单条件表达）；未知子条件整条拒绝 |
 
 ## L4 其他配置
 
 | 块 | 状态 | 说明 |
 |---|---|---|
-| `proxy-providers` | ✅ | 声明落入 `routing.proxy_providers`（type/url/path/interval/health-check；**`interval` 单位为秒**，原样带入，RIL-092）；组内 `use:` 引用成为 provider 成员；未声明引用被拒并报告。载荷下载与更新生命周期随 RIL-010，故在此之前每个声明均按引擎降级报告 |
+| `proxy-providers` | ✅ | 声明落入 `routing.proxy_providers`（type/url/path/interval/health-check；**`interval` 单位为秒**，原样带入，RIL-092）；组内 `use:` 引用成为 provider 成员；未声明引用被拒并报告。下载生命周期已随 RIL-010 落地（大小/并发上限、超时、取消、304 条件缓存、指数退避、可选预置摘要比对）；把下载接进 provider 节点库的控制面装配归 RIL-019，在此之前声明仍按引擎降级报告 |
 | `dns` | 捕获不导入 | DNS 分流归本地策略层（RIL-020） |
 | mixed-port / allow-lan / external-controller | 捕获不导入 | 入口所有权归用户主配置（RIL-016） |
 

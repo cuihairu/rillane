@@ -28,6 +28,7 @@ pub mod clash;
 pub mod clash_export;
 pub mod converter;
 pub mod fetcher;
+pub mod provider_fetch;
 pub mod rillane_dsl;
 pub mod rule_source;
 // 来源快照原子替换（RIL-008）：以来源版本整体替换，失败保留旧快照
@@ -38,6 +39,7 @@ pub use clash::*;
 pub use clash_export::*;
 pub use converter::*;
 pub use fetcher::*;
+pub use provider_fetch::*;
 pub use rillane_dsl::*;
 pub use rule_source::*;
 pub use snapshots::{RefreshError, RefreshOutcome, SourceSnapshotStore};

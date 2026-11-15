@@ -54,14 +54,14 @@ dropped with a named report entry (RIL-093), never crash the bulk import.
 | NETWORK (inside logic) | ✅ | → `proto` condition |
 | MATCH (fallback) | ✅ | must stay last |
 | PROCESS-NAME / PROCESS-PATH | ✅ | → `process` (comm-style short name) / `process_path` (full executable path) conditions (RIL-015); comparison is exact and case-sensitive. Reported as engine-degraded: matching depends on TUN process attribution (`process.name` / `process.path` annotations), so flows from other ingress surfaces or platforms without attribution never match; the short name is never used to impersonate a path |
-| RULE-SET / rule-providers | ✅ | reference strategy (RIL-014): provider declarations land in `routing.rule_providers` (interval in seconds, passthrough), RULE-SET resolves at match time against `routing.rule_sets`; undeclared references are rejected + reported; payload downloads ship with RIL-010 |
+| RULE-SET / rule-providers | ✅ | reference strategy (RIL-014): provider declarations land in `routing.rule_providers` (interval in seconds, passthrough), RULE-SET resolves at match time against `routing.rule_sets`; undeclared references are rejected + reported; payload downloads share the RIL-010 lifecycle (conditional caching, backoff, preset digests), control-plane wiring lands with RIL-019 |
 | logic expressions (AND/OR/NOT) | ✅ | AND flattens into the rule's match list; OR → `any`, NOT → `not`; nested AND inside OR/NOT is rejected + reported (needs single-condition form); unknown sub-conditions reject the whole rule |
 
 ## L4 Other configuration
 
 | Block | Status | Notes |
 |---|---|---|
-| `proxy-providers` | ✅ | declarations land in `routing.proxy_providers` (type/url/path/interval/health-check; **`interval` unit is seconds**, passthrough, RIL-092); group `use:` references become provider members; undeclared references are rejected + reported. Payload download/update lifecycle ships with RIL-010, so each declaration is reported as engine-degraded until then |
+| `proxy-providers` | ✅ | declarations land in `routing.proxy_providers` (type/url/path/interval/health-check; **`interval` unit is seconds**, passthrough, RIL-092); group `use:` references become provider members; undeclared references are rejected + reported. The download lifecycle landed with RIL-010 (bounded size/concurrency, timeout, cancellation, conditional caching via 304, exponential backoff, optional preset-digest verification); control-plane wiring that feeds downloads into the provider node library lands with RIL-019, so declarations still report engine-degraded until then |
 | `dns` | captured, not imported | DNS partitioning belongs to the local policy layer (RIL-020) |
 | mixed-port / allow-lan / external-controller | captured, not imported | ingress ownership stays with the user config (RIL-016) |
 

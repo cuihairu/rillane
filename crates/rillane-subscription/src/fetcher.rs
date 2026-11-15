@@ -3,6 +3,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
+use std::error::Error as _;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use reqwest::{header, Client, Proxy, Response};
 use tracing::{debug, warn};
@@ -33,8 +34,10 @@ pub struct FetcherConfig {
     pub timeout: Duration,
     /// 最大重试次数
     pub max_retries: u32,
-    /// 重试间隔
+    /// 重试间隔（首次；此后按 2^n 指数退避，封顶 [`Self::max_backoff`]）
     pub retry_interval: Duration,
+    /// 退避封顶（RIL-010）：指数退避不得无限增长
+    pub max_backoff: Duration,
     /// 用户代理
     pub user_agent: Option<String>,
     /// 是否跟随重定向
@@ -43,6 +46,9 @@ pub struct FetcherConfig {
     pub headers: HashMap<String, String>,
     /// 代理设置
     pub proxy: Option<String>,
+    /// 内容字节上限（RIL-010 可配）：订阅默认 50MiB；provider 载荷按策略
+    /// 收紧（Content-Length 快速拒绝 + 流式分块双闸，见 `fetch_attempt`）
+    pub max_bytes: u64,
 }
 
 impl Default for FetcherConfig {
@@ -51,6 +57,7 @@ impl Default for FetcherConfig {
             timeout: Duration::from_secs(30),
             max_retries: 3,
             retry_interval: Duration::from_secs(5),
+            max_backoff: Duration::from_secs(60),
             user_agent: Some(format!(
                 "rillane-subscription/{} (rust)",
                 env!("CARGO_PKG_VERSION")
@@ -58,14 +65,78 @@ impl Default for FetcherConfig {
             follow_redirects: true,
             headers: HashMap::new(),
             proxy: None,
+            max_bytes: 50 * 1024 * 1024,
         }
+    }
+}
+
+/// 条件请求参数（RIL-010 条件缓存）：携带上次成功响应的验证器，
+/// 服务端命中则回 304（`FetchResult::not_modified`），调用方复用缓存
+/// 内容，不重发解析。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConditionalGet {
+    /// 上次响应的 ETag（请求时作 `If-None-Match`）
+    pub etag: Option<String>,
+    /// 上次响应的 Last-Modified（请求时作 `If-Modified-Since`）
+    pub last_modified: Option<String>,
+}
+
+/// 日志/错误面的 URL 脱敏（RIL-010 凭证边界）：userinfo 口令与凭证类
+/// 查询串值一律打码。凭证只允许随 URL/显式 header 走传输面，**任何**
+/// 日志、tracing、错误文案都不得携带原文——边界明确：传输用原文、
+/// 展示用脱敏。
+pub fn redact_url(url: &str) -> String {
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return "<url 解析失败>".to_string(),
+    };
+    // 重建为 scheme://host[:port]/path——userinfo 天然剥离
+    let mut base = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or("<host>"));
+    if let Some(port) = parsed.port() {
+        base.push_str(&format!(":{port}"));
+    }
+    base.push_str(parsed.path());
+    // 查询串逐键保留；凭证类键值打码
+    const CREDENTIAL_KEYS: [&str; 12] = [
+        "token",
+        "key",
+        "secret",
+        "password",
+        "passwd",
+        "pwd",
+        "auth",
+        "sign",
+        "apikey",
+        "api_key",
+        "access_token",
+        "ticket",
+    ];
+    let pairs: Vec<String> = parsed
+        .query()
+        .unwrap_or_default()
+        .split('&')
+        .filter(|s| !s.is_empty())
+        .map(|pair| {
+            let (k, _) = pair.split_once('=').unwrap_or((pair, ""));
+            let k_lower = k.to_ascii_lowercase();
+            if CREDENTIAL_KEYS.contains(&k_lower.as_str()) {
+                format!("{k}=***")
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect();
+    if pairs.is_empty() {
+        base
+    } else {
+        format!("{base}?{}", pairs.join("&"))
     }
 }
 
 /// 订阅获取结果
 #[derive(Debug, Clone)]
 pub struct FetchResult {
-    /// 获取到的内容
+    /// 获取到的内容（304 时为空——以 [`Self::not_modified`] 区分「真的空体」）
     pub content: String,
     /// ETag 响应头
     pub etag: Option<String>,
@@ -77,6 +148,13 @@ pub struct FetchResult {
     pub headers: HashMap<String, String>,
     /// 内容类型
     pub content_type: Option<String>,
+    /// 304 Not Modified（RIL-010 条件缓存命中）：内容未变，`content` 为空，
+    /// 调用方应复用缓存而非把空体当新版本
+    pub not_modified: bool,
+    /// 内容 SHA-256 摘要（hex，与 `SourceSnapshot::hash_content` 同源）。
+    /// 摘要只证明内容一致（获取/缓存/重试间的身份），**不证明来源可信**
+    /// ——来源可信由传输（HTTPS）或预置摘要比对另行约束（RIL-010 口径）。
+    pub content_digest: String,
 }
 
 /// 订阅获取器
@@ -152,20 +230,33 @@ impl SubscriptionFetcher {
 
     /// 获取订阅内容
     pub async fn fetch(&self, url: &str) -> Result<FetchResult> {
+        self.fetch_conditional(url, None).await
+    }
+
+    /// 条件获取（RIL-010 条件缓存）：携带上次成功响应的验证器，
+    /// 服务端命中 304 时返回 `not_modified = true`（空体），调用方复用
+    /// 缓存。`fetch` 即本方法的无条件形态。
+    pub async fn fetch_conditional(
+        &self,
+        url: &str,
+        conditions: Option<&ConditionalGet>,
+    ) -> Result<FetchResult> {
+        // 日志/错误面一律脱敏（RIL-010 凭证边界：原文只走传输面）
+        let redacted = redact_url(url);
         debug!(
             target: "rillane::subscription::fetcher",
-            url = %url,
+            url = %redacted,
             "开始获取订阅内容"
         );
 
         let mut last_error = None;
 
         for attempt in 1..=self.config.max_retries {
-            match self.fetch_attempt(url).await {
+            match self.fetch_attempt(url, conditions).await {
                 Ok(result) => {
                     debug!(
                         target: "rillane::subscription::fetcher",
-                        url = %url,
+                        url = %redacted,
                         attempt = attempt,
                         status = result.status_code,
                         size = result.content.len(),
@@ -178,7 +269,7 @@ impl SubscriptionFetcher {
                     if let Some(ferr) = err.downcast_ref::<FetcherError>() {
                         warn!(
                             target: "rillane::subscription::fetcher",
-                            url = %url,
+                            url = %redacted,
                             error = %ferr,
                             "订阅内容终态错误，不重试"
                         );
@@ -186,7 +277,7 @@ impl SubscriptionFetcher {
                     }
                     warn!(
                         target: "rillane::subscription::fetcher",
-                        url = %url,
+                        url = %redacted,
                         attempt = attempt,
                         error = %err,
                         "获取失败，将重试"
@@ -194,9 +285,16 @@ impl SubscriptionFetcher {
 
                     last_error = Some(err);
 
-                    // 如果不是最后一次尝试，等待重试间隔
+                    // 不是最后一次尝试：按 2^n 指数退避等待（RIL-010），
+                    // 封顶 max_backoff
                     if attempt < self.config.max_retries {
-                        tokio::time::sleep(self.config.retry_interval).await;
+                        let shift = (attempt - 1).min(16);
+                        let backoff = self
+                            .config
+                            .retry_interval
+                            .saturating_mul(1u32 << shift)
+                            .min(self.config.max_backoff);
+                        tokio::time::sleep(backoff).await;
                     }
                 }
             }
@@ -206,7 +304,7 @@ impl SubscriptionFetcher {
     }
 
     /// 单次获取尝试
-    async fn fetch_attempt(&self, url: &str) -> Result<FetchResult> {
+    async fn fetch_attempt(&self, url: &str, conditions: Option<&ConditionalGet>) -> Result<FetchResult> {
         let mut request = self.client.get(url);
 
         // 设置请求头
@@ -219,11 +317,33 @@ impl SubscriptionFetcher {
             request = request.header(header::USER_AGENT, user_agent);
         }
 
-        // 发送请求
-        let mut response = request
-            .send()
-            .await
-            .with_context(|| format!("发送请求到 {} 失败", url))?;
+        // 条件缓存验证器（RIL-010）：命中时服务端回 304
+        if let Some(cond) = conditions {
+            if let Some(etag) = &cond.etag {
+                request = request.header(header::IF_NONE_MATCH, etag);
+            }
+            if let Some(lm) = &cond.last_modified {
+                request = request.header(header::IF_MODIFIED_SINCE, lm);
+            }
+        }
+
+        // 发送请求（错误文案脱敏——凭证只走传输面）。reqwest 自身的错误
+        // 链里嵌原始 URL（含凭证），不得整链透传：取最深一层原因（仅
+        // "connection refused" 之类传输诊断，无 URL）重写文案。
+        let mut response = match request.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let cause = {
+                    let mut cur = e.source();
+                    while let Some(next) = cur.and_then(|c| c.source()) {
+                        cur = Some(next);
+                    }
+                    cur.map(|c| c.to_string())
+                        .unwrap_or_else(|| "请求发送失败".to_string())
+                };
+                return Err(anyhow!("发送请求到 {} 失败: {cause}", redact_url(url)));
+            }
+        };
 
         let status_code = response.status().as_u16();
 
@@ -231,7 +351,7 @@ impl SubscriptionFetcher {
         if status_code == 304 {
             debug!(
                 target: "rillane::subscription::fetcher",
-                url = %url,
+                url = %redact_url(url),
                 "内容未修改"
             );
             return Ok(FetchResult {
@@ -253,6 +373,8 @@ impl SubscriptionFetcher {
                     .get(header::CONTENT_TYPE)
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string()),
+                not_modified: true,
+                content_digest: String::new(),
             });
         }
 
@@ -293,10 +415,10 @@ impl SubscriptionFetcher {
             .map(|s| s.to_string());
 
         // 读取内容（有界）：订阅端点为第三方不可信面，无界 text() 读取是内存
-        // DoS 面（50MiB 上限与 validate_content 同口径；validate_content 现
-        // 仅测试调用，须在此处落地）。先查 Content-Length 快速拒绝，再流式
-        // 累积并设硬上限，防分块/谎报长度。
-        let max_bytes: u64 = 50 * 1024 * 1024;
+        // DoS 面。先查 Content-Length 快速拒绝，再流式累积并设硬上限，防
+        // 分块/谎报长度。上限可配（RIL-010）：订阅默认 50MiB，provider 载荷
+        // 按策略收紧。
+        let max_bytes: u64 = self.config.max_bytes;
         if let Some(len) = response.content_length() {
             if len > max_bytes {
                 return Err(FetcherError::Oversized(len, max_bytes).into());
@@ -317,6 +439,9 @@ impl SubscriptionFetcher {
             Err(_) => return Err(FetcherError::NotUtf8.into()),
         };
 
+        // 摘要只证明内容一致（重试/缓存间身份），不证明来源可信（RIL-010）
+        let content_digest = rillane_config::SourceSnapshot::hash_content(content.as_bytes());
+
         Ok(FetchResult {
             content,
             etag,
@@ -324,6 +449,8 @@ impl SubscriptionFetcher {
             status_code,
             headers,
             content_type,
+            not_modified: false,
+            content_digest,
         })
     }
 
@@ -498,6 +625,33 @@ impl Default for SubscriptionFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RIL-010 凭证边界回归：日志/错误面的 URL 脱敏——userinfo 剥离、
+    /// 凭证类查询值打码、非凭证查询保留、主机路径不变。
+    #[test]
+    fn redact_url_masks_credentials() {
+        // userinfo 口令剥离
+        assert_eq!(
+            redact_url("https://user:hunter2@example.com/sub"),
+            "https://example.com/sub"
+        );
+        // 凭证类查询值打码（大小写不敏感），非凭证键保留
+        assert_eq!(
+            redact_url("http://example.com/sub?token=abc123&flag=1"),
+            "http://example.com/sub?token=***&flag=1"
+        );
+        assert_eq!(
+            redact_url("http://example.com/sub?API_KEY=zzz&x=y"),
+            "http://example.com/sub?API_KEY=***&x=y"
+        );
+        // 端口与路径保留
+        assert_eq!(
+            redact_url("http://example.com:8443/a/b?secret=top"),
+            "http://example.com:8443/a/b?secret=***"
+        );
+        // 无查询：原样（host 面）
+        assert_eq!(redact_url("https://example.com/sub"), "https://example.com/sub");
+    }
 
     #[test]
     fn test_base64_detection() {
