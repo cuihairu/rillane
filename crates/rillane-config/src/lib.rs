@@ -16,6 +16,7 @@ pub mod preview;
 pub mod proposal;
 pub mod rollback;
 pub mod source;
+pub mod watchdog;
 
 pub use approval::{
     proposal_digest, ApprovalAuthority, ApprovalError, PreauthorizedGrant, ProposalApproval,
@@ -35,6 +36,14 @@ pub use rollback::{
     RollbackRequest, CODE_ROLLBACK_CANDIDATE_MISMATCH, CODE_ROLLBACK_INPUT_INVALID,
     CODE_ROLLBACK_LIVE_MOVED, CODE_ROLLBACK_TARGET_FOREIGN, CODE_ROLLBACK_TARGET_NOT_APPLIED,
     CODE_ROLLBACK_TARGET_UNKNOWN, CONNECTION_TRUTH_STATEMENT,
+};
+pub use watchdog::{
+    assess_management_risk, repair_guidance, ManagementAssessment, ManagementRisk,
+    ManagementRiskKind, RecoveryPlan, ResumeOutcome, Watchdog, WatchdogError, WatchdogSnapshot,
+    WatchdogVerdict, WATCHDOG_DEFAULT_WINDOW_MS, WATCHDOG_MAX_WINDOW_MS,
+    CODE_WATCHDOG_GENERATION_MISMATCH, CODE_WATCHDOG_INPUT_INVALID, CODE_WATCHDOG_LIVE_MOVED,
+    CODE_WATCHDOG_NOT_DUE, CODE_WATCHDOG_TARGET_GONE, CODE_WATCHDOG_TARGET_UNKNOWN,
+    CODE_WATCHDOG_VERIFY_MISMATCH, CODE_WATCHDOG_WINDOW_EXPIRED, CODE_WATCHDOG_WINDOW_INVALID,
 };
 pub use contract::{
     CapabilitySet, ConfigError, ConfigVersion, CODE_UNKNOWN_VERSION, CODE_UNSUPPORTED_COMBINATION,
