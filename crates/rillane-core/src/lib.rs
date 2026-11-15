@@ -24,6 +24,7 @@ pub mod outbound;
 pub mod performance;
 pub mod plan;
 pub mod pool;
+pub mod probe;
 pub mod quality;
 pub mod query;
 pub mod redact;
@@ -72,6 +73,13 @@ pub use pool::{
     Acquire, ConnPool, EvictionReason, PoolError, PoolLimits, PoolStats, PooledConn, RecycledConn,
     TransportReuse, WarmDecision, CODE_POOL_CAPACITY_NODE, CODE_POOL_CAPACITY_TOTAL,
     CODE_POOL_LIMITS_INVALID, CODE_POOL_UNSUPPORTED,
+};
+pub use probe::{
+    JobSnapshot, ProbeError, ProbeExecError, ProbeExecutor, ProbeLimits, ProbeOutcome,
+    ProbeService, ProbeTarget, TargetScope, CODE_PROBE_BUDGET_EXHAUSTED, CODE_PROBE_CANCEL_REQUESTED,
+    CODE_PROBE_CANCELLED, CODE_PROBE_EXEC_FAILED, CODE_PROBE_JOB_UNKNOWN, CODE_PROBE_TIMEOUT,
+    CODE_PROBE_TARGET_OUT_OF_SCOPE, CODE_PROBE_UNSUPPORTED, JOB_STATE_CANCELLED, JOB_STATE_COMPLETED,
+    JOB_STATE_FAILED, JOB_STATE_QUEUED, JOB_STATE_RUNNING, JOB_STATE_TIMED_OUT,
 };
 pub use quality::{
     QualityMetric, QualitySample, QualitySampleError, SampleSource, SampleStatus, SampleValue,
