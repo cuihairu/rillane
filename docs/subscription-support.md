@@ -36,7 +36,7 @@ dropped with a named report entry (RIL-093), never crash the bulk import.
 
 | Group type | Status | Notes |
 |---|---|---|
-| select | ✅ | member order preserved |
+| select | ✅ | member order preserved; user picks persist across updates (`routing.selections`, RIL-011): a still-present pick is honored even if unhealthy, a deleted pick falls back to the first healthy member with the recovery named in the decision reason, and reload keeps selections the new config does not carry. Nested group references are validated at build time — cycles and dangling refs are rejected by name |
 | url-test | ✅ | `url` mapped; **`interval` unit is seconds** (official default 300; `0`/empty → 300, RIL-092); export side emits seconds as well |
 | fallback | ⚠️ | degrades to Random with a named report entry; faithful ordered fallback ships with RIL-012 |
 | relay | ⚠️ | degrades to ConsistentHash with a named report entry; faithful chain support decided in RIL-013 |

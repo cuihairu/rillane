@@ -1743,6 +1743,14 @@ pub struct RoutingConfig {
     /// 随 `RoutingConfig` 整体替换。
     #[serde(default, skip_serializing_if = "ProviderNodeLibrary::is_empty")]
     pub provider_nodes: ProviderNodeLibrary,
+    /// 用户选择面（RIL-011 select 保真）：组名 → 选中的成员名（节点或
+    /// 嵌套组）。`Strategy::Fixed` 求值时优先命中：所选成员仍在组的成员
+    /// 集（含不健康）则尊重手动点选；所选成员被更新/删除移除则走明确
+    /// 恢复策略（清除选择、回落首健康成员、回落原因显式）。这是用户
+    /// 运行态——配置更新**不得随意清空**仍有效的选择（引擎 reload 时
+    /// 并集合并）。空面不落盘。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub selections: BTreeMap<String, String>,
 }
 
 /// rule-provider 声明（RIL-014）：一个 RULE-SET 规则集的来源元数据。
@@ -1781,6 +1789,7 @@ impl Default for RoutingConfig {
             rule_sets: RuleSetLibrary::default(),
             proxy_providers: BTreeMap::new(),
             provider_nodes: ProviderNodeLibrary::default(),
+            selections: BTreeMap::new(),
         }
     }
 }
@@ -1817,6 +1826,80 @@ impl RoutingConfig {
                     );
                 }
             }
+        }
+        // RIL-011：组循环拒绝（嵌套组引用 A→B→A 会让运行时解析/选择无限
+        // 递归——构建期点名拒绝循环路径），同遍历拒绝**悬空组引用**（引用
+        // 未声明组 = 导入链 bug，静默少成员）；加权组引用同组引用对待。
+        {
+            // 邻接表：组名 → 它引用的组名集合
+            let mut refs: std::collections::BTreeMap<&str, Vec<&str>> =
+                std::collections::BTreeMap::new();
+            for group in &self.groups {
+                let mut outs = Vec::new();
+                for member in &group.members {
+                    match member {
+                        GroupMember::Group { name } | GroupMember::WeightedGroup { name, .. } => {
+                            anyhow::ensure!(
+                                self.groups.iter().any(|g| &g.name == name),
+                                "组 {} 引用了未声明的组 `{name}`",
+                                group.name
+                            );
+                            outs.push(name.as_str());
+                        }
+                        _ => {}
+                    }
+                }
+                refs.insert(group.name.as_str(), outs);
+            }
+            // 三色迭代 DFS：phase-1 弹出 = 收尾（标黑 + 退路径）；
+            // phase-0 弹出仅白节点处理（去重，重复条目直接丢弃）。
+            // gray 邻居 = 回边 = 环，报错带完整环路径。
+            const GRAY: u8 = 0;
+            const BLACK: u8 = 1;
+            let mut color: std::collections::HashMap<&str, u8> =
+                std::collections::HashMap::new();
+            let mut path: Vec<&str> = Vec::new();
+            for root in refs.keys() {
+                if color.contains_key(root) {
+                    continue;
+                }
+                let mut stack = vec![(*root, 0usize)];
+                while let Some((node, phase)) = stack.pop() {
+                    if phase == 1 {
+                        color.insert(node, BLACK);
+                        path.pop();
+                        continue;
+                    }
+                    if color.contains_key(node) {
+                        continue; // 已入路径或已完成：重复条目
+                    }
+                    color.insert(node, GRAY);
+                    path.push(node);
+                    stack.push((node, 1));
+                    for next in &refs[node] {
+                        match color.get(next) {
+                            Some(&GRAY) => {
+                                // 回边：路径上从 next 到栈顶即环（闭合回 next）
+                                let start =
+                                    path.iter().position(|n| n == next).unwrap_or(0);
+                                let cycle = path[start..].join(" → ");
+                                anyhow::bail!("组循环: {cycle} → {next}");
+                            }
+                            Some(&BLACK) | Some(&(2u8..=u8::MAX)) => {}
+                            None => stack.push((*next, 0)),
+                        }
+                    }
+                }
+            }
+        }
+        // RIL-011：用户选择的组须已声明（组名打错 = 永不生效的选择面）；
+        // 值（成员名）不做构建期校验——provider 展开节点构建期不可知，
+        // 悬空值由引擎求值期恢复策略处理。
+        for group in self.selections.keys() {
+            anyhow::ensure!(
+                self.groups.iter().any(|g| &g.name == group),
+                "选择面引用了未声明的组 `{group}`"
+            );
         }
         // RIL-014：RuleSetRef 引用名非空（空名是导入链 bug，不是合法配置；
         // 引用是否存在载荷不做构建期拒绝——载荷随 RIL-010 异步装入，缺席
@@ -2027,6 +2110,131 @@ provider_nodes:
             !empty_text.contains("proxy_providers:")
                 && !empty_text.contains("provider_nodes:"),
             "空面不落盘: {empty_text}"
+        );
+    }
+    /// RIL-011：组循环构建期点名拒绝（A→B→A、自环 A→A、以及经加权组
+    /// 的环）；悬空组引用同遍历拒绝；合法链（A→B→节点）放行。
+    #[test]
+    fn group_cycles_and_dangling_refs_rejected() {
+        let yaml = |groups: &str| {
+            format!(
+                r#"
+default_node: direct
+groups:
+{groups}
+rules: []
+"#
+            )
+        };
+        // 二元环
+        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
+            "  - name: a
+    strategy: fixed
+    members: [{ type: group, name: b }]
+  - name: b
+    strategy: fixed
+    members: [{ type: group, name: a }]",
+        ))
+        .expect("应解析");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("组循环"), "{err}");
+        assert!(err.contains('a') && err.contains('b'), "环路径须点名: {err}");
+
+        // 自环
+        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
+            "  - name: a
+    strategy: fixed
+    members: [{ type: group, name: a }]",
+        ))
+        .expect("应解析");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("组循环") && err.contains("a → a"), "{err}");
+
+        // 经加权组的环（WeightedGroup 同样参与图）
+        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
+            "  - name: a
+    strategy: fixed
+    members: [{ type: weighted_group, name: b, weight: 2 }]
+  - name: b
+    strategy: fixed
+    members: [{ type: group, name: a }]",
+        ))
+        .expect("应解析");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("组循环"), "加权组环须被拒: {err}");
+
+        // 悬空组引用
+        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
+            "  - name: a
+    strategy: fixed
+    members: [{ type: group, name: ghost }]",
+        ))
+        .expect("应解析");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("未声明的组") && err.contains("ghost"), "{err}");
+
+        // 合法链放行
+        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
+            "  - name: a
+    strategy: fixed
+    members: [{ type: group, name: b }]
+  - name: b
+    strategy: fixed
+    members: [n1]",
+        ))
+        .expect("应解析");
+        cfg.validate().expect("合法链应通过");
+    }
+
+    /// RIL-011：用户选择面 serde——组名须已声明（键面校验），往返语义
+    /// 不变，空面不落盘。
+    #[test]
+    fn selections_roundtrip_and_key_validation() {
+        let yaml = r#"
+default_node: direct
+groups:
+  - name: pick
+    strategy: fixed
+    members: [n1, n2]
+rules: []
+selections:
+  pick: n2
+"#;
+        let cfg: RoutingConfig = serde_yaml::from_str(yaml).expect("应解析");
+        assert_eq!(cfg.selections.get("pick").map(String::as_str), Some("n2"));
+        cfg.validate().expect("已声明组的选择应通过校验");
+
+        // 往返
+        let back: RoutingConfig =
+            serde_yaml::from_str(&serde_yaml::to_string(&cfg).expect("序列化")).expect("读回");
+        assert_eq!(back.selections, cfg.selections, "选择面往返语义不变");
+
+        // 键面校验：未声明组的选择构建期点名拒绝
+        let bad: RoutingConfig = serde_yaml::from_str(
+            r#"
+default_node: direct
+groups:
+  - name: pick
+    strategy: fixed
+    members: [n1]
+rules: []
+selections:
+  typo-group: n1
+"#,
+        )
+        .expect("应解析");
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("未声明的组") && err.contains("typo-group"),
+            "{err}"
+        );
+
+        // 空面不落盘
+        let empty_text =
+            serde_yaml::to_string(&RoutingConfig::default()).expect("序列化");
+        assert!(
+            !empty_text.contains("selections:"),
+            "空选择面不落盘: {empty_text}"
         );
     }
 

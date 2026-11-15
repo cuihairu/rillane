@@ -527,3 +527,128 @@ fn provider_member_expands_from_provider_node_library() {
         .expect("组仍在配置中，不应从观测面消失");
     assert!(only.members.is_empty(), "provider 空集不得伪装出成员");
 }
+
+// ---------- RIL-011：select 选择保真 ----------
+
+fn fixed_pick_group(members: Vec<GroupMember>) -> RoutingConfig {
+    let config = RoutingConfig {
+        default_node: "pick".to_string(),
+        groups: vec![PolicyGroup {
+            name: "pick".to_string(),
+            strategy: Strategy::Fixed,
+            members,
+            slo: None,
+            url_test: None,
+        }],
+        rules: vec![],
+        ..RoutingConfig::default()
+    };
+    // 健康态默认全真（get_node_health 缺数据 = 健康）
+    config
+}
+
+/// RIL-011：`Strategy::Fixed` 尊重用户选择——selections 命中组成员时
+/// 按所选成员出流（而非首成员）。
+#[tokio::test]
+async fn select_honors_user_selection() -> Result<()> {
+    let mut config = fixed_pick_group(vec![
+        GroupMember::Node { name: "node1".into() },
+        GroupMember::Node { name: "node2".into() },
+    ]);
+    config
+        .selections
+        .insert("pick".to_string(), "node2".to_string());
+    let engine = RoutingEngine::new(config);
+
+    let decision = engine.route(create_flow_context("example.com", 80)).await?;
+    assert_eq!(
+        decision.final_node(),
+        "node2",
+        "用户选择 node2 优先于首成员 node1"
+    );
+    Ok(())
+}
+
+/// RIL-011：所选成员不健康时仍尊重手动点选（显式意图不被健康门槛
+/// 二次猜测，与 Clash select 语义一致）。
+#[tokio::test]
+async fn select_honors_selection_even_if_unhealthy() -> Result<()> {
+    let mut config = fixed_pick_group(vec![
+        GroupMember::Node { name: "node1".into() },
+        GroupMember::Node { name: "node2".into() },
+    ]);
+    config
+        .selections
+        .insert("pick".to_string(), "node2".to_string());
+    let engine = RoutingEngine::new(config);
+    engine.set_node_health("node2", false);
+
+    let decision = engine.route(create_flow_context("example.com", 80)).await?;
+    assert_eq!(
+        decision.final_node(),
+        "node2",
+        "不健康的手动点选仍生效（用户显式选择）"
+    );
+    Ok(())
+}
+
+/// RIL-011：所选成员已被更新/删除移除 → 明确恢复策略：回落首健康成员、
+/// 决策原因点名恢复、引擎内陈旧选择被清除（不反复报告）。
+#[tokio::test]
+async fn stale_selection_recovers_to_first_member() -> Result<()> {
+    let mut config = fixed_pick_group(vec![
+        GroupMember::Node { name: "node1".into() },
+        GroupMember::Node { name: "node2".into() },
+    ]);
+    config
+        .selections
+        .insert("pick".to_string(), "node-gone".to_string());
+    let engine = RoutingEngine::new(config);
+
+    let decision = engine.route(create_flow_context("example.com", 80)).await?;
+    assert_eq!(decision.final_node(), "node1", "陈旧选择回落首健康成员");
+    let reason = decision.reason.unwrap_or_default();
+    assert!(
+        reason.contains("node-gone") && reason.contains("回落"),
+        "恢复原因须点名所选成员与回落: {reason}"
+    );
+
+    // 陈旧选择已清除：二次路由不再重复报告
+    let decision2 = engine.route(create_flow_context("example.com", 80)).await?;
+    assert_eq!(decision2.final_node(), "node1");
+    assert!(
+        !decision2.reason.as_deref().unwrap_or_default().contains("回落"),
+        "清除后不得重复报告恢复: {:?}",
+        decision2.reason
+    );
+    Ok(())
+}
+
+/// RIL-011：更新不随意清空有效选择——新配置未携带 selections 时，
+/// reload 保留旧选择（组仍声明且成员仍在 → 依旧生效）。
+#[tokio::test]
+async fn reload_preserves_valid_selections() -> Result<()> {
+    let mut config = fixed_pick_group(vec![
+        GroupMember::Node { name: "node1".into() },
+        GroupMember::Node { name: "node2".into() },
+    ]);
+    config
+        .selections
+        .insert("pick".to_string(), "node2".to_string());
+    let engine = RoutingEngine::new(config);
+
+    // 更新：同组结构但新配置未带选择面（订阅刷新重写配置的现实形态）
+    let updated = fixed_pick_group(vec![
+        GroupMember::Node { name: "node1".into() },
+        GroupMember::Node { name: "node2".into() },
+    ]);
+    engine.reload(updated);
+
+    let decision = engine.route(create_flow_context("example.com", 80)).await?;
+    assert_eq!(
+        decision.final_node(),
+        "node2",
+        "更新后有效选择不得被随意清空"
+    );
+    Ok(())
+}

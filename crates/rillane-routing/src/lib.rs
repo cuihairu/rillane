@@ -227,6 +227,17 @@ fn split_probe_target(probe: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port))
 }
 
+/// 拼接路由原因与恢复说明（RIL-011）：两者都有时以「；」衔接，
+/// 恢复说明不吞掉原有 reason。
+fn merge_reason(reason: Option<String>, note: Option<String>) -> Option<String> {
+    match (reason, note) {
+        (Some(r), Some(n)) => Some(format!("{r}；{n}")),
+        (Some(r), None) => Some(r),
+        (None, Some(n)) => Some(n),
+        (None, None) => None,
+    }
+}
+
 impl RoutingEngine {
     pub fn new(config: RoutingConfig) -> Self {
         let geo = Arc::new(GeoDatabases::new(
@@ -269,6 +280,19 @@ impl RoutingEngine {
                 next.geosite_db.clone(),
             ));
         }
+        // RIL-011：更新不随意清空有效选择——selections 是用户运行态，
+        // 新配置未携带的组保留旧选择（新配置显式携带的键以新配置为准）。
+        // 所选成员已删除的陈旧选择由 Fixed 求值期恢复策略清除。
+        let next = {
+            let cur = self.config.read().expect("routing poisoned");
+            let mut next = next;
+            for (group, sel) in &cur.selections {
+                next.selections
+                    .entry(group.clone())
+                    .or_insert_with(|| sel.clone());
+            }
+            next
+        };
         *self.config.write().expect("routing poisoned") = next;
         self.build_group_cache();
         self.clear_round_robin_counters();
@@ -444,6 +468,15 @@ impl RoutingEngine {
 
         // 默认健康，实际应用中应该执行健康检查
         true
+    }
+
+    /// 手动标记节点健康态（RIL-011 求值面：控制面/运维手动摘除节点；
+    /// 与探活任务写入同一健康缓存，TTL 内生效）
+    pub fn set_node_health(&self, node_name: &str, is_healthy: bool) {
+        self.health_status.insert(
+            node_name.to_string(),
+            (is_healthy, std::time::Instant::now()),
+        );
     }
 
     /// 启动健康检查任务
@@ -807,6 +840,40 @@ impl RoutingEngine {
         }
     }
 
+    /// RIL-011 select 保真：`Strategy::Fixed` 的用户选择面。
+    /// 选择命中组成员集（**全成员集，含不健康**——显式手动点选不被健康
+    /// 门槛二次猜测，与 Clash select 语义一致）；所选成员已被更新/删除
+    /// 移除 → 明确恢复策略：清除引擎配置副本里的陈旧选择、回落首健康
+    /// 成员、回落原因显式返回（由调用方并入 decision.reason，不静默）。
+    fn apply_fixed_selection<'a>(
+        &self,
+        descriptor: &'a GroupDescriptor,
+        healthy: &[&'a GroupDescriptorMember],
+    ) -> (Option<&'a GroupDescriptorMember>, Option<String>) {
+        let selection = {
+            let config = self.config.read().expect("routing poisoned");
+            config.selections.get(&descriptor.name).cloned()
+        };
+        let Some(selected) = selection else {
+            return (healthy.first().copied(), None);
+        };
+        if let Some(member) = descriptor.members.iter().find(|m| m.as_name() == selected) {
+            return (Some(member), None);
+        }
+        // 恢复策略：陈旧选择清除（不反复报告同一失效选择）
+        {
+            let mut config = self.config.write().expect("routing poisoned");
+            config.selections.remove(&descriptor.name);
+        }
+        (
+            healthy.first().copied(),
+            Some(format!(
+                "组 {} 所选成员 `{selected}` 已不存在（更新/删除），清除选择并回落首健康成员",
+                descriptor.name
+            )),
+        )
+    }
+
     /// 从组中选择成员
     async fn select_from_group(
         &self,
@@ -819,8 +886,15 @@ impl RoutingEngine {
             return Err(anyhow!("组 {} 无健康成员", descriptor.name));
         }
 
+        let mut fixed_note: Option<String> = None;
         let selected_member = match descriptor.strategy {
-            Strategy::Fixed => healthy_members.first().copied(),
+            Strategy::Fixed => {
+                // RIL-011 select 保真：用户选择优先；所选成员已被移除走
+                // 明确恢复策略（清除选择 + 回落首健康成员 + 原因显式）
+                let (member, note) = self.apply_fixed_selection(descriptor, &healthy_members);
+                fixed_note = note;
+                member
+            }
             Strategy::Random => {
                 let mut rng = thread_rng();
                 healthy_members.choose(&mut rng).copied()
@@ -848,7 +922,7 @@ impl RoutingEngine {
                     name.clone(),
                     Vec::new(), // 中间节点目前为空
                 );
-                decision.reason = reason;
+                decision.reason = merge_reason(reason, fixed_note);
                 Ok(decision)
             }
             GroupDescriptorMember::Group {
