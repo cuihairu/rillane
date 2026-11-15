@@ -281,8 +281,16 @@
   交付：相同目标浏览器/两个游戏的分组轨迹及故障样例。验收：TCP/UDP、名称/路径、权限不足、PID/端口复用均实测，规则来源可查。
 - [ ] **RIL-086｜P1｜六平台并行场景验收**；依赖：RIL-025、RIL-031、RIL-035、RIL-039、RIL-042、RIL-046、RIL-049。
   交付：真实网站/QUIC 与游戏并行转发矩阵。验收：分别报告双栈、DNS、MTU、切网与退出恢复；不支持项明确拒绝或按配置降级。
-- [ ] **RIL-087｜P0｜订阅到执行完整回归**；依赖：RIL-010、RIL-016、RIL-022、RIL-060。
+- [x] **RIL-087｜P0｜订阅到执行完整回归**；依赖：RIL-010、RIL-016、RIL-022、RIL-060。
   交付：多来源刷新、组回退、规则集、来源删除与本地覆盖场景。验收：输入→IR→代际→Explain→实际出口一致；凭证和关键策略不静默丢失。
+  完成（2026-11-16）：`crates/rillane-routing/tests/subscription_to_execution.rs` 6 测试（rillane-routing Cargo.toml 增 `rillane-subscription` dev-dep——该文件不属并发Actor 脏面），10× 重复全绿，`cargo clippy -p rillane-routing --all-targets --all-features -- -D warnings` 干净；逐验收条款映射如下。
+  ① 多来源刷新（multi_source_refresh_builds_consistent_generations）：sub-a（trojan+ss+select 组）与 sub-b（vmess）合并建代际；同内容重 build 同代际身份（build 确定性）；刷新 sub-a 新增节点 → 新代际、恰 +1 对象、新 ObjectId 在场；sub-b 对象逐 ID 摘要不漂移（他源不受本源刷新改写）。
+  ② 凭证不静默丢失（credentials_survive_conversion_and_anchor_generation_identity）：trojan 口令/ss 算法+口令/vmess UUID 全部进 IR 断言；凭证轮换 → `digest_parts` 对象摘要变化 → 代际身份变化（不静默沿用旧凭证代际）。
+  ③ 组回退全链（group_fallback_execution_matches_explanation）：clash `fallback` 直映 `Strategy::Fallback`；输入→IR→`RuntimeGeneration`（对象+组→成员边）→`RoutingEngine` 按声明序回退（f-1→f-2→f-3→恢复回 f-1，set_node_health 注入）；`freeze_explain_snapshot`+`explain` 预测=实际出口、`generation_id` 回显代际关联、同快照同输入重放摘要与预测全等（可离线重放）。
+  ④ 规则集一致（rule_conditions_route_and_explain_agree）：后缀（DOMAIN-SUFFIX）/网段（IP-CIDR 10.0.0.0/8）/MATCH 兜底三类规则全量进 IR（len==3 不静默丢）；逐输入实际出口=规则目标、`matched_by`=转换器规则名 `rule-N`、Explain 预测=实际出口。
+  ⑤ 来源删除显式（source_deletion_is_explicit_not_silent）：本地 LOCAL-PROXY 组（Group 对象注册在场）跨源引用订阅节点；只删 sub-b 对象留引用 → `GenerationError::DanglingReference` 且 `code()==CODE_GENERATION_DANGLING`（关键策略不静默断链）；连本地引用边一并清理 → 删除完成、对象离场、他源对象不受累、恰少一个对象。
+  ⑥ 本地覆盖（nodes_only_import_keeps_local_policy_ownership）：`ImportMode::NodesOnly` 经 `SubscriptionConverter::with_options`+`auto_convert` 只收 2 节点，组/规则为空、剥离经 warnings 显式登记（含 "nodes-only"）；节点凭证照常进 IR（只收节点≠剥凭证）；刷新合并模拟：本地 egress 面被订阅节点替换、本地 2 条规则原样不被覆盖；存量 FullPolicy 对照组/规则整份照收且无剥离登记。
+  外部真实网络（订阅拉取/geoip 库在线加载）不在本回归面：转换器输入以脱敏内联 YAML 为准（RFC 5737/占位凭证，同 RIL-007 样本纪律），拉取面由 rillane-subscription 自有契约覆盖。
 - [ ] **RIL-088｜P1｜事务与故障注入验收**；依赖：RIL-019、RIL-023。
   交付：逐阶段失败、磁盘错误、崩溃、网络失联和多客户端并发。验收：旧版本保留/补偿/重启恢复行为可重放，未补偿问题不能用成功回执掩盖。
 - [ ] **RIL-089｜P1｜并行负载性能对照**；依赖：RIL-025、RIL-027、RIL-031、RIL-064。

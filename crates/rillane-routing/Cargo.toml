@@ -21,3 +21,4 @@ geosite-rs.workspace = true
 
 [dev-dependencies]
 maxminddb-writer.workspace = true
+rillane-subscription = { path = "../rillane-subscription" }
