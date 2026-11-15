@@ -1400,10 +1400,7 @@ impl ClashConverter {
     /// （fallback=按序回退、relay=链式转发）：映射成 Random/ConsistentHash
     /// 属有损转换——Err 携带说明，调用方决定降级（宽松+报告）或拒绝（严格），
     /// 不再静默映射伪装成功（RIL-093；完整 fallback 实现归 RIL-012）
-    fn convert_group_type_to_strategy(
-        &self,
-        group_type: ClashProxyGroupType,
-    ) -> Result<Strategy> {
+    fn convert_group_type_to_strategy(&self, group_type: ClashProxyGroupType) -> Result<Strategy> {
         match group_type {
             ClashProxyGroupType::Select => Ok(Strategy::Fixed),
             ClashProxyGroupType::UrlTest => Ok(Strategy::Latency),
@@ -1428,7 +1425,11 @@ impl ClashConverter {
     }
 
     /// 转换规则为路由规则
-    fn convert_rules_to_routing_rules(&self, rules: &[ClashRule]) -> Result<Vec<RouteRule>> {
+    fn convert_rules_to_routing_rules(
+        &self,
+        rules: &[ClashRule],
+        report: &mut ConversionReport,
+    ) -> Result<Vec<RouteRule>> {
         let mut routing_rules = Vec::new();
 
         for (index, rule) in rules.iter().enumerate() {
@@ -1442,6 +1443,9 @@ impl ClashConverter {
                     });
                 }
                 Err(err) => {
+                    // 跳过规则必须可见：此前只记日志，规则悄悄消失等于伪装
+                    // 成功；宽松模式进损失清单，严格模式据此整体拒绝（RIL-093）
+                    report.dropped_rules.push((name, err.to_string()));
                     warn!(
                         target: "rillane::subscription::clash",
                         rule = ?rule,
@@ -1756,7 +1760,7 @@ rules:
         let converter = ClashConverter::new();
         let config = converter.parse(yaml_content).unwrap();
         let groups = converter
-            .convert_proxy_groups_to_groups(&config.proxy_groups)
+            .convert_proxy_groups_to_groups(&config.proxy_groups, &mut Default::default())
             .unwrap();
         assert_eq!(groups.len(), 3);
 
@@ -1820,7 +1824,7 @@ rules:
         let converter = ClashConverter::new();
         let config = converter.parse(yaml_content).unwrap();
         let groups = converter
-            .convert_proxy_groups_to_groups(&config.proxy_groups)
+            .convert_proxy_groups_to_groups(&config.proxy_groups, &mut Default::default())
             .unwrap();
 
         let interval_of = |suffix: &str| -> u64 {
@@ -1876,7 +1880,7 @@ rules:
         let converter = ClashConverter::new();
         let config = converter.parse(yaml_content).unwrap();
         let egress = converter
-            .convert_proxies_to_egress(&config.proxies)
+            .convert_proxies_to_egress(&config.proxies, &mut Default::default())
             .unwrap();
         assert_eq!(egress.len(), 1);
         match &egress[0].spec {
@@ -1924,7 +1928,7 @@ rules:
         let converter = ClashConverter::new();
         let config = converter.parse(yaml_content).unwrap();
         let egress = converter
-            .convert_proxies_to_egress(&config.proxies)
+            .convert_proxies_to_egress(&config.proxies, &mut Default::default())
             .unwrap();
         assert_eq!(egress.len(), 1);
         match &egress[0].spec {
@@ -1967,7 +1971,7 @@ rules:
         let converter = ClashConverter::new();
         let config = converter.parse(yaml_content).unwrap();
         let err = converter
-            .convert_proxies_to_egress(&config.proxies)
+            .convert_proxies_to_egress(&config.proxies, &mut Default::default())
             .expect_err("无换算表插件应拒导");
         assert!(
             err.to_string().contains("kcptun-client"),
@@ -2443,15 +2447,21 @@ rules: []
         let converter = ClashConverter::new();
 
         assert_eq!(
-            converter.convert_group_type_to_strategy(ClashProxyGroupType::Select),
+            converter
+                .convert_group_type_to_strategy(ClashProxyGroupType::Select)
+                .unwrap(),
             Strategy::Fixed
         );
         assert_eq!(
-            converter.convert_group_type_to_strategy(ClashProxyGroupType::UrlTest),
+            converter
+                .convert_group_type_to_strategy(ClashProxyGroupType::UrlTest)
+                .unwrap(),
             Strategy::Latency
         );
         assert_eq!(
-            converter.convert_group_type_to_strategy(ClashProxyGroupType::LoadBalance),
+            converter
+                .convert_group_type_to_strategy(ClashProxyGroupType::LoadBalance)
+                .unwrap(),
             Strategy::Weighted
         );
     }

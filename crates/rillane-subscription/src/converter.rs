@@ -48,6 +48,10 @@ pub struct ConversionOptions {
     pub max_nodes: Option<usize>,
     /// 最大组数
     pub max_groups: Option<usize>,
+    /// 严格导入：任何语义损失（不支持的节点类型/组/规则、无效节点）整体
+    /// 拒绝而不产出半份配置；宽松（缺省）继续导入但损失清单进 warnings
+    /// （RIL-093）
+    pub strict_import: bool,
 }
 
 impl Default for ConversionOptions {
@@ -63,6 +67,7 @@ impl Default for ConversionOptions {
             rule_name_prefix: String::new(),
             max_nodes: None,
             max_groups: None,
+            strict_import: false,
         }
     }
 }
@@ -133,7 +138,8 @@ impl SubscriptionConverter {
             .with_node_prefix(options.node_name_prefix.clone())
             .with_group_prefix(options.group_name_prefix.clone())
             .with_rule_prefix(options.rule_name_prefix.clone())
-            .with_filtering(options.filter_invalid_nodes);
+            .with_filtering(options.filter_invalid_nodes)
+            .with_strict(options.strict_import);
 
         let rillane_converter = RillaneDslConverter::new()
             .with_validation(true)
@@ -311,11 +317,15 @@ impl SubscriptionConverter {
         let mut filtered_config = clash_config.clone();
         filtered_config.proxies = filtered_proxies;
 
-        // 转换为 Rillane 配置
-        let rillane_config = self
+        // 转换为 Rillane 配置：损失清单进 warnings，丢弃/降级内容可见、
+        // 不伪装成无损成功；严格导入时清单非空在上游直接整体拒绝（RIL-093）
+        let (rillane_config, report) = self
             .clash_converter
-            .convert_to_rillane(&filtered_config)
+            .convert_to_rillane_with_report(&filtered_config)
             .context("转换 Clash 配置为 Rillane 配置失败")?;
+        if !report.is_empty() {
+            warnings.push(format!("有损转换报告:\n{}", report.summary()));
+        }
 
         let stats = ConversionStats {
             input: InputStats {

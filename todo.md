@@ -33,8 +33,8 @@
 
 - [x] **RIL-092｜P0｜当前导入器 interval 单位修复**；依赖：无。（2026-11-15 完成）
   交付：`crates/rillane-subscription/src/clash.rs:70-78` 新增 `clash_interval_secs`——按秒原样透传，`0`/缺省按 300 秒；`clash.rs:1246` 接入；`ClashProxyGroup::interval` 注释改秒（`clash.rs:393`）。导出侧同源缺陷一并修：`clash_export.rs:694-702` `interval_ms`→`interval_secs`，300_000→300（否则 Mihomo 侧 300000 秒≈不探活）。文档同步：`docs/subscription.md:14`、`docs/zh/subscription.md:14`、研究缺口表标已修。验收证据：`test_urltest_interval_read_in_seconds`（300→300、60000→60000、0→300、缺省→300）+ `clash_interval_secs_policy` 单测 + 旧用例 `test_urltest_group_probe_config_mapped` 改断言 60000；rillane-subscription 74 测全绿。commit：见 git log `fix: read clash interval in seconds`。
-- [ ] **RIL-093｜P0｜当前导入器有损转换护栏**；依赖：无。
-  交付：明确导入模式/错误，未实现的 fallback/relay 与关键不支持规则不能伪装成功。验收：严格导入拒绝语义损失，宽松仅节点导入报告丢弃内容；现有可支持节点和组回归，完整 fallback 实现仍由 RIL-012 交付。
+- [x] **RIL-093｜P0｜当前导入器有损转换护栏**；依赖：无。（2026-11-15 完成）
+  交付：`crates/rillane-subscription/src/clash.rs:820` 新增 `ConversionReport`（丢弃节点/降级组/跳过规则三清单 + `is_empty`/`summary`）；`clash.rs:934` `with_strict` 严格导入模式，`clash.rs:974` `convert_to_rillane_with_report`——宽松模式配置照常产出但损失清单随行返回，严格模式清单非空整体拒绝（Err 即完整损失清单）。fallback/relay 不再静默映射：`clash.rs:1403` `convert_group_type_to_strategy` 改返回 Result，宽松降级+报告、严格拒绝（完整 fallback 实现归 RIL-012）。`clash.rs:875` `is_supported_proxy_type`：类型级不支持节点（Snell）宽松丢弃+报告、严格记单拒绝，单节点不再炸掉整个导入；已支持类型配置错误（reality 缺 public-key）保持点名硬错误（G1-6 拒绝策略保持）。过滤节点与跳过规则全部进清单，跳过规则不再只记日志。管线 wiring：`converter.rs:54` `ConversionOptions::strict_import`（缺省 false）、`converter.rs:142` 接入 `with_strict`、损失清单进 `ConversionResult::warnings`。验收证据：`tests/clash_guardrails.rs` 8 测全绿（严格拒 fallback/relay 点名组名；宽松降级+报告语义；不支持规则 rule-1/rule-2 点名；空 server 与 snell 丢节点报告+严格拒；vless reality 缺 public-key 双模式硬错误；干净配置零误伤回归含 url-test interval=300；summary 渲染；管线 strict_import 拒绝/宽松 warnings 可见）；rillane-subscription 92 测全绿（72 lib + 8 guardrails + 12 dsl）。commit：见 git log `feat: add lossy import guardrails`。
 
 - [ ] **RIL-007｜P0｜订阅兼容样本库**；依赖：RIL-002。
   交付：脱敏 inline/provider-only/full-policy 正反例及字段/单位支持表。验收：每个关键输入有预期对象/诊断；节点密码与带 token URL 不进入样本仓库。
