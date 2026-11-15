@@ -92,6 +92,20 @@ pub struct EstablishedSession {
 }
 
 impl EstablishedSession {
+    /// 测试装配入口（crate 内可见；生产路径唯一入口是执行器建立收尾）
+    #[cfg(test)]
+    pub(crate) fn assemble(
+        pin: SessionPin,
+        endpoint: EndpointRef,
+        attempts: Vec<AttemptRecord>,
+    ) -> Self {
+        Self {
+            pin,
+            endpoint,
+            attempts,
+        }
+    }
+
     /// 会话钉（代际取自计划）
     pub fn pin(&self) -> &SessionPin {
         &self.pin
@@ -537,6 +551,11 @@ impl SessionLedger {
     /// 解绑（流结束/撤销）
     pub fn unbind(&mut self, session_id: &str) -> Option<LedgerEntry> {
         self.sessions.remove(session_id)
+    }
+
+    /// 全部会话身份（遍历用；快照语义，遍历期间不受并发影响）
+    pub fn session_ids(&self) -> Vec<String> {
+        self.sessions.keys().cloned().collect()
     }
 
     /// 当前绑定数
