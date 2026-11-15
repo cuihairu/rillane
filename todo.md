@@ -92,7 +92,7 @@
   交付：完整名称/路径、权限/namespace 边界、有界缓存。验收：PID/端口复用、UDP、权限不足及 comm 截断不误归因；同目标两进程分别路由。
 - [ ] **RIL-031｜P0｜Linux 生命周期恢复**；依赖：RIL-019、RIL-029。
   交付：systemd 启停、异常退出日志与重启修复。验收：终止/崩溃/网络切换后 DNS 与路由恢复，重复启动无残留。
-- [ ] **RIL-032｜P0｜Windows 技术探针**；依赖：无（早期风险消减，反哺 RIL-004/RIL-005）。
+- [ ] **RIL-032｜P0｜Windows 技术探针**【BLOCKED 2026-11-15】缺 Windows 真机/虚拟机：Wintun 安装、WFP-ALE 归属查询与原型防环都需在 Windows 上实测，本机（Linux）无法产出验收要求的「Windows 上 TCP/UDP 本机归因和防环证据」；有环境后立即执行。
   交付：Wintun、公开归属查询/WFP-ALE 的实测选型记录及最低版本/权限。验收：Windows 上展示 TCP/UDP 本机归因和原型防环证据，记录不可用字段。
 - [ ] **RIL-033｜P1｜Windows 接管/旁路实现**；依赖：RIL-018、RIL-020、RIL-032。
   交付：packet I/O、双栈路由/DNS 和旁路。验收：真实浏览器/游戏流进入共享内核，DNS/代理拨号不循环，失败可补偿。
@@ -100,7 +100,7 @@
   交付：正式 OwnerResolver 和身份缓存。验收：同目标多进程、UDP、进程退出/端口复用/权限失败，unknown 策略均有真机证据。
 - [ ] **RIL-035｜P1｜Windows 服务与退出恢复**；依赖：RIL-019、RIL-033、RIL-034。
   交付：SCM/权限、驱动依赖校验、安装/卸载恢复。验收：服务崩溃、休眠、切网和卸载不遗留路由/DNS；签名和依赖限制公开。
-- [ ] **RIL-036｜P0｜macOS 技术探针**；依赖：无（早期风险消减，反哺 RIL-004/RIL-005）。
+- [ ] **RIL-036｜P0｜macOS 技术探针**【BLOCKED 2026-11-15】缺 macOS 真机：接管方案、helper/extension 边界、签名 entitlement 均需真机验证身份可得性与发布约束（CI macOS runner 只能编译不能装 profile/签名验收），无法产出验收要求的「真机验证缺口记录」；有设备后立即执行。
   交付：公开接管/本机身份方案、helper/extension 边界和签名 entitlement 记录。验收：真机验证所需身份可得性与发布约束，缺口明确，不靠私有 fd。
 - [ ] **RIL-037｜P1｜macOS 接管与旁路**；依赖：RIL-018、RIL-020、RIL-036。
   交付：选定公开接口的数据面和路由/DNS 补偿。验收：双栈 TCP/UDP/QUIC、DNS、MTU 和系统代理共存；权限失败不半接管。
@@ -114,7 +114,7 @@
   交付：musl 包、fw4/nftables 共存和 LAN/本机策略。验收：设备/IP/域名/端口、IPv4/IPv6、DNS 与 UDP 工作，不要求客户端 PID。
 - [ ] **RIL-042｜P1｜OpenWrt 运维与资源**；依赖：RIL-041。
   交付：procd、配置更新恢复、低内存默认预算。验收：路由器启停/升级/断网恢复，测得 RSS/CPU/吞吐上限；不支持的架构明确列出。
-- [ ] **RIL-094｜P0｜iOS 公开 packetFlow 早期探针**；依赖：无。
+- [ ] **RIL-094｜P0｜iOS 公开 packetFlow 早期探针**【BLOCKED 2026-11-15】缺 iOS 签名开发设备与开发者账号：packetFlow 批量 read/write、缓冲所有权、吞吐/RSS 实验必须在签名设备上跑 Network Extension，模拟器不加载扩展；无法产出「不依赖私有 fd」的实测结论；有签名设备后立即执行（结论反哺 RIL-043）。
   交付：最小签名设备实验验证批量 read/write、缓冲所有权、取消、吞吐/RSS 与 App/Extension 边界。验收：不依赖私有 fd；结论修订 RIL-043，缺少签名/设备明确未验证，不等正式 FFI 完成才试。
 - [ ] **RIL-043｜P1｜移动批次 FFI**；依赖：RIL-004、RIL-006、RIL-040、RIL-094。
   交付：包批次/缓冲所有权、线程、背压、取消、ABI 版本。验收：fd 与公开 packetFlow 都能桥接；无悬空指针、取消后回调或无界队列。
