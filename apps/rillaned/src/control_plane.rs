@@ -163,6 +163,7 @@ impl ControlPlane {
             (Method::GET, "/trace/flows") => self.handle_trace_flows(req).await,
             (Method::GET, "/trace/flow") => self.handle_trace_flow(req).await,
             (Method::GET, "/trace/flow.svg") => self.handle_trace_flow_svg(req).await,
+            (Method::DELETE, "/trace/history") => self.handle_trace_history_delete().await,
             (Method::GET, "/trace/events") => self.handle_trace_events(req).await,
             (Method::GET, "/probe") => self.handle_probe_list().await,
             (Method::GET, "/probe/result") => self.handle_probe_result(req).await,
@@ -1505,6 +1506,23 @@ impl ControlPlane {
                 trace_error(StatusCode::NOT_FOUND, absent.code, absent.note)
             }
         }
+    }
+
+    /// 诊断历史显式清除（RIL-064 留存面）：只删已关闭迹（活动流不拆），
+    /// 缺席答复从此带 `collector.flow.purged`。TTL 过期另有周期 sweeper
+    /// （runtime start 装配）——本端点是操作员的显式「立即清」。
+    async fn handle_trace_history_delete(&self) -> Response<RespBody> {
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let purged = self.runtime.trace_history_purge(now);
+        json(
+            StatusCode::OK,
+            &serde_json::json!({
+                "schema_version": 1u32,
+                "purged": purged,
+            }),
+        )
     }
 
     /// 事件增量读取（RIL-060）：缺席/未知 ID → 404 + 稳定码；limit=0
@@ -5143,6 +5161,110 @@ mod tests {
             v["error"]["context"],
             serde_json::json!("no record is not evidence of no traffic")
         );
+    }
+
+    /// 指标标签卫生检查（RIL-064）：标签键须在登记名单内（新增键必须
+    /// 改本名单过审）；值不得是 ip:port / 裸地址形态（逐连接高基数身份
+    /// 不得进标签）。返回首个违规（None = 干净）。
+    fn metrics_label_hygiene_violation(body: &str) -> Option<String> {
+        const ALLOWED: [&str; 14] = [
+            "direction", "egress", "from", "ingress", "mode", "name", "origin", "quantile",
+            "reason", "result", "source", "subscription", "to", "type",
+        ];
+        for line in body.lines() {
+            let Some((metric, rest)) = line.split_once('{') else {
+                continue;
+            };
+            let labels = rest.split('}').next().unwrap_or("");
+            for pair in labels.split(',') {
+                let Some((key, value)) = pair.split_once('=') else {
+                    return Some(format!("标签形态非法: {line}"));
+                };
+                let key = key.trim();
+                if !ALLOWED.contains(&key) {
+                    return Some(format!("未登记标签键 {key}（{metric}）"));
+                }
+                let value = value.trim().trim_matches('"');
+                if value.parse::<std::net::SocketAddr>().is_ok()
+                    || value.parse::<std::net::IpAddr>().is_ok()
+                {
+                    return Some(format!("标签值携带地址形态（高基数身份）: {key}={value}"));
+                }
+            }
+        }
+        None
+    }
+
+    /// RIL-064：指标标签卫生 + 清除端点走鉴权门。admin token 绝不出现
+    /// 在指标输出；标签键全集有界登记、值无地址形态（解析器自检：带
+    /// 地址标签的伪造行必须被抓——扫描面不是摆设）；DELETE 历史是
+    /// mutating：无 token 401、带 token 放行。
+    #[tokio::test]
+    async fn metrics_labels_are_bounded_and_purge_endpoint_requires_auth() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, Some("sekrit-token-1".into()), true);
+
+        let body = get_body(&cp, "/metrics").await;
+        assert!(
+            !body.contains("sekrit-token-1"),
+            "admin token 绝不进指标输出"
+        );
+        assert_eq!(
+            metrics_label_hygiene_violation(&body),
+            None,
+            "指标标签卫生不过关"
+        );
+        let bogus = "rillane_test_metric{remote=\"10.0.0.1:443\"} 1\n";
+        assert!(
+            metrics_label_hygiene_violation(bogus).is_some(),
+            "带地址标签的行必须被抓（解析器自检）"
+        );
+
+        // 清除端点是 mutating：无 token 401
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri("/trace/history")
+            .body(RespBody::new(Bytes::new()))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 带 token 放行（空采集器答 0）
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri("/trace/history")
+            .header("x-admin-token", "sekrit-token-1")
+            .body(RespBody::new(Bytes::new()))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// RIL-064：DELETE /trace/history 显式清历史——空采集器答 0（不造数），
+    /// 信封版本化
+    #[tokio::test]
+    async fn trace_history_delete_answers_versioned_purge_count() {        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri("/trace/history")
+            .body(RespBody::new(Bytes::new()))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["schema_version"], serde_json::json!(1));
+        assert_eq!(v["purged"], serde_json::json!(0), "空采集器不造清除数");
     }
 
     /// RIL-060：参数非法逐项显式拒绝——limit=0（内核 query.page.invalid）、

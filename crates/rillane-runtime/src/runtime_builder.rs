@@ -1448,6 +1448,33 @@ impl Runtime {
         let subscription_manager = self.subscription_manager.clone();
         let network_manager = self.network_manager.clone();
         let running = self.running.clone();
+
+        // RIL-064：诊断轨迹 TTL 清扫——「历史可过期」在生产装配的兑现
+        // 点（读路径不清账：无人读也不许滞留到天荒地老；容量兜底之外
+        // 再加时间界）。60s 周期、错过 tick 跳过——清扫是尽力而为的
+        // 维护面，不追账不阻塞。
+        {
+            let collector = self.trace_collector.clone();
+            let running = self.running.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut ticker = time::interval(Duration::from_secs(60));
+                ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+                loop {
+                    ticker.tick().await;
+                    if !*running.read().expect("running lock poisoned") {
+                        break;
+                    }
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_millis() as u64);
+                    collector
+                        .lock()
+                        .expect("trace collector poisoned")
+                        .sweep(now);
+                }
+                Ok::<(), anyhow::Error>(())
+            }));
+        }
         let stats_interval = self
             .runtime_config
             .stats_interval
@@ -1951,6 +1978,26 @@ impl Runtime {
             .expect("trace collector poisoned")
             .config()
             .clone()
+    }
+
+    /// 诊断轨迹 TTL 清扫单次调用（RIL-064；start() 的周期 sweeper 每
+    /// 60s 走一次——本方法是可测接缝，测试可直接注入墙钟）。返回本次
+    /// 过期条数。
+    pub fn trace_sweep_expired(&self, now_wall_ms: u64) -> usize {
+        self.trace_collector
+            .lock()
+            .expect("trace collector poisoned")
+            .sweep(now_wall_ms)
+    }
+
+    /// 诊断历史显式清除（RIL-064）：控制面 `DELETE /trace/history` 触发
+    /// ——只删已关闭迹（活动流不拆），缺席答复从此带
+    /// `collector.flow.purged`。返回删除条数。
+    pub fn trace_history_purge(&self, now_wall_ms: u64) -> usize {
+        self.trace_collector
+            .lock()
+            .expect("trace collector poisoned")
+            .purge_closed(now_wall_ms)
     }
 
     /// 获取入口 -> 出口的累计流量统计快照
@@ -4525,6 +4572,46 @@ mod tests {
         let connectors = runtime.get_egress_connectors();
         assert!(connectors.contains_key("n1"), "并发 merge 不得丢失增量 n1");
         assert!(connectors.contains_key("n2"), "并发 merge 不得丢失增量 n2");
+    }
+
+    // ---- RIL-064 诊断留存面 ----
+
+    /// 留存三面在装配上可见：配置快照（TTL 有界——「历史可过期」的配置
+    /// 事实）、TTL 清扫单次调用与显式清除（空采集器都答 0，不造数）。
+    /// 周期 sweeper 在 start() 装配（60s），本测钉可测接缝。
+    #[tokio::test]
+    async fn trace_retention_faces_are_wired() {
+        let cfg = source_test_config(
+            "127.0.0.1:0",
+            vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            vec![],
+            vec![],
+        );
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(RuntimeConfig {
+                enable_hot_reload: false,
+                ..RuntimeConfig::default()
+            })
+            .build()
+            .expect("build runtime");
+
+        let snap = runtime.trace_collector_config();
+        assert!(snap.enabled, "采集默认开启（开销对照的 default 档）");
+        assert!(snap.ttl_ms > 0, "TTL 有界可见——历史可过期的配置事实");
+        assert!(snap.capacity > 0 && snap.max_active_flows > 0, "容量双界可见");
+        assert_eq!(
+            runtime.trace_sweep_expired(9_000_000_000),
+            0,
+            "空采集器清扫不造数"
+        );
+        assert_eq!(
+            runtime.trace_history_purge(9_000_000_000),
+            0,
+            "空采集器清除不造数"
+        );
     }
 
     // ---- RIL-016 本地策略所有权：来源作用域合并 ----

@@ -40,6 +40,9 @@ pub const CODE_TRACE_GONE_ACTIVE_LIMIT: &str = "collector.flow.active_limit";
 pub const CODE_TRACE_GONE_SAMPLED_OUT: &str = "collector.flow.sampled_out";
 /// 稳定原因码：已关闭迹被订阅侧取走（合法离场——事件已交付订阅者）
 pub const CODE_TRACE_GONE_DRAINED: &str = "collector.flow.drained";
+/// 稳定原因码：历史被操作员显式清除（RIL-064 留存面——清除是显式
+/// 动作，缺席答复与「从未见过」分立）
+pub const CODE_TRACE_GONE_PURGED: &str = "collector.flow.purged";
 
 /// 一条流离开采集器的墓碑记录（有界——容量与环形缓冲一致）。查询面
 /// 据此区分「从未见过」与「见过但已离开」，离开原因显式。
@@ -395,6 +398,30 @@ impl FlowCollector {
             );
         }
         batch
+    }
+
+    /// 操作员显式清除历史（RIL-064 留存面）：删除全部已关闭迹（活动流
+    /// 保留——清历史不拆活动流），逐条墓碑化为 [`CODE_TRACE_GONE_PURGED`]
+    /// （此后查询该流答显式「已被清除」，与「从未见过」分立）。
+    /// 返回删除条数。
+    pub fn purge_closed(&mut self, now_wall_ms: u64) -> usize {
+        let (kept, purged): (Vec<_>, Vec<_>) = self.ring.drain(..).partition(|t| !t.closed);
+        self.ring = kept.into();
+        let removed = purged.len();
+        for trace in &purged {
+            let wall = trace
+                .events
+                .last()
+                .map(|e| e.wall_ms)
+                .unwrap_or(now_wall_ms);
+            self.entomb(
+                trace.flow.clone(),
+                CODE_TRACE_GONE_PURGED,
+                wall,
+                trace.events.len(),
+            );
+        }
+        removed
     }
 }
 
@@ -846,5 +873,63 @@ mod tests {
             RecordOutcome::Recorded,
             "活动迹在 drain 后仍可写"
         );
+    }
+
+    /// 显式清除历史（RIL-064）：只删已关闭迹、活动流保留；被清除流
+    /// 的缺席答复从此带 collector.flow.purged（与「从未见过」分立）
+    #[test]
+    fn purge_closed_removes_history_keeps_active_and_marks_tombstones() {
+        let mut collector = FlowCollector::new(config(8, 8, 8, 10_000, 1));
+        for id in ["done", "live"] {
+            collector.admit(
+                flow(id),
+                FlowOrigin::Stream,
+                "g",
+                TraceStage::Takeover,
+                "t",
+                EvidenceKind::Observed,
+                0,
+                1000,
+                "",
+            );
+        }
+        collector.finish(
+            &flow("done"),
+            "session.closed",
+            EvidenceKind::Observed,
+            50,
+            1050,
+            "",
+        );
+        assert_eq!(collector.purge_closed(2_000), 1, "只删已关闭迹");
+        assert_eq!(collector.stats().active_traces, 1, "活动流不被清除拆掉");
+        assert!(
+            collector.tombstone(&flow("done")).is_some(),
+            "被清除流留墓碑"
+        );
+        assert_eq!(
+            collector.tombstone(&flow("done")).unwrap().reason,
+            CODE_TRACE_GONE_PURGED
+        );
+        assert!(
+            collector.tombstone(&flow("never")).is_none(),
+            "从未见过的流没有墓碑——两态分立"
+        );
+        // 活动迹仍可写（清除不破坏活动面）
+        assert_eq!(
+            collector.record(
+                &flow("live"),
+                TraceStage::Transfer,
+                None,
+                "bytes",
+                EvidenceKind::Observed,
+                60,
+                1060,
+                ""
+            ),
+            RecordOutcome::Recorded
+        );
+        // 幂等：再清一次 = 0 条
+        assert_eq!(collector.purge_closed(2_100), 0);
     }
 }
