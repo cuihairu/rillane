@@ -120,6 +120,7 @@ pub fn dns_block_to_resolver_config(
         retries: cfg.retries,
         cache,
         tls_skip_verify: cfg.tls_skip_verify,
+        egress_mark: rillane_core::net_mark::egress_fwmark(),
     })
 }
 
@@ -135,6 +136,10 @@ pub struct DnsService {
     /// 静态 hosts 表（G2-15）：Some = 本地监听面 A/AAAA 查询命中直接应答
     /// 真实映射地址（优先于 fake-ip）；None = 无表（存量零差异）
     hosts: Option<Arc<rillane_core::hosts::DnsHosts>>,
+    /// 代际源（RIL-020 解析上下文）：Some = fake-ip 分配把当下配置代际
+    /// 写进绑定；None = 空代际（显式缺失）。发布协调器（RIL-019）接线
+    /// 后由运行时装配传入真实代际读数。
+    generation_source: Option<Arc<dyn Fn() -> String + Send + Sync>>,
     run: Mutex<Option<DnsServiceRun>>,
 }
 
@@ -164,8 +169,20 @@ impl DnsService {
             listen,
             fake_ip,
             hosts,
+            generation_source: None,
             run: Mutex::new(None),
         }
+    }
+
+    /// 注入代际源（RIL-020 解析上下文）：本地监听面 fake-ip 分配时取
+    /// 当下配置代际写进绑定（`FakeIpTable::reverse_with_context` 可读，
+    /// 路由据此挂正确代际建计划）。未注入 = 空代际。
+    pub fn with_generation_source(
+        mut self,
+        source: Arc<dyn Fn() -> String + Send + Sync>,
+    ) -> Self {
+        self.generation_source = Some(source);
+        self
     }
 
     /// fake-ip 池句柄（None = 未启用）——运行时装配把它交给入口面做
@@ -207,13 +224,16 @@ impl DnsService {
             anyhow::bail!("DNS 服务已在运行（listen {}）", self.listen);
         }
         let (tx, rx) = oneshot::channel();
-        let server = LocalDnsServer::new(
+        let mut server = LocalDnsServer::new(
             Arc::clone(&self.resolver),
             self.listen.ip(),
             self.listen.port(),
             self.fake_ip.clone(),
             self.hosts.clone(),
         );
+        if let Some(source) = self.generation_source.clone() {
+            server = server.with_generation_source(source);
+        }
         let task = tokio::spawn(async move { server.serve(rx).await });
         *run = Some(DnsServiceRun {
             _shutdown: tx,
@@ -506,6 +526,74 @@ mod tests {
         svc.stop().await.expect("stop 应成功");
         svc.stop().await.expect("未运行 stop 应 no-op Ok");
         svc.start().await.expect("stop 后重启应成功");
+        svc.stop().await.expect("收尾 stop 应成功");
+    }
+
+    /// RIL-020：解析器配置继承进程出站 fwmark（DNS 上游 socket 旁路面，
+    /// TUN include 下上游查询不进代理环）。mark 全局态测试内自复位。
+    #[test]
+    fn resolver_config_inherits_egress_fwmark() {
+        rillane_core::net_mark::set_egress_fwmark(0x5E45);
+        let base = block("default_group: trusted\ntrusted: ['223.5.5.5:53']");
+        let out = dns_block_to_resolver_config(&base, &[]).expect("转换应成功");
+        assert_eq!(out.egress_mark, 0x5E45, "转换面应继承进程出站 mark");
+        rillane_core::net_mark::set_egress_fwmark(0);
+        let out = dns_block_to_resolver_config(&base, &[]).expect("转换应成功");
+        assert_eq!(out.egress_mark, 0, "复位后回落不打 mark");
+    }
+
+    /// RIL-020 解析上下文端到端：DnsService 注入代际源 → A 查询得假地址
+    /// → 池表反查携带当下代际（路由面据此挂正确代际建计划）。
+    #[tokio::test]
+    async fn dns_service_wires_generation_source_into_fake_ip() {
+        let mock = spawn_mock().await;
+        let base = block("default_group: trusted\ntrusted: ['127.0.0.1:53']");
+        let mut resolver_cfg = dns_block_to_resolver_config(&base, &[]).expect("转换应成功");
+        resolver_cfg.trusted = vec![DnsUpstream::Udp(mock)];
+        let resolver = Arc::new(DnsResolver::new(resolver_cfg).expect("引擎装配应成功"));
+        let table = Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/15").unwrap());
+        let port = free_udp_port();
+        let gen_src: Arc<dyn Fn() -> String + Send + Sync> =
+            Arc::new(|| "gen-svc-7".to_string());
+        let svc = DnsService::new(
+            resolver,
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            Some(table.clone()),
+            None,
+        )
+        .with_generation_source(gen_src);
+        svc.start().await.expect("启动应成功");
+        let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli.connect(SocketAddr::from(([127, 0, 0, 1], port)))
+            .await
+            .unwrap();
+        let q = encode_query(0x0601, "ctx.example", DnsRecordType::A).expect("查询应可编码");
+        let mut raw = None;
+        for _ in 0..100 {
+            if cli.send(&q).await.is_err() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+            let mut buf = [0u8; 512];
+            if let Ok(Ok(n)) =
+                tokio::time::timeout(Duration::from_millis(200), cli.recv(&mut buf)).await
+            {
+                raw = Some(buf[..n].to_vec());
+                break;
+            }
+        }
+        let resp =
+            rillane_platform::network::dns_engine::decode_response(&raw.expect("应收到应答"))
+                .expect("应答应可解码");
+        assert_eq!(resp.rcode, 0);
+        let DnsAnswerData::A(ip) = resp.answers[0].data else {
+            panic!("应为 A 应答");
+        };
+        let ctx = table
+            .reverse_with_context(&ip)
+            .expect("池表应有绑定");
+        assert_eq!(ctx.domain, "ctx.example");
+        assert_eq!(ctx.generation_id, "gen-svc-7", "代际源应写进绑定");
         svc.stop().await.expect("收尾 stop 应成功");
     }
 }

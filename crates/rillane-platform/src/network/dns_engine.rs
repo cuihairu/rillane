@@ -697,6 +697,12 @@ pub struct ResolverConfig {
     pub cache: Option<DnsCacheConfig>,
     /// DoT/DoH 证书校验开关（缺省 false = 校验；回环测试置 true）
     pub tls_skip_verify: bool,
+    /// 出站 fwmark（RIL-020 DNS 上游 socket 旁路）：非 0 时上游 UDP/DoT
+    /// socket 打 SO_MARK 走逃逸表（net_mark 半边①配套 `ip rule fwmark`
+    /// 半边②）——TUN include 路由下 DNS 上游不被拽回代理环。0 = 不打
+    /// （存量零差异）；DoH 经 reqwest 无 socket 级入口，mark ≠ 0 时
+    /// 显式降级 warn（一次）。
+    pub egress_mark: u32,
 }
 
 /// DoT/DoH 共享 TLS 面（每解析器构造一次；connector + DoH HTTP 客户端）。
@@ -804,6 +810,8 @@ pub struct DnsResolver {
     inflight: tokio::sync::Mutex<InflightMap>,
     /// DoT/DoH 共享 TLS 面（无加密上游也构造——构造成本一次，避免逐查询判空）
     tls: DnsTlsCtx,
+    /// 出站 fwmark（RIL-020 上游 socket 旁路；0 = 不打）
+    egress_mark: u32,
 }
 
 /// singleflight 映射（见 DnsResolver::inflight 注）。
@@ -868,6 +876,7 @@ impl DnsResolver {
             stats: DnsStatsCounters::default(),
             query_ids: AtomicU16::new(0x4E00),
             inflight: tokio::sync::Mutex::new(HashMap::new()),
+            egress_mark: cfg.egress_mark,
             tls,
         })
     }
@@ -1034,6 +1043,7 @@ impl DnsResolver {
                     self.timeout,
                     &self.query_ids,
                     &self.tls,
+                    self.egress_mark,
                 )
                 .await
                 {
@@ -1073,6 +1083,7 @@ async fn query_upstream(
     timeout: Duration,
     ids: &AtomicU16,
     tls: &DnsTlsCtx,
+    egress_mark: u32,
 ) -> Result<DnsWireResponse, String> {
     match server {
         DnsUpstream::Udp(addr) => {
@@ -1082,36 +1093,64 @@ async fn query_upstream(
                 id,
                 &encode_query(id, domain, qtype).map_err(|e| format!("编码失败:{e}"))?,
                 timeout,
+                egress_mark,
             )
             .await
         }
         DnsUpstream::Dot { host, port, sni } => {
             let id = ids.fetch_add(1, Ordering::Relaxed);
             let packet = encode_query(id, domain, qtype).map_err(|e| format!("编码失败:{e}"))?;
-            dot_exchange(host, *port, sni, &packet, id, timeout, &tls.connector).await
+            let io = DotIo {
+                connector: &tls.connector,
+                egress_mark,
+            };
+            dot_exchange(host, *port, sni, &packet, id, timeout, &io).await
         }
         DnsUpstream::Doh { url } => {
+            if egress_mark != 0 {
+                warn_doh_unbypassed(url);
+            }
             let packet = encode_query(0, domain, qtype).map_err(|e| format!("编码失败:{e}"))?;
             doh_exchange(url, &packet, timeout, &tls.doh).await
         }
     }
 }
 
-/// 单上游 UDP 查询（临时端口 + connect 源过滤 + §5-E6 id 校验）
+/// DoH 旁路缺口显式降级（进程级一次）：reqwest 无 socket 级打点入口，
+/// mark ≠ 0 时 DoH 上游走系统栈（TUN include 下可能进隧道）——点名
+/// 原因与可用替代（UDP/DoT 上游已旁路），不静默。
+static DOH_UNBYPASSED_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+fn warn_doh_unbypassed(url: &str) {
+    if DOH_UNBYPASSED_WARNED.get().is_none()
+        && DOH_UNBYPASSED_WARNED.set(()).is_ok()
+    {
+        tracing::warn!(
+            target: "rillane::network",
+            %url,
+            "DoH 上游无 socket 级旁路入口（reqwest 不暴露 socket），egress_mark 对 DoH 不生效——TUN include 下 DoH 查询可能经隧道；需要旁路请改用 UDP/DoT 上游"
+        );
+    }
+}
+
+/// 单上游 UDP 查询（临时端口 + connect 源过滤 + §5-E6 id 校验）。
+/// socket 经 net_mark 旁路面建（RIL-020：mark ≠ 0 打 SO_MARK，TUN
+/// include 下查询不被拽回隧道；降级纪律同 net_mark）。
 async fn udp_exchange(
     server: SocketAddr,
     id: u16,
     packet: &[u8],
     timeout: Duration,
+    egress_mark: u32,
 ) -> Result<DnsWireResponse, String> {
     let bind = if server.is_ipv4() {
         "0.0.0.0:0"
     } else {
         "[::]:0"
     };
-    let sock = UdpSocket::bind(bind)
-        .await
+    let bind_addr: SocketAddr = bind.parse().expect("临时绑定地址恒法");
+    let std_sock = rillane_core::net_mark::bind_udp_marked(bind_addr, egress_mark)
         .map_err(|e| format!("绑定临时端口失败：{e}"))?;
+    let sock = UdpSocket::from_std(std_sock).map_err(|e| format!("socket 收编失败：{e}"))?;
     sock.connect(server)
         .await
         .map_err(|e| format!("连接 {server} 失败：{e}"))?;
@@ -1139,8 +1178,49 @@ async fn udp_exchange(
     Ok(resp)
 }
 
+/// DoT 对端连接（RIL-020 旁路面）：mark=0 走原生 `connect`（多候选
+/// 首胜语义零差异）；mark ≠ 0 时先落地 host 候选再逐个 marked 连接
+///（首个胜出；set_mark 失败降级由 net_mark 统一处理）。
+async fn connect_peer_marked(peer: &str, egress_mark: u32) -> Result<TcpStream, String> {
+    if egress_mark == 0 {
+        return TcpStream::connect(peer)
+            .await
+            .map_err(|e| format!("连接 {peer} 失败：{e}"));
+    }
+    let addrs = tokio::task::spawn_blocking({
+        let peer = peer.to_string();
+        move || {
+            std::net::ToSocketAddrs::to_socket_addrs(&peer)
+                .map(|i| i.collect::<Vec<_>>())
+                .map_err(std::io::Error::other)
+        }
+    })
+    .await
+    .map_err(|e| format!("解析任务失败：{e}"))?
+    .map_err(|e| format!("解析 {peer} 失败：{e}"))?;
+    let mut last: Option<std::io::Error> = None;
+    for addr in addrs {
+        match rillane_core::net_mark::connect_tcp_marked(addr, egress_mark).await {
+            Ok(s) => return Ok(s),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(format!(
+        "连接 {peer} 失败：{}",
+        last
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "无候选地址".to_string())
+    ))
+}
+
 /// DoT 交换（RFC 7858）：TCP+TLS 连接后逐消息 2 字节大端长度前缀。
 /// host 允许域名（连接期经系统解析器落地）；SNI = 配置 host。
+/// DoT 连接 IO 上下文（TLS 面 + 旁路 mark，RIL-020）。
+struct DotIo<'a> {
+    connector: &'a TlsConnector,
+    egress_mark: u32,
+}
+
 async fn dot_exchange(
     host: &str,
     port: u16,
@@ -1148,16 +1228,16 @@ async fn dot_exchange(
     packet: &[u8],
     id: u16,
     timeout: Duration,
-    connector: &TlsConnector,
+    io: &DotIo<'_>,
 ) -> Result<DnsWireResponse, String> {
     let peer = format!("{host}:{port}");
     let fut = async {
-        let tcp = TcpStream::connect(&peer)
-            .await
-            .map_err(|e| format!("连接 {peer} 失败：{e}"))?;
+        // RIL-020：连接经 net_mark 旁路面（mark ≠ 0 打 SO_MARK 逃逸）
+        let tcp = connect_peer_marked(&peer, io.egress_mark).await?;
         let name = rustls::pki_types::ServerName::try_from(sni.to_string())
             .map_err(|e| format!("SNI {sni:?} 非法：{e}"))?;
-        let mut stream = connector
+        let mut stream = io
+            .connector
             .connect(name, tcp)
             .await
             .map_err(|e| format!("{peer} TLS 握手失败：{e}"))?;
@@ -1258,6 +1338,10 @@ pub struct LocalDnsServer {
     /// 地址（不触上游、不经 fake-ip，优先级高于 fake-ip）；None = 无表，
     /// 存量行为零差异
     hosts: Option<Arc<rillane_core::hosts::DnsHosts>>,
+    /// 代际源（RIL-020 解析上下文）：Some = fake-ip 分配把当下配置代际
+    /// 身份写进绑定（`reverse_with_context` 可读，路由据此挂正确代际）；
+    /// None = 空代际（显式缺失，不伪造）。builder 注入，存量构造零差异。
+    generation_source: Option<Arc<dyn Fn() -> String + Send + Sync>>,
 }
 
 impl LocalDnsServer {
@@ -1274,7 +1358,19 @@ impl LocalDnsServer {
             local_port,
             fake_ip,
             hosts,
+            generation_source: None,
         }
+    }
+
+    /// 注入代际源（RIL-020 解析上下文）：fake-ip 分配时取当下配置代际
+    /// 身份写进绑定。运行时装配在发布协调器（RIL-019）接线后传入真实
+    /// 代际读数；未注入 = 空代际。
+    pub fn with_generation_source(
+        mut self,
+        source: Arc<dyn Fn() -> String + Send + Sync>,
+    ) -> Self {
+        self.generation_source = Some(source);
+        self
     }
 
     /// 监听地址
@@ -1313,8 +1409,18 @@ impl LocalDnsServer {
                         let resolver = self.resolver.clone();
                         let fake_ip = self.fake_ip.clone();
                         let hosts = self.hosts.clone();
+                        let generation_source = self.generation_source.clone();
                         tokio::spawn(async move {
-                            handle_dns_query(worker, peer, data, resolver, fake_ip, hosts).await;
+                            handle_dns_query(
+                                worker,
+                                peer,
+                                data,
+                                resolver,
+                                fake_ip,
+                                hosts,
+                                generation_source,
+                            )
+                            .await;
                         });
                     }
                     Err(e) => warn!("DNS 监听收包失败：{e}"),
@@ -1337,6 +1443,7 @@ async fn handle_dns_query(
     resolver: Arc<DnsResolver>,
     fake_ip: Option<Arc<rillane_core::fake_ip::FakeIpTable>>,
     hosts: Option<Arc<rillane_core::hosts::DnsHosts>>,
+    generation_source: Option<Arc<dyn Fn() -> String + Send + Sync>>,
 ) {
     let reply = match decode_query(&data) {
         Ok(q) => {
@@ -1364,20 +1471,34 @@ async fn handle_dns_query(
                     .collect();
                 encode_response(q.id, &q.domain, q.qtype, 0, &answers)
             } else if let (Some(table), DnsRecordType::A) = (fake_ip.as_ref(), q.qtype) {
-                let ip = table.alloc(&q.domain);
-                debug!("fake-ip 应答：{} → {ip}", q.domain);
-                encode_response(
-                    q.id,
-                    &q.domain,
-                    q.qtype,
-                    0,
-                    &[DnsAnswer {
-                        domain: q.domain.clone(),
-                        rtype: DnsRecordType::A,
-                        ttl: 1,
-                        data: DnsAnswerData::A(ip),
-                    }],
-                )
+                // RIL-020：分配挂解析上下文（代际源注入则取当下代际，未
+                // 注入空串=显式缺失）；池满且全钉住（活跃会话在用）→
+                // SERVFAIL，绝不转手在用地址
+                let generation = generation_source
+                    .as_ref()
+                    .map(|f| f())
+                    .unwrap_or_default();
+                match table.alloc_with_generation(&q.domain, &generation) {
+                    Ok(ip) => {
+                        debug!("fake-ip 应答：{} → {ip}（gen {generation:?}）", q.domain);
+                        encode_response(
+                            q.id,
+                            &q.domain,
+                            q.qtype,
+                            0,
+                            &[DnsAnswer {
+                                domain: q.domain.clone(),
+                                rtype: DnsRecordType::A,
+                                ttl: 1,
+                                data: DnsAnswerData::A(ip),
+                            }],
+                        )
+                    }
+                    Err(e) => {
+                        debug!("fake-ip 池耗尽（{e}），回 SERVFAIL");
+                        encode_response(q.id, &q.domain, q.qtype, 2, &[])
+                    }
+                }
             } else {
                 match resolver.resolve(&q.domain, q.qtype).await {
                     Ok(answers) => encode_response(q.id, &q.domain, q.qtype, 0, &answers),
@@ -1467,6 +1588,7 @@ impl EngineDnsHandler {
             retries: config.retries,
             cache: config.cache.clone(),
             tls_skip_verify: false,
+            egress_mark: 0,
         })?;
         Ok(Self {
             config: config.clone(),
@@ -1644,6 +1766,7 @@ mod tests {
             retries: 0,
             cache: Some(DnsCacheConfig::default()),
             tls_skip_verify: false,
+            egress_mark: 0,
         }
     }
 
@@ -2371,6 +2494,104 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
     }
 
+    /// RIL-020 解析上下文：代际源注入后 fake-ip 分配把当下代际写进绑定
+    ///（reverse_with_context 可读）；未注入 = 空代际显式缺失；池满全钉
+    /// → SERVFAIL（不转手在用地址）。
+    #[tokio::test]
+    async fn fake_ip_alloc_carries_generation_context_and_servfails_when_exhausted() {
+        let (mock, _hits) = spawn_mock(|d| (0, vec![v4(d, [8, 8, 4, 4], 120)])).await;
+        let cfg = ResolverConfig {
+            trusted: vec![DnsUpstream::Udp(mock)],
+            ..base_cfg()
+        };
+        let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
+        // /30 池恰 4 地址，便于打满
+        let table = Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/30").unwrap());
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let current = Arc::new(std::sync::Mutex::new("gen-live-1".to_string()));
+        let gen_src: Arc<dyn Fn() -> String + Send + Sync> = {
+            let reader = current.clone();
+            Arc::new(move || reader.lock().unwrap().clone())
+        };
+        let server = LocalDnsServer::new(
+            resolver,
+            "127.0.0.1".parse().unwrap(),
+            port,
+            Some(table.clone()),
+            None,
+        )
+        .with_generation_source(gen_src);
+        let (tx, rx) = oneshot::channel();
+        let task = tokio::spawn(server.serve(rx));
+        let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli.connect(SocketAddr::from(([127, 0, 0, 1], port)))
+            .await
+            .unwrap();
+        // 分配 4 个域名（打满 /30 池），代际读数应进绑定
+        async fn query(cli: &UdpSocket, id: u16, domain: &str) -> DnsWireResponse {
+            let q = encode_query(id, domain, DnsRecordType::A).unwrap();
+            cli.send(&q).await.unwrap();
+            let mut raw = [0u8; 512];
+            let n = tokio::time::timeout(Duration::from_secs(2), cli.recv(&mut raw))
+                .await
+                .expect("监听应答查询")
+                .unwrap();
+            decode_response(&raw[..n]).unwrap()
+        }
+        let mut fakes = Vec::new();
+        for i in 1..=4 {
+            let resp = query(&cli, 0x20 + i, &format!("d{i}.test")).await;
+            assert_eq!(resp.rcode, 0, "打满前应答 NOERROR");
+            let DnsAnswerData::A(ip) = resp.answers[0].data else {
+                panic!("应为 A 应答");
+            };
+            fakes.push(ip);
+        }
+        let ctx = table.reverse_with_context(&fakes[0]).expect("应有上下文");
+        assert_eq!(ctx.domain, "d1.test");
+        assert_eq!(ctx.generation_id, "gen-live-1", "代际源读数应进绑定");
+
+        // 钉满全池 → 新域名 SERVFAIL（不转手在用地址）
+        for ip in &fakes {
+            assert!(table.pin(ip), "钉住在用地址");
+        }
+        let resp = query(&cli, 0x30, "overflow.test").await;
+        assert_eq!(resp.rcode, 2, "全钉住耗尽应 SERVFAIL");
+        assert!(resp.answers.is_empty());
+
+        // 关桥排空
+        drop(tx);
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    }
+
+    /// RIL-020 上游 socket 旁路：egress_mark ≠ 0 时 UDP 上游查询走
+    /// net_mark 建连面（无 CAP 环境 set_mark 失败降级普通 socket）——
+    /// mark 全局态串行化同 net_mark 测试纪律。
+    #[tokio::test]
+    async fn resolver_with_egress_mark_still_resolves_via_marked_path() {
+        let (mock, hits) = spawn_mock(|d| (0, vec![v4(d, [9, 9, 9, 9], 60)])).await;
+        let cfg = ResolverConfig {
+            trusted: vec![DnsUpstream::Udp(mock)],
+            egress_mark: 0x5E45,
+            ..base_cfg()
+        };
+        let resolver = DnsResolver::new(cfg).unwrap();
+        let answers = resolver
+            .resolve("marked.test", DnsRecordType::A)
+            .await
+            .expect("mark ≠ 0（降级或真打）都应解析成功");
+        assert_eq!(
+            answers[0].data,
+            DnsAnswerData::A(Ipv4Addr::new(9, 9, 9, 9))
+        );
+        assert!(
+            hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "上游应收到查询"
+        );
+    }
+
     /// G2-15 hosts 映射：A/AAAA 命中按映射直答真实地址（不触上游、不经
     /// fake-ip，TTL 1）；名命中族不符 → 空 NOERROR 不泄上游；未命中回落
     /// 既有路径（A → fake-ip 池段、AAAA → 上游）；hosts 优先于 fake-ip
@@ -2662,6 +2883,7 @@ mod tests {
                 sni: "localhost".into(),
             }],
             tls_skip_verify: true,
+            egress_mark: 0,
             ..base_cfg()
         };
         let r = DnsResolver::new(cfg).unwrap();
@@ -2727,6 +2949,7 @@ mod tests {
                 url: format!("https://127.0.0.1:{port}/dns-query"),
             }],
             tls_skip_verify: true,
+            egress_mark: 0,
             ..base_cfg()
         };
         let r = DnsResolver::new(cfg).unwrap();

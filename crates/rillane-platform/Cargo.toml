@@ -17,7 +17,8 @@ bytes.workspace = true
 thiserror.workspace = true
 winapi = { version = "0.3", optional = true }
 dns-lookup = "3.0"
-socket2 = "0.5"
+# set_mark（SO_MARK 旁路面，RIL-020 DNS 上游）在 "all" feature 下
+socket2 = { version = "0.5", features = ["all"] }
 network-interface = "2.0"
 futures.workspace = true
 regex.workspace = true

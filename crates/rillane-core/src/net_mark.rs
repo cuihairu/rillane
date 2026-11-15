@@ -35,6 +35,87 @@ pub fn egress_fwmark() -> u32 {
     EGRESS_FWMARK.load(Ordering::Relaxed)
 }
 
+/// SO_MARK 设置失败的降级警告（进程级一次；TCP/UDP 共用，语义同一：
+/// 逃逸需 CAP_NET_ADMIN，降级不因逃逸功能自爆）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn warn_mark_downgrade(error: std::io::Error) {
+    #[cfg(target_os = "linux")]
+    {
+        if MARK_DOWNGRADE_WARNED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            tracing::warn!(
+                error = %error,
+                "SO_MARK 设置失败，降级普通 socket（逃逸需 CAP_NET_ADMIN）"
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = error;
+}
+
+/// 出站 UDP socket 统一入口（RIL-020 DNS 上游旁路面）：绑定本地地址并
+/// 按 [`egress_fwmark`] 纪律打 SO_MARK——TUN include 路由下 DNS 上游
+/// 查询不被拽回隧道（DNS 不进代理环的 socket 侧落地）。
+///
+/// - `mark == 0` 或非 Linux：普通 bind（存量零差异）；
+/// - `mark != 0`（Linux）：socket2 建 socket → `set_mark` → bind；
+///   set_mark 失败（缺 CAP_NET_ADMIN）→ warn 一次降级普通 bind；
+/// - 返回 std socket（已 nonblocking，调用方 `tokio::from_std` 收编）。
+pub fn bind_udp_marked(
+    bind: std::net::SocketAddr,
+    mark: u32,
+) -> std::io::Result<std::net::UdpSocket> {
+    #[cfg(target_os = "linux")]
+    if mark != 0 {
+        let domain = if bind.is_ipv4() {
+            socket2::Domain::IPV4
+        } else {
+            socket2::Domain::IPV6
+        };
+        let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+        sock.set_nonblocking(true)?;
+        if let Err(e) = sock.set_mark(mark) {
+            drop(sock);
+            warn_mark_downgrade(e);
+        } else {
+            sock.bind(&bind.into())?;
+            return Ok(sock.into());
+        }
+    }
+    let _ = mark;
+    let sock = std::net::UdpSocket::bind(bind)?;
+    sock.set_nonblocking(true)?;
+    Ok(sock)
+}
+
+/// 单地址出站 TCP 连接，显式携带 mark（RIL-020：DNS DoT 上游旁路面）。
+///
+/// - `mark == 0` 或非 Linux：`TcpStream::connect`（零差异）；
+/// - `mark != 0`（Linux）：SO_MARK 建连（set_mark 失败 warn 一次降级
+///   普通 connect；语义对齐 [`connect_tcp`] 单候选路径，含 EINPROGRESS
+///   收敛）。
+#[cfg(target_os = "linux")]
+pub async fn connect_tcp_marked(
+    addr: std::net::SocketAddr,
+    mark: u32,
+) -> std::io::Result<TcpStream> {
+    if mark == 0 {
+        return TcpStream::connect(addr).await;
+    }
+    connect_addr_marked(addr, mark).await
+}
+
+/// 非 Linux：无 SO_MARK 面，直连（降级语义，行为同 mark 0）。
+#[cfg(not(target_os = "linux"))]
+pub async fn connect_tcp_marked(
+    addr: std::net::SocketAddr,
+    _mark: u32,
+) -> std::io::Result<TcpStream> {
+    TcpStream::connect(addr).await
+}
+
 /// 出站 TCP 连接统一入口（direct/proxy 各 connector、mesh 拨号面共用）。
 ///
 /// - 解析：`std::net::ToSocketAddrs` 在 `spawn_blocking`；`A: Send + 'static`
@@ -184,12 +265,7 @@ async fn connect_one(addr: std::net::SocketAddr) -> std::io::Result<TcpStream> {
     let _active = ActiveConnectGuard::new();
     #[cfg(test)]
     gate_wait(addr).await;
-    let mark = egress_fwmark();
-    if mark != 0 {
-        connect_addr_marked(addr, mark).await
-    } else {
-        TcpStream::connect(addr).await
-    }
+    connect_tcp_marked(addr, egress_fwmark()).await
 }
 
 #[cfg(test)]
@@ -255,17 +331,8 @@ async fn connect_addr_marked(addr: std::net::SocketAddr, mark: u32) -> std::io::
     let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
     sock.set_nonblocking(true)?;
     if let Err(e) = sock.set_mark(mark) {
-        if MARK_DOWNGRADE_WARNED
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            tracing::warn!(
-                mark,
-                error = %e,
-                "SO_MARK 设置失败，降级直连（逃逸需 CAP_NET_ADMIN）"
-            );
-        }
         drop(sock);
+        warn_mark_downgrade(e);
         return TcpStream::connect(addr).await;
     }
     // 非阻塞 connect：进行中与即刻成败都收敛到下方等待；即刻失败（如
@@ -524,5 +591,73 @@ mod tests {
         hang_gate.notify_waiters();
         server.abort();
         gate_clear();
+    }
+
+    /// RIL-020 DNS 上游旁路面：mark=0 普通 bind 零差异，收发走通。
+    #[tokio::test]
+    async fn bind_udp_marked_zero_mark_is_plain_usable() {
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let peer = server.local_addr().unwrap();
+        let bound = bind_udp_marked("127.0.0.1:0".parse().unwrap(), 0)
+            .expect("mark 0 普通 bind 应成功");
+        let client = tokio::net::UdpSocket::from_std(bound).unwrap();
+        client.send_to(b"ping", peer).await.unwrap();
+        let mut buf = [0u8; 4];
+        let (n, _) = server.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"ping");
+    }
+
+    /// RIL-020：mark ≠ 0 须 bind 成功可用——root/CAP 在则真打 mark，
+    /// 否则降级普通 bind（两态都可用，不因逃逸面自爆解析）。
+    #[test]
+    fn bind_udp_marked_nonzero_usable_in_both_modes() {
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let peer = server.local_addr().unwrap();
+        let bound = bind_udp_marked("127.0.0.1:0".parse().unwrap(), 0x5E45)
+            .expect("降级/真打 mark 都应 bind 成功");
+        bound.send_to(b"ok", peer).expect("发送可用");
+        let mut buf = [0u8; 2];
+        let (n, _) = server.recv_from(&mut buf).expect("对端可收");
+        assert_eq!(&buf[..n], b"ok");
+    }
+
+    /// RIL-020：connect_tcp_marked mark=0 与普通连接等价（回环 echo）。
+    #[tokio::test]
+    async fn connect_tcp_marked_zero_mark_plain_usable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 3];
+            s.read_exact(&mut buf).await.unwrap();
+            s.write_all(&buf).await.unwrap();
+        });
+        let mut c = connect_tcp_marked(addr, 0)
+            .await
+            .expect("mark 0 普通连接应成功");
+        c.write_all(b"hey").await.unwrap();
+        let mut buf = [0u8; 3];
+        c.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hey");
+        server.await.unwrap();
+    }
+
+    /// RIL-020：connect_tcp_marked mark ≠ 0 连接可用（root 真打 mark /
+    /// 无 CAP 降级，两态都连通；SO_MARK 读回断言已由 marked_connect_
+    /// sets_mark_readable_as_root 覆盖，此处只钉可用性）。
+    #[tokio::test]
+    async fn connect_tcp_marked_nonzero_usable_in_both_modes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2];
+            let _ = s.read_exact(&mut buf).await;
+        });
+        let mut c = connect_tcp_marked(addr, 0x5E45)
+            .await
+            .expect("降级/真打 mark 都应连通");
+        c.write_all(b"go").await.unwrap();
+        server.await.unwrap();
     }
 }
