@@ -131,3 +131,5 @@ Game diagnostics include UDP association/mapping lifecycle, endpoint changes, di
 First delivery must reproduce uncaptured or sampled/expired records, wrong-rule selection, permitted A-timeout-to-B fallback, and expired UDP mapping recreation. Each case shows inputs, observed events, simulation differences and unknowns, consistently across CLI/JSON and later MCP. Separate managed Mesh, proxy endpoints and Internet L3 probes; do not infer provider internal routing.
 
 This is the v1 implementation specification. Exact API/CLI schemas freeze with their tasks; Windows/macOS identity and Apple packet bridging still require spikes and device evidence.
+
+See [v1 IO and accounting contracts](io-and-accounting.md) for inbound/outbound boundaries, ownership, transport composition and layered counters.

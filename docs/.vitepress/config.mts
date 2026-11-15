@@ -7,6 +7,7 @@ function locale(zh: boolean): DefaultTheme.Config {
     page(zh ? 'v1 设计入口' : 'v1 design index', '/design/'),
     page(zh ? 'v1 架构设计' : 'v1 architecture design', '/design/architecture-v1'),
     page(zh ? '架构概念与抽象依据' : 'Concepts and rationale', '/design/architecture-concepts'),
+    page(zh ? '接入、出口与统计契约' : 'IO and accounting contracts', '/design/io-and-accounting'),
     page(zh ? 'Debug、路径与 MCP' : 'Debug, paths and MCP', '/design/debug-and-mcp'),
     page(zh ? '竞品架构研究与 SVG' : 'Architecture study and SVGs', '/research/proxy-architectures-2026-11-14'),
   ]

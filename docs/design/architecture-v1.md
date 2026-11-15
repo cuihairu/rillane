@@ -169,7 +169,7 @@ Start with interfaces/modules; split crates only for measurable dependency or re
 
 ## 10. Migration and acceptance
 
-RV1 items are architectural indexes. The **single atomic execution backlog is repository-root `todo.md`, RIL-001–RIL-095**. It replaces the old checklist; history stays in Git. Use atomic task commits, fixtures and device evidence rather than independently marking RV1 complete.
+RV1 items are architectural indexes. The **single atomic execution backlog is repository-root `todo.md`, RIL-001–RIL-103**. It replaces the old checklist; history stays in Git. Use atomic task commits, fixtures and device evidence rather than independently marking RV1 complete.
 
 | ID | Priority | Work package | Depends on | Gate |
 |---|---|---|---|---|
@@ -213,3 +213,5 @@ P0 covers first user value, core foundations and risk spikes; P1 covers later co
 - **M4/M5: Debug, read-only MCP, controlled writes and other platforms.** Deliver through independent gates; reads do not wait for writes, and each platform can validate without all others finishing.
 
 Six-platform summaries/full-scope documentation are closing evidence, not a universal lock on intermediate deliveries. Mesh enhancement may wait; insecure existing paths must still reject. Candidates do not imply stable-release authorization. Missing device evidence remains unverified.
+
+See [v1 IO and accounting contracts](io-and-accounting.md) for inbound/outbound boundaries, ownership, transport composition and layered counters.

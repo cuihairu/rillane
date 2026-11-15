@@ -1,0 +1,75 @@
+# v1 接入、出口、会话与流量统计契约
+
+状态：**设计提案，接口尚未整体实现**。本页细化 C03/C21～C24/C31，作为 [v1 架构](architecture-v1.md)的配套契约。现有类型应渐进迁移，完成过的基础任务不因此重新打开。
+
+## 1. 依赖方向与职责
+
+```text
+Listener / CapturePort → Inbound → PendingSession
+                                     ↓
+                           SessionExecutor → Router → RoutePlan
+                                     ↓
+                                  Outbound
+                                     ↓
+                     UnderlayDialer / 协议要求的传输组合
+```
+
+| 抽象 | 输入/输出与职责 | 为什么独立 |
+|---|---|---|
+| InboundSpec / Factory | 配置 → 已验证入口；认证、准入、监听与接管装配 | 入口配置不参与出口选择 |
+| Listener / CapturePort | socket / IP 包 → 协议或网络栈 | 接管与代理协议、身份查询的权限不同 |
+| InboundProtocol | 客户端握手 → 目标、身份及待接入会话 | 保留协议回复、认证和报文解析语义 |
+| EndpointSpec / OutboundFactory | 不可变节点配置、凭证引用 → 已验证出口实例 | 订阅字段和跨字段校验不进入每次转发 |
+| StreamOutbound / DatagramOutbound | 目标 + OpenContext → 字节流 / 数据报关联 | 建立通道与业务搬运分开，TCP/UDP 生命周期不同 |
+| UnderlayDialer | 地址/拨号选项 → 底层连接 | DNS、接口绑定、旁路由平台端口实现 |
+| StreamTransport | 底层流 → TLS/WS/gRPC/HTTPUpgrade 等承载 | 实现共享，但排列/支持组合由装配器验证 |
+| SessionExecutor | 接入会话 + RoutePlan → 建立出口、确认接入、转发和关闭 | 统一取消、背压、预算、回退和会话统计 |
+| ResourcePool | 有类型资源 → 预热/独占租借/多路复用子流 | 已绑定目标、单次消费和可多路复用资源不可混用 |
+| TrafficMeter / SessionObserver | 轻量计数 / 低频阶段事件 → 指标与诊断服务 | 统一口径，避免统计反向控制路由或阻塞转发 |
+
+接口数量按真实复用需要确定，不要求每个概念都建立 trait/crate。Hysteria2 可自己持有 QUIC 会话，WireGuard 可持有隧道资源；向上提供通道能力，不强迫所有协议走相同的字节流套娃。
+
+## 2. 接入确认与通道所有权
+
+SOCKS5 CONNECT / HTTP CONNECT 采用两阶段接入：认证/解析目标 → PendingStream → 路由/建立出口 → 成功回复 → AcceptedStream → 双向转发。出口失败时 InboundResponder 将结构化错误映射为入口协议错误，不能先报告连接成功。现有 IngressEndpoint.run(router, output) 通过适配器逐步迁移，不同时维护两套会话执行器。
+
+PendingStream 独占客户端通道和 responder。accept/reject 消费 responder，只执行一次；取消/超时关闭资源，不重复回复。成功回复失败时立即释放已建立出口。OpenedStream 持有协议包装 IO 与实际端点/传输/握手结果，协议加密/分帧状态随 IO 生命周期存在，不泄露给普通复制循环。
+
+OpenContext 包含 session_id、attempt_id、generation_id、截止时间、取消和拨号策略引用；它不持有可任意重新求值的 Router。出口只做一次建立尝试，SessionExecutor 按 RoutePlan 执行允许的回退。已发生业务数据交换后不得盲目重放到另一出口，失败边界必须显式声明。
+
+错误至少携带阶段、稳定原因码、可重试性、证据类型和脱敏上下文。统一 ConnectFailure 不向客户端暴露节点凭证或底层秘密；超时只说明观测阶段，不能自动断言故障责任。
+
+## 3. UDP 与 TUN
+
+DatagramAssociation 明确固定目标/多目标、最大数据报长度、源验证、空闲/存活期限和关闭语义。SOCKS5 UDP 的控制连接关联客户端准入与多个目标映射；控制连接结束后按契约回收。不能把多个目标全部绑定到一次 TCP 风格的路由决策，目标映射按自己的计划保持出口粘性。
+
+TUN 经用户态网络栈产出 TCP 会话或 UDP 数据报，TCP 回复由网络栈驱动，不使用 SOCKS5 responder。进程身份由 OwnerResolver 注入证据，TUN 不天然提供 PID。入口只管理认证/握手/准入资源，建立后的会话预算由 SessionExecutor 管理。
+
+## 4. 能力、传输与资源池
+
+能力由实现提供并由 Factory 合并校验，包含流/数据报、传输组合、数据报大小、目标绑定、预热与多路复用。当前 UDP/TCP 支持表不应在订阅器、runtime 扫描和协议类中独立复制。静态不支持在装配期诊断，权限/网络变化等动态失败在建立期按类型报告。
+
+VLESS over WS over TLS 的一次合法路径：Dialer 建 TCP → TLS → WS → VLESS 目标握手 → 业务通道。此顺序是协议要求，不是任意 middleware 排列。平台旁路在打开底层 socket 时施加，不能等协议包装后补救。
+
+池区分未使用的预热连接（取出即消费）、独占/已绑定目标通道（按协议判断是否可回收）、可多路复用会话（创建子流）。池键包含代际/节点身份、目标绑定和相关传输/安全配置；不同租户/凭证不能混借。TLS 会话恢复与连接复用分别管理，密钥留在资源侧。初始化、drain、取消和关闭均有明确资源所有者。
+
+## 5. 分层统计与统一口径
+
+| 边界 | 采集内容 | 用途 |
+|---|---|---|
+| Inbound | 接入数、认证/准入失败、入口归属的业务字节 | 用户、设备、入口负载 |
+| Session | 上下行业务字节、时长、目标/规则/场景和结束原因 | 统一业务总量与逐流分析 |
+| Outbound / attempt | 建连/握手耗时、失败/回退、实际出口归属、UDP 丢弃 | 节点质量与负载 |
+| Transport / Dialer | 可测底层字节、握手封装、连接池命中 | 分析传输开销，不能冒充网卡/IP 总流量 |
+
+业务字节在语义等价的业务通道边界设唯一权威计数器；普通流通常由转发循环计数，协议专有传输由适配器提供等价计数。入口/出口是同一业务流量的归属视图，不把两端相加作为总使用量。上下行统一按客户端→目标/目标→客户端定义，不能随 socket 读写方向翻转。
+
+计数明确 measurement_layer、方向和计数语义：本地读取/成功写入/丢弃分别定义，部分写只累加实际字节，重试不能重复统计业务总量。零长度 UDP 仍是一条报文；发送成功不证明对端已收到。底层加密/握手开销单独记录，无法观测的网络头/重传保持未知。
+
+A 建连失败后回退 B：A 记录 attempt 失败与真实底层开销，实际承载的业务归属 B；会话总量只累计一次。系统主动探测标记 traffic_origin=probe，预热标记 prewarm，与用户业务分别汇总；共享多路复用资源的公共开销无法准确摊分时计入共享资源，不伪造每流精度。
+
+TrafficMeter 走有界维度的轻量计数，SessionObserver 记录建立、握手、回退、关闭等低频事件；不为每次读写创建 TraceEvent。session_id/attempt_id、域名/路径等高基数信息保留在受限逐流视图，不进入 Prometheus 标签。统计关闭或慢消费者不能阻塞转发。字段权限/脱敏沿用 [Debug/MCP](debug-and-mcp.md)。
+
+## 6. 迁移验收
+
+先冻结契约和所有权，再通过现有入口/出口适配；基础能力复用现有已完成任务。验证成功/失败协议回复、取消、半关闭、部分写、UDP 多目标/零长度、池租借隔离与回退不重放。使用同一负载核对会话权威总量和入口/出口维度汇总；底层统计与业务统计分别报告。原子任务 RIL-096～103 维护在根目录 todo.md，本页不宣称接口已落地。

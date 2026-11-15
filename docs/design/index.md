@@ -6,6 +6,7 @@ This directory maintains only the current v1 design. **Proposal, not implemented
 |---|---|
 | [v1 architecture design](architecture-v1.md) | Six platforms, Clash compatibility, local process routing, concurrent scenarios, generations, ownership and independent delivery gates |
 | [Concepts and rationale](architecture-concepts.md) | Responsibilities, rationale, benefits and costs of 32 core concepts |
+| [IO and accounting contracts](io-and-accounting.md) | Inbound/outbound, executor, transport/pools and business/underlying accounting |
 | [Debug, paths and optional MCP](debug-and-mcp.md) | Explanation, actual traces, active probes, privacy, authority and configuration lifecycle |
 | [Upstream architecture study](../research/proxy-architectures-2026-11-14.md) | Primary evidence, SVGs and influences from Mihomo, sing-box and Surge |
 

@@ -121,3 +121,5 @@ PacketPort.read_batch(deadline) / write_batch(packets)
 在这些证据产生之前，“更合理”表示边界和验收更清楚，不表示已证明比 Mihomo、sing-box 或 Surge 更快。
 
 C31 的细化见 [Debug、路径解释与可选 MCP](debug-and-mcp.md)：RouteExplanation、FlowTrace/TraceEvent、ProbeJob、DiagnosticView、ConfigProposal/ApplyReceipt、MCPAdapter，分别说明职责、抽象理由、收益、成本与安全边界。
+
+接入/出口接口、会话所有权、合法传输组合与分层流量统计统一见 [v1 IO 与统计契约](io-and-accounting.md)。

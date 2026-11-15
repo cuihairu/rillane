@@ -109,3 +109,5 @@ Ports support deadlines/cancellation and do not assume identical OS abilities. S
 Before this evidence exists, a more reasonable architecture means clearer boundaries and acceptance criteria, not proven superiority over Mihomo, sing-box or Surge.
 
 See [Debugging, path explanation and optional MCP](debug-and-mcp.md) for C31 refinements: RouteExplanation, FlowTrace/TraceEvent, ProbeJob, DiagnosticView, ConfigProposal/ApplyReceipt and MCPAdapter, with rationale, costs and boundaries.
+
+See [v1 IO and accounting contracts](io-and-accounting.md) for inbound/outbound boundaries, ownership, transport composition and layered counters.
