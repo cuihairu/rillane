@@ -3496,6 +3496,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: None,
         }
@@ -3554,6 +3555,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: Some(rillane_config::EgressPoolBlock {
                 enabled: true,

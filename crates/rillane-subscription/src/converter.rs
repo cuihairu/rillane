@@ -1747,6 +1747,7 @@ proxies:
                 network: None,
                 obfuscation: None,
                 profile: None,
+                scenarios: Default::default(),
                 performance: None,
                 egress_pool: None,
             },

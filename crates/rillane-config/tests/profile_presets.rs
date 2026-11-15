@@ -166,3 +166,145 @@ fn expansion_is_idempotent() {
     assert!(!obfs.enabled, "显式 enabled: false 恒优先，profile 不覆盖");
     assert_eq!(obfs.padding, None, "显式块内联形状不被模板改写");
 }
+
+// ---- RIL-017：并列场景策略（scenarios）与旧 profile 迁移 ----
+
+/// 场景并列展开：game + web 同时声明——两组板并立（game-auto/web-auto）、
+/// 规则各归各组、game 混淆与 web 连接池同时填充。
+#[test]
+fn scenarios_parallel_expansion_game_and_web() {
+    let yaml = format!(
+        "{BASE_YAML}scenarios:\n  game: {{}}\n  web: {{}}\n"
+    );
+    let cfg: RillaneConfig =
+        RillaneConfig::from_str(&yaml, Some("yaml")).expect("scenarios 应可解析");
+    assert!(cfg.profile.is_none(), "新配置不再由单枚举控制");
+
+    // 两组板并立
+    let names: Vec<&str> = cfg.routing.groups.iter().map(|g| g.name.as_str()).collect();
+    assert!(names.contains(&"game-auto"), "game 模板组在场: {names:?}");
+    assert!(names.contains(&"web-auto"), "web 模板组在场: {names:?}");
+
+    // 规则各归各组
+    assert!(
+        cfg.routing
+            .rules
+            .iter()
+            .any(|r| r.target == "game-auto"),
+        "game 规则模板 target 归 game-auto"
+    );
+    assert!(
+        cfg.routing
+            .rules
+            .iter()
+            .any(|r| r.target == "web-auto"),
+        "web 规则模板 target 归 web-auto"
+    );
+
+    // 场景块同时填充
+    let obfs = cfg.obfuscation.as_ref().expect("game 场景填混淆");
+    assert!(obfs.enabled);
+    let pool = cfg.egress_pool.as_ref().expect("web 场景填连接池");
+    assert!(pool.enabled);
+
+    // game slo 面不变（与单场景展开一致）
+    let game = cfg
+        .routing
+        .groups
+        .iter()
+        .find(|g| g.name == "game-auto")
+        .expect("game-auto 在场");
+    let slo = game.slo.as_ref().expect("game 组带 slo");
+    assert_eq!(slo.p95_ms, Some(80));
+}
+
+/// 旧配置可读：`profile: game` 仍解析并按原语义展开；迁移诊断显式携带
+/// （from_str 丢弃、from_str_with_diagnostics 可观察）。
+#[test]
+fn legacy_profile_readable_with_migration_diagnostics() {
+    let (cfg, diags) = RillaneConfig::from_str_with_diagnostics(
+        &base_with_profile("game"),
+        Some("yaml"),
+    )
+    .expect("旧配置可读");
+    assert_eq!(cfg.profile, Some(ProfileKind::Game));
+    assert_eq!(cfg.routing.groups.len(), 1);
+    assert_eq!(cfg.routing.groups[0].name, "game-auto");
+    assert_eq!(diags.len(), 1, "迁移诊断恰一条: {diags:?}");
+    assert!(
+        diags[0].contains("profile") && diags[0].contains("scenarios"),
+        "诊断点名两面: {:?}",
+        diags[0]
+    );
+
+    // 新配置无诊断
+    let (_, diags) = RillaneConfig::from_str_with_diagnostics(
+        &format!("{BASE_YAML}scenarios:\n  game: {{}}\n"),
+        Some("yaml"),
+    )
+    .expect("新配置可读");
+    assert!(diags.is_empty(), "新面无迁移诊断: {diags:?}");
+}
+
+/// 两面同时声明 = 迁移未完成，解析期拒绝（二选一）。
+#[test]
+fn profile_and_scenarios_together_rejected() {
+    let yaml = format!("{BASE_YAML}profile: game\nscenarios:\n  web: {{}}\n");
+    let err = RillaneConfig::from_str(&yaml, Some("yaml"))
+        .expect_err("两面同时声明须拒绝");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("profile") && msg.contains("scenarios") && msg.contains("二选一"),
+        "拒绝理由点名两面: {msg}"
+    );
+}
+
+/// 用户自建同名组在场：模板退让（显式恒优先），并列展开幂等。
+#[test]
+fn scenarios_user_group_wins_and_idempotent() {
+    // 用户自带 game-auto 组 + 规则：模板不再填（显式恒优先）
+    let yaml = r#"
+control:
+  api_bind: 127.0.0.1:9090
+telemetry:
+  log_level: info
+  enable_metrics: true
+  enable_tracing: false
+ingress: []
+egress: []
+routing:
+  default_node: direct
+  groups:
+    - name: game-auto
+      strategy: fixed
+      members:
+        - direct
+  rules:
+    - name: mine
+      matches:
+        - type: domain_suffix
+          values: [example.com]
+      target: game-auto
+scenarios:
+  game: {}
+"#;
+    let cfg: RillaneConfig =
+        RillaneConfig::from_str(yaml, Some("yaml")).expect("应可解析");
+    assert_eq!(cfg.routing.groups.len(), 1, "模板组不重复填");
+    assert!(
+        matches!(cfg.routing.groups[0].strategy, rillane_config::Strategy::Fixed),
+        "用户策略不被覆盖"
+    );
+    assert_eq!(cfg.routing.rules.len(), 1, "模板规则不重复填");
+    // 用户未显式声明混淆/池时 game 场景仍填充缺省块（缺省填充语义不变）
+    assert!(cfg.obfuscation.is_some(), "game 缺省混淆仍填充");
+}
+
+/// 空 scenarios 不落盘（skip_serializing_if），存量序列化形态零差异。
+#[test]
+fn empty_scenarios_not_serialized() {
+    let cfg: RillaneConfig =
+        RillaneConfig::from_str(&base_with_profile("proxy"), Some("yaml")).expect("可解析");
+    let text = serde_yaml::to_string(&cfg).expect("序列化");
+    assert!(!text.contains("scenarios"), "空面不落盘: {text}");
+}

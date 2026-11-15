@@ -37,6 +37,48 @@ pub enum ProfileKind {
     Web,
 }
 
+/// 各场景的参数面（RIL-017）：暂为空壳（展开产物即既有块缺省填充），
+/// deny_unknown_fields 让拼错子字段立刻报错；场景专属参数后续在此扩展。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioOpts {}
+
+/// 并列场景策略（RIL-017）：proxy/game/web **可同时声明**——旧
+/// `profile` 单枚举的互斥控制就此废弃（新配置不得再由单枚举控制）。
+/// 旧配置 `profile: <kind>` 仍可读（legacy 面，见 RillaneConfig::from_str
+/// 迁移诊断）；两面同时声明解析期拒绝（迁移未完成，二选一）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioScopes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ScenarioOpts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<ScenarioOpts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web: Option<ScenarioOpts>,
+}
+
+impl ScenarioScopes {
+    pub fn is_empty(&self) -> bool {
+        self.proxy.is_none() && self.game.is_none() && self.web.is_none()
+    }
+
+    /// 已声明场景（稳定顺序 proxy → game → web）
+    pub fn declared(&self) -> Vec<ProfileKind> {
+        let mut out = Vec::new();
+        if self.proxy.is_some() {
+            out.push(ProfileKind::Proxy);
+        }
+        if self.game.is_some() {
+            out.push(ProfileKind::Game);
+        }
+        if self.web.is_some() {
+            out.push(ProfileKind::Web);
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RillaneConfig {
@@ -64,9 +106,14 @@ pub struct RillaneConfig {
     #[serde(default)]
     pub egress_pool: Option<EgressPoolBlock>,
     /// 场景预设（P2-3 scenario-profiles.md §2-D1；缺省 None = 存量零差异；
-    /// 仅 from_str 入口展开——订阅/程序化构造不触发，§5-1）
+    /// 仅 from_str 入口展开——订阅/程序化构造不触发，§5-1）。
+    /// RIL-017 起为 legacy 面：与 `scenarios` 并列面互斥，解析期二选一。
     #[serde(default)]
     pub profile: Option<ProfileKind>,
+    /// 并列场景策略（RIL-017；缺省空 = 全不声明，行为零差异）：
+    /// proxy/game/web 可同时声明，展开产物与手写等价配置同链
+    #[serde(default, skip_serializing_if = "ScenarioScopes::is_empty")]
+    pub scenarios: ScenarioScopes,
     /// relay IO 性能参数（P3-5 performance-io.md §3；缺省 None = 不设定、
     /// 缓冲维持 8192×2 缺省，行为零差异 §2-D5）
     #[serde(default)]
@@ -1232,7 +1279,12 @@ impl RillaneConfig {
             .extension()
             .and_then(|ext| ext.to_str())
             .map(str::to_lowercase);
-        let mut config = Self::from_str_without_profile(&raw, hint.as_deref())?;
+        // 迁移诊断（RIL-017）：config crate 不引 tracing，落 stderr 由
+        // 调用方环境捕获（进程级配置装载一次性提示，非热路径）
+        let (mut config, diagnostics) = Self::from_str_with_diagnostics(&raw, hint.as_deref())?;
+        for note in &diagnostics {
+            eprintln!("rillane-config warn ({}): {note}", path.display());
+        }
         let base_dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
         if let Some(base_dir) = base_dir {
             config.routing.geoip_db = config
@@ -1249,9 +1301,31 @@ impl RillaneConfig {
     }
 
     pub fn from_str(raw: &str, hint: Option<&str>) -> Result<Self> {
+        Ok(Self::from_str_with_diagnostics(raw, hint)?.0)
+    }
+
+    /// 带迁移诊断的解析入口（RIL-017）：旧 `profile` 单枚举可读，但返回
+    /// 迁移提示（迁移到 `scenarios` 并列面——game/web 可同时声明）；
+    /// 两面同时声明解析期拒绝（迁移未完成，二选一）。`from_str` 丢弃
+    /// 诊断保持兼容；`load_from_path` 会把诊断打到 tracing warn。
+    pub fn from_str_with_diagnostics(
+        raw: &str,
+        hint: Option<&str>,
+    ) -> Result<(Self, Vec<String>)> {
         let mut config = Self::from_str_without_profile(raw, hint)?;
+        let mut diagnostics = Vec::new();
+        if config.profile.is_some() && !config.scenarios.is_empty() {
+            anyhow::bail!(
+                "profile 与 scenarios 同时声明（迁移未完成）：旧 profile 单枚举与新并列场景面二选一——请把 profile: <kind> 迁移为 scenarios: {{ <kind>: {{}} }}"
+            );
+        }
+        if config.profile.is_some() {
+            diagnostics.push(
+                "配置使用了旧 profile 单枚举（proxy/game/web 互斥）；建议迁移到 scenarios 并列面（proxy/game/web 可同时声明）".to_string(),
+            );
+        }
         config.apply_profile();
-        Ok(config)
+        Ok((config, diagnostics))
     }
 
     fn from_str_without_profile(raw: &str, hint: Option<&str>) -> Result<Self> {
@@ -1284,9 +1358,24 @@ impl RillaneConfig {
     /// 为 no-op）。规则模板与组模板同生共死：组非空（用户自组在场）时
     /// 不填规则——模板 target 指向组模板名，用户自组名不可猜测（§6-E6）。
     pub fn apply_profile(&mut self) {
+        // RIL-017：并列面在场时按场景逐个展开（多场景共存：各填各的
+        // 模板组/规则，按名守卫互不挤占）；legacy 单枚举走原语义路径
+        let scopes = self.scenarios.clone();
+        if !scopes.is_empty() {
+            for kind in scopes.declared() {
+                self.apply_scenario(kind);
+            }
+            return;
+        }
         let Some(kind) = self.profile else {
             return;
         };
+        self.apply_legacy_profile(kind);
+    }
+
+    /// legacy `profile` 单枚举展开（原 apply_profile 主体，语义原样——
+    /// 存量配置零差异）：groups 非空（用户自组在场）即整体退让不填模板。
+    fn apply_legacy_profile(&mut self, kind: ProfileKind) {
         let mut created_group = false;
         if self.routing.groups.is_empty() {
             let (name, slo) = match kind {
@@ -1353,6 +1442,93 @@ impl RillaneConfig {
             });
         }
         // web：网页短连接复用（P1-5；其余字段缺省 = §3.1 缺省值）
+        if kind == ProfileKind::Web && self.egress_pool.is_none() {
+            self.egress_pool = Some(EgressPoolBlock {
+                enabled: true,
+                ..EgressPoolBlock::default()
+            });
+        }
+    }
+
+    /// 并列场景展开（RIL-017）：按**模板组名**守卫而非「groups 全空」守卫
+    /// ——多场景共存时各填各的模板组/规则（game-auto 与 web-auto 并立），
+    /// 互不挤占；用户自建同名组在场即视为显式声明，模板退让（显式恒
+    /// 优先）。场景间规则按 target 归属（模板规则 target 指向本场景组名），
+    /// 天然幂等。
+    fn apply_scenario(&mut self, kind: ProfileKind) {
+        let (group_name, slo) = match kind {
+            ProfileKind::Game => (
+                "game-auto",
+                Some(SloPolicy {
+                    p95_ms: Some(80),
+                    loss_ratio: Some(0.02),
+                    loss_penalty_ms: None,
+                }),
+            ),
+            ProfileKind::Proxy => ("auto", None),
+            ProfileKind::Web => ("web-auto", None),
+        };
+        let group_absent = !self
+            .routing
+            .groups
+            .iter()
+            .any(|g| g.name == group_name);
+        if group_absent {
+            self.routing.groups.push(PolicyGroup {
+                name: group_name.to_string(),
+                strategy: Strategy::Latency,
+                members: vec![GroupMember::Node {
+                    name: self.routing.default_node.clone(),
+                }],
+                slo,
+                url_test: None,
+            });
+            // 规则模板与组模板同生共死：组是本次新建且同名 target 规则
+            // 缺席才填（多场景各自带自己的规则集，target 各指各组）
+            if !self
+                .routing
+                .rules
+                .iter()
+                .any(|r| r.target == group_name)
+            {
+                let template_rules = match kind {
+                    ProfileKind::Game => GAME_DOMAIN_SUFFIXES
+                        .iter()
+                        .map(|d| RouteRule {
+                            name: format!("game-{}", d.replace('.', "-")),
+                            matches: vec![MatchCondition::DomainSuffix {
+                                values: vec![(*d).to_string()],
+                            }],
+                            target: "game-auto".to_string(),
+                        })
+                        .collect(),
+                    ProfileKind::Proxy => vec![profile_cn_rule("auto")],
+                    ProfileKind::Web => vec![profile_cn_rule("web-auto")],
+                };
+                self.routing.rules.extend(template_rules);
+            }
+        }
+        if kind == ProfileKind::Game && self.obfuscation.is_none() {
+            self.obfuscation = Some(ObfuscationConfig {
+                default_timing: None,
+                timing: Some(TimingBlockConfig {
+                    mode: "fixed".to_string(),
+                    fixed_ms: 10,
+                    max_delay_ms: 20,
+                    ..TimingBlockConfig::default()
+                }),
+                default_shaping: None,
+                shaping: None,
+                enabled: true,
+                middleware: vec!["padding".to_string(), "timing".to_string()],
+                padding: Some(PaddingBlockConfig {
+                    mode: "bucket".to_string(),
+                    buckets: vec![128, 256, 512, 1024],
+                    ..PaddingBlockConfig::default()
+                }),
+                ..ObfuscationConfig::default()
+            });
+        }
         if kind == ProfileKind::Web && self.egress_pool.is_none() {
             self.egress_pool = Some(EgressPoolBlock {
                 enabled: true,

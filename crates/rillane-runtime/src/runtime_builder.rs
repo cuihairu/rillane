@@ -4246,6 +4246,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: None,
         };
@@ -4292,6 +4293,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: None,
         };
@@ -4344,6 +4346,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: None,
         };
@@ -4414,6 +4417,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: None,
         };
@@ -4454,6 +4458,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: None,
         };
@@ -4514,6 +4519,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: None,
         }
@@ -4802,6 +4808,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: None,
         };
@@ -4876,6 +4883,7 @@ mod tests {
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: None,
         };
@@ -5032,6 +5040,7 @@ routing:
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: None,
         }
@@ -6032,6 +6041,7 @@ routing:
             network: None,
             obfuscation: None,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
             egress_pool: None,
         }
@@ -6232,6 +6242,7 @@ routing:
             obfuscation: None,
             egress_pool,
             profile: None,
+            scenarios: Default::default(),
             performance: None,
         }
     }
