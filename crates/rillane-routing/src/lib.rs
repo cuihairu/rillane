@@ -19,7 +19,13 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::time::interval;
 
+mod explain;
 mod geo;
+pub use explain::{
+    explain_offline, DomainSource, EgressCertainty, EvaluatedStep, ExplainInput, ExplainSnapshot,
+    ExplainedTarget, FrozenGroup, FrozenMember, FrozenQuality, FrozenSlo, PredictedEgress,
+    ProcessEvidence, RouteExplanation, UnknownEvidence,
+};
 pub use geo::{geoip_country, host_to_ip, GeoDatabases, GeoSiteDb};
 
 /// G0-2 域名正则热路径编译缓存（审核发现 2026-11-04）：同一 pattern 反复
@@ -713,9 +719,13 @@ impl RoutingEngine {
                 for m in &group.members {
                     match m {
                         rillane_config::GroupMember::Node { name }
-                        | rillane_config::GroupMember::WeightedNode { name, .. } => names.push(name.clone()),
+                        | rillane_config::GroupMember::WeightedNode { name, .. } => {
+                            names.push(name.clone())
+                        }
                         rillane_config::GroupMember::Group { name }
-                        | rillane_config::GroupMember::WeightedGroup { name, .. } => names.push(name.clone()),
+                        | rillane_config::GroupMember::WeightedGroup { name, .. } => {
+                            names.push(name.clone())
+                        }
                         rillane_config::GroupMember::Provider { name } => {
                             for node in config.provider_nodes.nodes(name) {
                                 names.push(node);
@@ -823,8 +833,7 @@ impl FlowRouter for RoutingEngine {
         // 面继续评估（warn 点名场景与原因，不静默）；reject = 显式上抛，
         // 不悄悄改道。
         if !config.scenarios.is_empty() {
-            let mut ordered: Vec<&rillane_config::ScenarioRule> =
-                config.scenarios.iter().collect();
+            let mut ordered: Vec<&rillane_config::ScenarioRule> = config.scenarios.iter().collect();
             ordered.sort_by_key(|s| s.priority);
             for scenario in ordered {
                 if scenario
@@ -1182,9 +1191,7 @@ fn matches_condition(
                 TargetProto::Udp => "udp",
                 TargetProto::Quic => "quic",
             };
-            protocols
-                .iter()
-                .any(|p| p.eq_ignore_ascii_case(actual))
+            protocols.iter().any(|p| p.eq_ignore_ascii_case(actual))
         }
         // RIL-014：规则集引用——按名查 `routing.rule_sets` 库，库中条件
         // 任一命中即命中（递归支持逻辑组合）；无此名（载荷未加载/来源
@@ -1623,7 +1630,11 @@ mod tests {
             metadata: FlowMetadata::default(),
         };
         assert_eq!(
-            engine.route(no_annotation).await.expect("route").final_node(),
+            engine
+                .route(no_annotation)
+                .await
+                .expect("route")
+                .final_node(),
             "direct",
             "注解缺席恒不命中——目标端口值不得串入源端口条件"
         );
@@ -1693,12 +1704,7 @@ mod tests {
                 },
             ],
         );
-        rule_sets.insert(
-            "blocked",
-            vec![MatchCondition::Port {
-                values: vec![6881],
-            }],
-        );
+        rule_sets.insert("blocked", vec![MatchCondition::Port { values: vec![6881] }]);
 
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
@@ -1706,9 +1712,7 @@ mod tests {
             rules: vec![
                 RouteRule {
                     name: "ads-block".into(),
-                    matches: vec![MatchCondition::RuleSetRef {
-                        name: "ads".into(),
-                    }],
+                    matches: vec![MatchCondition::RuleSetRef { name: "ads".into() }],
                     target: "reject".into(),
                 },
                 RouteRule {

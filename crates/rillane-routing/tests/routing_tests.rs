@@ -481,8 +481,10 @@ fn provider_group_config(provider_nodes: Vec<String>) -> RoutingConfig {
 #[test]
 fn provider_member_expands_from_provider_node_library() {
     // 库已装入：静态节点 + provider 展开的节点集都在观测面
-    let engine =
-        RoutingEngine::new(provider_group_config(vec!["remote-a".into(), "remote-b".into()]));
+    let engine = RoutingEngine::new(provider_group_config(vec![
+        "remote-a".into(),
+        "remote-b".into(),
+    ]));
     let report = engine.group_quality_report();
     let members: Vec<String> = report
         .iter()
@@ -556,8 +558,12 @@ fn fixed_pick_group(members: Vec<GroupMember>) -> RoutingConfig {
 #[tokio::test]
 async fn select_honors_user_selection() -> Result<()> {
     let mut config = fixed_pick_group(vec![
-        GroupMember::Node { name: "node1".into() },
-        GroupMember::Node { name: "node2".into() },
+        GroupMember::Node {
+            name: "node1".into(),
+        },
+        GroupMember::Node {
+            name: "node2".into(),
+        },
     ]);
     config
         .selections
@@ -663,8 +669,12 @@ async fn fallback_all_unhealthy_errors() -> Result<()> {
 #[tokio::test]
 async fn select_honors_selection_even_if_unhealthy() -> Result<()> {
     let mut config = fixed_pick_group(vec![
-        GroupMember::Node { name: "node1".into() },
-        GroupMember::Node { name: "node2".into() },
+        GroupMember::Node {
+            name: "node1".into(),
+        },
+        GroupMember::Node {
+            name: "node2".into(),
+        },
     ]);
     config
         .selections
@@ -686,8 +696,12 @@ async fn select_honors_selection_even_if_unhealthy() -> Result<()> {
 #[tokio::test]
 async fn stale_selection_recovers_to_first_member() -> Result<()> {
     let mut config = fixed_pick_group(vec![
-        GroupMember::Node { name: "node1".into() },
-        GroupMember::Node { name: "node2".into() },
+        GroupMember::Node {
+            name: "node1".into(),
+        },
+        GroupMember::Node {
+            name: "node2".into(),
+        },
     ]);
     config
         .selections
@@ -706,7 +720,11 @@ async fn stale_selection_recovers_to_first_member() -> Result<()> {
     let decision2 = engine.route(create_flow_context("example.com", 80)).await?;
     assert_eq!(decision2.final_node(), "node1");
     assert!(
-        !decision2.reason.as_deref().unwrap_or_default().contains("回落"),
+        !decision2
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("回落"),
         "清除后不得重复报告恢复: {:?}",
         decision2.reason
     );
@@ -718,8 +736,12 @@ async fn stale_selection_recovers_to_first_member() -> Result<()> {
 #[tokio::test]
 async fn reload_preserves_valid_selections() -> Result<()> {
     let mut config = fixed_pick_group(vec![
-        GroupMember::Node { name: "node1".into() },
-        GroupMember::Node { name: "node2".into() },
+        GroupMember::Node {
+            name: "node1".into(),
+        },
+        GroupMember::Node {
+            name: "node2".into(),
+        },
     ]);
     config
         .selections
@@ -728,8 +750,12 @@ async fn reload_preserves_valid_selections() -> Result<()> {
 
     // 更新：同组结构但新配置未带选择面（订阅刷新重写配置的现实形态）
     let updated = fixed_pick_group(vec![
-        GroupMember::Node { name: "node1".into() },
-        GroupMember::Node { name: "node2".into() },
+        GroupMember::Node {
+            name: "node1".into(),
+        },
+        GroupMember::Node {
+            name: "node2".into(),
+        },
     ]);
     engine.reload(updated);
 
@@ -774,7 +800,12 @@ fn scenario(
     }
 }
 
-fn ctx_with_process(host: &str, port: u16, proto: TargetProto, process: Option<&str>) -> FlowContext {
+fn ctx_with_process(
+    host: &str,
+    port: u16,
+    proto: TargetProto,
+    process: Option<&str>,
+) -> FlowContext {
     let mut ctx = create_flow_context(host, port);
     ctx.target.proto = proto;
     if let Some(p) = process {
@@ -868,7 +899,12 @@ async fn browser_quic_flow_not_caught_by_udp_game_scenario() -> Result<()> {
 
     // 真 UDP 游戏流命中场景
     let udp = engine
-        .route(ctx_with_process("relay.example.com", 27015, TargetProto::Udp, None))
+        .route(ctx_with_process(
+            "relay.example.com",
+            27015,
+            TargetProto::Udp,
+            None,
+        ))
         .await?;
     assert_eq!(udp.final_node(), "game-node");
     assert_eq!(udp.reason.as_deref(), Some("scenario:game-scene"));
@@ -988,9 +1024,7 @@ async fn scenario_priority_ascending_and_tie_keeps_declaration_order() -> Result
     };
     let engine = RoutingEngine::new(config);
 
-    let decision = engine
-        .route(create_flow_context("example.com", 80))
-        .await?;
+    let decision = engine.route(create_flow_context("example.com", 80)).await?;
     assert_eq!(
         decision.reason.as_deref(),
         Some("scenario:early-low"),
@@ -1025,9 +1059,7 @@ async fn scenario_priority_ascending_and_tie_keeps_declaration_order() -> Result
         ..Default::default()
     };
     let engine = RoutingEngine::new(config);
-    let decision = engine
-        .route(create_flow_context("example.com", 80))
-        .await?;
+    let decision = engine.route(create_flow_context("example.com", 80)).await?;
     assert_eq!(
         decision.reason.as_deref(),
         Some("scenario:tie-a"),
