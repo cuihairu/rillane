@@ -30,6 +30,11 @@ use rillane_config::{
 // TUN 装配块专用（Linux 门控面，platform-packaging.md）
 #[cfg(target_os = "linux")]
 use rillane_config::MatchCondition;
+// 协议目录准入（RIL-104）：装配期先查目录，未准入/编目外类型不进热路径
+use rillane_config::contract::CODE_UNKNOWN_EGRESS;
+use rillane_config::protocol_catalog::{
+    admission, Admission, Registration, CODE_EGRESS_NOT_ADMITTED,
+};
 use rillane_core::udp::table::chain_id_of;
 use rillane_core::udp::{ChainFailureEvent, EgressUdpConnector};
 use rillane_core::{
@@ -2986,19 +2991,8 @@ fn scan_udp_capability(
 }
 
 fn egress_kind(spec: &EgressConfig) -> &'static str {
-    match spec {
-        EgressConfig::Reject => "reject",
-        EgressConfig::Direct => "direct",
-        EgressConfig::Socks5 { .. } => "socks5",
-        EgressConfig::Http { .. } => "http",
-        EgressConfig::Shadowsocks { .. } => "shadowsocks",
-        EgressConfig::Vmess { .. } => "vmess",
-        EgressConfig::Vless { .. } => "vless",
-        EgressConfig::Trojan { .. } => "trojan",
-        EgressConfig::Hysteria { .. } => "hysteria",
-        EgressConfig::Hysteria2 { .. } => "hysteria2",
-        EgressConfig::Wireguard { .. } => "wireguard",
-    }
+    // 规范映射单源于 rillane-config 协议目录（RIL-104）——runtime 只委托
+    rillane_config::protocol_catalog::egress_kind(spec)
 }
 
 /// 出口构建产物：FlowOutput（入口侧复用）+ EgressConnector（chain 消费）对
@@ -3230,6 +3224,27 @@ fn build_egress_outputs(
     let mut connectors = HashMap::new();
 
     for desc in descriptors {
+        // 协议目录准入（RIL-104）：编目外类型与未准入后端都不得进热路径——
+        // 装配期点名稳定原因码拒绝，不静默降级、不在拨号期才炸。
+        let kind = egress_kind(&desc.spec);
+        match admission(kind) {
+            Admission::Admitted(_) => {}
+            Admission::NotAdmitted(e) => {
+                let Registration::NotAdmitted { reason } = e.registration else {
+                    unreachable!("未准入判定必带原因");
+                };
+                return Err(anyhow!(
+                    "{CODE_EGRESS_NOT_ADMITTED}: 出口类型 {kind} 未准入（节点 {}）：{reason}",
+                    desc.name
+                ));
+            }
+            Admission::Unknown => {
+                return Err(anyhow!(
+                    "{CODE_UNKNOWN_EGRESS}: 出口类型 {kind} 不在协议目录（节点 {}）",
+                    desc.name
+                ));
+            }
+        }
         match &desc.spec {
             EgressConfig::Reject => {
                 let flow_output: Arc<dyn FlowOutput> =
@@ -3599,7 +3614,13 @@ fn build_egress_outputs(
                 connectors.insert(desc.name.clone(), connector);
             }
             _ => {
-                return Err(anyhow!("暂不支持的出口类型: {}", desc.name));
+                // 防御面：目录准入已先行（循环顶部），编目内类型都应落上
+                // 方工厂臂——落到此处说明目录与装配工厂失同步，点名稳定码。
+                return Err(anyhow!(
+                    "{CODE_EGRESS_NOT_ADMITTED}: 出口类型 {} 未接入后端工厂（节点 {}）",
+                    egress_kind(&desc.spec),
+                    desc.name
+                ));
             }
         }
     }

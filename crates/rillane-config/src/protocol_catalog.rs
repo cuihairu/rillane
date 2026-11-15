@@ -1,0 +1,549 @@
+//! 协议目录与注册契约（RIL-104）：出口协议的编目、准入与选库证据锚点。
+//!
+//! - **编目即事实**：每个出口协议类型在目录中恰有一条记录——已评审准入
+//!   （带证据锚点与选库结论）或明确未准入（带原因）。目录外类型不存在
+//!   「隐式可用」；配置 IR 是封闭枚举，未知类型在订阅转换面即被丢弃/拒绝，
+//!   IR 面只会出现编目内类型。
+//! - **准入才进热路径**：装配期（RuntimeBuilder）先查目录，未准入类型在
+//!   建立任何连接器之前以稳定原因码拒绝——未审核配置不会走到拨号/转发。
+//! - **无实现证据是自写前置**：准入条目必须带评估记录锚点（版本、许可、
+//!   平台、公开 API、旁路/取消/统计与复用结论）；「无可选库」的结论本身
+//!   也要留证，之后才允许自写实现（RIL-105..134 的统一前置）。
+//!
+//! 数据报能力列与运行期构建期扫描（runtime `scan_udp_capability`，口径
+//! 同 udp-relay-path §3.1 能力表）一致：目录是静态事实源，扫描是执行面。
+
+use crate::EgressConfig;
+
+/// 稳定原因码：出口类型已编目但后端未准入（装配期拒绝）。
+pub const CODE_EGRESS_NOT_ADMITTED: &str = "config.egress.not_admitted";
+
+/// 后端来源（选库结论的机器口径）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// 仓库自写实现（评估记录以源路径为证据；「无可选库」结论留证后才自写）
+    InTree {
+        /// 自写实现的源路径
+        path: &'static str,
+    },
+    /// 第三方库（评估记录点名版本、许可、平台、公开 API）
+    Library {
+        /// 库名（crates.io 名）
+        crate_name: &'static str,
+        /// 版本要求（Cargo.toml 声明；lock 实测版本在评估记录）
+        version_req: &'static str,
+        /// 许可（SPDX 表达式，取自库发布清单）
+        license: &'static str,
+    },
+    /// 尚无后端（未准入的根因——不允许静默当 direct 用）
+    None,
+}
+
+/// 注册状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registration {
+    /// 已评审准入：证据锚点指向两语文档同名小节（`## <kind>`），
+    /// 小节内必含版本/许可/平台/公开 API/旁路/取消/统计/复用/结论。
+    Admitted {
+        /// 评估记录锚点（相对 docs/ 的路径 + 小节锚）
+        evidence: &'static str,
+    },
+    /// 编目在案但未准入：配置可解析，装配期拒绝——不进热路径。
+    NotAdmitted {
+        /// 拒绝原因（点名缺什么、谁是前置）
+        reason: &'static str,
+    },
+}
+
+/// 目录条目：一个出口协议类型的全部编目事实。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogEntry {
+    /// 稳定类型名（= IR 出口类型口径，与 runtime `egress_kind` 同源）
+    pub kind: &'static str,
+    pub registration: Registration,
+    /// 数据报能力（目录口径 = 构建期 UDP 能力扫描的支持集）
+    pub udp: bool,
+    pub backend: Backend,
+}
+
+impl CatalogEntry {
+    /// 已准入则返回证据锚点
+    pub fn evidence(self) -> Option<&'static str> {
+        match self.registration {
+            Registration::Admitted { evidence } => Some(evidence),
+            Registration::NotAdmitted { .. } => None,
+        }
+    }
+}
+
+/// 协议目录（静态事实源；顺序即文档顺序）。
+pub const CATALOG: &[CatalogEntry] = &[
+    CatalogEntry {
+        kind: "reject",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#reject",
+        },
+        udp: true, // UDP 面注册为静默丢弃连接器（与 TCP 同口径拦截）
+        backend: Backend::InTree {
+            path: "crates/rillane-core/src/udp（RejectUdpConnector）+ rillane-runtime RejectFlowOutput",
+        },
+    },
+    CatalogEntry {
+        kind: "direct",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#direct",
+        },
+        udp: true,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/direct.rs",
+        },
+    },
+    CatalogEntry {
+        kind: "socks5",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#socks5",
+        },
+        udp: false, // 不据此承诺出站 SOCKS5 UDP relay（PROTOCOLS.md 同口径）
+        backend: Backend::Library {
+            crate_name: "tokio-socks",
+            version_req: "0.5",
+            license: "MIT",
+        },
+    },
+    CatalogEntry {
+        kind: "http",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#http",
+        },
+        udp: false,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/http.rs",
+        },
+    },
+    CatalogEntry {
+        kind: "shadowsocks",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#shadowsocks",
+        },
+        udp: true, // 插件（SIP003）模式 UDP 判负——见评估记录
+        backend: Backend::Library {
+            crate_name: "shadowsocks",
+            version_req: "1.25",
+            license: "MIT",
+        },
+    },
+    CatalogEntry {
+        kind: "vmess",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#vmess",
+        },
+        udp: true, // 仅 network=tcp（ws/grpc/h2 的 UDP 面未实现）
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/vmess.rs",
+        },
+    },
+    CatalogEntry {
+        kind: "vless",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#vless",
+        },
+        udp: true, // 仅 network=tcp；flow/reality 拨号期点名拒绝（G1-6）
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/vless.rs",
+        },
+    },
+    CatalogEntry {
+        kind: "trojan",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#trojan",
+        },
+        udp: true, // 恒叠 TLS 且仅 network=tcp
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/trojan.rs",
+        },
+    },
+    CatalogEntry {
+        kind: "hysteria",
+        registration: Registration::NotAdmitted {
+            reason: "hysteria v1 无已评审后端（RIL-109 选库前置未完成；UDP 载具 quinn 未决）——无实现证据不得自写，装配期拒绝",
+        },
+        udp: false,
+        backend: Backend::None,
+    },
+    CatalogEntry {
+        kind: "hysteria2",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#hysteria2",
+        },
+        udp: false, // 当前连接器仅 TCP stream over QUIC（载具 quinn 未决，归 V2）
+        backend: Backend::Library {
+            crate_name: "hysteria2",
+            version_req: "0.1.6",
+            license: "MulanPSL-2.0",
+        },
+    },
+    CatalogEntry {
+        kind: "wireguard",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#wireguard",
+        },
+        udp: true,
+        backend: Backend::Library {
+            crate_name: "defguard_wireguard_rs",
+            version_req: "0.11",
+            license: "Apache-2.0",
+        },
+    },
+];
+
+/// 目录条目查询。
+pub fn entry_for(kind: &str) -> Option<&'static CatalogEntry> {
+    CATALOG.iter().find(|e| e.kind == kind)
+}
+
+/// 准入判定（装配期热路径门）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    /// 已评审准入（可进装配）
+    Admitted(&'static CatalogEntry),
+    /// 已编目但未准入（装配期拒绝，带条目内原因）
+    NotAdmitted(&'static CatalogEntry),
+    /// 目录外类型（`config.egress.unknown`——IR 封闭枚举下装配面不可达，
+    /// 保留给订阅转换/诊断面点名未知类型）
+    Unknown,
+}
+
+/// 按类型名判定准入。
+pub fn admission(kind: &str) -> Admission {
+    match entry_for(kind) {
+        Some(e) => match e.registration {
+            Registration::Admitted { .. } => Admission::Admitted(e),
+            Registration::NotAdmitted { .. } => Admission::NotAdmitted(e),
+        },
+        None => Admission::Unknown,
+    }
+}
+
+/// IR 出口类型 → 稳定类型名（规范映射；runtime 的 `egress_kind` 委托本函数）。
+pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
+    match spec {
+        EgressConfig::Reject => "reject",
+        EgressConfig::Direct => "direct",
+        EgressConfig::Socks5 { .. } => "socks5",
+        EgressConfig::Http { .. } => "http",
+        EgressConfig::Shadowsocks { .. } => "shadowsocks",
+        EgressConfig::Vmess { .. } => "vmess",
+        EgressConfig::Vless { .. } => "vless",
+        EgressConfig::Trojan { .. } => "trojan",
+        EgressConfig::Hysteria { .. } => "hysteria",
+        EgressConfig::Hysteria2 { .. } => "hysteria2",
+        EgressConfig::Wireguard { .. } => "wireguard",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::CODE_UNKNOWN_EGRESS;
+
+    /// 构造每个 IR 出口变体（枚举增删字段即编译失败——目录必须同步更新），
+    /// 断言规范映射逐一落在目录内。
+    #[test]
+    fn catalog_covers_every_egress_variant() {
+        let samples = [
+            EgressConfig::Reject,
+            EgressConfig::Direct,
+            EgressConfig::Socks5 {
+                server: "203.0.113.1".into(),
+                port: 1080,
+                username: None,
+                password: None,
+            },
+            EgressConfig::Http {
+                server: "203.0.113.2".into(),
+                port: 8080,
+                username: None,
+                password: None,
+                tls: false,
+                skip_cert_verify: false,
+                sni: None,
+                tls_fingerprint: None,
+            },
+            EgressConfig::Shadowsocks {
+                server: "203.0.113.3".into(),
+                port: 8388,
+                method: "aes-256-gcm".into(),
+                password: "pw".into(),
+                plugin: None,
+                plugin_opts: None,
+            },
+            EgressConfig::Vmess {
+                server: "203.0.113.4".into(),
+                port: 443,
+                uuid: "00000000-0000-0000-0000-000000000000".into(),
+                alter_id: 0,
+                security: "auto".into(),
+                network: "tcp".into(),
+                path: None,
+                host: None,
+                grpc_service_name: None,
+                tls: true,
+                skip_cert_verify: false,
+                sni: None,
+                alpn: None,
+                tls_fingerprint: None,
+            },
+            EgressConfig::Vless {
+                server: "203.0.113.5".into(),
+                port: 443,
+                uuid: "00000000-0000-0000-0000-000000000001".into(),
+                flow: None,
+                reality: None,
+                network: "tcp".into(),
+                path: None,
+                host: None,
+                grpc_service_name: None,
+                tls: true,
+                skip_cert_verify: false,
+                sni: None,
+                alpn: None,
+                tls_fingerprint: None,
+            },
+            EgressConfig::Trojan {
+                server: "203.0.113.6".into(),
+                port: 443,
+                password: "pw".into(),
+                network: "tcp".into(),
+                path: None,
+                host: None,
+                grpc_service_name: None,
+                tls: true,
+                skip_cert_verify: false,
+                sni: None,
+                alpn: None,
+                tls_fingerprint: None,
+            },
+            EgressConfig::Hysteria {
+                server: "203.0.113.7".into(),
+                port: 443,
+                password: "pw".into(),
+                protocol: "udp".into(),
+                up_mbps: None,
+                down_mbps: None,
+                auth: None,
+                auth_str: None,
+                obfs: None,
+                obfs_param: None,
+                server_name: None,
+                skip_cert_verify: false,
+                alpn: None,
+            },
+            EgressConfig::Hysteria2 {
+                server: "203.0.113.8".into(),
+                port: 443,
+                password: "pw".into(),
+                mport: None,
+                obfs: None,
+                obfs_param: None,
+                server_name: None,
+                skip_cert_verify: false,
+                alpn: None,
+            },
+            EgressConfig::Wireguard {
+                endpoint: "203.0.113.9:51820".into(),
+                private_key: "pk".into(),
+                public_key: "pub".into(),
+                address: "10.0.0.2/32".into(),
+                allowed_ips: None,
+                preshared_key: None,
+                persistent_keepalive: None,
+                listen_port: None,
+                mtu: None,
+                dns: None,
+            },
+        ];
+        assert_eq!(
+            CATALOG.len(),
+            samples.len(),
+            "目录条目数 = IR 出口变体数（增变体必须同步编目）"
+        );
+        for spec in &samples {
+            let kind = egress_kind(spec);
+            let entry = entry_for(kind).unwrap_or_else(|| panic!("变体 {kind} 未编目"));
+            assert_eq!(entry.kind, kind);
+        }
+        // 目录无重复类型名
+        let mut kinds: Vec<_> = CATALOG.iter().map(|e| e.kind).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(kinds.len(), CATALOG.len(), "类型名唯一");
+    }
+
+    /// 准入判定稳定：已准入十条 + hysteria v1 未准入（点名 RIL-109 前置）；
+    /// 目录外类型 → Unknown（订阅/诊断面按 `config.egress.unknown` 点名）。
+    #[test]
+    fn admission_decisions_are_stable() {
+        for e in CATALOG {
+            let verdict = admission(e.kind);
+            match e.registration {
+                Registration::Admitted { .. } => {
+                    assert!(
+                        matches!(verdict, Admission::Admitted(got) if got.kind == e.kind),
+                        "{} 应准入",
+                        e.kind
+                    );
+                }
+                Registration::NotAdmitted { reason } => {
+                    let Admission::NotAdmitted(got) = verdict else {
+                        panic!("{} 应未准入: {verdict:?}", e.kind);
+                    };
+                    assert_eq!(got.kind, "hysteria");
+                    assert!(reason.contains("RIL-109"), "原因点名前置: {reason}");
+                    assert_eq!(got.backend, Backend::None, "未准入即无后端");
+                }
+            }
+        }
+        for unknown in ["mieru", "ss", "trojan-go", "snell", ""] {
+            assert_eq!(
+                admission(unknown),
+                Admission::Unknown,
+                "目录外类型 {unknown} 应 Unknown"
+            );
+            assert_eq!(CODE_UNKNOWN_EGRESS, "config.egress.unknown");
+        }
+    }
+
+    /// 准入条目必须带证据锚点与选库结论；未准入条目必须带原因且无后端；
+    /// UDP 能力列与构建期扫描口径一致（§3.1 支持集）。
+    #[test]
+    fn admitted_requires_evidence_and_backend() {
+        const UDP_SUPPORTED: [&str; 7] = [
+            "direct",
+            "shadowsocks",
+            "wireguard",
+            "reject",
+            "vmess",
+            "vless",
+            "trojan",
+        ];
+        for e in CATALOG {
+            match e.registration {
+                Registration::Admitted { evidence } => {
+                    assert!(
+                        evidence.starts_with("protocol-backends.md#") && !evidence.ends_with('#'),
+                        "{} 证据锚点须指向评估记录小节: {evidence}",
+                        e.kind
+                    );
+                    assert_ne!(e.backend, Backend::None, "{} 已准入必须有选库结论", e.kind);
+                    assert_eq!(
+                        e.udp,
+                        UDP_SUPPORTED.contains(&e.kind),
+                        "{} UDP 能力列须与 §3.1 能力表一致",
+                        e.kind
+                    );
+                }
+                Registration::NotAdmitted { reason } => {
+                    assert!(!reason.is_empty(), "未准入必带原因");
+                    assert!(!e.udp, "未准入不声明 UDP 能力");
+                    assert_eq!(e.backend, Backend::None);
+                }
+            }
+        }
+    }
+
+    /// 证据记录存在性（RIL-104 验收核心）：每个已准入条目的锚点在两语文档
+    /// 各有一个 `## <kind>` 小节，小节内必含 版本/许可/平台/公开 API/旁路/
+    /// 取消/统计/复用/结论（中文）与对应英文字段——缺字段即测试失败，
+    /// 「记录了什么」由文档小节承载，「必须记录什么」由本测试钉死。
+    #[test]
+    fn evidence_records_exist_for_every_admitted_entry() {
+        const ZH_FIELDS: [&str; 9] = [
+            "版本",
+            "许可",
+            "平台",
+            "公开 API",
+            "旁路",
+            "取消",
+            "统计",
+            "复用",
+            "结论",
+        ];
+        const EN_FIELDS: [&str; 9] = [
+            "Version",
+            "License",
+            "Platforms",
+            "Public API",
+            "Bypass",
+            "Cancel",
+            "Stats",
+            "Reuse",
+            "Conclusion",
+        ];
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let zh = std::fs::read_to_string(format!("{manifest}/../../docs/zh/protocol-backends.md"))
+            .expect("中文评估记录须存在");
+        let en = std::fs::read_to_string(format!("{manifest}/../../docs/protocol-backends.md"))
+            .expect("英文评估记录须存在");
+
+        // 按 `## ` 切小节，取 `## <kind>` 起到下一小节（或 EOF）的内容
+        let section = |doc: &str, kind: &str| -> String {
+            let header = format!("## {kind}");
+            let start = doc
+                .find(&format!("\n{header}\n"))
+                .expect("小节锚点须存在且独立成行");
+            let rest = &doc[start + 1..];
+            let end = rest[header.len()..]
+                .find("\n## ")
+                .map(|p| p + header.len() + 1)
+                .unwrap_or(rest.len());
+            rest[..end].to_string()
+        };
+
+        for e in CATALOG.iter().filter(|e| e.evidence().is_some()) {
+            let zh_sec = section(&zh, e.kind);
+            let en_sec = section(&en, e.kind);
+            for f in ZH_FIELDS {
+                assert!(zh_sec.contains(f), "zh#{} 小节缺字段「{f}」", e.kind);
+            }
+            for f in EN_FIELDS {
+                assert!(
+                    en_sec.contains(f),
+                    "en#{} section missing field \"{f}\"",
+                    e.kind
+                );
+            }
+            // 选库结论与目录机器口径一致：库名/自写路径必须出现在小节里
+            match e.backend {
+                Backend::Library {
+                    crate_name,
+                    version_req,
+                    ..
+                } => {
+                    assert!(
+                        zh_sec.contains(crate_name) && en_sec.contains(crate_name),
+                        "{} 小节须点名选库 {crate_name}",
+                        e.kind
+                    );
+                    assert!(
+                        zh_sec.contains(version_req),
+                        "zh#{} 小节须记录版本要求 {version_req}",
+                        e.kind
+                    );
+                }
+                Backend::InTree { path } => {
+                    let src = path.split("（").next().unwrap_or(path);
+                    let dir = src.split(" + ").next().unwrap_or(src);
+                    assert!(
+                        zh_sec.contains(dir) && en_sec.contains(dir),
+                        "{} 小节须点名自写路径 {dir}",
+                        e.kind
+                    );
+                }
+                Backend::None => unreachable!("准入条目无 None 后端"),
+            }
+        }
+        // 未准入条目也有记录小节（留证「为什么不能进热路径」）
+        let zh_hy = section(&zh, "hysteria");
+        assert!(zh_hy.contains("未准入"), "hysteria 小节须写明未准入状态");
+    }
+}

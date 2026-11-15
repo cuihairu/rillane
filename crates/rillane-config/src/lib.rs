@@ -13,6 +13,7 @@ pub mod apply;
 pub mod contract;
 pub mod generations;
 pub mod preview;
+pub mod protocol_catalog;
 pub mod proposal;
 pub mod rollback;
 pub mod source;
