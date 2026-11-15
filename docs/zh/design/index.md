@@ -7,6 +7,7 @@
 | [v1 架构设计](architecture-v1.md) | 六平台范围、Clash 兼容、进程分流、并行场景、配置代际、模块职责及独立交付门禁 |
 | [架构概念与抽象依据](architecture-concepts.md) | 32 个核心概念的职责、为什么抽象、收益与成本 |
 | [接入、出口与统计契约](io-and-accounting.md) | 入口/出口、会话执行、传输/资源池、业务与底层统计的接口边界 |
+| [协议接入计划](protocol-roadmap.md) | 外部实现优先、新协议/隧道/传输与选库门禁 |
 | [Debug、路径解释与可选 MCP](debug-and-mcp.md) | 规则推演、真实轨迹、主动探测、脱敏、工具权限和配置闭环 |
 | [竞品架构研究](../research/proxy-architectures-2026-11-14.md) | Mihomo、sing-box、Surge 的来源证据、SVG 与借鉴理由 |
 

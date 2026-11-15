@@ -74,7 +74,7 @@ Freeze contracts/ownership then adapt current implementations. Verify responses,
 
 ## 7. Prefer external protocol libraries and replaceable backends
 
-A protocol directory is primarily an **adaptation/integration boundary**. Prefer mature existing implementations. Rillane owns contracts, option conversion, capabilities, ownership and necessary compatibility code. Add minimal custom implementation only for verified library gaps, documenting the cost. Existing dependencies already include shadowsocks, hysteria2, tokio-socks and defguard_wireguard_rs.
+A protocol directory is primarily an **adaptation/integration boundary**. Prefer mature existing implementations. Rillane owns contracts, option conversion, capabilities, ownership and necessary compatibility code. Write protocol implementation only after a documented search/evaluation confirms that no usable reusable implementation exists. Missing Rust wrappers, injection or platform support first calls for adapters, upstream contributions or minimal maintained patches, not a convenience rewrite. Existing dependencies already include shadowsocks, hysteria2, tokio-socks and defguard_wireguard_rs.
 
 ```text
 SessionExecutor
@@ -100,3 +100,5 @@ Library-owned sockets must support required bypass, such as mobile VPN protect. 
 For other languages assess a stable C ABI/FFI first, then managed subprocesses if justified. Both require explicit threading, buffers, cancellation, crashes and packaging; neither is equivalent to a Rust trait adapter. Subprocesses are not the default architecture and MCP gains no generic execution tool.
 
 Adapt existing working backends before selectively replacing them. Validate equivalent protocol inputs, success/failure, UDP, partial IO, cancellation, release, bypass and accounting. Upstream protocol support does not establish Rillane integration acceptance. Track this through RIL-097/099/100/103.
+
+See the [protocol integration plan](protocol-roadmap.md) for additional protocols, roles and backend gates.

@@ -13,7 +13,7 @@ Rillane is a Rust proxy-core project. The current design baseline is **v1**: one
 - [32 concepts and rationale](docs/design/architecture-concepts.md)
 - [Debug, paths and optional MCP](docs/design/debug-and-mcp.md)
 - [Upstream study and SVGs](docs/research/proxy-architectures-2026-11-14.md)
-- [103 atomic tasks with priorities, dependencies and acceptance](todo.md)
+- [139 atomic tasks with priorities, dependencies and acceptance](todo.md)
 
 Old designs, roadmaps and audits are removed from active documentation; use Git history. Process routing is required only on local Windows/macOS/Linux hosts, not arbitrary app PID lookup on OpenWrt/Android/iOS.
 

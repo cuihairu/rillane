@@ -169,7 +169,7 @@ Start with interfaces/modules; split crates only for measurable dependency or re
 
 ## 10. Migration and acceptance
 
-RV1 items are architectural indexes. The **single atomic execution backlog is repository-root `todo.md`, RIL-001–RIL-103**. It replaces the old checklist; history stays in Git. Use atomic task commits, fixtures and device evidence rather than independently marking RV1 complete.
+RV1 items are architectural indexes. The **single atomic execution backlog is repository-root `todo.md`, RIL-001–RIL-139**. It replaces the old checklist; history stays in Git. Use atomic task commits, fixtures and device evidence rather than independently marking RV1 complete.
 
 | ID | Priority | Work package | Depends on | Gate |
 |---|---|---|---|---|
@@ -217,3 +217,5 @@ Six-platform summaries/full-scope documentation are closing evidence, not a univ
 See [v1 IO and accounting contracts](io-and-accounting.md) for inbound/outbound boundaries, ownership, transport composition and layered counters.
 
 Protocol modules prefer external-library adapters; separate protocol identity from Factory/feature-selected backends. Keep dependency types outside routing/sessions and validate socket bypass, cancellation and equivalent accounting. See [IO contracts](io-and-accounting.md).
+
+See the [protocol integration plan](protocol-roadmap.md): write protocols only when no usable implementation exists; evaluate/reuse backends before integration without blocking baseline milestones.
