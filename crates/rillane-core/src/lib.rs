@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
+pub mod budgets;
 pub mod drain;
 pub mod executor;
 pub mod fake_ip;
@@ -28,6 +29,12 @@ pub use outbound::{
     OpenedAssociation, OpenedStream, OutboundCapabilities, StreamIo, StreamOutbound, TargetBinding,
     CODE_OPEN_CANCELLED, CODE_OPEN_HANDSHAKE, CODE_OPEN_POOL_EXHAUSTED, CODE_OPEN_REFUSED,
     CODE_OPEN_TIMEOUT, CODE_OPEN_UNSUPPORTED,
+};
+pub use budgets::{
+    BudgetKind, BudgetLimits, BudgetRejection, BudgetUsage, Budgets, ControlPermit, DialPermit,
+    MappingPermit, QueueReservation, SessionPermit, CODE_BUDGET_CONTROL, CODE_BUDGET_DIALING,
+    CODE_BUDGET_QUEUE_SESSION, CODE_BUDGET_QUEUE_TOTAL, CODE_BUDGET_SESSION_SCOPE,
+    CODE_BUDGET_SESSIONS, CODE_BUDGET_UDP_MAPPING,
 };
 pub use drain::{
     DrainController, DrainError, DrainReason, ReclaimRecord, RevokeOutcome, SessionFlowState,
