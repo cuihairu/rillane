@@ -242,8 +242,7 @@ impl FairScheduler {
         } else {
             self.latency_budget
         };
-        let clamped = desired
-            .clamp(self.shape.latency_budget_min, self.shape.latency_budget_max);
+        let clamped = desired.clamp(self.shape.latency_budget_min, self.shape.latency_budget_max);
         let applied = clamped as i64 - self.latency_budget as i64;
         self.latency_budget = clamped;
         applied
@@ -281,13 +280,15 @@ mod tests {
         let dl1 = sched
             .push(TrafficClass::Throughput, 64 * 1024, 0)
             .expect("入队");
-        let _dl2 = sched.push(TrafficClass::Throughput, 64 * 1024, 0).expect("入队");
-        let _dl3 = sched.push(TrafficClass::Throughput, 64 * 1024, 0).expect("入队");
+        let _dl2 = sched
+            .push(TrafficClass::Throughput, 64 * 1024, 0)
+            .expect("入队");
+        let _dl3 = sched
+            .push(TrafficClass::Throughput, 64 * 1024, 0)
+            .expect("入队");
 
         // 游戏小包 100B 在下载进行到 5s 时入队
-        let game = sched
-            .push(TrafficClass::Latency, 100, 5_000)
-            .expect("入队");
+        let game = sched.push(TrafficClass::Latency, 100, 5_000).expect("入队");
         let grants = sched.serve_round(5_000);
 
         // 本轮头部 = 游戏小包（延迟类优先），等待 0ms
@@ -315,7 +316,9 @@ mod tests {
         for _ in 0..100 {
             sched.push(TrafficClass::Latency, 100, 0).expect("入队");
         }
-        let dl = sched.push(TrafficClass::Throughput, 64 * 1024, 0).expect("入队");
+        let dl = sched
+            .push(TrafficClass::Throughput, 64 * 1024, 0)
+            .expect("入队");
 
         let grants = sched.serve_round(10);
         let latency_bytes: u64 = grants
@@ -349,7 +352,9 @@ mod tests {
     #[test]
     fn full_round_to_throughput_when_no_latency_traffic() {
         let mut sched = FairScheduler::new(shape()).expect("合法形状");
-        let dl = sched.push(TrafficClass::Throughput, 64 * 1024, 0).expect("入队");
+        let dl = sched
+            .push(TrafficClass::Throughput, 64 * 1024, 0)
+            .expect("入队");
         let grants = sched.serve_round(0);
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].request_id, dl);

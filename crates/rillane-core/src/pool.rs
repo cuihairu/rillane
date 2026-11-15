@@ -55,7 +55,10 @@ pub enum TransportReuse {
 impl TransportReuse {
     /// 是否可池化（None 类不可——伪造即越权）
     pub fn poolable(self) -> bool {
-        matches!(self, TransportReuse::TlsResumption | TransportReuse::Multiplexed)
+        matches!(
+            self,
+            TransportReuse::TlsResumption | TransportReuse::Multiplexed
+        )
     }
 
     /// 机器口径
@@ -347,16 +350,19 @@ impl ConnPool {
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
         let node_key = node.clone();
-        self.idle.entry(node_key.clone()).or_default().push(PooledConn {
-            conn_id,
-            node: node_key,
-            endpoint,
-            reuse,
-            opened_ms: now_ms,
-            last_used_ms: now_ms,
-            uses: 1,
-            streams_in_flight: 0,
-        });
+        self.idle
+            .entry(node_key.clone())
+            .or_default()
+            .push(PooledConn {
+                conn_id,
+                node: node_key,
+                endpoint,
+                reuse,
+                opened_ms: now_ms,
+                last_used_ms: now_ms,
+                uses: 1,
+                streams_in_flight: 0,
+            });
         self.total_idle += 1;
         Ok(conn_id)
     }
@@ -364,12 +370,7 @@ impl ConnPool {
     /// 热路径取用：LIFO 取该节点（可指定端点）最近用过的可用连接。
     /// TlsResumption → 独占 Hit（离池）；Multiplexed 未满流 → Share
     /// （留池，流数 +1），满流 → 独占 Hit。无可用 → Miss（走冷路径）。
-    pub fn acquire(
-        &mut self,
-        node: &str,
-        endpoint: Option<&EndpointRef>,
-        now_ms: u64,
-    ) -> Acquire {
+    pub fn acquire(&mut self, node: &str, endpoint: Option<&EndpointRef>, now_ms: u64) -> Acquire {
         let Some(vec) = self.idle.get_mut(node) else {
             self.misses += 1;
             return Acquire::Miss;
@@ -565,7 +566,10 @@ mod tests {
             .expect("入池");
         assert_eq!(
             pool.plan_warm("node-a", &ep("10.0.0.3"), TransportReuse::TlsResumption, T0),
-            WarmDecision::Full { total: 2, per_node: 2 },
+            WarmDecision::Full {
+                total: 2,
+                per_node: 2
+            },
             "单节点上限挡住预热"
         );
     }
@@ -713,7 +717,11 @@ mod tests {
             .expect_err("None 类应拒入池");
         assert_eq!(err.code(), CODE_POOL_UNSUPPORTED);
         assert_eq!(pool.stats().offers_rejected, 1);
-        assert_eq!(pool.acquire("node-a", None, T0), Acquire::Miss, "池空走冷路径");
+        assert_eq!(
+            pool.acquire("node-a", None, T0),
+            Acquire::Miss,
+            "池空走冷路径"
+        );
 
         // release 侧双保险：手工构造 None 条目也进不来
         let rogue = PooledConn {
@@ -772,8 +780,7 @@ mod tests {
         assert_eq!(evicted.len(), 2);
         assert!(evicted
             .iter()
-            .all(|r| r.reason == EvictionReason::NodeRemoved
-                && r.conn.node == "node-a"));
+            .all(|r| r.reason == EvictionReason::NodeRemoved && r.conn.node == "node-a"));
         assert_eq!(pool.stats().total_idle, 1);
         assert_eq!(pool.stats().evictions, 2);
         // node-b 不受波及

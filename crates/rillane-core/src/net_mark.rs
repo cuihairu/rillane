@@ -74,7 +74,8 @@ pub fn bind_udp_marked(
         } else {
             socket2::Domain::IPV6
         };
-        let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+        let sock =
+            socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
         sock.set_nonblocking(true)?;
         if let Err(e) = sock.set_mark(mark) {
             drop(sock);
@@ -598,8 +599,8 @@ mod tests {
     async fn bind_udp_marked_zero_mark_is_plain_usable() {
         let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let peer = server.local_addr().unwrap();
-        let bound = bind_udp_marked("127.0.0.1:0".parse().unwrap(), 0)
-            .expect("mark 0 普通 bind 应成功");
+        let bound =
+            bind_udp_marked("127.0.0.1:0".parse().unwrap(), 0).expect("mark 0 普通 bind 应成功");
         let client = tokio::net::UdpSocket::from_std(bound).unwrap();
         client.send_to(b"ping", peer).await.unwrap();
         let mut buf = [0u8; 4];

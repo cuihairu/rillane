@@ -22,8 +22,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::outbound::{
-    DatagramOutbound, OpenContext, OpenStage, StreamOutbound, TargetBinding,
-    CODE_OPEN_CANCELLED, CODE_OPEN_UNSUPPORTED,
+    DatagramOutbound, OpenContext, OpenStage, StreamOutbound, TargetBinding, CODE_OPEN_CANCELLED,
+    CODE_OPEN_UNSUPPORTED,
 };
 use crate::plan::{EndpointRef, GenerationRef, RoutePlan, SessionPin};
 
@@ -260,7 +260,8 @@ impl SessionExecutor {
                 return Err(PlanExecError::Cancelled { attempts });
             } else {
                 let ctx = dial_context(&base_ctx, index);
-                match outbound.open_stream(candidate.endpoint.as_ref().expect("gap 已排除"), &ctx)
+                match outbound
+                    .open_stream(candidate.endpoint.as_ref().expect("gap 已排除"), &ctx)
                     .await
                 {
                     Ok(opened) => {
@@ -315,10 +316,7 @@ impl SessionExecutor {
                 return Err(PlanExecError::Cancelled { attempts });
             } else {
                 let ctx = dial_context(&base_ctx, index);
-                match outbound
-                    .open_association(&binding, &ctx)
-                    .await
-                {
+                match outbound.open_association(&binding, &ctx).await {
                     Ok(opened) => {
                         return Ok(finish(
                             plan,
@@ -374,7 +372,9 @@ fn planned_node(plan: &RoutePlan) -> String {
     match &plan.decision().path {
         crate::RoutePath::Direct { node } => node.clone(),
         crate::RoutePath::ThroughGroup { selected_node, .. } => selected_node.clone(),
-        crate::RoutePath::Chain { hops } => hops.last().map(|hop| hop.node.clone()).unwrap_or_default(),
+        crate::RoutePath::Chain { hops } => {
+            hops.last().map(|hop| hop.node.clone()).unwrap_or_default()
+        }
     }
 }
 
@@ -621,10 +621,10 @@ mod tests {
         }
 
         fn set_endpoint(&self, node: &str, endpoint: Option<(&str, u16)>) {
-            self.endpoints
-                .lock()
-                .expect("catalog")
-                .insert(node.to_string(), endpoint.map(|(h, p)| EndpointRef::new(h, p)));
+            self.endpoints.lock().expect("catalog").insert(
+                node.to_string(),
+                endpoint.map(|(h, p)| EndpointRef::new(h, p)),
+            );
         }
     }
 
@@ -728,10 +728,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::outbound::StreamIo for NullIo {
-        async fn write_all(
-            &mut self,
-            _data: bytes::Bytes,
-        ) -> Result<usize, OpenError> {
+        async fn write_all(&mut self, _data: bytes::Bytes) -> Result<usize, OpenError> {
             Ok(0)
         }
 
@@ -763,7 +760,10 @@ mod tests {
             .await
             .expect("建立成功");
         match plan.execution() {
-            ExecutionOutcome::Dialed { endpoint, via_chain } => {
+            ExecutionOutcome::Dialed {
+                endpoint,
+                via_chain,
+            } => {
                 assert_eq!(endpoint.host, "10.0.0.7");
                 assert_eq!(endpoint.port, 443);
                 assert!(via_chain.is_empty(), "直连链路为空");
@@ -836,7 +836,10 @@ mod tests {
     /// 代际错配（上下文 ≠ 计划）建立前拒绝，零拨号
     #[tokio::test]
     async fn generation_mismatch_rejected_before_dial() {
-        let catalog = Arc::new(TestCatalog::new(&[("node-a", Some(("a.example", 443)))], &[]));
+        let catalog = Arc::new(TestCatalog::new(
+            &[("node-a", Some(("a.example", 443)))],
+            &[],
+        ));
         let executor = SessionExecutor::new(catalog);
         let outbound = Arc::new(MockStreamOutbound::ok_node("10.0.0.1", 443));
         let mut plan = plan_for("node-a", &generation("gen-1"));
@@ -969,13 +972,16 @@ mod tests {
     #[tokio::test]
     async fn cancelled_stops_fallback_immediately() {
         let catalog = Arc::new(TestCatalog::new(
-            &[("node-a", Some(("a.example", 443))), ("node-b", Some(("b.example", 443)))],
+            &[
+                ("node-a", Some(("a.example", 443))),
+                ("node-b", Some(("b.example", 443))),
+            ],
             &[("node-a", vec!["node-b"])],
         ));
         let executor = SessionExecutor::new(catalog);
-        let outbound = Arc::new(MockStreamOutbound::script(vec![Err(
-            OpenError::cancelled(OpenStage::Dial)
-        )]));
+        let outbound = Arc::new(MockStreamOutbound::script(vec![Err(OpenError::cancelled(
+            OpenStage::Dial,
+        ))]));
         let mut plan = plan_for("node-a", &generation("gen-1"));
         let ctx = OpenContext::new("s-1", generation("gen-1")).expect("上下文");
         ctx.cancel.cancel();
@@ -1038,7 +1044,10 @@ mod tests {
         for attempt in err.attempts() {
             assert!(matches!(
                 attempt.outcome,
-                AttemptOutcome::Skipped { code: CODE_OPEN_UNSUPPORTED, .. }
+                AttemptOutcome::Skipped {
+                    code: CODE_OPEN_UNSUPPORTED,
+                    ..
+                }
             ));
         }
         assert!(matches!(plan.execution(), ExecutionOutcome::Failed { .. }));
@@ -1151,10 +1160,7 @@ mod tests {
     #[test]
     fn ledger_bind_freeze_unbind_and_rebind() {
         let mut ledger = SessionLedger::default();
-        let pin = SessionPin::for_plan(
-            &plan_for("node-a", &generation("gen-1")),
-            "node-a",
-        );
+        let pin = SessionPin::for_plan(&plan_for("node-a", &generation("gen-1")), "node-a");
         let session = EstablishedSession {
             pin,
             endpoint: EndpointRef::new("10.0.0.1", 443),

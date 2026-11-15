@@ -26,9 +26,7 @@
 
 use std::fmt;
 
-use crate::quality::{
-    QualityMetric, QualitySample, SampleStatus, SampleValue,
-};
+use crate::quality::{QualityMetric, QualitySample, SampleStatus, SampleValue};
 
 /// 稳定原因码：权重全零（无法加权评分）
 pub const CODE_WEIGHTS_INVALID: &str = "scoring.weights.invalid";
@@ -191,7 +189,9 @@ impl fmt::Display for ScoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ScoreError::WeightsInvalid => f.write_str("objective weights sum to zero"),
-            ScoreError::ProfileInvalid => f.write_str("scenario profile invalid (negative threshold)"),
+            ScoreError::ProfileInvalid => {
+                f.write_str("scenario profile invalid (negative threshold)")
+            }
         }
     }
 }
@@ -569,7 +569,11 @@ fn aggregate(metric: QualityMetric, samples: &[&QualitySample]) -> f64 {
             let mut num = 0u64;
             let mut den = 0u64;
             for s in samples {
-                if let SampleValue::Ratio { numerator, denominator } = s.value() {
+                if let SampleValue::Ratio {
+                    numerator,
+                    denominator,
+                } = s.value()
+                {
                     num += *numerator as u64;
                     den += *denominator as u64;
                 }
@@ -679,18 +683,12 @@ mod tests {
         let ra = gaming.score(&a, T0);
         let rb = gaming.score(&b, T0);
         let (sa, sb) = (ra.score.expect("A 可评"), rb.score.expect("B 可评"));
-        assert!(
-            sa > sb,
-            "游戏目标下 A({sa}) 应压过 B({sb})——低延迟重权"
-        );
+        assert!(sa > sb, "游戏目标下 A({sa}) 应压过 B({sb})——低延迟重权");
 
         let ra = web.score(&a, T0);
         let rb = web.score(&b, T0);
         let (sa, sb) = (ra.score.expect("A 可评"), rb.score.expect("B 可评"));
-        assert!(
-            sb > sa,
-            "网页目标下 B({sb}) 应压过 A({sa})——吞吐重权"
-        );
+        assert!(sb > sa, "网页目标下 B({sb}) 应压过 A({sa})——吞吐重权");
     }
 
     /// 输入快照可重放：同快照两次评分报告逐字段相等（权重/参考冻结）
@@ -978,7 +976,13 @@ mod tests {
 
         // 纯函数：同一输入两次决策一致（无可变状态——不影响任何绑定面）
         let d1 = scorer.prefer("node-a", &rich, std::slice::from_ref(&rich), None, T0);
-        let d2 = scorer.prefer("node-a", &rich.clone(), std::slice::from_ref(&rich), None, T0);
+        let d2 = scorer.prefer(
+            "node-a",
+            &rich.clone(),
+            std::slice::from_ref(&rich),
+            None,
+            T0,
+        );
         assert_eq!(d1, d2);
     }
 

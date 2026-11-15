@@ -320,7 +320,10 @@ impl Budgets {
     }
 
     /// 准入一个会话（场景范围记账；总量与范围任一超限即拒）
-    pub fn admit_session(&self, scope: impl Into<String>) -> Result<SessionPermit, BudgetRejection> {
+    pub fn admit_session(
+        &self,
+        scope: impl Into<String>,
+    ) -> Result<SessionPermit, BudgetRejection> {
         let scope = scope.into();
         match try_inc(&self.state.sessions_total, self.limits.max_sessions_total) {
             Err(used) => Err(BudgetRejection {
@@ -330,11 +333,7 @@ impl Budgets {
             }),
             Ok(_) => {
                 let scope_used = {
-                    let mut map = self
-                        .state
-                        .sessions_by_scope
-                        .lock()
-                        .expect("scope 记账锁");
+                    let mut map = self.state.sessions_by_scope.lock().expect("scope 记账锁");
                     let used = map.entry(scope.clone()).or_insert(0);
                     *used += 1;
                     *used
@@ -380,13 +379,13 @@ impl Budgets {
 
     /// 准入一条 UDP NAT 映射
     pub fn admit_udp_mapping(&self) -> Result<MappingPermit, BudgetRejection> {
-        try_inc(&self.state.udp_mappings, self.limits.max_udp_mappings).map_err(
-            |used| BudgetRejection {
+        try_inc(&self.state.udp_mappings, self.limits.max_udp_mappings).map_err(|used| {
+            BudgetRejection {
                 kind: BudgetKind::UdpMapping,
                 used,
                 limit: self.limits.max_udp_mappings.expect("拒绝必有上限"),
-            },
-        )?;
+            }
+        })?;
         Ok(MappingPermit {
             state: Arc::clone(&self.state),
         })
@@ -417,8 +416,11 @@ impl Budgets {
                 });
             }
         }
-        match try_inc_bytes(bytes, &self.state.queue_bytes_total, self.limits.max_queue_bytes_total)
-        {
+        match try_inc_bytes(
+            bytes,
+            &self.state.queue_bytes_total,
+            self.limits.max_queue_bytes_total,
+        ) {
             Err(used) => Err(BudgetRejection {
                 kind: BudgetKind::QueueTotal,
                 used,
@@ -565,10 +567,7 @@ mod tests {
             .reserve_queue_bytes("flow-1", 500)
             .expect_err("累计 1100B 应拒");
         assert_eq!(err.code(), CODE_BUDGET_QUEUE_SESSION);
-        assert_eq!(
-            err.kind,
-            BudgetKind::QueueSession("flow-1".to_string())
-        );
+        assert_eq!(err.kind, BudgetKind::QueueSession("flow-1".to_string()));
         assert_eq!(err.used, 1100);
         assert_eq!(err.limit, 1000);
 
@@ -599,7 +598,9 @@ mod tests {
         // 释放即归还
         drop(r1);
         assert_eq!(budgets.usage().queue_bytes_total, 600);
-        let _r3 = budgets.reserve_queue_bytes("flow-3", 400).expect("归还后可占");
+        let _r3 = budgets
+            .reserve_queue_bytes("flow-3", 400)
+            .expect("归还后可占");
     }
 
     /// 控制面独立池：数据面（会话+队列）全满时控制请求仍被接纳；
@@ -658,7 +659,9 @@ mod tests {
             max_queue_bytes_total: Some(0),
             ..Default::default()
         });
-        let _zero = budgets.reserve_queue_bytes("flow-1", 0).expect("零字节恒可");
+        let _zero = budgets
+            .reserve_queue_bytes("flow-1", 0)
+            .expect("零字节恒可");
         assert_eq!(budgets.usage().queue_bytes_total, 0);
     }
 

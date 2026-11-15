@@ -413,7 +413,9 @@ mod tests {
 
         // release 后地址恢复可回收
         t.release(&ip1);
-        let reuser = t.alloc_with_generation("next.example", g1).expect("释放后可回收");
+        let reuser = t
+            .alloc_with_generation("next.example", g1)
+            .expect("释放后可回收");
         assert_eq!(reuser, ip1, "释放后被新域名回收");
         assert_eq!(
             t.reverse_with_context(&ip1).map(|c| c.domain),
@@ -471,7 +473,9 @@ mod tests {
         );
         // 钉住后：重解析冻结，代际保持
         t.pin(&ip);
-        let _ = t.alloc_with_generation("ctx.example", "gen-c").expect("重分配");
+        let _ = t
+            .alloc_with_generation("ctx.example", "gen-c")
+            .expect("重分配");
         assert_eq!(
             t.reverse_with_context(&ip),
             Some(ResolutionContext {

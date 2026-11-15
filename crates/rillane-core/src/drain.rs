@@ -68,7 +68,10 @@ pub enum SessionFlowState {
     /// 正常在流（无排空事件触达）
     Streaming,
     /// 排空中：自然结束优先，deadline 后由 sweep 回收（撤销不走此态）
-    Draining { reason: DrainReason, deadline_ms: u64 },
+    Draining {
+        reason: DrainReason,
+        deadline_ms: u64,
+    },
 }
 
 /// 超时回收记录（sweep 产物；断线需重连边界的一个强制动作）
@@ -193,7 +196,8 @@ impl DrainController {
         deadline_ms: u64,
         _now_ms: u64,
     ) -> Vec<String> {
-        self.retired_generations.insert(retired_generation.to_string());
+        self.retired_generations
+            .insert(retired_generation.to_string());
         self.mark_draining(
             |entry| entry.pin().generation().as_str() == retired_generation,
             DrainReason::GenerationRetired {
@@ -206,12 +210,7 @@ impl DrainController {
     /// 端点删除：目录摘除某节点的端点。该节点出口的全部存量会话进入
     /// 排空态（**不**立即断线——删除与撤销分别处理），节点本身不拒新会话
     /// （新端点由目录声明）。返回进入排空的会话。
-    pub fn delete_endpoint(
-        &mut self,
-        node: &str,
-        deadline_ms: u64,
-        _now_ms: u64,
-    ) -> Vec<String> {
+    pub fn delete_endpoint(&mut self, node: &str, deadline_ms: u64, _now_ms: u64) -> Vec<String> {
         self.mark_draining(
             |entry| entry.pin().egress() == node,
             DrainReason::EndpointDeleted {
@@ -259,7 +258,10 @@ impl DrainController {
             .states
             .iter()
             .filter_map(|(id, state)| match state {
-                SessionFlowState::Draining { reason, deadline_ms } if *deadline_ms <= now_ms => {
+                SessionFlowState::Draining {
+                    reason,
+                    deadline_ms,
+                } if *deadline_ms <= now_ms => {
                     Some((id.clone(), reason.clone(), now_ms - *deadline_ms))
                 }
                 _ => None,
@@ -344,11 +346,9 @@ mod tests {
     }
 
     fn session(node: &str, gen: &str, host: &str) -> EstablishedSession {
-        let plan = RoutePlan::from_decision(
-            &RouteDecision::direct(node.to_string()),
-            generation(gen),
-        )
-        .expect("合法计划");
+        let plan =
+            RoutePlan::from_decision(&RouteDecision::direct(node.to_string()), generation(gen))
+                .expect("合法计划");
         EstablishedSession::assemble(
             SessionPin::for_plan(&plan, node),
             EndpointRef::new(host, 443),
@@ -450,7 +450,10 @@ mod tests {
                 deadline_ms: 1_000,
             })
         );
-        assert_eq!(dc.session_state("flow-b"), Some(SessionFlowState::Streaming));
+        assert_eq!(
+            dc.session_state("flow-b"),
+            Some(SessionFlowState::Streaming)
+        );
 
         // deadline 前：仍存活；deadline 后：sweep 回收
         assert!(dc.sweep(500).is_empty());
@@ -473,9 +476,7 @@ mod tests {
         dc.bind("flow-1", session("node-a", "gen-1", "10.0.0.1"), 100);
 
         for bad in ["", "   "] {
-            let err = dc
-                .revoke_session("flow-1", bad)
-                .expect_err("空署名应拒绝");
+            let err = dc.revoke_session("flow-1", bad).expect_err("空署名应拒绝");
             assert_eq!(err.code(), CODE_AUTHORITY_MISSING);
         }
         assert!(dc.entry("flow-1").is_some(), "拒绝后条目不动");
@@ -500,11 +501,10 @@ mod tests {
         assert!(dc.entry("flow-2").is_some(), "点名撤销不波及其它会话");
 
         // 不存在的会话：None（无臆造结果）
-        assert!(
-            dc.revoke_session("flow-x", "admin-console")
-                .expect("署名合法")
-                .is_none()
-        );
+        assert!(dc
+            .revoke_session("flow-x", "admin-console")
+            .expect("署名合法")
+            .is_none());
     }
 
     /// 按代际撤销只杀该代际；其它代际会话不受影响
@@ -526,11 +526,10 @@ mod tests {
         assert_eq!(dc.len(), 1);
 
         // 全空代际撤销：空结果
-        assert!(
-            dc.revoke_generation("gen-9", "security-desk")
-                .expect("署名合法")
-                .is_empty()
-        );
+        assert!(dc
+            .revoke_generation("gen-9", "security-desk")
+            .expect("署名合法")
+            .is_empty());
     }
 
     /// 后到排空事件覆盖先前态（按事件序确定）；撤销态不进 sweep
