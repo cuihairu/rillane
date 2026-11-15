@@ -16,7 +16,13 @@ pub mod fake_ip;
 pub mod hosts;
 pub mod net_mark;
 pub mod performance;
+pub mod plan;
 pub mod udp;
+
+pub use plan::{
+    DecisionSnapshot, EndpointRef, ExecutionOutcome, FlowAssociation, GenerationRef,
+    MetadataOrigin, ObjectRef, Provenanced, RoutePlan, SessionPin,
+};
 
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.
 pub trait IoStream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {}

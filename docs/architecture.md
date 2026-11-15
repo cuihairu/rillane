@@ -8,7 +8,7 @@ This is an implementation reference, not another architecture design. The **sing
 |---|---|
 | `apps/rillaned` | Configuration, runtime assembly and HTTP control plane |
 | `apps/rillanectl` | Configuration utilities, control queries, subscriptions and certificates |
-| `rillane-core` | Flow/FlowContext, RouteDecision/RoutePath, forwarding and UDP contracts |
+| `rillane-core` | Flow/FlowContext, RouteDecision/RoutePath, forwarding and UDP contracts; flow/plan/session contracts (`plan` module: one-way RoutePlan mapping, SessionPin, TCP/UDP association boundary) |
 | `rillane-config` | Configuration models, validation, profile expansion and the config version/capability contract (`contract` module) |
 | `rillane-routing` | Conditions, logical groups and routing decisions |
 | `rillane-protocols` | Inbounds, outbounds, dialing and transports |
@@ -30,7 +30,7 @@ This is an implementation reference, not another architecture design. The **sing
 | Scenarios | Configuration-time profile defaults and separate rule-selected outbounds | Concurrent policies, resource budgets and typed quality feedback |
 | Diagnostics | Aggregates, group state, Mesh dry-run and diagnose | Real flow traces, pure Explain, explicit Probe; MCP is not implemented |
 
-RouteDecision/RoutePath already describes groups, chains and reasons; RoutePlan extends it without creating a second router. Subscription SHA-256 change detection exists but is not source authentication or transactional generations.
+RouteDecision/RoutePath already describes groups, chains and reasons; RoutePlan extends it without creating a second router. The `plan` module (RIL-006) freezes the rule result into a read-only `DecisionSnapshot`, keeps execution results (dialed/failed) separate from it, binds flows to an explicit generation via `SessionPin`, and models TCP streams and UDP datagram associations as distinct kinds. Subscription SHA-256 change detection exists but is not source authentication or transactional generations; the immutable `RuntimeGeneration` contract lives in `rillane-config` (RIL-003).
 
 ## Control and updates
 
