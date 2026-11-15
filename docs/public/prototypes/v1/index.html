@@ -1,0 +1,36 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rillane v1 原型图库</title><style>
+:root{color-scheme:light;font-family:system-ui,"Noto Sans CJK SC",sans-serif;color:#19313c;background:#f5f7f8}body{margin:0 auto;max-width:1440px;padding:32px 24px}h1{font-size:36px;margin-bottom:12px}p{line-height:1.7;color:#526674}nav{display:flex;flex-wrap:wrap;gap:12px;margin:24px 0}a{color:#007f78}nav a{padding:8px 14px;background:white;border:1px solid #d8e3e6;border-radius:8px;text-decoration:none}main{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}article{background:white;border:1px solid #d8e3e6;border-radius:12px;padding:20px;scroll-margin-top:20px}article.desktop{grid-column:1/-1}h2{margin:0;font-size:22px}img{display:block;width:100%;height:auto;border-radius:8px}article.mobile img{max-width:440px;margin:auto}footer{display:flex;justify-content:space-between;margin-top:16px;font-size:14px}aside{padding:16px 20px;border-left:4px solid #007f78;background:#e9f4f2;line-height:1.8}small{color:#60777e}@media(max-width:750px){body{padding:20px 12px}main{grid-template-columns:1fr}h1{font-size:28px}article{padding:12px}}
+</style><header><small>RILLANE · DESIGN V1</small><h1>连接看得见，策略讲得清</h1><p>桌面 6 页 / iOS 2 页 / Android 2 页。点击图片查看原图，可直接离线打开本文件。</p></header>
+<aside>这是静态视觉原型，所有连接、流量与检测结果均为示例。图片上的按钮不可操作，不能证明功能已经实现。规则/全局/直连、DNS应答模式、DNS查询出站属于不同控制层。生成图中的Logo和细节图标尚待组件设计统一。</aside>
+<nav><a href="#D01">D01</a> <a href="#D02">D02</a> <a href="#D03">D03</a> <a href="#D04">D04</a> <a href="#D05">D05</a> <a href="#D06">D06</a> <a href="#I01">I01</a> <a href="#I02">I02</a> <a href="#A01">A01</a> <a href="#A02">A02</a></nav><main><article id="D01" class="desktop">
+<h2>D01 · 桌面 · 总览</h2><p>连接、模式、并行场景、业务流量与媒体检测摘要</p>
+<a href="desktop-overview.png" target="_blank" rel="noopener"><img loading="lazy" src="desktop-overview.png" width="1568" height="1003" alt="桌面 · 总览 原型示例" /></a>
+<footer><a href="desktop-overview.png" download>下载 PNG</a><span>1568 × 1003</span></footer></article><article id="D02" class="desktop">
+<h2>D02 · 桌面 · 节点与订阅</h2><p>来源、分组选择、更新差异与能力状态</p>
+<a href="desktop-nodes.png" target="_blank" rel="noopener"><img loading="lazy" src="desktop-nodes.png" width="1568" height="1003" alt="桌面 · 节点与订阅 原型示例" /></a>
+<footer><a href="desktop-nodes.png" download>下载 PNG</a><span>1568 × 1003</span></footer></article><article id="D03" class="desktop">
+<h2>D03 · 桌面 · 规则与区域</h2><p>规则/全局/直连、区域预设、三桌面进程规则与切换影响</p>
+<a href="desktop-rules.png" target="_blank" rel="noopener"><img loading="lazy" src="desktop-rules.png" width="1568" height="1003" alt="桌面 · 规则与区域 原型示例" /></a>
+<footer><a href="desktop-rules.png" download>下载 PNG</a><span>1568 × 1003</span></footer></article><article id="D04" class="desktop">
+<h2>D04 · 桌面 · 网络与 DNS</h2><p>接管、fake-ip/redir-host、DNS出站、引导解析、按需嗅探</p>
+<a href="desktop-network.png" target="_blank" rel="noopener"><img loading="lazy" src="desktop-network.png" width="1568" height="1003" alt="桌面 · 网络与 DNS 原型示例" /></a>
+<footer><a href="desktop-network.png" download>下载 PNG</a><span>1568 × 1003</span></footer></article><article id="D05" class="desktop">
+<h2>D05 · 桌面 · 连接诊断</h2><p>实际轨迹、计划/实际出口、回退、未知原因与只读AI</p>
+<a href="desktop-diagnostics.png" target="_blank" rel="noopener"><img loading="lazy" src="desktop-diagnostics.png" width="1568" height="1003" alt="桌面 · 连接诊断 原型示例" /></a>
+<footer><a href="desktop-diagnostics.png" download>下载 PNG</a><span>1568 × 1003</span></footer></article><article id="D06" class="desktop">
+<h2>D06 · 桌面 · 开发者代理</h2><p>Git/SSH/GitHub路由、当前终端、配置预览与连通性</p>
+<a href="desktop-developer.png" target="_blank" rel="noopener"><img loading="lazy" src="desktop-developer.png" width="1568" height="1003" alt="桌面 · 开发者代理 原型示例" /></a>
+<footer><a href="desktop-developer.png" download>下载 PNG</a><span>1568 × 1003</span></footer></article><article id="I01" class="mobile">
+<h2>I01 · iOS · 首页</h2><p>原生列表、模式、场景、业务流量与常用工具</p>
+<a href="ios-home.png" target="_blank" rel="noopener"><img loading="lazy" src="ios-home.png" width="1024" height="1536" alt="iOS · 首页 原型示例" /></a>
+<footer><a href="ios-home.png" download>下载 PNG</a><span>1024 × 1536</span></footer></article><article id="I02" class="mobile">
+<h2>I02 · iOS · 网络设置</h2><p>DNS应答、查询出站、例外、嗅探与应用预览</p>
+<a href="ios-network.png" target="_blank" rel="noopener"><img loading="lazy" src="ios-network.png" width="1024" height="1536" alt="iOS · 网络设置 原型示例" /></a>
+<footer><a href="ios-network.png" download>下载 PNG</a><span>1024 × 1536</span></footer></article><article id="A01" class="mobile">
+<h2>A01 · Android · 首页</h2><p>Material风格、VPN状态、模式与并行场景</p>
+<a href="android-home.png" target="_blank" rel="noopener"><img loading="lazy" src="android-home.png" width="1024" height="1536" alt="Android · 首页 原型示例" /></a>
+<footer><a href="android-home.png" download>下载 PNG</a><span>1024 × 1536</span></footer></article><article id="A02" class="mobile">
+<h2>A02 · Android · 网络设置</h2><p>独立DNS/区域控制与变更预览</p>
+<a href="android-network.png" target="_blank" rel="noopener"><img loading="lazy" src="android-network.png" width="1024" height="1536" alt="Android · 网络设置 原型示例" /></a>
+<footer><a href="android-network.png" download>下载 PNG</a><span>1024 × 1536</span></footer></article></main><p>界面参考：Clash Verge 官方预览、Shadowrocket App Store 产品资料。iMac仅确认到进程，未获取实时窗口截图。后续以UI交互规格和内核能力回执为准。</p><p><a href="manifest.json">文件清单与SHA-256</a></p></html>

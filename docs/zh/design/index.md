@@ -8,6 +8,8 @@
 | [架构概念与抽象依据](architecture-concepts.md) | 32 个核心概念的职责、为什么抽象、收益与成本 |
 | [接入、出口与统计契约](io-and-accounting.md) | 入口/出口、会话执行、传输/资源池、业务与底层统计的接口边界 |
 | [协议接入计划](protocol-roadmap.md) | 外部实现优先、新协议/隧道/传输与选库门禁 |
+| [UI 原型与控制语义](ui-prototype-v1.md) | 代理模式、区域、DNS/嗅探、流媒体与开发者代理交互 |
+| [10 张原型图库](ui/README.md) | 桌面 6 页、iOS/Android 各 2 页，PNG/离线图库/提示词 |
 | [Debug、路径解释与可选 MCP](debug-and-mcp.md) | 规则推演、真实轨迹、主动探测、脱敏、工具权限和配置闭环 |
 | [竞品架构研究](../research/proxy-architectures-2026-11-14.md) | Mihomo、sing-box、Surge 的来源证据、SVG 与借鉴理由 |
 

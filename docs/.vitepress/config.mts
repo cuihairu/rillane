@@ -10,6 +10,8 @@ function locale(zh: boolean): DefaultTheme.Config {
     page(zh ? '接入、出口与统计契约' : 'IO and accounting contracts', '/design/io-and-accounting'),
     page(zh ? '协议接入计划' : 'Protocol integration plan', '/design/protocol-roadmap'),
     page(zh ? 'Debug、路径与 MCP' : 'Debug, paths and MCP', '/design/debug-and-mcp'),
+    page(zh ? 'UI 原型与控制语义' : 'UI prototypes and controls', '/design/ui-prototype-v1'),
+    page(zh ? '原型图库（10 张）' : 'Prototype gallery (10)', '/design/ui/README'),
     page(zh ? '竞品架构研究与 SVG' : 'Architecture study and SVGs', '/research/proxy-architectures-2026-11-14'),
   ]
   const guides = [

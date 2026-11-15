@@ -133,3 +133,5 @@ First delivery must reproduce uncaptured or sampled/expired records, wrong-rule 
 This is the v1 implementation specification. Exact API/CLI schemas freeze with their tasks; Windows/macOS identity and Apple packet bridging still require spikes and device evidence.
 
 See [v1 IO and accounting contracts](io-and-accounting.md) for inbound/outbound boundaries, ownership, transport composition and layered counters.
+
+See [UI/network semantics](ui-prototype-v1.md) for DNS/sniff provenance, streaming and Git/SSH/GitHub tests. Reuse ProbeJob/DiagnosticView/proposals and separate probes/prewarming from business accounting.

@@ -133,3 +133,5 @@ MCP 输出采用结构化字段白名单；原始 `diagnose` 压缩包不能直�
 本节是 v1 的实施规格；API/CLI 精确 schema 随对应任务冻结，Windows/macOS 身份与 Apple 包桥接仍需技术探针和真机验证。
 
 接入/出口接口、会话所有权、合法传输组合与分层流量统计统一见 [v1 IO 与统计契约](io-and-accounting.md)。
+
+DNS/嗅探来源、媒体检测和 Git/SSH/GitHub 连通性的证据与作用域见 [UI 与网络控制规格](ui-prototype-v1.md)，复用 ProbeJob/DiagnosticView/配置提案；不同检测与预热流量不混用户业务统计。
