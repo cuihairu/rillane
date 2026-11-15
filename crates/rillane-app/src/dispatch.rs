@@ -150,11 +150,48 @@ fn build_validated(name: &str, args: &Value) -> Result<AppOperation, JsonRpcErro
         "probe_result" => Ok(AppOperation::ProbeResult {
             id: get_u64("id").ok_or_else(|| invalid("id"))?,
         }),
+        "validate_config" => Ok(AppOperation::ConfigPreview {
+            patch: args.get("patch").ok_or_else(|| invalid("patch"))?.clone(),
+            scope: get_scope(args),
+        }),
+        "preview_config_change" => {
+            let patch = args.get("patch").ok_or_else(|| invalid("patch"))?.clone();
+            let scope = get_scope(args).unwrap_or_else(|| derive_scope_from_patch(&patch));
+            Ok(AppOperation::ConfigPropose {
+                patch,
+                scope,
+                ttl_ms: get_u64("ttl_ms").unwrap_or(crate::ops::MCP_PROPOSE_TTL_MS),
+            })
+        }
         other => Err(
             JsonRpcError::invalid_params(format!("unknown tool: {other}"))
                 .with_code_data("mcp.tool.unknown", json!({"tool": other})),
         ),
     }
+}
+
+/// scope 标签提取（schema 已挡非串/超长——此处只取形；缺省 None）。
+fn get_scope(args: &Value) -> Option<Vec<String>> {
+    args.get("scope")?.as_array().map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect()
+    })
+}
+
+/// scope 缺省派生：patch 顶层段即提案范围（排序去重——同输入同输出；
+/// 模型不必转述范围，转述错了反而误导操作员审阅）。空补丁 → 空范围
+/// → 提案店拒绝（proposal.scope.empty 稳定码——空补丁本就无可登记）。
+fn derive_scope_from_patch(patch: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = patch
+        .as_object()
+        .map(|obj| obj.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 /// 构造期拒绝（AppError）→ -32602（schema 已挡住常规违例——此臂是
@@ -357,5 +394,77 @@ mod tests {
             out["structuredContent"]["error"]["code"],
             "mcp.result.oversize"
         );
+    }
+
+    /// RIL-080：配置工具 → 边界操作映射——预检 scope 直取；提案
+    /// scope 缺省派生自 patch 顶层段（排序去重）、ttl 缺省、owner
+    /// 结构性固定（请求体 owner 恒适配器标签——模型面无此字段）。
+    #[test]
+    fn config_tools_map_to_preview_and_propose_operations() {
+        let (op, tool) = build_operation(
+            "validate_config",
+            Some(&json!({"patch": {"telemetry": {"log_level": "debug"}}, "scope": ["telemetry"]})),
+        )
+        .expect("op");
+        assert_eq!(tool.name, "validate_config");
+        match op {
+            AppOperation::ConfigPreview { patch, scope } => {
+                assert_eq!(patch["telemetry"]["log_level"], "debug");
+                assert_eq!(scope, Some(vec!["telemetry".to_string()]));
+            }
+            other => panic!("expected config preview, got {other:?}"),
+        }
+
+        let (op, _) = build_operation(
+            "preview_config_change",
+            Some(&json!({"patch": {"routing": {}, "telemetry": {}}})),
+        )
+        .expect("op");
+        match op {
+            AppOperation::ConfigPropose {
+                patch,
+                scope,
+                ttl_ms,
+            } => {
+                assert_eq!(
+                    scope,
+                    vec!["routing".to_string(), "telemetry".to_string()],
+                    "scope 缺省 = patch 顶层段（排序）"
+                );
+                assert_eq!(ttl_ms, crate::ops::MCP_PROPOSE_TTL_MS, "ttl 缺省");
+                let req = AppOperation::ConfigPropose {
+                    patch,
+                    scope,
+                    ttl_ms,
+                }
+                .request()
+                .expect("req");
+                assert_eq!(req.path, "/config/proposals");
+                let body = req.body.expect("body");
+                assert_eq!(body["owner"], crate::ops::MCP_PROPOSAL_OWNER);
+                assert_eq!(body["scope"], json!(["routing", "telemetry"]));
+            }
+            other => panic!("expected config propose, got {other:?}"),
+        }
+
+        // 空补丁 → 空范围（提案店将以 proposal.scope.empty 稳定码拒——
+        // 派生不造范围）；显式 scope 覆盖派生
+        let (op, _) =
+            build_operation("preview_config_change", Some(&json!({"patch": {}}))).expect("op");
+        match op {
+            AppOperation::ConfigPropose { scope, .. } => assert!(scope.is_empty()),
+            other => panic!("expected config propose, got {other:?}"),
+        }
+        let (op, _) = build_operation(
+            "preview_config_change",
+            Some(&json!({"patch": {"routing": {}}, "scope": ["telemetry"]})),
+        )
+        .expect("op");
+        match op {
+            AppOperation::ConfigPropose { scope, .. } => {
+                assert_eq!(scope, vec!["telemetry".to_string()])
+            }
+            other => panic!("expected config propose, got {other:?}"),
+        }
     }
 }

@@ -25,6 +25,8 @@ fn wire_of(op: &AppOperation) -> (Method, &'static str) {
         AppOperation::ProbeSubmit(_) => (Method::Post, "/probe"),
         AppOperation::ProbeCancel { .. } => (Method::Post, "/probe/cancel"),
         AppOperation::ProbeResult { .. } => (Method::Get, "/probe/result"),
+        AppOperation::ConfigPreview { .. } => (Method::Post, "/config/preview"),
+        AppOperation::ConfigPropose { .. } => (Method::Post, "/config/proposals"),
     }
 }
 
@@ -69,13 +71,22 @@ fn sample_ops() -> Vec<AppOperation> {
         }),
         AppOperation::ProbeCancel { id: 7 },
         AppOperation::ProbeResult { id: 7 },
+        AppOperation::ConfigPreview {
+            patch: serde_json::json!({"telemetry": {"log_level": "debug"}}),
+            scope: Some(vec!["telemetry".to_string()]),
+        },
+        AppOperation::ConfigPropose {
+            patch: serde_json::json!({"telemetry": {"log_level": "debug"}}),
+            scope: vec!["telemetry".to_string()],
+            ttl_ms: 60_000,
+        },
     ]
 }
 
 #[test]
 fn operation_set_is_closed_and_each_maps_one_wire_shape() {
     let ops = sample_ops();
-    assert_eq!(ops.len(), 11, "全集样例与操作数一致（新操作漏登记即失败）");
+    assert_eq!(ops.len(), 13, "全集样例与操作数一致（新操作漏登记即失败）");
     for op in &ops {
         let req = op.request().expect("request builds");
         let (method, path) = wire_of(op);
@@ -85,7 +96,7 @@ fn operation_set_is_closed_and_each_maps_one_wire_shape() {
 }
 
 /// 线上路径审查名单（与 wire_of 对账——路径不来自操作之外的任何来源）
-const PATH_ALLOWLIST: [&str; 10] = [
+const PATH_ALLOWLIST: [&str; 12] = [
     "/runtime/stats",
     "/routing/stats",
     "/trace/flows",
@@ -96,6 +107,8 @@ const PATH_ALLOWLIST: [&str; 10] = [
     "/probe",
     "/probe/cancel",
     "/probe/result",
+    "/config/preview",
+    "/config/proposals",
 ];
 
 #[test]
@@ -108,6 +121,40 @@ fn every_request_path_is_on_the_allowlist() {
             req.path
         );
     }
+}
+
+/// RIL-080：配置操作体形——预检 scope 缺省不入体；提案 owner 恒
+/// 适配器固定标签（模型请求面无 owner 字段——冒充结构性不可能）。
+#[test]
+fn config_operations_carry_fixed_owner_and_minimal_body() {
+    let preview = AppOperation::ConfigPreview {
+        patch: serde_json::json!({"a": 1}),
+        scope: None,
+    }
+    .request()
+    .expect("request");
+    assert_eq!(preview.method, Method::Post);
+    assert_eq!(preview.path, "/config/preview");
+    assert_eq!(
+        preview.body.as_ref().expect("body"),
+        &serde_json::json!({"patch": {"a": 1}}),
+        "scope None 不入体"
+    );
+
+    let propose = AppOperation::ConfigPropose {
+        patch: serde_json::json!({"a": 1}),
+        scope: vec!["a".to_string()],
+        ttl_ms: 5,
+    }
+    .request()
+    .expect("request");
+    assert_eq!(propose.method, Method::Post);
+    assert_eq!(propose.path, "/config/proposals");
+    let body = propose.body.expect("body");
+    assert_eq!(body["owner"], "mcp", "owner 适配器固定");
+    assert_eq!(body["ttl_ms"], serde_json::json!(5));
+    assert_eq!(body["patch"], serde_json::json!({"a": 1}));
+    assert_eq!(body["scope"], serde_json::json!(["a"]));
 }
 
 #[test]

@@ -130,7 +130,7 @@ impl ControlPlane {
             Ok(v) => v,
             Err(r) => return r,
         };
-        json(StatusCode::OK, &service.state())
+        json_v1(StatusCode::OK, &service.state())
     }
 
     async fn handle_config_receipts(&self) -> Response<RespBody> {
@@ -138,7 +138,7 @@ impl ControlPlane {
             Ok(v) => v,
             Err(r) => return r,
         };
-        json(StatusCode::OK, &service.audit())
+        json_v1(StatusCode::OK, &service.audit())
     }
 
     /// POST /config/proposals：登记正向提案（base 由 daemon 自填——
@@ -166,7 +166,7 @@ impl ControlPlane {
             body.ttl_ms,
             crate::config_tx::now_ms(),
         ) {
-            Ok(proposal) => json(StatusCode::CREATED, &proposal),
+            Ok(proposal) => json_v1(StatusCode::CREATED, &proposal),
             Err(err) => Self::tx_error_response(&err),
         }
     }
@@ -197,7 +197,7 @@ impl ControlPlane {
             body.ttl_ms,
             crate::config_tx::now_ms(),
         ) {
-            Ok(proposal) => json(StatusCode::CREATED, &proposal),
+            Ok(proposal) => json_v1(StatusCode::CREATED, &proposal),
             Err(err) => Self::tx_error_response(&err),
         }
     }
@@ -218,7 +218,7 @@ impl ControlPlane {
             Ok(v) => v,
             Err(r) => return r,
         };
-        json(
+        json_v1(
             StatusCode::OK,
             &service.preview(&body.patch, body.scope.as_deref()),
         )
@@ -249,7 +249,7 @@ impl ControlPlane {
             body.ttl_ms,
             crate::config_tx::now_ms(),
         ) {
-            Ok(approval) => json(StatusCode::OK, &approval),
+            Ok(approval) => json_v1(StatusCode::OK, &approval),
             Err(err) => Self::tx_error_response(&err),
         }
     }
@@ -279,7 +279,7 @@ impl ControlPlane {
             caller_owner: body.owner,
         };
         match service.apply(request, crate::config_tx::now_ms()) {
-            Ok(outcome) => json(StatusCode::OK, &outcome),
+            Ok(outcome) => json_v1(StatusCode::OK, &outcome),
             Err(err) => Self::tx_error_response(&err),
         }
     }
@@ -313,7 +313,7 @@ impl ControlPlane {
             drain_deadline_ms: body.drain_deadline_ms,
         };
         match service.rollback(request, crate::config_tx::now_ms()) {
-            Ok(report) => json(StatusCode::OK, &report),
+            Ok(report) => json_v1(StatusCode::OK, &report),
             Err(err) => Self::tx_error_response(&err),
         }
     }
@@ -3403,6 +3403,27 @@ fn json<T: Serialize>(status: StatusCode, value: &T) -> Response<RespBody> {
     }
 }
 
+/// MCP 信封（schema_version=1 冻结——rillane-app reply 面/工具
+/// outputSchema 契约）：flatten 保持业务字段顶层不变——既有消费者
+///（CLI/脚本）不受影响，MCP structuredContent 满足 outputSchema。
+/// 配置事务 8 端点统一走此信封（RIL-080）。
+#[derive(serde::Serialize)]
+struct SchemaEnvelope<'a, T> {
+    schema_version: u32,
+    #[serde(flatten)]
+    inner: &'a T,
+}
+
+fn json_v1<T: Serialize>(status: StatusCode, value: &T) -> Response<RespBody> {
+    json(
+        status,
+        &SchemaEnvelope {
+            schema_version: 1u32,
+            inner: value,
+        },
+    )
+}
+
 fn text(status: StatusCode, msg: &str) -> Response<RespBody> {
     Response::builder()
         .status(status)
@@ -6252,8 +6273,13 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(v["applicable"], serde_json::json!(true));
+        assert_eq!(
+            v["schema_version"],
+            serde_json::json!(1),
+            "配置面答复带 MCP 信封（RIL-080）"
+        );
 
-        // 提案（daemon 自填 base）
+        // 提案（daemon 自填 base）：带提案期预检投影、不回显补丁
         let (s, v) = post_config(
             &cp,
             "/config/proposals",
@@ -6263,6 +6289,17 @@ mod tests {
         assert_eq!(s, StatusCode::CREATED);
         let proposal_id = v["id"].as_str().unwrap().to_string();
         assert_eq!(v["base_generation"], serde_json::json!(base_gen));
+        assert_eq!(
+            v["schema_version"],
+            serde_json::json!(1),
+            "登记答复带 MCP 信封"
+        );
+        assert_eq!(
+            v["preview"]["applicable"],
+            serde_json::json!(true),
+            "登记答复带提案期预检（RIL-080）"
+        );
+        assert!(v.get("patch").is_none(), "登记答复不回显补丁——缩小答复面");
 
         // 批准
         let (s, v) = post_config(

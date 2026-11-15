@@ -102,6 +102,11 @@ impl AppError {
         let context = error
             .and_then(|e| e.get("context"))
             .and_then(|c| c.as_str())
+            .or_else(|| {
+                error
+                    .and_then(|e| e.get("message"))
+                    .and_then(|c| c.as_str())
+            })
             .or_else(|| absence.and_then(|a| a.get("note")).and_then(|c| c.as_str()))
             .map(String::from)
             .unwrap_or_else(|| truncate_body(body));
@@ -173,6 +178,19 @@ mod tests {
         assert_eq!(err.status, Some(404));
         assert_eq!(err.code, "collector.flow.expired");
         assert_eq!(err.context, "ttl");
+    }
+
+    #[test]
+    fn error_message_field_feeds_context() {
+        // 配置事务信封（RIL-079/RIL-080）{"error":{"code","message"}}：
+        // 稳定码照取，message 进 context（daemon 侧消息已脱敏）
+        let err = AppError::from_response(
+            409,
+            r#"{"error":{"code":"apply.base.conflict","message":"现役代际已前进"}}"#,
+        );
+        assert_eq!(err.status, Some(409));
+        assert_eq!(err.code, "apply.base.conflict");
+        assert_eq!(err.context, "现役代际已前进");
     }
 
     #[test]

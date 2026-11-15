@@ -451,7 +451,7 @@ mod tests {
         );
         let out = handle_line(&mut state(), &line).expect("answer");
         assert_eq!(out["result"]["resultType"], "complete");
-        assert_eq!(out["result"]["tools"].as_array().map(Vec::len), Some(11));
+        assert_eq!(out["result"]["tools"].as_array().map(Vec::len), Some(13));
     }
 
     #[test]
@@ -584,6 +584,13 @@ mod tests {
                 "probe",
             ),
             ("probe_cancel", json!({"id": 1}), "probe"),
+            // RIL-080：提案登记是写档——只读会话在范围门即拒（预检
+            // validate_config 是 Read 档，不在拒列表）
+            (
+                "preview_config_change",
+                json!({"patch": {"telemetry": {}}}),
+                "write",
+            ),
         ] {
             let line = call_line(20, name, args);
             let out = handle_line(&mut state(), &line).expect("answer");
@@ -1286,5 +1293,95 @@ mod tests {
         assert_eq!(sc["explain"]["conclusion"]["conditional"], true);
         assert_eq!(sc["explain"]["conclusion"]["matched"], false);
         assert_eq!(sc["explain"]["gaps"].as_array().map(Vec::len), Some(2));
+    }
+
+    /// RIL-080 端点隔离：validate_config（Read 档）恰一次请求打到
+    /// /config/preview（只读投影——不触提案路径）；预检面透传为
+    /// structuredContent（daemon 侧已脱敏）。
+    #[test]
+    fn validate_config_hits_preview_only() {
+        let payload = r#"{"schema_version":1,"applicable":true,"diff":[{"op":"changed","path":"telemetry.log_level","before":"info","after":"debug"}],"diagnostics":[]}"#;
+        let (seen, base) = scripted_stub(vec![("HTTP/1.1 200 OK", payload)]);
+        let mut st = state_with(GrantedScopes::parse("read").expect("parse"), 0);
+        st.app = BlockingApp::new(&base, None).expect("app");
+        let line = call_line(
+            44,
+            "validate_config",
+            json!({"patch": {"telemetry": {"log_level": "debug"}}}),
+        );
+        let out = handle_line(&mut st, &line).expect("answer");
+        let requests = seen.lock().expect("lock").clone();
+        assert_eq!(requests.len(), 1, "预检恰一次边界请求");
+        assert!(
+            requests[0].starts_with("POST /config/preview"),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            !requests[0].contains("/config/proposals"),
+            "预检不触提案路径——只读会话无登记面"
+        );
+        assert_eq!(out["result"]["isError"], false);
+        let sc = &out["result"]["structuredContent"];
+        assert_eq!(sc["applicable"], true);
+        assert_eq!(sc["diff"][0]["path"], "telemetry.log_level");
+    }
+
+    /// RIL-080 提案登记：写档会话 preview_config_change 打到
+    /// /config/proposals；**owner 由适配器固定**（请求体 owner 恒
+    /// "mcp"——模型面无 owner 字段，冒充他人在结构上不可能）；答复
+    /// 携服务端提案 ID + 提案期预检（激活仍不在工具面——批准与应用
+    /// 归操作员/独立授权）。
+    #[test]
+    fn write_session_proposes_with_fixed_owner() {
+        let payload = r#"{"schema_version":1,"id":"prop-1","base_generation":"g1","base_hash":"h1","owner":"mcp","scope":["telemetry"],"created_ms":1,"expires_ms":2,"preview":{"applicable":true,"diff":[],"diagnostics":[]}}"#;
+        let (seen, base) = scripted_stub(vec![("HTTP/1.1 201 Created", payload)]);
+        let mut st = state_with(GrantedScopes::parse("read,write").expect("parse"), 0);
+        st.app = BlockingApp::new(&base, None).expect("app");
+        let line = call_line(
+            45,
+            "preview_config_change",
+            json!({"patch": {"telemetry": {"log_level": "debug"}}}),
+        );
+        let out = handle_line(&mut st, &line).expect("answer");
+        let requests = seen.lock().expect("lock").clone();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].starts_with("POST /config/proposals"),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            requests[0].contains(r#""owner":"mcp""#),
+            "owner 适配器固定: {}",
+            requests[0]
+        );
+        assert_eq!(out["result"]["isError"], false);
+        let sc = &out["result"]["structuredContent"];
+        assert_eq!(sc["id"], "prop-1", "服务端提案 ID 透传");
+        assert_eq!(sc["preview"]["applicable"], true);
+        assert_eq!(sc["expires_ms"], 2, "限制面（有效期）透传");
+    }
+
+    /// RIL-080：只读会话 preview_config_change 被范围门拒（-32001）且
+    /// 不产生任何边界请求（被拒请求不进入执行）。
+    #[test]
+    fn read_only_session_cannot_propose_config_change() {
+        let (seen, base) = scripted_stub(vec![("HTTP/1.1 200 OK", "{}")]);
+        let mut st = state_with(GrantedScopes::parse("read").expect("parse"), 0);
+        st.app = BlockingApp::new(&base, None).expect("app");
+        let line = call_line(
+            46,
+            "preview_config_change",
+            json!({"patch": {"telemetry": {}}}),
+        );
+        let out = handle_line(&mut st, &line).expect("answer");
+        assert_eq!(out["error"]["code"], -32001);
+        assert_eq!(out["error"]["data"]["required"], "write");
+        assert_eq!(
+            seen.lock().expect("lock").len(),
+            0,
+            "被拒请求不进入执行——无边界请求"
+        );
     }
 }

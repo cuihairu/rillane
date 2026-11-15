@@ -287,6 +287,39 @@ impl From<&ApplyReconcile> for ReconcileDto {
     }
 }
 
+/// 提案登记答复（POST /config/proposals 响应体）：提案身份字段平铺
+///（CLI 既有消费面不变）+ 提案期预检投影 `preview`（RIL-080 MCP 工具
+/// 与 CLI 共用的 diff/诊断/限制面）。**不含补丁回显**——patch 是调用者
+/// 自给的输入，不必回读；缩小答复面（大补丁不占答复、秘密键值不因
+/// 回显而多一处副本）。预检与登记同锁同刻——`preview.diff` 就是登记
+/// 依据，不是事后另算的近似。
+#[derive(Debug, Clone, Serialize)]
+pub struct CreatedProposalDto {
+    pub id: String,
+    pub base_generation: String,
+    pub base_hash: String,
+    pub owner: String,
+    pub scope: Vec<String>,
+    pub created_ms: u64,
+    pub expires_ms: u64,
+    pub preview: ConfigPreview,
+}
+
+impl CreatedProposalDto {
+    fn from_proposal(proposal: &ConfigProposal, preview: ConfigPreview) -> Self {
+        Self {
+            id: proposal.id.clone(),
+            base_generation: proposal.base_generation.clone(),
+            base_hash: proposal.base_hash.clone(),
+            owner: proposal.owner.clone(),
+            scope: proposal.scope.clone(),
+            created_ms: proposal.created_ms,
+            expires_ms: proposal.expires_ms,
+            preview,
+        }
+    }
+}
+
 /// 审计摘要（GET /config/receipts 响应体）：回执链（seq 降序）+
 /// 回执链 vs 现役面 reconcile。
 #[derive(Debug, Clone, Serialize)]
@@ -448,7 +481,9 @@ impl ConfigTxService {
     /// 登记正向提案：daemon 自填 base（live 面）+ 提案期 preview 预检
     /// （不落状态、不烧凭证——坏 patch 在提案期就显式报）。范围含
     /// `rollback` 标记者拒绝（标记范围由 `create_rollback_proposal`
-    /// 专用）。
+    /// 专用）。返回提案身份（无补丁回显——调用者自给自足，缩小答复
+    /// 面）+ 提案期预检投影（RIL-080 MCP 工具与 CLI 共用的 diff/诊断
+    /// /限制面——预检与登记同锁同刻，diff 就是登记依据不是事后拼凑）。
     pub fn create_proposal(
         &self,
         owner: &str,
@@ -456,7 +491,7 @@ impl ConfigTxService {
         patch: &serde_json::Value,
         ttl_ms: u64,
         now_ms: u64,
-    ) -> Result<ConfigProposal, TxError> {
+    ) -> Result<CreatedProposalDto, TxError> {
         if scope.iter().any(|s| s == ROLLBACK_SCOPE_MARKER) {
             return Err(TxError::bad_request(
                 "proposal.scope.invalid",
@@ -467,8 +502,8 @@ impl ConfigTxService {
         let ConfigTxInner {
             proposals, live, ..
         } = &mut *inner;
-        self.preview_gate(&live.config, patch, scope)?;
-        proposals
+        let preview = self.preview_checked(&live.config, patch, scope)?;
+        let proposal = proposals
             .create(
                 new_proposal_id(),
                 ProposalInput {
@@ -481,7 +516,8 @@ impl ConfigTxService {
                 },
                 now_ms,
             )
-            .map_err(|e| TxError::from_proposal(&e))
+            .map_err(|e| TxError::from_proposal(&e))?;
+        Ok(CreatedProposalDto::from_proposal(&proposal, preview))
     }
 
     /// 登记回滚提案（daemon 创建）：范围固定 rollback 标记、patch 为空
@@ -587,7 +623,7 @@ impl ConfigTxService {
             }
             // 执行前 preview 兜底预检（不烧凭证——现役面形状失配在此
             // 显式报，执行器失败只留给不可预知的内部错误）
-            self.preview_gate(&live.config, &proposal.patch, &proposal.scope)?;
+            self.preview_checked(&live.config, &proposal.patch, &proposal.scope)?;
         }
 
         let pure_request = ApplyRequest {
@@ -756,13 +792,14 @@ impl ConfigTxService {
     }
 
     /// preview 预检口（guard 持有期调）：不适用即 400（稳定码并列为
-    /// 人读消息——消息面已脱敏）。
-    fn preview_gate(
+    /// 人读消息——消息面已脱敏）；适用则交还预检投影（提案登记据此
+    /// 同刻入账——RIL-080 答复里的 diff 与登记依据同源）。
+    fn preview_checked(
         &self,
         current: &RillaneConfig,
         patch: &serde_json::Value,
         scope: &[String],
-    ) -> Result<(), TxError> {
+    ) -> Result<ConfigPreview, TxError> {
         let preview = preview_config_patch(current, patch, &self.capabilities, Some(scope));
         if !preview.applicable {
             let codes = preview
@@ -776,7 +813,7 @@ impl ConfigTxService {
                 format!("补丁不适用（{codes}）"),
             ));
         }
-        Ok(())
+        Ok(preview)
     }
 }
 
@@ -1111,5 +1148,29 @@ mod config_tx_tests {
             before.proposals,
             "preview 不落提案"
         );
+    }
+
+    /// RIL-080：提案登记答复带提案期预检投影（同锁同刻——diff 就是
+    /// 登记依据）且**不回显补丁**（序列化面无 patch 键——调用者自给
+    /// 自足，大补丁不占答复、秘密值不多一处副本）。
+    #[test]
+    fn created_proposal_carries_preview_and_omits_patch_echo() {
+        let service = ConfigTxService::new(boot_config(), CapabilitySet::full());
+        let created = service
+            .create_proposal(OWNER, &["routing".to_string()], &patch(), 60_000, 0)
+            .expect("登记提案");
+        assert!(created.preview.applicable, "登记面预检必已过");
+        assert!(
+            !created.preview.diff.is_empty(),
+            "diff 非空（default_node 变更）"
+        );
+        assert_eq!(created.preview.diff[0].path, "routing.default_node");
+        assert_eq!(created.scope, vec!["routing".to_string()]);
+
+        let text = serde_json::to_string(&created).expect("序列化");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("解析");
+        assert!(v.get("patch").is_none(), "登记答复不回显补丁——缩小面");
+        assert!(v.get("preview").is_some(), "预检投影在场");
+        assert!(v["preview"]["diff"].is_array());
     }
 }

@@ -138,6 +138,13 @@ pub enum ProbeJobSpec {
     UdpEcho { addr: String, payload_len: usize },
 }
 
+/// MCP 配置提案的所有者标签（适配器固定——模型不能自选 owner，冒充
+/// 他人提案在结构上不可能；批准与应用仍是操作员/独立授权面的事）。
+pub const MCP_PROPOSAL_OWNER: &str = "mcp";
+
+/// MCP 配置提案默认有效期（毫秒；与 CLI 默认同口径）。
+pub const MCP_PROPOSE_TTL_MS: u64 = 60_000;
+
 /// 闭合操作集：CLI/UI/MCP 能对本边界发出的**全部**调用。
 /// （配置变更面经 RIL-073+ 提案生命周期另行进入；原始配置读/
 /// 订阅 URL 是管理员-grade 面，刻意不在本边界。）
@@ -166,6 +173,21 @@ pub enum AppOperation {
     ProbeCancel { id: u64 },
     /// 探测作业结果（GET /probe/result）
     ProbeResult { id: u64 },
+    /// 配置补丁预检（POST /config/preview——只读投影：现役为基的
+    /// 规范化 diff/诊断/范围越界，秘密值脱敏；不落提案、不激活任何
+    /// 配置。RIL-080）
+    ConfigPreview {
+        patch: serde_json::Value,
+        scope: Option<Vec<String>>,
+    },
+    /// 配置变更提案（POST /config/proposals——服务端提案 ID + 提案期
+    /// 预检投影；owner 由适配器固定 [`MCP_PROPOSAL_OWNER`]，不经模型；
+    /// 批准与应用不在本操作——激活须操作员另行完成。RIL-080）
+    ConfigPropose {
+        patch: serde_json::Value,
+        scope: Vec<String>,
+        ttl_ms: u64,
+    },
 }
 
 impl AppOperation {
@@ -183,6 +205,8 @@ impl AppOperation {
             AppOperation::ProbeSubmit(_) => "probe_submit",
             AppOperation::ProbeCancel { .. } => "probe_cancel",
             AppOperation::ProbeResult { .. } => "probe_result",
+            AppOperation::ConfigPreview { .. } => "validate_config",
+            AppOperation::ConfigPropose { .. } => "preview_config_change",
         }
     }
 
@@ -210,8 +234,8 @@ impl AppOperation {
                 if let Some(origin) = filter.origin {
                     query.push(("origin", origin.as_str().to_string()));
                 }
-                if let Some(gen) = &filter.generation {
-                    query.push(("generation", sanitize_untrusted(gen, 128)));
+                if let Some(gen_id) = &filter.generation {
+                    query.push(("generation", sanitize_untrusted(gen_id, 128)));
                 }
                 query.push(("offset", filter.offset.to_string()));
                 query.push(("limit", filter.limit.to_string()));
@@ -286,6 +310,35 @@ impl AppOperation {
                 path: "/probe/result",
                 query: vec![("id", id.to_string())],
                 body: None,
+            }),
+            AppOperation::ConfigPreview { patch, scope } => {
+                let mut body = serde_json::json!({ "patch": patch });
+                if let Some(scope) = scope {
+                    body["scope"] = serde_json::json!(scope);
+                }
+                Ok(OpRequest {
+                    method: Method::Post,
+                    path: "/config/preview",
+                    query: Vec::new(),
+                    body: Some(body),
+                })
+            }
+            AppOperation::ConfigPropose {
+                patch,
+                scope,
+                ttl_ms,
+            } => Ok(OpRequest {
+                method: Method::Post,
+                path: "/config/proposals",
+                query: Vec::new(),
+                // owner 适配器固定（[`MCP_PROPOSAL_OWNER`]）——模型请求
+                // 面没有 owner 字段，冒充他人在结构上不可能
+                body: Some(serde_json::json!({
+                    "owner": MCP_PROPOSAL_OWNER,
+                    "scope": scope,
+                    "patch": patch,
+                    "ttl_ms": ttl_ms,
+                })),
             }),
         }
     }

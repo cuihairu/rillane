@@ -153,6 +153,36 @@ fn probe_id_input_schema() -> Value {
     })
 }
 
+/// 配置补丁面（RIL-080）：patch 必须是对象（形状裁决在 daemon 提案
+/// 期预检——客户端 schema 只挡类型）；scope 标签 ≤16 字符（提案店
+/// 契约）。**没有 owner 字段**——owner 由适配器固定，模型不可冒充。
+fn config_patch_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["patch"],
+        "properties": {
+            "patch": {"type": "object"},
+            "scope": {"type": "array", "items": {"type": "string", "maxLength": 16}},
+        },
+    })
+}
+
+/// 提案登记面（RIL-080）：同 [`config_patch_input_schema`] + ttl_ms
+///（毫秒，上限 24h——提案店 TTL 契约）；owner 同样结构性缺席。
+fn config_propose_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["patch"],
+        "properties": {
+            "patch": {"type": "object"},
+            "scope": {"type": "array", "items": {"type": "string", "maxLength": 16}},
+            "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 86_400_000},
+        },
+    })
+}
+
 /// 工具目录（冻结——顺序即 tools/list 输出顺序；扩工具 = 显式加行
 /// + 契约测试同步。目录构造含运行时 schema 值——OnceLock 装载一次）
 pub fn catalog() -> &'static [ToolContract] {
@@ -304,6 +334,31 @@ fn build_catalog() -> Vec<ToolContract> {
             input_schema: probe_id_input_schema(),
             output_schema: Some(envelope_output_schema()),
         },
+        // ---- 配置事务（RIL-080：预检只读档；提案写档——激活仍须操作
+        // 员批准与应用，模型侧无任何直达激活口）----
+        ToolContract {
+            name: "validate_config",
+            title: "Validate config change",
+            description: "配置补丁预检（只读投影：现役为基的规范化 diff/诊断/范围越界，秘密值脱敏；不落提案、不激活任何配置）",
+            scope: Scope::Read,
+            annotations: read_hints(),
+            input_schema: config_patch_input_schema(),
+            output_schema: Some(envelope_output_schema()),
+        },
+        ToolContract {
+            name: "preview_config_change",
+            title: "Propose config change",
+            description: "登记配置变更提案（返回服务端提案 ID/基础代际/有效期与提案期预检 diff 与限制；批准与应用须操作员另行完成——本工具不激活任何配置）",
+            scope: Scope::Write,
+            annotations: ToolAnnotations {
+                read_only_hint: false,
+                destructive_hint: false,
+                idempotent_hint: false,
+                open_world_hint: false,
+            },
+            input_schema: config_propose_input_schema(),
+            output_schema: Some(envelope_output_schema()),
+        },
     ]
 }
 
@@ -334,7 +389,7 @@ pub fn tool_entry(t: &ToolContract) -> Value {
     entry
 }
 
-/// tools/list 答复（本版工具集一页全出——11 个工具不设游标分页；
+/// tools/list 答复（本版工具集一页全出——13 个工具不设游标分页；
 /// resultType 恒 complete，目录随二进制冻结故可缓存）
 pub fn tools_list_result() -> Value {
     json!({
@@ -622,7 +677,7 @@ mod tests {
     #[test]
     fn catalog_is_closed_and_matches_operation_set() {
         let cat = catalog();
-        assert_eq!(cat.len(), 11, "工具数 = 闭合操作集大小（扩集两边同步）");
+        assert_eq!(cat.len(), 13, "工具数 = 闭合操作集大小（扩集两边同步）");
         for op_name in [
             AppOperation::RuntimeStats,
             AppOperation::RoutingQuality,
@@ -648,6 +703,8 @@ mod tests {
             "probe_submit",
             "probe_cancel",
             "probe_result",
+            "validate_config",
+            "preview_config_change",
         ];
         op_names.sort_unstable();
         assert_eq!(tool_names, op_names);
@@ -785,7 +842,7 @@ mod tests {
         assert_eq!(result["resultType"], "complete");
         assert_eq!(result["cacheScope"], "public");
         let tools = result["tools"].as_array().expect("tools");
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 13);
         for entry in tools {
             assert!(entry.get("inputSchema").is_some());
             assert!(entry.get("annotations").is_some());
@@ -874,5 +931,53 @@ mod tests {
             "collector": {"traces": 3},
         }));
         assert_eq!(cap_result(ok.clone()), ok);
+    }
+
+    /// RIL-080：配置工具契约——patch 必须是对象；**无 owner 字段**
+    ///（冒充他人在 schema 面即拒）；ttl 上限 24h；scope 标签 ≤16。
+    #[test]
+    fn config_tools_contracts_hold() {
+        let validate = tool("validate_config").expect("validate entry");
+        assert_eq!(validate.scope, Scope::Read);
+        assert!(validate.annotations.read_only_hint, "预检是只读投影");
+
+        let propose = tool("preview_config_change").expect("propose entry");
+        assert_eq!(propose.scope, Scope::Write);
+        assert!(!propose.annotations.read_only_hint, "提案登记不是只读");
+        assert!(!propose.annotations.destructive_hint, "不激活任何配置");
+
+        // patch 缺席 / 非对象 → -32602
+        let err = validate_arguments(validate, Some(&json!({}))).unwrap_err();
+        assert_eq!(err.data.expect("data")["code"], "mcp.input.required");
+        let err = validate_arguments(validate, Some(&json!({"patch": [1]}))).unwrap_err();
+        assert_eq!(err.data.expect("data")["code"], "mcp.input.type");
+
+        // owner 字段结构性缺席（additionalProperties:false）
+        let err = validate_arguments(propose, Some(&json!({"patch": {}, "owner": "cli:local"})))
+            .unwrap_err();
+        assert_eq!(
+            err.data.expect("data")["code"],
+            "mcp.input.unknown_field",
+            "模型不能自选 owner"
+        );
+
+        // ttl 越上限 / scope 标签超长 → 拒
+        let err = validate_arguments(propose, Some(&json!({"patch": {}, "ttl_ms": 86_400_001})))
+            .unwrap_err();
+        assert_eq!(err.data.expect("data")["code"], "mcp.input.range");
+        let err = validate_arguments(
+            validate,
+            Some(&json!({"patch": {}, "scope": ["0123456789abcdefg"]})),
+        )
+        .unwrap_err();
+        assert_eq!(err.data.expect("data")["code"], "mcp.input.oversize");
+
+        // 合法最小形通过
+        validate_arguments(validate, Some(&json!({"patch": {}}))).expect("validate ok");
+        validate_arguments(
+            propose,
+            Some(&json!({"patch": {"telemetry": {}}, "ttl_ms": 60_000})),
+        )
+        .expect("propose ok");
     }
 }
