@@ -56,6 +56,7 @@
 | POST | `/mesh/link-states` | 链路状态上报（mesh 面内部） | —（节点间） |
 | GET | `/trace/flows` | 逐连接轨迹分页列表（可过滤；版本化信封 `schema_version=1`） | `trace list` |
 | GET | `/trace/flow?id=` | 单流完整轨迹或显式缺席答复（`found:false` + 稳定码） | `trace flow` |
+| GET | `/trace/flow.svg?id=` | 单流路径 SVG 图（与 JSON 答复同一查询快照；标注路径层/时间/缺口） | `trace flow --svg` |
 | GET | `/trace/events?id=&from_seq=&limit=` | 事件增量读取（未知/缺席 ID → 404 + 稳定码） | `trace events` |
 | GET | `/probe` | 探测作业列表（限额 + 作业快照） | `probe list` |
 | GET | `/probe/result?id=` | 单作业测量快照，或显式缺席答复（`found:false` + 稳定码） | `probe result` |
@@ -190,13 +191,15 @@ rillanectl diagnose [--endpoint <base URL>] [--output <目录>] [--scope safe|fu
 
 ```bash
 rillanectl trace list   [--state active|closed] [--origin stream|association] [--generation <G>] [--offset N] [--limit N] [--json]
-rillanectl trace flow   <id> [--json]
+rillanectl trace flow   <id> [--json] [--svg]
 rillanectl trace events <id> [--from-seq N] [--limit N] [--json]
 ```
 
 逐连接轨迹查询（RIL-060，走内核逐连接查询服务）。`--endpoint` 为 base URL 型（默认 `http://{api_bind}`）。以真实 flow ID 锚定——`stats`/`/flows` 展示的 ingress/egress 聚合键在本面不作为流 ID 命中。缺席显式分码（`query.flow.unknown` / `query.tracing.disabled` / `collector.flow.evicted|expired|active_limit|sampled_out|drained`）；缺席答复恒携带采集计数快照与固定说明「无记录 ≠ 应用未发包」——绝不把缺席报告为「未发包」。默认文本输出；`--json` 原样打印版本化信封（`schema_version=1`）。
 
 退出码：`0` 查询有答；`1` 连接或用法错误；`2` 显式缺席（`trace flow` 答复 `found:false`，或 `trace events` 收到 404 错误信封）。
+
+`trace flow <id> --svg` 导出路径图（RIL-062，`GET /trace/flow.svg?id=`）。SVG 与 JSON 答复出自同一份查询快照——图与 JSON 内容一致由构造保证。事件按层分组、绝不混画：L3（接管/身份/DNS/嗅探）、计划（规则/路由计划）、连接（拨号尝试/实际出口/传输统计/终态）；Mesh 账本刻意不进本图（账本在 `/mesh/switches`）。时间轴为单调时钟，相邻事件时差超阈值画显式缺口标注；无事件的层如实写「无事件」，不造刻度。内嵌文本（流 ID/代际/事件 detail）全部 XML 转义 + 控制字符替换 + 有界截断——长文本与恶意名称破坏不了文档结构。缺席仍带码：未知 ID 答 404 稳定码信封（退出码 2），绝不用空图糊弄。`--svg` 与 `--json` 互斥。
 
 ### probe
 

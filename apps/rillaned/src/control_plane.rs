@@ -162,6 +162,7 @@ impl ControlPlane {
             (Method::GET, "/flows") => self.handle_flows().await,
             (Method::GET, "/trace/flows") => self.handle_trace_flows(req).await,
             (Method::GET, "/trace/flow") => self.handle_trace_flow(req).await,
+            (Method::GET, "/trace/flow.svg") => self.handle_trace_flow_svg(req).await,
             (Method::GET, "/trace/events") => self.handle_trace_events(req).await,
             (Method::GET, "/probe") => self.handle_probe_list().await,
             (Method::GET, "/probe/result") => self.handle_probe_result(req).await,
@@ -1474,6 +1475,36 @@ impl ControlPlane {
             }),
         };
         json(StatusCode::OK, &out)
+    }
+
+    /// 流轨迹 SVG 导出（RIL-062）：与 `/trace/flow` 同一查询快照——
+    /// 图与 JSON 内容一致由「同一快照两种渲染」构造性保证。缺席
+    /// （含未知 ID）→ 404 稳定码信封，不拿图糊弄缺席。
+    async fn handle_trace_flow_svg(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        let query = req.uri().query().unwrap_or("");
+        let Some(id) = query.split('&').find_map(|kv| {
+            let mut parts = kv.splitn(2, '=');
+            if parts.next() == Some("id") {
+                parts.next().map(|v| v.to_string())
+            } else {
+                None
+            }
+        }) else {
+            return trace_bad_param("id is required");
+        };
+        let flow = match rillane_core::trace::FlowId::new(&id) {
+            Ok(flow) => flow,
+            Err(err) => return trace_error(StatusCode::BAD_REQUEST, err.code(), &err.context),
+        };
+        match self.runtime.flow_query().flow(&flow) {
+            rillane_core::query::FlowRecord::Found(trace) => svg(
+                StatusCode::OK,
+                &rillane_core::trace_svg::render_flow_svg(&trace),
+            ),
+            rillane_core::query::FlowRecord::Absent(absent) => {
+                trace_error(StatusCode::NOT_FOUND, absent.code, absent.note)
+            }
+        }
     }
 
     /// 事件增量读取（RIL-060）：缺席/未知 ID → 404 + 稳定码；limit=0
@@ -3036,6 +3067,15 @@ fn text(status: StatusCode, msg: &str) -> Response<RespBody> {
         .status(status)
         .header(CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(RespBody::new(Bytes::from(msg.to_string())))
+        .unwrap_or_else(|_| Response::new(RespBody::new(Bytes::from("internal error"))))
+}
+
+/// SVG 响应（RIL-062 路径图导出）——正文由渲染端生成端一次性转义
+fn svg(status: StatusCode, body: &str) -> Response<RespBody> {
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "image/svg+xml")
+        .body(RespBody::new(Bytes::from(body.to_string())))
         .unwrap_or_else(|_| Response::new(RespBody::new(Bytes::from("internal error"))))
 }
 
@@ -5070,6 +5110,39 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["schema_version"], serde_json::json!(1));
         assert_eq!(v["error"]["code"], serde_json::json!("query.flow.unknown"));
+    }
+
+    /// RIL-062：/trace/flow.svg 参数面与 JSON 面同门——缺 id /
+    /// 非法 id 逐项稳定码（400），未知 ID 缺席 = 404 信封不拿图糊弄
+    #[tokio::test]
+    async fn trace_flow_svg_param_and_absence_are_explicit() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        // 缺 id
+        let (status, body) = get_status_and_body(&cp, "/trace/flow.svg").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!("query.param.invalid"));
+
+        // 空白 id → 内核 trace.flow_id.invalid
+        let (status, body) = get_status_and_body(&cp, "/trace/flow.svg?id=").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["error"]["code"],
+            serde_json::json!("trace.flow_id.invalid")
+        );
+
+        // 未知 ID = 404 显式缺席（SVG 端点不答 200 空图）
+        let (status, body) = get_status_and_body(&cp, "/trace/flow.svg?id=never-seen").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!("query.flow.unknown"));
+        assert_eq!(
+            v["error"]["context"],
+            serde_json::json!("no record is not evidence of no traffic")
+        );
     }
 
     /// RIL-060：参数非法逐项显式拒绝——limit=0（内核 query.page.invalid）、

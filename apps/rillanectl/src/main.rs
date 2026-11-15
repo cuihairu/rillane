@@ -228,6 +228,10 @@ enum TraceCommand {
         id: String,
         #[arg(long)]
         json: bool,
+        /// 输出 SVG 路径图（RIL-062；GET /trace/flow.svg——与 JSON 同一
+        /// 查询快照；缺席仍退出码 2）
+        #[arg(long, conflicts_with = "json")]
+        svg: bool,
     },
     /// 事件增量读取（from_seq 起至多 limit 条）
     Events {
@@ -1291,7 +1295,29 @@ fn main() -> Result<()> {
                         print!("{}", render_trace_list(&v));
                     }
                 }
-                TraceCommand::Flow { id, json } => {
+                TraceCommand::Flow {
+                    id,
+                    json,
+                    svg: want_svg,
+                } => {
+                    if want_svg {
+                        // SVG 路径图导出（RIL-062）：正文原样输出；404 =
+                        // 显式缺席（退出码 2），其余失败退出码 1
+                        let url = trace_svg_url(&base, &id)?;
+                        match trace_fetch_svg(&client, token.as_deref(), &url) {
+                            Ok(body) => print!("{body}"),
+                            Err((status, body)) => {
+                                let (code, ctx) = trace_svg_error_parts(&body);
+                                if status.as_u16() == 404 {
+                                    eprintln!("trace flow svg: 显式缺席（HTTP 404，{code}）: {ctx}");
+                                    std::process::exit(2);
+                                }
+                                eprintln!("trace flow svg: HTTP {status}（{code}）: {ctx}");
+                                std::process::exit(1);
+                            }
+                        }
+                        return Ok(());
+                    }
                     let mut url = trace_query_url(&base, "/trace/flow")?;
                     url.push_str(&format!(
                         "&id={}",
@@ -2665,6 +2691,52 @@ fn trace_fetch_json_or_404(
     Ok(v)
 }
 
+/// SVG 路径图 URL（RIL-062）：base URL 型 + id 消毒入查询串
+fn trace_svg_url(base: &str, id: &str) -> Result<String> {
+    let mut url = trace_query_url(base, "/trace/flow.svg")?;
+    url.push_str(&format!(
+        "&id={}",
+        rillane_core::redact::sanitize_untrusted(id, 256)
+    ));
+    Ok(url)
+}
+
+/// SVG 路径图原样取回（RIL-062）：成功 = SVG 正文；失败 =
+/// (status, 正文)——正文可能是 JSON 错误信封，由调用方投影
+fn trace_fetch_svg(
+    client: &Client,
+    token: Option<&str>,
+    url: &str,
+) -> std::result::Result<String, (reqwest::StatusCode, String)> {
+    let mut req = client.get(url);
+    if let Some(token) = token {
+        req = req.header("x-admin-token", token);
+    }
+    let resp = req
+        .send()
+        .map_err(|_| (reqwest::StatusCode::SERVICE_UNAVAILABLE, String::new()))?;
+    let status = resp.status();
+    let body = resp.text().map_err(|e| (status, e.to_string()))?;
+    if !status.is_success() {
+        return Err((status, body));
+    }
+    Ok(body)
+}
+
+/// SVG 错误信封投影（code/context）——非 JSON 正文给占位码不 panic
+fn trace_svg_error_parts(body: &str) -> (String, String) {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    let code = v["error"]["code"]
+        .as_str()
+        .map(String::from)
+        .unwrap_or_else(|| "trace.flow.svg.failed".into());
+    let ctx = v["error"]["context"]
+        .as_str()
+        .map(String::from)
+        .unwrap_or_default();
+    (code, ctx)
+}
+
 /// 显式缺席答复（found:false 信封的 absence 对象投影）
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TraceAbsentAnswer {
@@ -3834,6 +3906,29 @@ mod tests {
         let url = trace_query_url("http://127.0.0.1:9090/", "/trace/flows").expect("合法 base");
         assert_eq!(url, "http://127.0.0.1:9090/trace/flows?");
         assert!(trace_query_url("", "/trace/flows").is_err(), "空 base 拒绝");
+    }
+
+    /// RIL-062：SVG 路径图 URL 拼装——剥尾斜杠 + id 消毒入查询串
+    #[test]
+    fn trace_svg_url_builds_with_sanitized_id() {
+        let url = trace_svg_url("http://127.0.0.1:9090/", "f-1").expect("合法 base");
+        assert_eq!(url, "http://127.0.0.1:9090/trace/flow.svg?&id=f-1");
+        assert!(trace_svg_url("", "f-1").is_err(), "空 base 拒绝");
+    }
+
+    /// RIL-062：SVG 错误信封投影——JSON 信封取 code/context，非 JSON
+    /// 正文给占位码不 panic
+    #[test]
+    fn trace_svg_error_parts_project_envelope_or_fallback() {
+        let (code, ctx) = trace_svg_error_parts(
+            r#"{"schema_version":1,"error":{"code":"query.flow.unknown","context":"no record is not evidence of no traffic"}}"#,
+        );
+        assert_eq!(code, "query.flow.unknown");
+        assert_eq!(ctx, "no record is not evidence of no traffic");
+
+        let (code, ctx) = trace_svg_error_parts("<html>gateway</html>");
+        assert_eq!(code, "trace.flow.svg.failed");
+        assert_eq!(ctx, "");
     }
 
     /// RIL-060：过滤参数客户端校验——非法值不发请求

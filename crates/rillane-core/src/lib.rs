@@ -33,6 +33,7 @@ pub mod scoring;
 pub mod session;
 pub mod session_trace;
 pub mod trace;
+pub mod trace_svg;
 pub mod udp;
 
 pub use budgets::{

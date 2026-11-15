@@ -56,6 +56,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | POST | `/mesh/link-states` | link state reporting (internal to the mesh plane) | — (inter-node) |
 | GET | `/trace/flows` | per-connection trace list (paged, filtered; versioned envelope `schema_version=1`) | `trace list` |
 | GET | `/trace/flow?id=` | one flow's full trace, or an explicit absence answer (`found:false` + stable code) | `trace flow` |
+| GET | `/trace/flow.svg?id=` | one flow's path as SVG (same query snapshot as the JSON answer; layers/time/gaps annotated) | `trace flow --svg` |
 | GET | `/trace/events?id=&from_seq=&limit=` | incremental event read (unknown/absent id → 404 + stable code) | `trace events` |
 | GET | `/probe` | probe job list (limits + job snapshots) | `probe list` |
 | GET | `/probe/result?id=` | one job's measurement snapshot, or an explicit absence answer (`found:false` + stable code) | `probe result` |
@@ -190,13 +191,15 @@ Scope selection (default `safe`): `safe` omits the subscription list, runtime co
 
 ```bash
 rillanectl trace list   [--state active|closed] [--origin stream|association] [--generation <G>] [--offset N] [--limit N] [--json]
-rillanectl trace flow   <id> [--json]
+rillanectl trace flow   <id> [--json] [--svg]
 rillanectl trace events <id> [--from-seq N] [--limit N] [--json]
 ```
 
 Per-connection trace queries against the kernel's flow query service (RIL-060). `--endpoint` is the base-URL flavor (default `http://{api_bind}`). Anchored on real flow IDs — the ingress/egress aggregate keys shown by `stats`/`/flows` never resolve as flow IDs here. Absence is explicit and coded (`query.flow.unknown` / `query.tracing.disabled` / `collector.flow.evicted|expired|active_limit|sampled_out|drained`); an absent answer always carries the collector counter snapshot and the fixed note "no record is not evidence of no traffic" — absence is never reported as "the app sent no packets". Text output is default; `--json` prints the versioned envelope (`schema_version=1`) verbatim.
 
 Exit codes: `0` query answered; `1` connection or usage error; `2` explicit absence (`trace flow` answered `found:false`, or `trace events` got a 404 error envelope).
+
+`trace flow <id> --svg` exports the path graph (RIL-062, `GET /trace/flow.svg?id=`). The SVG is rendered from the same query snapshot as the JSON answer — graph and JSON always agree. Events are grouped into separate lanes and never mixed: L3 (takeover/identity/dns/sniff), plan (rule/route plan), connection (attempt/egress/transfer/close); the mesh ledger is deliberately kept out of the graph (it lives at `/mesh/switches`). The time axis is the monotonic clock with explicit gap annotations for large inter-event deltas; lanes with no events say so instead of fabricating ticks. All embedded text (flow id, generation, event details) is XML-escaped, control-character-replaced and length-bounded — long or malicious names cannot break the document. Absence stays coded: an unknown id answers 404 with a stable code envelope (exit 2), never an empty picture. `--svg` and `--json` are mutually exclusive.
 
 ### probe
 
