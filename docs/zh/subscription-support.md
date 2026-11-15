@@ -69,3 +69,29 @@
 | url-test `interval` | 秒 | 原样透传；`0`/缺省→300（RIL-092） |
 | provider `interval` | 秒 | provider 落地时强制（RIL-009） |
 | health-check `interval` | 秒 | |
+
+## 端到端接管验收（RIL-095，Linux 候选）
+
+范围：既有 Linux 转发链路上的订阅接管闭环
+（`crates/rillane-runtime/tests/linux_takeover_acceptance.rs`）：
+
+- **订阅样例真实接管/转发**：Clash 订阅样例（trojan + ss 节点、select +
+  url-test 组）→ 导入 IR → 与本地兜底面合并（订阅 catch-all 不进运行面，
+  `default_node` 归本地——RIL-016）→ 守护加载面（serde 往返 +
+  `RillaneConfig::from_str`，守护进程同款解析入口）→ 运行时消费：
+  SOCKS5 入口 CONNECT → 路由 → Direct 出口 → 回环回显逐字节一致
+  （RIL-087 全链一致性的运行面延伸）。
+- **interval 秒口径全链**：显式 `interval: 300` 逐面保持 300 秒——转换面
+  （`UrlTestConfig.interval_secs`）→ 守护加载面（serde 往返不变）→ 运行时
+  探测门（`Duration::from_secs` 消费）。不变 1 秒（RIL-092 的运行面回归锚）。
+- **有损配置拒绝**：未知规则类型样本严格导入整体拒绝（拒绝信息即完整损失
+  清单，绝不产出半份伪装成功的配置——RIL-093）；宽松模式损失显式可见
+  （清单非空、被丢规则留名），合法节点照常产出；显式未知配置版本在守护
+  加载面稳定拒绝（错误信息携带 `config.version.unknown` 稳定原因码，
+  不猜语义）。
+- **启停恢复**：运行时停止 → 同配置重建 → 转发恢复（第二组会话照常真实
+  往返）；发布 journal 现役代际跨启停保留——守护状态面由发布协调器权威
+  承载（RIL-019）。
+
+不宣称：新 provider、完整 fallback、新 ScenarioPolicy 已交付（随各自
+backlog 项落地）。

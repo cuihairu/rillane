@@ -309,8 +309,14 @@
 
 P0 = 首批用户价值/关键架构与高风险探针；P1 = 承诺范围的后续平台与工具；P2 = 可推迟的增强。优先级不覆盖硬依赖，P2 不得阻塞 P0/P1 阶段产物。各平台的自身运行与恢复门禁独立，不等六平台汇总任务全部完成才交付。
 
-- [ ] **RIL-095｜P0｜Linux 兼容修复中间产物**；依赖：RIL-092、RIL-093。
+- [x] **RIL-095｜P0｜Linux 兼容修复中间产物**；依赖：RIL-092、RIL-093。
   交付：基于已有 Linux 转发链路的可评审候选、兼容说明与回归证据。验收：订阅样例真实接管/转发、显式 300 秒不变 1 秒、有损配置拒绝、启停恢复正确；不宣称新 provider、完整 fallback 或新 ScenarioPolicy 已交付。
+  完成（2026-11-16）：`crates/rillane-runtime/tests/linux_takeover_acceptance.rs` 3 测试（新增文件，不触并发 Actor 脏面），10× 重复全绿，`cargo clippy -p rillane-runtime --all-targets --all-features -- -D warnings` 干净，rillane-runtime 全量 187 lib + 3 验收绿（另 mesh 1 / txn 4 / tun 1）；兼容说明落 `docs/zh/subscription-support.md` + 英文孪生 `docs/subscription-support.md`（端到端接管验收节，范围与不宣称同验收口径）。逐验收条款映射如下。
+  ① 订阅样例真实接管/转发（subscription_sample_takeover_and_forwarding）：Clash 样例（trojan + ss、select + url-test）→ 导入 IR → 本地兜底合并（订阅 catch-all 剥离、`default_node` 归本地 `local-direct`——RIL-016）→ 守护加载面（serde 往返 + `RillaneConfig::from_str` 守护同款解析入口：trojan 凭证规格、A-AUTO 组、规则面齐进加载面）→ 运行时消费：回环 SOCKS5 无认证 CONNECT → 路由 → Direct 出口 → 回显服务逐字节往返（文本 + 二进制载荷各一轮）；BIND_GUARD 串行化探端口→复绑窗口（复用 s2 组纪律）。
+  ② 显式 300 秒不变 1 秒（同测试 ①）：`interval: 300` 逐面保持——转换面 `UrlTestConfig.interval_secs == 300`（RIL-092 秒口径）→ 守护加载面 serde 往返后仍 300 → 运行时探测门以 `Duration::from_secs(interval_secs)` 消费（routing lib 探测门同口径断言）。
+  ③ 有损配置拒绝 + 未知版本拒绝（lossy_sample_and_unknown_version_rejected）：未知规则类型样本（`UNKNOWN-RULE-TYPE,tcp,DIRECT`，解析期保留原文进 Unknown——RIL-014）严格导入整体拒绝，拒绝信息即完整损失清单（含「严格导入拒绝有损转换」头 + 被丢规则定位与原因），绝不产出半份伪装成功的配置（RIL-093）；宽松模式损失显式可见（`dropped_rules` 非空留名）且合法节点照常产出；显式未知配置版本 `version: '9.9'` 守护加载面稳定拒绝——错误信息携带 `config.version.unknown` 稳定原因码 + 版本字面量原样报告（合约口径：按码分支，不按文案匹配）。
+  ④ 启停恢复（start_stop_recovery_forwarding）：先经发布协调器落现役代际（提交点）→ 运行时停止（`is_running` 翻转）→ 同配置重建（守护进程重启同构）→ 第二组会话照常真实往返（转发恢复）；重开对账现役代际跨启停保留、无挂起事务残留（守护状态面由 journal 权威承载——RIL-019）。
+  不宣称面：新 provider、完整 fallback、新 ScenarioPolicy 均未在本候选范围（随各自 backlog 项落地），测试头注与兼容说明一致。
 
 | 阶段 | 最小验收范围 | 不阻塞它的后续工作 |
 |---|---|---|

@@ -72,3 +72,36 @@ dropped with a named report entry (RIL-093), never crash the bulk import.
 | url-test `interval` | seconds | passthrough; `0`/missing → 300 (RIL-092) |
 | provider `interval` | seconds | enforced when providers land (RIL-009) |
 | health-check `interval` | seconds | |
+
+## End-to-end takeover acceptance (RIL-095, Linux candidate)
+
+Scope: the subscription takeover loop over the existing Linux forwarding chain
+(`crates/rillane-runtime/tests/linux_takeover_acceptance.rs`):
+
+- **Real takeover/forwarding of a subscription sample**: a Clash sample
+  (trojan + ss nodes, select + url-test groups) → import IR → merged with the
+  local fallback face (the subscription catch-all never enters the runtime
+  face; `default_node` stays local — RIL-016) → daemon load face (serde
+  round-trip + `RillaneConfig::from_str`, the daemon's own parse entry) →
+  runtime consumption: SOCKS5 ingress CONNECT → routing → Direct egress →
+  loopback echo byte-for-byte (runtime-face extension of the RIL-087
+  full-chain consistency).
+- **Interval in seconds across the whole chain**: explicit `interval: 300`
+  stays 300 seconds at every face — conversion (`UrlTestConfig.interval_secs`)
+  → daemon load face (unchanged through the serde round-trip) → runtime probe
+  gate (consumed via `Duration::from_secs`). Never reinterpreted as 1 second
+  (runtime-face regression anchor for RIL-092).
+- **Lossy config rejection**: a sample with an unknown rule type is rejected
+  whole in strict import mode (the rejection message is the complete loss
+  list; never a half-config masquerading as success — RIL-093); in loose mode
+  the loss is explicitly visible (non-empty report, dropped rule named) while
+  valid nodes still convert; an explicit unknown config version is stably
+  rejected at the daemon load face (the error message carries the stable
+  `config.version.unknown` reason code; no semantic guessing).
+- **Stop/restart recovery**: runtime stop → rebuild with the same config →
+  forwarding recovers (a second session round-trips for real); the publish
+  journal's effective generation survives the restart — daemon state is
+  authoritatively carried by the publish coordinator (RIL-019).
+
+Not claimed: new provider, full fallback, or a new ScenarioPolicy (those land
+with their own backlog items).
