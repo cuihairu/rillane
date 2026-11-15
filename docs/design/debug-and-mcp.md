@@ -111,3 +111,23 @@ Use structured allowlisted DiagnosticViews, never raw diagnose bundles. Exclude 
 4. Preview and controlled writes; test conflicts, idempotent retries, denied access, partial failures, crash recovery and watchdog behavior.
 
 Report fields/permissions per platform and Unsupported owner identity where appropriate. Builds do not replace device validation. Detailed atomic dependencies and acceptance criteria live in the root `todo.md`.
+
+## 8. Link-diagnostic implementation specification
+
+Deliver **real connection list → per-flow timeline → rule explanation → active probes**. Prepare shared event/identity/redaction contracts first. Ship Trace CLI before Explain if needed; explanation reuses the production evaluator. Read-only MCP uses the same evidence without waiting for probes, a GUI or configuration writes.
+
+| Question | Required evidence | Uncertainty |
+|---|---|---|
+| Why is there no record? | Capture health, routes/bypass, ingress counters, collection/filter/drop state | Unobserved may mean uncaptured, filtered or expired; it does not prove the app sent nothing |
+| Why this node? | Generation, rule provenance, identity state, group snapshot and selection reason | Conditional explanations for missing identity/quality |
+| Which endpoint actually carried it? | Attempts, handshake results, connected endpoint and allowed fallback | Selection is not connectivity; proxy connectivity is not target application success |
+| Where is the delay? | Available stage timing, queueing and first downstream bytes | Parallel stages cannot simply be summed; remote internal timing can be unknown |
+| Why did it fail? | Error stage/code, evidence of close direction, network changes and revocations | Separate confirmed causes, possible causes and unknowns; timeout alone does not condemn a node |
+
+Web diagnostics include DNS/cache, proxy TCP/QUIC setup, visible handshakes, first downstream bytes and throughput. Call a measurement HTTP TTFB only when HTTP request/response semantics are available. Opaque TLS does not reveal website internals or exact TLS stage timing. Basic connection diagnostics do not require MITM.
+
+Game diagnostics include UDP association/mapping lifecycle, endpoint changes, directional counters, local queue depth/drops and network changes. RTT/jitter/packet loss require measurement methods, samples and appropriate peer support. Missing echo/sequence evidence stays unknown; idle downstream traffic is not proof of loss.
+
+First delivery must reproduce uncaptured or sampled/expired records, wrong-rule selection, permitted A-timeout-to-B fallback, and expired UDP mapping recreation. Each case shows inputs, observed events, simulation differences and unknowns, consistently across CLI/JSON and later MCP. Separate managed Mesh, proxy endpoints and Internet L3 probes; do not infer provider internal routing.
+
+This is the v1 implementation specification. Exact API/CLI schemas freeze with their tasks; Windows/macOS identity and Apple packet bridging still require spikes and device evidence.

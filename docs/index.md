@@ -27,3 +27,5 @@ features:
   - title: Diagnostics and optional AI
     details: Separate Explain, Trace and Probe; MCP disabled by default, reads before controlled writes.
 ---
+
+Connection diagnostics follow real lists → per-flow timelines → rule explanation → active probes. See the [v1 diagnostic specification](design/debug-and-mcp.md). These remain design targets.

@@ -27,3 +27,5 @@ features:
   - title: 诊断与可选 AI
     details: 纯 Explain、真实 Trace、主动 Probe 分离；MCP 默认关闭，先只读后受控配置。
 ---
+
+连接诊断按“真实连接列表 → 逐连接时间线 → 规则解释 → 主动探测”推进，详见 [v1 链路诊断规格](design/debug-and-mcp.md)。当前仍为设计目标。
