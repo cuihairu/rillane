@@ -246,8 +246,9 @@
 
 ## 7. 配置提案与受控 MCP 写入
 
-- [ ] **RIL-073｜P1｜ConfigProposal 存储**；依赖：RIL-019、RIL-065。
+- [x] **RIL-073｜P1｜ConfigProposal 存储**；依赖：RIL-019、RIL-065。
   交付：服务端 patch、基础代际/哈希、所有者、范围、TTL 与不可猜测 ID。验收：内容修改失效，过期/跨调用者读取拒绝，临时状态有容量和回收上限。
+  证据：**新模块 `crates/rillane-config/src/proposal.rs`**（纯存储、无时钟无线程依赖——调用方供钟，采集器/TTL 同纪律；rillane-config 新增 `uuid.workspace = true`）。**提案存储形** `ConfigProposal{id, base_generation, base_hash, owner, scope, patch(JSON 对象), created_ms, expires_ms}`；创建入参 `ProposalInput`（ID 单独传——`new_proposal_id()` = uuid v4 simple 形 32 位小写十六进制、122 位随机量，不可猜测性是授权边界一半、所有者绑定是另一半）。**守卫式读取** `read(id, owner, now_ms, live_hash) → ProposalRead::Valid | Rejected{code}`——拒绝顺序契约 `unknown → foreign → expired → base_changed`（跨所有者判定先于过期/哈希判定：非所有者探测他人提案只得 `foreign`，响应差异不构成状态侧信道——测试构造「同时过期 + 基础已变」提案断言错误所有者只见 foreign）；验收「内容修改失效」= `base_hash ≠ live_hash → proposal.base_changed`（恢复一致哈希恢复有效）；验收「过期拒绝」= `now ≥ expires_ms → proposal.expired`。**取消** 所有者检查式（提前释放——拒绝顺序同读取：foreign 不泄露存活态；过期项取消按已失效处置显式答 expired 并顺带回收该条目；取消不看 `base_hash`——内容前提与生命周期释放分立）。**验收「容量和回收上限」**：`PROPOSAL_STORE_CAP=64` 硬上限——`create` 先 `sweep(now)` 清扫过期项再判容量（满员时回收过期项腾位，测试断言「回收 1 + 新增 1」且活提案不被逐出）；仍满 `proposal.capacity` 显式拒绝不改变存量；`sweep` 返回回收数。**输入校验逐字段点名**：id/base_generation/base_hash/owner 非空、字符上限（64/128/128/128）、无控制字符 → `proposal.input.invalid`；scope 非空、≤16 项、每项 ≤64 字符无控制字符 → `proposal.scope.invalid`；TTL 1..=24h（`PROPOSAL_MAX_TTL_MS`）→ `proposal.ttl.invalid`；patch 须 JSON 对象（形状验证归 RIL-074）；被拒输入不留痕（测试断言 store 空）；重复 ID `proposal.id.clash` 不静默覆盖。**范围守卫** `covers(id, owner, now, live_hash, section)` 供 RIL-074/075/076 消费——有效提案逐段判定、读取被拒原码透传。**测试 12 条**（rillane-config lib 20→32，全 0 失败 + 10 次重复运行确定性）：ID 不可猜测性、登记/读取往返、未知 ID 显式、跨调用者无状态泄露、内容修改失效、过期回收、容量+回收、逐字段输入校验、ID 冲突、取消所有者检查、范围守卫；`cargo clippy -p rillane-config --all-targets` 干净（存量 serde_urlencoded 工作区清单警告为先前遗留）；rustfmt 合规。HTTP/CLI/MCP 表面按范围纪律归 RIL-074–081 接入。commit：见 git log `feat: add config proposal store`。
 - [ ] **RIL-074｜P1｜验证和变更预览**；依赖：RIL-054、RIL-073。
   交付：规范化 diff、引用/能力验证、模拟受影响流类别和副作用报告。验收：校验不改变有效配置；诊断与 diff 脱敏，预测影响不冒充实际连接结果。
 - [ ] **RIL-075｜P1｜精确授权绑定**；依赖：RIL-068、RIL-074。

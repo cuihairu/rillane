@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub mod contract;
 pub mod generations;
+pub mod proposal;
 pub mod source;
 
 pub use contract::{
@@ -19,6 +20,13 @@ pub use generations::{
     digest_parts, GenerationEdge, GenerationError, GenerationObject, GenerationStore,
     RuntimeGeneration, CODE_GENERATION_CYCLE, CODE_GENERATION_DANGLING, CODE_GENERATION_DUPLICATE,
     CODE_GENERATION_ID_MISMATCH,
+};
+pub use proposal::{
+    new_proposal_id, ConfigProposal, ProposalInput, ProposalRead, ProposalStore,
+    ProposalStoreError, CODE_PROPOSAL_BASE_CHANGED, CODE_PROPOSAL_CAPACITY, CODE_PROPOSAL_EXPIRED,
+    CODE_PROPOSAL_FOREIGN, CODE_PROPOSAL_ID_CLASH, CODE_PROPOSAL_INPUT_INVALID,
+    CODE_PROPOSAL_SCOPE_INVALID, CODE_PROPOSAL_TTL_INVALID, CODE_PROPOSAL_UNKNOWN,
+    PROPOSAL_MAX_TTL_MS, PROPOSAL_STORE_CAP,
 };
 pub use source::{
     derive_local_id, CompatibilityDiagnostic, ObjectCatalog, ObjectId, ObjectKind, ObjectRenamed,
