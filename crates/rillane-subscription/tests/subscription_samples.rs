@@ -204,6 +204,69 @@ fn provider_only_surfaces_block_loss_not_silent() {
     );
 }
 
+// ---------- RIL-014：rule-providers + RULE-SET + 逻辑规则样本 ----------
+
+#[test]
+fn ruleset_logic_sample_converts_with_tracked_references() {
+    let (config, report) = loose("ruleset_logic.yaml");
+    assert!(
+        report.is_empty(),
+        "样本必须零损失，实际: {}",
+        report.summary()
+    );
+
+    // 首匹配顺序 = 声明顺序；rule-N 命名稳定；MATCH 兜底最后
+    let names: Vec<&str> = config
+        .routing
+        .rules
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["rule-1", "rule-2", "rule-3", "rule-4", "rule-5"]);
+
+    // RULE-SET → 命名引用（可追踪）
+    assert_eq!(
+        config.routing.rules[0].matches[0],
+        rillane_config::MatchCondition::RuleSetRef {
+            name: "ads".to_string()
+        }
+    );
+
+    // AND 平铺三条件（域名后缀 + 目标端口）、OR → Any（源端口 + 目标
+    // 端口语义分离）、NOT → Not
+    assert_eq!(config.routing.rules[1].matches.len(), 2);
+    assert!(matches!(
+        &config.routing.rules[1].matches[0],
+        rillane_config::MatchCondition::DomainSuffix { .. }
+    ));
+    assert!(matches!(
+        &config.routing.rules[1].matches[1],
+        rillane_config::MatchCondition::Port { .. }
+    ));
+    assert!(matches!(
+        &config.routing.rules[2].matches[0],
+        rillane_config::MatchCondition::Any { .. }
+    ));
+    assert!(matches!(
+        &config.routing.rules[3].matches[0],
+        rillane_config::MatchCondition::Not { .. }
+    ));
+    assert!(config.routing.rules[4].matches.is_empty(), "MATCH 无条件");
+
+    // 声明面：http + file 两个 provider，interval 秒口径原样带入
+    assert_eq!(config.routing.rule_providers.len(), 2);
+    let ads = config.routing.rule_providers.get("ads").expect("ads 声明");
+    assert_eq!(ads.behavior, "domain");
+    assert_eq!(ads.interval_secs, Some(86400));
+    let direct = config
+        .routing
+        .rule_providers
+        .get("direct-cidr")
+        .expect("direct-cidr 声明");
+    assert_eq!(direct.behavior, "ipcidr");
+    assert_eq!(direct.provider_type, "file");
+}
+
 // ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
 
 #[test]

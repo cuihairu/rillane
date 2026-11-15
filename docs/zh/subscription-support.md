@@ -47,10 +47,12 @@
 | DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX | ✅ | 首匹配顺序保持 |
 | IP-CIDR / IP-CIDR-6 | ✅ | 源/目的区分按换算表 |
 | GEOIP / GEOSITE | ✅ | |
+| SRC-PORT / DST-PORT | ✅ | 源/目标端口分立条件（源走 `net.src_port` 注解面，目标走目的端口）；区间展开 |
+| NETWORK（逻辑规则内） | ✅ | → `proto` 条件 |
 | MATCH（兜底） | ✅ | 必须保持最后 |
 | PROCESS-NAME / 进程字段 | ❌ | 拒绝+报告；规范映射随 RIL-015 |
-| RULE-SET / rule-providers | ❌ | 拒绝+报告；随 RIL-014 |
-| 逻辑表达式（AND/OR/NOT） | ❌ | 拒绝+报告 |
+| RULE-SET / rule-providers | ✅ | 引用策略（RIL-014）：provider 声明落 `routing.rule_providers`（interval 秒口径原样），RULE-SET 匹配期按 `routing.rule_sets` 库解析；未声明引用拒绝+报告；载荷下载随 RIL-010 |
+| 逻辑表达式（AND/OR/NOT） | ✅ | AND 平铺进规则条件列表；OR → `any`、NOT → `not`；OR/NOT 内嵌套 AND 拒绝+报告（需单条件表达）；未知子条件整条拒绝 |
 
 ## L4 其他配置
 

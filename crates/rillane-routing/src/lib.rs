@@ -12,9 +12,9 @@ use dashmap::DashMap;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use rillane_config::{
     GroupDescriptor, GroupDescriptorMember, MatchCondition, PolicyGroup, RouteRule, RoutingConfig,
-    SloPolicy, Strategy,
+    RuleSetLibrary, SloPolicy, Strategy,
 };
-use rillane_core::{FlowContext, FlowRouter, RouteDecision};
+use rillane_core::{FlowContext, FlowRouter, RouteDecision, TargetProto};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::time::interval;
@@ -750,7 +750,9 @@ impl FlowRouter for RoutingEngine {
         let config = self.snapshot();
         let geo = self.geo.read().expect("geo lock poisoned").clone();
         for rule in &config.rules {
-            if matches_rule(&self.regex_cache, &geo, rule, &ctx) {
+            // RIL-014：规则按数组序首匹配——先声明的规则先参与匹配，
+            // RULE-SET 引用按 config.rule_sets 库解析（载荷缺席恒不命中）。
+            if matches_rule(&self.regex_cache, &geo, &config.rule_sets, rule, &ctx) {
                 return self
                     .resolve_target(&rule.target, Some(rule.name.clone()), Some(&ctx))
                     .await;
@@ -900,26 +902,30 @@ impl RoutingEngine {
 fn matches_rule(
     regex_cache: &DashMap<String, Arc<regex::Regex>>,
     geo: &GeoDatabases,
+    rule_sets: &RuleSetLibrary,
     rule: &RouteRule,
     ctx: &FlowContext,
 ) -> bool {
     rule.matches
         .iter()
-        .all(|matcher| matches_condition(regex_cache, geo, matcher, ctx))
+        .all(|matcher| matches_condition(regex_cache, geo, rule_sets, matcher, ctx))
 }
 
-/// 单条件匹配（递归支持 Any/Not 逻辑组合）。
+/// 单条件匹配（递归支持 Any/Not 逻辑组合与 RuleSetRef 引用展开）。
 fn matches_condition(
     regex_cache: &DashMap<String, Arc<regex::Regex>>,
     geo: &GeoDatabases,
+    rule_sets: &RuleSetLibrary,
     cond: &MatchCondition,
     ctx: &FlowContext,
 ) -> bool {
     match cond {
         MatchCondition::Any { conditions } => conditions
             .iter()
-            .any(|c| matches_condition(regex_cache, geo, c, ctx)),
-        MatchCondition::Not { condition } => !matches_condition(regex_cache, geo, condition, ctx),
+            .any(|c| matches_condition(regex_cache, geo, rule_sets, c, ctx)),
+        MatchCondition::Not { condition } => {
+            !matches_condition(regex_cache, geo, rule_sets, condition, ctx)
+        }
         MatchCondition::DomainSuffix { values } => {
             let host = ctx.target.host.to_ascii_lowercase();
             values
@@ -987,6 +993,40 @@ fn matches_condition(
             .annotations
             .get("process.name")
             .map(|name| values.iter().any(|v| v == name))
+            .unwrap_or(false),
+        // RIL-014：源端口——本机五元组源端口经 `net.src_port` 注解进入
+        // 求值面（与 client.cidr/process.name 同一注入先例）；注解缺席
+        // 恒不命中。与 `Port`（目标端口）语义严格分离。
+        MatchCondition::SrcPort { values } => ctx
+            .metadata
+            .annotations
+            .get("net.src_port")
+            .and_then(|v| v.parse::<u16>().ok())
+            .map(|src| values.contains(&src))
+            .unwrap_or(false),
+        // RIL-014：传输协议——目标 proto 精确归类（tcp/udp/quic），大小写
+        // 不敏感；Quic 属 UDP 面，但此处按 proto 字面归类不折叠。
+        MatchCondition::Proto { protocols } => {
+            let actual = match ctx.target.proto {
+                TargetProto::Tcp => "tcp",
+                TargetProto::Udp => "udp",
+                TargetProto::Quic => "quic",
+            };
+            protocols
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(actual))
+        }
+        // RIL-014：规则集引用——按名查 `routing.rule_sets` 库，库中条件
+        // 任一命中即命中（递归支持逻辑组合）；无此名（载荷未加载/来源
+        // 失效）恒不命中——与 GeoSite 缺数据库同一语义，不伪装命中。
+        MatchCondition::RuleSetRef { name } => rule_sets
+            .get(name)
+            .map(|entry| {
+                entry
+                    .conditions
+                    .iter()
+                    .any(|c| matches_condition(regex_cache, geo, rule_sets, c, ctx))
+            })
             .unwrap_or(false),
     }
 }
@@ -1270,6 +1310,231 @@ mod tests {
             engine.route(ctx).await.expect("route").final_node(),
             "direct",
             "注解缺席应落默认节点"
+        );
+    }
+
+    /// RIL-014：源端口条件——`net.src_port` 注解命中/不命中/缺席三态，
+    /// 与目标端口（Port）语义分离。
+    #[tokio::test]
+    async fn src_port_matches_annotation_only() {
+        use rillane_core::{FlowId, FlowMetadata, FlowTarget, TargetProto};
+
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            rules: vec![RouteRule {
+                name: "local-src".into(),
+                matches: vec![MatchCondition::SrcPort {
+                    values: (9000..=9010).collect(),
+                }],
+                target: "src-node".into(),
+            }],
+            ..Default::default()
+        });
+        let ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "203.0.113.5".into(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            metadata: FlowMetadata::default(),
+        };
+
+        let mut hit = ctx.clone();
+        hit.metadata
+            .annotations
+            .insert("net.src_port".into(), "9005".into());
+        assert_eq!(
+            engine.route(hit).await.expect("route").final_node(),
+            "src-node",
+            "源端口在区间内命中"
+        );
+
+        let mut miss = ctx;
+        miss.metadata
+            .annotations
+            .insert("net.src_port".into(), "80".into());
+        assert_eq!(
+            engine.route(miss).await.expect("route").final_node(),
+            "direct",
+            "源端口不在区间落默认"
+        );
+
+        // 目标端口 443 不得让 SrcPort 规则误命中（语义分离）
+        let no_annotation = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "203.0.113.5".into(),
+                port: 9005,
+                proto: TargetProto::Tcp,
+            },
+            metadata: FlowMetadata::default(),
+        };
+        assert_eq!(
+            engine.route(no_annotation).await.expect("route").final_node(),
+            "direct",
+            "注解缺席恒不命中——目标端口值不得串入源端口条件"
+        );
+    }
+
+    /// RIL-014：传输协议条件按目标 proto 精确归类。
+    #[tokio::test]
+    async fn proto_condition_matches_target_proto() {
+        use rillane_core::{FlowId, FlowMetadata, FlowTarget, TargetProto};
+
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            rules: vec![RouteRule {
+                name: "udp-only".into(),
+                matches: vec![MatchCondition::Proto {
+                    protocols: vec!["udp".into()],
+                }],
+                target: "udp-node".into(),
+            }],
+            ..Default::default()
+        });
+        let ctx_for = |proto| FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "203.0.113.7".into(),
+                port: 443,
+                proto,
+            },
+            metadata: FlowMetadata::default(),
+        };
+
+        assert_eq!(
+            engine
+                .route(ctx_for(TargetProto::Udp))
+                .await
+                .expect("route")
+                .final_node(),
+            "udp-node"
+        );
+        assert_eq!(
+            engine
+                .route(ctx_for(TargetProto::Tcp))
+                .await
+                .expect("route")
+                .final_node(),
+            "direct",
+            "tcp 不命中 udp 条件"
+        );
+    }
+
+    /// RIL-014：规则集引用按 `routing.rule_sets` 库解析——命中、不命中、
+    /// 悬空引用（库中无此名）恒不命中不 panic；首匹配顺序 = 声明顺序。
+    #[tokio::test]
+    async fn rule_set_ref_resolves_library_and_first_match_order() {
+        use rillane_core::{FlowId, FlowMetadata, FlowTarget, TargetProto};
+
+        let mut rule_sets = RuleSetLibrary::new();
+        rule_sets.insert(
+            "ads",
+            vec![
+                MatchCondition::DomainSuffix {
+                    values: vec!["ads.example".into()],
+                },
+                MatchCondition::DomainFull {
+                    values: vec!["tracker.example".into()],
+                },
+            ],
+        );
+        rule_sets.insert(
+            "blocked",
+            vec![MatchCondition::Port {
+                values: vec![6881],
+            }],
+        );
+
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            rules: vec![
+                RouteRule {
+                    name: "ads-block".into(),
+                    matches: vec![MatchCondition::RuleSetRef {
+                        name: "ads".into(),
+                    }],
+                    target: "reject".into(),
+                },
+                RouteRule {
+                    name: "p2p-block".into(),
+                    matches: vec![MatchCondition::RuleSetRef {
+                        name: "blocked".into(),
+                    }],
+                    target: "reject".into(),
+                },
+                RouteRule {
+                    name: "dangling".into(),
+                    matches: vec![MatchCondition::RuleSetRef {
+                        name: "ghost".into(),
+                    }],
+                    target: "reject".into(),
+                },
+            ],
+            rule_sets,
+            ..Default::default()
+        });
+        let ctx_for = |host: &str, port: u16| FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: host.into(),
+                port,
+                proto: TargetProto::Tcp,
+            },
+            metadata: FlowMetadata::default(),
+        };
+
+        // 首匹配：域名命中第一条（规则集任一条件命中即命中）
+        assert_eq!(
+            engine
+                .route(ctx_for("sub.ads.example", 443))
+                .await
+                .expect("route")
+                .final_node(),
+            "reject",
+            "首条规则集引用命中"
+        );
+        // 第二条端口条件（同 reject 目标，用默认旁证顺序：改经端口命中需
+        // 上面域名不命中——tracker.example 只落 full 条件仍在 ads 库）
+        assert_eq!(
+            engine
+                .route(ctx_for("other.example", 6881))
+                .await
+                .expect("route")
+                .final_node(),
+            "reject",
+            "第二条规则集（端口）命中"
+        );
+        // 悬空引用恒不命中 → 落默认
+        assert_eq!(
+            engine
+                .route(ctx_for("nothing.example", 80))
+                .await
+                .expect("route")
+                .final_node(),
+            "direct",
+            "库中无此名的引用恒不命中"
+        );
+        // 规则集内 full 相等（不含子域）验证：host=tracker.example 命中，
+        // host=sub.tracker.example 不命中（走默认）
+        assert_eq!(
+            engine
+                .route(ctx_for("sub.tracker.example", 443))
+                .await
+                .expect("route")
+                .final_node(),
+            "direct",
+            "DomainFull 不含子域语义在规则集内保持"
+        );
+        assert_eq!(
+            engine
+                .route(ctx_for("tracker.example", 443))
+                .await
+                .expect("route")
+                .final_node(),
+            "reject",
+            "DomainFull 精确相等命中"
         );
     }
 
@@ -1967,6 +2232,7 @@ mod tests {
             ],
             geoip_db: Some(mmdb_path.clone()),
             geosite_db: Some(dat_path.clone()),
+            ..rillane_config::RoutingConfig::default()
         });
 
         async fn route_to(engine: &RoutingEngine, host: &str) -> String {
@@ -2122,6 +2388,7 @@ mod tests {
             }],
             geoip_db: Some(mmdb_path.clone()),
             geosite_db: None,
+            ..rillane_config::RoutingConfig::default()
         });
         let ctx = FlowContext {
             id: FlowId::new(),

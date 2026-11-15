@@ -17,6 +17,8 @@
 //!   组成员权重、hy1 `protocol/up/down` 的非标值等）无 Clash 对应时不阻塞
 //!   导出，登记到 skipped。
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use rillane_config::{
     EgressConfig, GroupMember, MatchCondition, RillaneConfig as ProjectConfig, Strategy,
@@ -46,7 +48,27 @@ struct ClashExportDoc {
     proxies: Vec<Value>,
     #[serde(rename = "proxy-groups")]
     proxy_groups: Vec<ClashProxyGroup>,
+    #[serde(rename = "rule-providers", skip_serializing_if = "BTreeMap::is_empty")]
+    rule_providers: BTreeMap<String, RuleProviderExport>,
     rules: Vec<String>,
+}
+
+/// rule-provider 声明回导出（RIL-014）：`routing.rule_providers` 声明面
+/// 按 Clash 规范键写出（interval 秒口径原样往返），保证 RULE-SET 引用
+/// 回导出后仍可被 Clash/再次导入解析追踪。
+#[derive(Debug, Serialize)]
+struct RuleProviderExport {
+    #[serde(rename = "type")]
+    provider_type: String,
+    behavior: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(rename = "interval", skip_serializing_if = "Option::is_none")]
+    interval: Option<u64>,
 }
 
 /// Rillane → Clash 回导出器（无状态；`export` 纯函数）
@@ -136,10 +158,28 @@ impl ClashExporter {
             target_name(&config.routing.default_node, &direct_names)
         ));
 
+        // rule-providers 声明回导出（RIL-014）：RULE-SET 引用须有声明面
+        // 才能在 Clash 侧/再次导入时追踪；interval 秒口径原样往返
+        let mut rule_providers = BTreeMap::new();
+        for (name, decl) in &config.routing.rule_providers {
+            rule_providers.insert(
+                name.clone(),
+                RuleProviderExport {
+                    provider_type: decl.provider_type.clone(),
+                    behavior: decl.behavior.clone(),
+                    format: decl.format.clone(),
+                    url: decl.url.clone(),
+                    path: decl.path.clone(),
+                    interval: decl.interval_secs,
+                },
+            );
+        }
+
         let doc = ClashExportDoc {
             mixed_port: None,
             proxies,
             proxy_groups: groups,
+            rule_providers,
             rules,
         };
         let yaml = serde_yaml::to_string(&doc).context("Clash 文档序列化失败")?;
@@ -641,6 +681,25 @@ fn condition_to_rules(
                 rules.push(format!("PROCESS-NAME,{v},{target}"));
             }
         }
+        // RIL-014：源端口独立导出（与 DST-PORT 语义分离，往返保真）
+        MatchCondition::SrcPort { values } => {
+            for p in values {
+                rules.push(format!("SRC-PORT,{p},{target}"));
+            }
+        }
+        // RIL-014：规则集引用 → RULE-SET（声明面由 rule-providers 块随
+        // 文档导出，往返后引用仍可追踪）
+        MatchCondition::RuleSetRef { name } => {
+            rules.push(format!("RULE-SET,{name},{target}"));
+        }
+        // RIL-014：Proto 只存在于 Clash 逻辑规则子条件内（NETWORK），无
+        // 独立规则形态——不产出并登记具体原因（误导性的 Any/Not 文案会
+        // 由调用方兜底，这里先给出精确口径）
+        MatchCondition::Proto { protocols } => {
+            skipped.push(format!(
+                "Proto 条件（{protocols:?}）仅存在于 Clash 逻辑规则内，无法独立导出"
+            ));
+        }
     }
 }
 
@@ -880,6 +939,7 @@ mod tests {
                 ],
                 geoip_db: None,
                 geosite_db: None,
+                ..RoutingConfig::default()
             },
             ..serde_yaml::from_str(
                 "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",

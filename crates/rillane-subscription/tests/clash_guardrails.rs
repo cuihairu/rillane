@@ -82,7 +82,8 @@ fn unsupported_rules_reported_and_strict_rejected() {
         "rules:\n  - PROCESS-NAME,game.exe,n1\n  - RULE-SET,ads,n1\n  - DOMAIN-SUFFIX,example.com,n1",
     );
 
-    // 严格：两条不支持规则都点名拒绝
+    // 严格：两条不支持规则都点名拒绝（RIL-014 起 RULE-SET 走引用追踪：
+    // 未在 rule-providers 中声明的引用仍按损失拒绝，原因措辞更新）
     let strict = ClashConverter::new().with_strict(true);
     let clash = strict.parse(&yaml).unwrap();
     let err = strict.convert_to_rillane(&clash).unwrap_err().to_string();
@@ -91,7 +92,8 @@ fn unsupported_rules_reported_and_strict_rejected() {
         "实际: {err}"
     );
     assert!(err.contains("进程名规则暂不支持"));
-    assert!(err.contains("规则集规则暂不支持"));
+    assert!(err.contains("ads"), "未声明引用须点名规则集名: {err}");
+    assert!(err.contains("rule-providers"));
 
     // 宽松：跳过并报告，支持规则照常转换
     let lenient = ClashConverter::new();

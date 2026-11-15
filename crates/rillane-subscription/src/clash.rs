@@ -550,6 +550,33 @@ pub enum ClashRule {
         rulesets: Vec<String>,
         target: String,
     },
+    /// 逻辑 AND（RIL-014）：全部子条件命中即命中。顶层展开为 `matches`
+    /// 列表（列表内即 AND 语义）；OR/NOT 嵌套内的 AND 需要单条件表达，
+    /// 导入链显式拒绝（不能伪装成其它语义）
+    LogicAnd {
+        rules: Vec<ClashRule>,
+        target: String,
+    },
+    /// 逻辑 OR（RIL-014）：任一子条件命中即命中 → `MatchCondition::Any`
+    LogicOr {
+        rules: Vec<ClashRule>,
+        target: String,
+    },
+    /// 逻辑 NOT（RIL-014）：唯一子条件不命中即命中 → `MatchCondition::Not`
+    LogicNot {
+        rules: Vec<ClashRule>,
+        target: String,
+    },
+    /// 传输协议子条件（RIL-014）：`NETWORK,<proto>` 只在逻辑规则子条件
+    /// 内出现 → `MatchCondition::Proto`
+    Network {
+        protocols: Vec<String>,
+        target: String,
+    },
+    /// 未知规则类型（RIL-014）：解析期不炸整份配置（宽松导入的损失清单
+    /// 语义）——保留原文，转换期显式进损失清单（宽松随行/严格整体拒绝），
+    /// 未知关键条件不跳过也不伪装
+    Unknown { raw: String },
     /// MATCH（默认规则）
     Match { target: String },
 }
@@ -668,6 +695,13 @@ impl ClashRule {
         if raw.is_empty() {
             return Err("empty rule".into());
         }
+        // 逻辑规则（RIL-014）：AND/OR/NOT 载荷内含嵌套逗号，不能走朴素
+        // split——按头一个逗号前的 kind 提前分流到括号感知解析器。未知
+        // 关键子条件在子解析里报错，整条规则显式拒绝（不得部分跳过）
+        let head = raw.split(',').next().unwrap_or("").trim().to_ascii_uppercase();
+        if matches!(head.as_str(), "AND" | "OR" | "NOT") {
+            return Self::parse_logic_rule(&head, raw);
+        }
         let parts: Vec<&str> = raw
             .split(',')
             .map(|p| p.trim())
@@ -684,33 +718,6 @@ impl ClashRule {
                 .copied()
                 .ok_or_else(|| format!("invalid rule: {raw}"))
         };
-
-        fn parse_ports(s: &str) -> Result<Vec<u16>, String> {
-            let s = s.trim();
-            if s.is_empty() {
-                return Err("empty port".into());
-            }
-            if let Some((a, b)) = s.split_once('-') {
-                let start: u16 = a
-                    .trim()
-                    .parse()
-                    .map_err(|_| format!("invalid port range: {s}"))?;
-                let end: u16 = b
-                    .trim()
-                    .parse()
-                    .map_err(|_| format!("invalid port range: {s}"))?;
-                if start > end {
-                    return Err(format!("invalid port range: {s}"));
-                }
-                let span = (end - start) as usize;
-                if span > 4096 {
-                    return Err(format!("port range too large: {s}"));
-                }
-                return Ok((start..=end).collect());
-            }
-            let p: u16 = s.parse().map_err(|_| format!("invalid port: {s}"))?;
-            Ok(vec![p])
-        }
 
         match kind.as_str() {
             "DOMAIN-SUFFIX" => Ok(ClashRule::DomainSuffix {
@@ -757,11 +764,289 @@ impl ClashRule {
                 rulesets: vec![get(1)?.to_string()],
                 target: get(2)?.to_string(),
             }),
+            // RIL-014：传输协议——只在逻辑规则子条件内合法出现
+            "NETWORK" => Ok(ClashRule::Network {
+                protocols: vec![get(1)?.to_string()],
+                target: get(2)?.to_string(),
+            }),
             "MATCH" => Ok(ClashRule::Match {
                 target: get(1)?.to_string(),
             }),
-            _ => Err(format!("unsupported rule type: {}", parts[0])),
+            _ => {
+                // RIL-014：未知规则类型保留原文进 Unknown（解析期不炸整份
+                // 配置）；转换期显式进损失清单，未知关键条件不跳过
+                Ok(ClashRule::Unknown {
+                    raw: raw.to_string(),
+                })
+            }
         }
+    }
+
+    /// 逻辑规则解析（RIL-014）：`AND,((SUB1),(SUB2)),TARGET` /
+    /// `OR,((SUB1),(SUB2)),TARGET` / `NOT,((SUB)),TARGET`。子条件递归
+    /// 走 [`ClashRule::parse_rule_string`]（占位 target 保留在子规则上，
+    /// 转换期忽略）；未知/不支持子条件整条报错，不做部分吸收。
+    fn parse_logic_rule(kind: &str, raw: &str) -> Result<Self, String> {
+        // 载荷 = 第一个逗号之后的全部内容
+        let payload = raw
+            .split_once(',')
+            .map(|(_, rest)| rest.trim())
+            .ok_or_else(|| format!("invalid logic rule: {raw}"))?;
+        let (subs, target) = split_logic_payload(payload)?;
+        let rules = subs
+            .iter()
+            .map(|sub| {
+                // 逻辑子条件不带 target（出口由外层逻辑规则给出）——嵌套
+                // 逻辑规则与双段普通子条件都缺尾段，解析失败按形态补占位
+                // target 重试，转换期忽略占位值
+                ClashRule::parse_rule_string(sub).or_else(|err| {
+                    let head = sub.split(',').next().unwrap_or("").trim().to_ascii_uppercase();
+                    let double_segment =
+                        sub.split(',').filter(|p| !p.trim().is_empty()).count() == 2;
+                    if matches!(head.as_str(), "AND" | "OR" | "NOT") || double_segment {
+                        ClashRule::parse_rule_string(&format!("{sub},__LOGIC_SUB_TARGET__"))
+                    } else {
+                        Err(err)
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        match kind {
+            "AND" => Ok(ClashRule::LogicAnd { rules, target }),
+            "OR" => Ok(ClashRule::LogicOr { rules, target }),
+            _ => Ok(ClashRule::LogicNot { rules, target }),
+        }
+    }
+}
+
+/// 端口/端口区间解析（RIL-014 从规则解析提取共享）：`80` 单端口 /
+/// `1000-2000` 区间（上限 4096 防膨胀）。规则行与规则集载荷行共用。
+fn parse_ports(s: &str) -> Result<Vec<u16>, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty port".into());
+    }
+    if let Some((a, b)) = s.split_once('-') {
+        let start: u16 = a
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid port range: {s}"))?;
+        let end: u16 = b
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid port range: {s}"))?;
+        if start > end {
+            return Err(format!("invalid port range: {s}"));
+        }
+        let span = (end - start) as usize;
+        if span > 4096 {
+            return Err(format!("port range too large: {s}"));
+        }
+        return Ok((start..=end).collect());
+    }
+    let p: u16 = s.parse().map_err(|_| format!("invalid port: {s}"))?;
+    Ok(vec![p])
+}
+
+/// 拆逻辑规则载荷（RIL-014）：`((SUB1),(SUB2)),TARGET` → (子条件串列表,
+/// 目标)。括号感知扫描——子条件内的逗号属于子条件自身，顶层逗号才是
+/// 分隔符；子条件必须逐个用 `( ... )` 包裹（Clash 逻辑规则语法）。
+fn split_logic_payload(payload: &str) -> Result<(Vec<String>, String), String> {
+    let rest = payload.trim();
+    let Some(inner) = rest.strip_prefix('(') else {
+        return Err(format!(
+            "logic rule conditions must be wrapped in ( ): {payload}"
+        ));
+    };
+
+    // 找与首个 ( 配对的 )——子条件块整体边界
+    let mut depth = 1usize;
+    let mut block_end = None;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    block_end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = block_end else {
+        return Err("logic rule parentheses unbalanced".to_string());
+    };
+    let block = &inner[..end];
+    let after = inner[end + 1..].trim_start();
+    let Some(target) = after.strip_prefix(',') else {
+        return Err("logic rule missing target".to_string());
+    };
+
+    // 块内按顶层逗号拆子条件：depth 0 处的 `,` 是分隔符，其余逗号属于
+    // 子条件自身（如 DOMAIN,a.com）
+    let mut subs = Vec::new();
+    let mut cur = String::new();
+    let mut inner_depth = 0usize;
+    for c in block.chars() {
+        match c {
+            '(' => {
+                inner_depth += 1;
+                if inner_depth > 1 {
+                    cur.push(c);
+                }
+            }
+            ')' => {
+                inner_depth -= 1;
+                if inner_depth > 0 {
+                    cur.push(c);
+                } else {
+                    subs.push(cur.trim().to_string());
+                    cur.clear();
+                }
+            }
+            ',' if inner_depth == 0 => {} // 子条件之间的分隔逗号
+            _ => cur.push(c),
+        }
+    }
+    if inner_depth != 0 || !cur.trim().is_empty() {
+        return Err("logic rule parentheses unbalanced".to_string());
+    }
+    if subs.is_empty() {
+        return Err("logic rule has no conditions".to_string());
+    }
+    Ok((subs, target.trim().to_string()))
+}
+
+/// 解析 rule-provider 载荷为条件列表（RIL-014 展开策略的载荷侧）：声明
+/// `format` 决定文本形态——`yaml`（`payload:` 字符串列表）/ `text`（每行
+/// 一条规则，`#` 注释与空行跳过）。载荷行不带 target（RULE-SET 的出口
+/// 由引用行给出），行内多余参数（如 `no-resolve` 标志、行内 target）
+/// 忽略；behavior 划定条件类型域（domain/ipcidr/classical），越域条件
+/// 显式报错——载荷与声明不符不得静默混用。任何一行解析失败整体 Err
+/// 并点名该行（未知关键条件不跳过）。
+pub fn parse_rule_provider_payload(
+    behavior: &str,
+    format: &str,
+    text: &str,
+) -> Result<Vec<MatchCondition>> {
+    let entries: Vec<String> = match format.to_ascii_lowercase().as_str() {
+        "yaml" | "" => {
+            let value: serde_yaml::Value =
+                serde_yaml::from_str(text).map_err(|e| anyhow!("载荷 yaml 解析失败: {e}"))?;
+            let payload = value
+                .get("payload")
+                .ok_or_else(|| anyhow!("载荷缺 payload 键（yaml 格式）"))?;
+            let seq = payload
+                .as_sequence()
+                .ok_or_else(|| anyhow!("载荷 payload 必须是列表"))?;
+            seq.iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| anyhow!("载荷 payload 项必须是字符串: {item:?}"))
+                })
+                .collect::<Result<Vec<_>>>()?
+        }
+        "text" => text
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| line.to_string())
+            .collect(),
+        other => return Err(anyhow!("未知载荷格式: {other}（支持 yaml/text）")),
+    };
+
+    let mut conditions = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let condition = parse_payload_rule(entry)
+            .map_err(|e| anyhow!("载荷第 {} 条解析失败（{}）: {e}", index + 1, entry))?;
+        if !behavior_allows(behavior, &condition) {
+            return Err(anyhow!(
+                "载荷第 {} 条（{}）与声明 behavior `{}` 不符",
+                index + 1,
+                entry,
+                behavior
+            ));
+        }
+        conditions.push(condition);
+    }
+    Ok(conditions)
+}
+
+/// 单条载荷规则 → 条件（RIL-014）：kind + 值；载荷行 target/flag 参数
+/// 忽略（出口由 RULE-SET 引用行给出）。逻辑规则与 MATCH 在载荷域无意义
+/// /暂不支持——显式报错不静默跳过。
+fn parse_payload_rule(entry: &str) -> Result<MatchCondition> {
+    let raw = entry.trim();
+    let parts: Vec<&str> = raw.split(',').map(|p| p.trim()).collect();
+    let Some(kind_raw) = parts.first() else {
+        return Err(anyhow!("空载荷行"));
+    };
+    let kind = kind_raw.to_ascii_uppercase();
+    // 条件值：kind 后第一个参数；`no-resolve` 等标志参数在值之后
+    let value = parts
+        .get(1)
+        .copied()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow!("载荷行缺值: {raw}"))?;
+
+    let condition = match kind.as_str() {
+        "DOMAIN" => MatchCondition::DomainFull {
+            values: vec![value.to_string()],
+        },
+        "DOMAIN-SUFFIX" => MatchCondition::DomainSuffix {
+            values: vec![value.to_string()],
+        },
+        "DOMAIN-KEYWORD" => MatchCondition::DomainKeyword {
+            values: vec![value.to_string()],
+        },
+        "DOMAIN-REGEX" => MatchCondition::DomainRegex {
+            patterns: vec![value.to_string()],
+        },
+        "GEOSITE" => MatchCondition::GeoSite {
+            category: value.to_string(),
+        },
+        "GEOIP" => MatchCondition::Geoip {
+            country: value.to_string(),
+        },
+        "IP-CIDR" | "IP-CIDR6" => MatchCondition::IpCidr {
+            cidrs: vec![value.to_string()],
+        },
+        "SRC-PORT" => MatchCondition::SrcPort {
+            values: parse_ports(value).map_err(|e| anyhow!("{e}"))?,
+        },
+        "DST-PORT" => MatchCondition::Port {
+            values: parse_ports(value).map_err(|e| anyhow!("{e}"))?,
+        },
+        "PROCESS-NAME" => MatchCondition::Process {
+            values: vec![value.to_string()],
+        },
+        "AND" | "OR" | "NOT" => {
+            return Err(anyhow!("载荷内嵌套逻辑规则暂不支持: {kind}"));
+        }
+        "MATCH" => return Err(anyhow!("MATCH 在载荷域无意义")),
+        other => return Err(anyhow!("未知载荷规则类型: {other}")),
+    };
+    Ok(condition)
+}
+
+/// behavior 域校验（RIL-014）：domain 只收域名族，ipcidr 只收 IP 段，
+/// classical 全收。未知 behavior 一律拒收（声明面拼错不得静默当 classical）。
+fn behavior_allows(behavior: &str, condition: &MatchCondition) -> bool {
+    match behavior {
+        "domain" => matches!(
+            condition,
+            MatchCondition::DomainFull { .. }
+                | MatchCondition::DomainSuffix { .. }
+                | MatchCondition::DomainKeyword { .. }
+                | MatchCondition::DomainRegex { .. }
+                | MatchCondition::GeoSite { .. }
+        ),
+        "ipcidr" => matches!(condition, MatchCondition::IpCidr { .. }),
+        "classical" => true,
+        _ => false,
     }
 }
 
@@ -815,6 +1100,31 @@ pub struct ClashConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[serde(rename = "proxy-providers")]
     pub proxy_providers: HashMap<String, Value>,
+    /// rule-providers 声明捕获（RIL-014）：RULE-SET 引用的规则集来源
+    /// 元数据——转换期按名落 `routing.rule_providers` 声明并做引用追踪
+    /// （未声明的 RULE-SET 引用显式进损失清单）；载荷下载/更新归 RIL-010
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(rename = "rule-providers")]
+    pub rule_providers: HashMap<String, ClashRuleProvider>,
+}
+
+/// Clash rule-provider 声明（RIL-014）：`type`(http/file) + `behavior`
+/// (domain/ipcidr/classical) + `format`(yaml/text，缺省 yaml) + 来源
+/// （url 或 path）+ `interval` 更新周期（秒——Clash 口径即秒，导入时
+/// 不换算单位）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClashRuleProvider {
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    pub behavior: String,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub interval: Option<u64>,
 }
 
 fn default_log_level() -> String {
@@ -1053,8 +1363,13 @@ impl ClashConverter {
         let groups =
             self.convert_proxy_groups_to_groups(&clash_config.proxy_groups, &mut report)?;
 
-        // 转换规则为路由规则
-        let rules = self.convert_rules_to_routing_rules(&clash_config.rules, &mut report)?;
+        // 转换规则为路由规则（RIL-014：RULE-SET 引用按 rule-providers
+        // 声明追踪，未声明引用显式进损失清单）
+        let rules = self.convert_rules_to_routing_rules(
+            &clash_config.rules,
+            &clash_config.rule_providers,
+            &mut report,
+        )?;
 
         // proxy-providers 整块未吸收必须显式可见（RIL-007）：provider-only
         // 输入的关键语义不得静默消失；完整 provider 生命周期归 RIL-009/
@@ -1080,12 +1395,30 @@ impl ClashConverter {
             .map(|e| e.name.clone())
             .unwrap_or_else(|| "direct".to_string());
 
-        let routing = RoutingConfig {
+        let mut routing = RoutingConfig {
             default_node,
             groups,
             rules,
             ..RoutingConfig::default()
         };
+
+        // rule-providers 声明落配置（RIL-014）：url/path/interval（Clash
+        // interval 口径即秒）原样带入——载荷下载与更新生命周期归 RIL-010，
+        // 此处只保声明面供引用追踪与下载器配置。HashMap 迭代无序，落
+        // BTreeMap 后序列化确定
+        for (name, provider) in &clash_config.rule_providers {
+            routing.rule_providers.insert(
+                name.clone(),
+                rillane_config::RuleProviderDecl {
+                    provider_type: provider.provider_type.clone(),
+                    behavior: provider.behavior.clone(),
+                    format: provider.format.clone(),
+                    url: provider.url.clone(),
+                    path: provider.path.clone(),
+                    interval_secs: provider.interval,
+                },
+            );
+        }
 
         let config = rillane_config::RillaneConfig {
             version: rillane_config::ConfigVersion::default(),
@@ -1506,13 +1839,14 @@ impl ClashConverter {
     fn convert_rules_to_routing_rules(
         &self,
         rules: &[ClashRule],
+        providers: &HashMap<String, ClashRuleProvider>,
         report: &mut ConversionReport,
     ) -> Result<Vec<RouteRule>> {
         let mut routing_rules = Vec::new();
 
         for (index, rule) in rules.iter().enumerate() {
             let name = format!("{}rule-{}", self.rule_prefix, index + 1);
-            match self.convert_clash_rule(rule) {
+            match self.convert_clash_rule(rule, providers) {
                 Ok((matches, target)) => {
                     routing_rules.push(RouteRule {
                         name,
@@ -1538,7 +1872,11 @@ impl ClashConverter {
     }
 
     /// 转换单个 Clash 规则
-    fn convert_clash_rule(&self, rule: &ClashRule) -> Result<(Vec<MatchCondition>, String)> {
+    fn convert_clash_rule(
+        &self,
+        rule: &ClashRule,
+        providers: &HashMap<String, ClashRuleProvider>,
+    ) -> Result<(Vec<MatchCondition>, String)> {
         match rule {
             ClashRule::DomainSuffix { domains, target } => {
                 let matches = vec![MatchCondition::DomainSuffix {
@@ -1588,8 +1926,11 @@ impl ClashConverter {
                 }];
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
+            // RIL-014：源端口与目标端口语义严格分离——SRC-PORT 走
+            // `MatchCondition::SrcPort`（net.src_port 注解面），不再折进
+            // 目标端口 Port（混淆会让两条规则互串）
             ClashRule::SrcPort { ports, target } => {
-                let matches = vec![MatchCondition::Port {
+                let matches = vec![MatchCondition::SrcPort {
                     values: ports.clone(),
                 }];
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
@@ -1611,22 +1952,83 @@ impl ClashConverter {
                 );
                 Err(anyhow!("进程名规则暂不支持"))
             }
-            ClashRule::RuleSet {
-                rulesets: _,
-                target: _,
-            } => {
-                // Rillane 暂不支持规则集
-                warn!(
-                    target: "rillane::subscription::clash",
-                    "跳过规则集规则，Rillane 暂不支持"
-                );
-                Err(anyhow!("规则集规则暂不支持"))
+            // RIL-014：RULE-SET → 命名引用（展开/引用策略取引用侧——载荷
+            // 生命周期归 RIL-010，导入期不内联展开）。引用可追踪：指向
+            // 未声明 provider 的 RULE-SET 显式报错（宽松进损失清单、严格
+            // 整体拒绝），不得静默产生永不命中的悬空引用
+            ClashRule::RuleSet { rulesets, target } => {
+                let name = rulesets
+                    .first()
+                    .ok_or_else(|| anyhow!("规则集引用名为空"))?;
+                if !providers.contains_key(name) {
+                    return Err(anyhow!(
+                        "规则集 {} 未在 rule-providers 中声明（引用不可追踪）",
+                        name
+                    ));
+                }
+                let matches = vec![MatchCondition::RuleSetRef { name: name.clone() }];
+                Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
+            // RIL-014：逻辑 AND——子条件全部命中即命中，展开为 `matches`
+            // 列表（列表内即 AND 语义；嵌套 AND 平铺展平）
+            ClashRule::LogicAnd { rules, target } => {
+                let mut matches = Vec::new();
+                for sub in rules {
+                    let (sub_matches, _) = self.convert_clash_rule(sub, providers)?;
+                    matches.extend(sub_matches);
+                }
+                Ok((matches, format!("{}{}", self.group_prefix, target)))
+            }
+            // RIL-014：逻辑 OR——任一子条件命中即命中 → Any
+            ClashRule::LogicOr { rules, target } => {
+                let conditions = self.convert_logic_subrules(rules, providers)?;
+                let matches = vec![MatchCondition::Any { conditions }];
+                Ok((matches, format!("{}{}", self.group_prefix, target)))
+            }
+            // RIL-014：逻辑 NOT——唯一子条件不命中即命中 → Not
+            ClashRule::LogicNot { rules, target } => {
+                if rules.len() != 1 {
+                    return Err(anyhow!("NOT 逻辑规则只允许一个子条件，当前 {}", rules.len()));
+                }
+                let conditions = self.convert_logic_subrules(rules, providers)?;
+                let matches = vec![MatchCondition::Not {
+                    condition: Box::new(conditions.into_iter().next().expect("NOT 必有一个子条件")),
+                }];
+                Ok((matches, format!("{}{}", self.group_prefix, target)))
+            }
+            // RIL-014：NETWORK 子条件 → Proto（目标协议面）
+            ClashRule::Network { protocols, target } => {
+                let matches = vec![MatchCondition::Proto {
+                    protocols: protocols.clone(),
+                }];
+                Ok((matches, format!("{}{}", self.group_prefix, target)))
+            }
+            // RIL-014：未知类型显式拒绝进损失清单（宽松随行/严格整体拒绝）
+            ClashRule::Unknown { raw } => Err(anyhow!("规则类型不支持: {}", raw)),
             ClashRule::Match { target } => {
                 let matches = vec![]; // Match 规则不需要匹配条件
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
         }
+    }
+
+    /// OR/NOT 子条件转换（RIL-014）：每个子条件必须恰好产出一个条件
+    ///（嵌套 AND 展开为多条件，无法在 OR/NOT 内单条件表达——显式拒绝，
+    /// 不伪装成其它语义）。
+    fn convert_logic_subrules(
+        &self,
+        rules: &[ClashRule],
+        providers: &HashMap<String, ClashRuleProvider>,
+    ) -> Result<Vec<MatchCondition>> {
+        let mut conditions = Vec::new();
+        for sub in rules {
+            let (sub_matches, _) = self.convert_clash_rule(sub, providers)?;
+            if sub_matches.len() != 1 {
+                return Err(anyhow!("OR/NOT 内嵌套 AND 暂不支持（需单条件表达）"));
+            }
+            conditions.push(sub_matches.into_iter().next().expect("长度已校验为 1"));
+        }
+        Ok(conditions)
     }
 
     /// 验证代理是否有效
@@ -2634,7 +3036,7 @@ rules:
 
         // convert_clash_rule 映射
         let (matches, target) = converter
-            .convert_clash_rule(&config.rules[0])
+            .convert_clash_rule(&config.rules[0], &std::collections::HashMap::new())
             .expect("DomainRegex 应可转换");
         assert_eq!(target, "auto");
         assert!(matches!(
@@ -2750,5 +3152,351 @@ rules: []
             .find(|e| e.name == "vl-plain")
             .expect("vl-plain egress 应存在");
         assert!(matches!(vl.spec, EgressConfig::Vless { .. }));
+    }
+
+    // ---------- RIL-014：规则集与顺序 ----------
+
+    /// 源/目标端口语义严格分离：SRC-PORT → SrcPort（net.src_port 注解面），
+    /// DST-PORT → Port（目标端口）——此前两者都折进 Port 互串。
+    #[test]
+    fn src_port_and_dst_port_convert_distinct() {
+        let yaml = r#"
+proxies:
+  - name: "ss-1"
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: password
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies: ["ss-1"]
+
+rules:
+  - SRC-PORT,1000-2000,PROXY
+  - DST-PORT,443,PROXY
+        "#;
+        let converter = ClashConverter::new();
+        let clash = converter.parse(yaml).unwrap();
+        let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+        assert!(report.is_empty(), "端口规则必须零损失: {}", report.summary());
+
+        let src = &config.routing.rules[0];
+        assert_eq!(src.matches.len(), 1);
+        assert_eq!(
+            src.matches[0],
+            MatchCondition::SrcPort {
+                values: (1000..=2000).collect()
+            },
+            "SRC-PORT 必须落 SrcPort（区间展开），不得折进 Port"
+        );
+        let dst = &config.routing.rules[1];
+        assert_eq!(
+            dst.matches[0],
+            MatchCondition::Port {
+                values: vec![443]
+            },
+            "DST-PORT 落目标端口 Port"
+        );
+    }
+
+    /// RULE-SET 引用策略：已声明 provider → RuleSetRef 可追踪 + 声明
+    /// （url/interval 秒口径）落 routing.rule_providers；未声明引用显式
+    /// 进损失清单（宽松）/整体拒绝（严格），不产生悬空引用。
+    #[test]
+    fn ruleset_reference_tracked_and_undeclared_reported() {
+        let yaml = r#"
+rule-providers:
+  ads:
+    type: http
+    behavior: domain
+    format: yaml
+    url: "https://example.invalid/rules/ads.yaml"
+    interval: 86400
+  local-list:
+    type: file
+    behavior: ipcidr
+    path: ./rules/local.list
+
+proxies:
+  - name: "ss-1"
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: password
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies: ["ss-1"]
+
+rules:
+  - RULE-SET,ads,REJECT
+  - RULE-SET,local-list,PROXY
+  - RULE-SET,ghost,PROXY
+        "#;
+        let converter = ClashConverter::new();
+        let clash = converter.parse(yaml).unwrap();
+
+        // 宽松：前两条转 RuleSetRef，ghost 未声明进损失清单
+        let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+        assert_eq!(
+            config.routing.rules[0].matches[0],
+            MatchCondition::RuleSetRef {
+                name: "ads".to_string()
+            }
+        );
+        assert_eq!(
+            config.routing.rules[1].matches[0],
+            MatchCondition::RuleSetRef {
+                name: "local-list".to_string()
+            }
+        );
+        assert_eq!(report.dropped_rules.len(), 1, "ghost 必须显式进清单");
+        assert!(
+            report.dropped_rules[0].1.contains("ghost"),
+            "损失原因点名未声明来源: {:?}",
+            report.dropped_rules
+        );
+
+        // 声明面：url/path/interval（Clash interval 即秒）原样带入
+        let ads = config.routing.rule_providers.get("ads").expect("声明落配置");
+        assert_eq!(ads.provider_type, "http");
+        assert_eq!(ads.behavior, "domain");
+        assert_eq!(ads.format.as_deref(), Some("yaml"));
+        assert_eq!(ads.url.as_deref(), Some("https://example.invalid/rules/ads.yaml"));
+        assert_eq!(ads.interval_secs, Some(86400), "Clash interval 口径即秒");
+        let local = config
+            .routing
+            .rule_providers
+            .get("local-list")
+            .expect("file 声明落配置");
+        assert_eq!(local.path.as_deref(), Some("./rules/local.list"));
+        assert_eq!(local.interval_secs, None);
+
+        // 严格：任一损失即整体拒绝并点名
+        let strict = ClashConverter::new().with_strict(true);
+        let err = strict
+            .convert_to_rillane_with_report(&strict.parse(yaml).unwrap())
+            .expect_err("严格导入必须拒绝未声明引用");
+        assert!(err.to_string().contains("ghost"), "拒绝须点名 ghost: {err}");
+    }
+
+    /// 逻辑规则 AND/OR/NOT 正确展开：AND 平铺进 matches（含 NETWORK→
+    /// Proto），OR → Any，NOT → Not；首匹配顺序与 rule-N 命名保持。
+    #[test]
+    fn logic_rules_expand_and_or_not_in_order() {
+        let yaml = r#"
+proxies:
+  - name: "ss-1"
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: password
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies: ["ss-1"]
+
+rules:
+  - AND,((DOMAIN-SUFFIX,internal.corp),(DST-PORT,8443),(NETWORK,TCP)),PROXY
+  - OR,((SRC-PORT,9000),(DST-PORT,53)),DIRECT
+  - NOT,((GEOIP,CN)),PROXY
+  - MATCH,PROXY
+        "#;
+        let converter = ClashConverter::new();
+        let clash = converter.parse(yaml).unwrap();
+        let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+        assert!(report.is_empty(), "逻辑规则必须零损失: {}", report.summary());
+
+        // AND 平铺：matches 列表内即 AND，顺序保持
+        let and = &config.routing.rules[0];
+        assert_eq!(and.name, "rule-1");
+        assert_eq!(and.matches.len(), 3);
+        assert_eq!(and.matches[0], MatchCondition::DomainSuffix {
+            values: vec!["internal.corp".to_string()]
+        });
+        assert_eq!(
+            and.matches[1],
+            MatchCondition::Port {
+                values: vec![8443]
+            }
+        );
+        assert_eq!(
+            and.matches[2],
+            MatchCondition::Proto {
+                protocols: vec!["TCP".to_string()]
+            },
+            "NETWORK 子条件落 Proto"
+        );
+
+        // OR → Any
+        let or = &config.routing.rules[1];
+        assert_eq!(
+            or.matches[0],
+            MatchCondition::Any {
+                conditions: vec![
+                    MatchCondition::SrcPort {
+                        values: vec![9000]
+                    },
+                    MatchCondition::Port {
+                        values: vec![53]
+                    },
+                ]
+            }
+        );
+
+        // NOT → Not（唯一子条件）
+        let not = &config.routing.rules[2];
+        assert_eq!(
+            not.matches[0],
+            MatchCondition::Not {
+                condition: Box::new(MatchCondition::Geoip {
+                    country: "CN".to_string()
+                })
+            }
+        );
+
+        // MATCH 兜底最后：首匹配顺序 = 声明顺序
+        assert_eq!(config.routing.rules[3].name, "rule-4");
+        assert!(config.routing.rules[3].matches.is_empty(), "MATCH 无条件");
+    }
+
+    /// 未知关键条件不跳过：普通规则未知类型、逻辑规则内未知子条件，
+    /// 都必须整条显式进损失清单（宽松）/严格拒绝——不做部分吸收。
+    #[test]
+    fn unknown_conditions_dropped_explicitly_never_skipped() {
+        let yaml = r#"
+proxies:
+  - name: "ss-1"
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: password
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies: ["ss-1"]
+
+rules:
+  - FUTURE-TYPE,foo,PROXY
+  - AND,((MYSTERY,x),(DST-PORT,80)),PROXY
+  - DOMAIN-SUFFIX,kept.example,PROXY
+        "#;
+        let converter = ClashConverter::new();
+        let clash = converter.parse(yaml).unwrap();
+        let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+
+        let dropped: Vec<&str> = report
+            .dropped_rules
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(
+            dropped.contains(&"rule-1"),
+            "未知规则类型必须进清单: {dropped:?}"
+        );
+        assert!(
+            dropped.contains(&"rule-2"),
+            "逻辑规则内未知子条件必须整条进清单（不做部分吸收）: {dropped:?}"
+        );
+        // 保留面不受损，顺序保持
+        assert_eq!(config.routing.rules.len(), 1);
+        assert_eq!(config.routing.rules[0].name, "rule-3");
+        assert_eq!(config.routing.rules[0].matches[0], MatchCondition::DomainSuffix {
+            values: vec!["kept.example".to_string()]
+        });
+
+        // 严格整体拒绝并点名两条
+        let strict = ClashConverter::new().with_strict(true);
+        let err = strict
+            .convert_to_rillane_with_report(&strict.parse(yaml).unwrap())
+            .expect_err("严格导入必须拒绝");
+        let message = err.to_string();
+        assert!(message.contains("rule-1") && message.contains("rule-2"));
+    }
+
+    /// OR/NOT 内嵌套 AND 无法单条件表达——显式拒绝，不伪装成其它语义。
+    #[test]
+    fn nested_and_inside_or_rejected_explicitly() {
+        let yaml = r#"
+proxies:
+  - name: "ss-1"
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: password
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies: ["ss-1"]
+
+rules:
+  - OR,((AND,((DOMAIN,a.example),(DST-PORT,443))),(SRC-PORT,9000)),PROXY
+        "#;
+        let converter = ClashConverter::new();
+        let clash = converter.parse(yaml).unwrap();
+        let (_, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+        assert_eq!(report.dropped_rules.len(), 1);
+        assert!(
+            report.dropped_rules[0].1.contains("嵌套 AND"),
+            "拒绝原因须点名嵌套 AND: {:?}",
+            report.dropped_rules
+        );
+    }
+
+    /// 规则集载荷解析：yaml payload 列表与 text 行格式，behavior 域
+    /// 校验（domain 收域名族、ipcidr 只收 IP 段），未知类型/越域显式报
+    /// 错点名行号。
+    #[test]
+    fn rule_provider_payload_yaml_text_and_behavior_bounds() {
+        // yaml domain 载荷
+        let yaml_payload = "payload:\n  - DOMAIN,exact.example\n  - DOMAIN-SUFFIX,ads.example\n  - DOMAIN-KEYWORD,ads\n";
+        let conditions =
+            parse_rule_provider_payload("domain", "yaml", yaml_payload).expect("yaml 载荷解析");
+        assert_eq!(conditions.len(), 3);
+        assert_eq!(
+            conditions[0],
+            MatchCondition::DomainFull {
+                values: vec!["exact.example".to_string()]
+            }
+        );
+
+        // text classical 载荷：注释/空行跳过、IP-CIDR no-resolve 标志忽略
+        let text_payload = "# comment\n\nIP-CIDR,10.0.0.0/8,no-resolve\nSRC-PORT,1000-2000\n";
+        let conditions =
+            parse_rule_provider_payload("classical", "text", text_payload).expect("text 载荷解析");
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(
+            conditions[0],
+            MatchCondition::IpCidr {
+                cidrs: vec!["10.0.0.0/8".to_string()]
+            }
+        );
+        assert_eq!(
+            conditions[1],
+            MatchCondition::SrcPort {
+                values: (1000..=2000).collect()
+            }
+        );
+
+        // behavior 越域显式拒绝：domain 行进 ipcidr 库必须报错
+        let err = parse_rule_provider_payload("ipcidr", "yaml", yaml_payload)
+            .expect_err("domain 行进 ipcidr 库必须报错");
+        assert!(err.to_string().contains("behavior"), "越域点名 behavior: {err}");
+
+        // 未知类型点名
+        let err = parse_rule_provider_payload("classical", "text", "FUTURE-TYPE,foo\n")
+            .expect_err("未知类型必须报错");
+        assert!(err.to_string().contains("FUTURE-TYPE"), "点名未知类型: {err}");
     }
 }

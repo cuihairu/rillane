@@ -1720,6 +1720,40 @@ pub struct RoutingConfig {
     /// None = 无数据库，`GeoSite` 条件恒不命中。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geosite_db: Option<PathBuf>,
+    /// rule-provider 声明（RIL-014）：RULE-SET 引用的规则集来源元数据
+    /// （behavior/format/url/path/interval）。载荷获取与生命周期归
+    /// RIL-010；此处仅声明面，供引用追踪与下载器配置。键 = 规则集名。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rule_providers: BTreeMap<String, RuleProviderDecl>,
+    /// 命名规则集库（RIL-014）：`RuleSetRef` 条件的解析结果面。载荷未
+    /// 装入时引用恒不命中（与 GeoSite 缺库同语义）；控制面随快照刷新
+    /// 重装，热更随 `RoutingConfig` 整体替换。
+    #[serde(default, skip_serializing_if = "RuleSetLibrary::is_empty")]
+    pub rule_sets: RuleSetLibrary,
+}
+
+/// rule-provider 声明（RIL-014）：一个 RULE-SET 规则集的来源元数据。
+/// behavior 决定载荷行的语义域（domain/ipcidr/classical）——导入链按
+/// behavior 校验载荷条件类型，不静默混用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleProviderDecl {
+    /// 来源类型：`http`（远端）/ `file`（本地路径）
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    /// 语义域：`domain` / `ipcidr` / `classical`
+    pub behavior: String,
+    /// 载荷格式：`yaml`（payload: 列表）/ `text`（每行一条规则）；缺省 yaml
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// 远端 URL（type=http 必有；凭证不得出现在 URL 查询串——RIL-010 口径）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// 本地路径（type=file 必有）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// 更新周期（秒）；None = 不自动更新
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
 }
 
 impl Default for RoutingConfig {
@@ -1730,6 +1764,8 @@ impl Default for RoutingConfig {
             rules: Vec::new(),
             geoip_db: None,
             geosite_db: None,
+            rule_providers: BTreeMap::new(),
+            rule_sets: RuleSetLibrary::default(),
         }
     }
 }
@@ -1753,6 +1789,28 @@ impl RoutingConfig {
         for rule in &self.rules {
             for cond in &rule.matches {
                 validate_condition_regex(cond, &rule.name)?;
+            }
+        }
+        // RIL-014：RuleSetRef 引用名非空（空名是导入链 bug，不是合法配置；
+        // 引用是否存在载荷不做构建期拒绝——载荷随 RIL-010 异步装入，缺席
+        // 为文档化恒不命中）。
+        for rule in &self.rules {
+            let mut stack: Vec<&MatchCondition> = rule.matches.iter().collect();
+            while let Some(cond) = stack.pop() {
+                match cond {
+                    MatchCondition::Any { conditions } => {
+                        stack.extend(conditions.iter());
+                    }
+                    MatchCondition::Not { condition } => stack.push(condition),
+                    MatchCondition::RuleSetRef { name } => {
+                        anyhow::ensure!(
+                            !name.trim().is_empty(),
+                            "规则 {} 的规则集引用名为空",
+                            rule.name
+                        );
+                    }
+                    _ => {}
+                }
             }
         }
         Ok(())
@@ -1783,6 +1841,87 @@ mod geo_db_tests {
         let reparsed: RillaneConfig = serde_yaml::from_str(&rendered).unwrap();
         assert_eq!(reparsed.routing.geoip_db, cfg.routing.geoip_db);
         assert_eq!(reparsed.routing.geosite_db, cfg.routing.geosite_db);
+    }
+
+    /// RIL-014：源端口/协议/规则集引用条件与声明面、规则集库的 serde
+    /// 往返——标签 snake_case（src_port/rule_set_ref/proto），库平铺为
+    /// 名字→条件映射；空库/空声明不落盘（skip_serializing_if）。
+    #[test]
+    fn ruleset_and_port_conditions_roundtrip() {
+        let yaml = "default_node: direct\n\
+             groups: []\n\
+             rules:\n\
+             \x20 - name: r1\n\
+             \x20   matches:\n\
+             \x20     - type: src_port\n\
+             \x20       values: [80, 443]\n\
+             \x20     - type: proto\n\
+             \x20       protocols: [TCP]\n\
+             \x20     - type: rule_set_ref\n\
+             \x20       name: ads\n\
+             \x20   target: proxy\n\
+             rule_providers:\n\
+             \x20 ads:\n\
+             \x20   type: http\n\
+             \x20   behavior: domain\n\
+             \x20   url: https://x.invalid/a.yaml\n\
+             \x20   interval_secs: 86400\n\
+             rule_sets:\n\
+             \x20 ads:\n\
+             \x20   conditions:\n\
+             \x20     - type: domain_suffix\n\
+             \x20       values: [ads.example]\n";
+        let cfg: RoutingConfig = serde_yaml::from_str(yaml).expect("应解析");
+        assert_eq!(cfg.rules.len(), 1);
+        assert_eq!(
+            cfg.rules[0].matches[0],
+            MatchCondition::SrcPort {
+                values: vec![80, 443]
+            }
+        );
+        assert_eq!(
+            cfg.rules[0].matches[1],
+            MatchCondition::Proto {
+                protocols: vec!["TCP".to_string()]
+            }
+        );
+        assert_eq!(
+            cfg.rules[0].matches[2],
+            MatchCondition::RuleSetRef {
+                name: "ads".to_string()
+            }
+        );
+        let decl = cfg.rule_providers.get("ads").expect("声明解析");
+        assert_eq!(decl.interval_secs, Some(86400));
+        assert_eq!(decl.provider_type, "http");
+        let entry = cfg.rule_sets.get("ads").expect("库载荷解析");
+        assert_eq!(
+            entry.conditions[0],
+            MatchCondition::DomainSuffix {
+                values: vec!["ads.example".to_string()]
+            }
+        );
+
+        // 往返：序列化再解析语义不变（逐字段——RoutingConfig 未派生整体相等）
+        let text = serde_yaml::to_string(&cfg).expect("序列化");
+        let back: RoutingConfig = serde_yaml::from_str(&text).expect("往返解析");
+        assert_eq!(back.rules, cfg.rules, "规则面往返语义不变");
+        assert_eq!(back.rule_providers.len(), 1);
+        assert_eq!(
+            back.rule_providers.get("ads").map(|d| d.interval_secs),
+            Some(Some(86400))
+        );
+        assert_eq!(
+            back.rule_sets.get("ads").map(|e| e.conditions.clone()),
+            Some(cfg.rule_sets.get("ads").expect("库非空").conditions.clone())
+        );
+        // 空库/空声明不落盘
+        let empty = RoutingConfig::default();
+        let empty_text = serde_yaml::to_string(&empty).expect("序列化");
+        assert!(
+            !empty_text.contains("rule_sets:") && !empty_text.contains("rule_providers:"),
+            "空面不落盘: {empty_text}"
+        );
     }
 
     #[test]
@@ -2206,14 +2345,14 @@ pub enum Strategy {
     RoundRobin,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteRule {
     pub name: String,
     pub matches: Vec<MatchCondition>,
     pub target: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MatchCondition {
     /// 逻辑 OR：任一子条件命中即命中（`matches` 顶层仍是 AND）。
@@ -2275,4 +2414,66 @@ pub enum MatchCondition {
     Process {
         values: Vec<String>,
     },
+    /// 源端口匹配（RIL-014）：本机侧五元组源端口。取值经 `net.src_port`
+    /// 注解进入求值面（与 `client.cidr`/`process.name` 同一注入先例）；
+    /// 注解缺席恒不命中。与 `Port`（目标端口）语义严格分离——导入链
+    /// 不得把 SRC-PORT 折进目标端口（RIL-014 验收：源/目标端口正确）。
+    SrcPort {
+        values: Vec<u16>,
+    },
+    /// 传输协议匹配（RIL-014 逻辑规则子条件）：`tcp`/`udp`/`quic`，
+    /// 大小写不敏感。Clash 逻辑规则的 `NETWORK,<proto>` 子条件走此变体。
+    Proto {
+        protocols: Vec<String>,
+    },
+    /// 命名规则集引用（RIL-014）：按名解析 `routing.rule_sets` 库中的
+    /// 载荷条件，任一命中即命中。库中无此名（载荷未加载/来源失效）恒
+    /// 不命中——与 GeoSite 缺数据库同一语义，不伪装命中也不整体拒绝。
+    /// 引用可追踪：导入链要求 RULE-SET 指向已声明的 rule-provider。
+    RuleSetRef {
+        name: String,
+    },
+}
+
+/// 命名规则集库（RIL-014）：RULE-SET 引用的载荷解析结果——`规则集名 →
+/// 条件列表`（任一命中即命中）。载荷来源：rule-provider 快照内容
+/// （下载生命周期归 RIL-010；快照原子替换归 RIL-008），由控制面解析后
+/// 装入；随 `RoutingConfig` 热更整体替换。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuleSetLibrary {
+    /// 平铺序列化：`rule_sets: { <名>: { conditions: [...] } }`——配置面
+    /// 即名字到条件的直接映射，无包装层
+    #[serde(flatten)]
+    sets: BTreeMap<String, RuleSetEntry>,
+}
+
+/// 单个规则集条目：展开后的条件列表（首匹配层每条独立参与 OR 语义）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuleSetEntry {
+    pub conditions: Vec<MatchCondition>,
+}
+
+impl RuleSetLibrary {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 装入/替换一个规则集（调用方持有载荷解析职责）
+    pub fn insert(&mut self, name: impl Into<String>, conditions: Vec<MatchCondition>) {
+        self.sets.insert(name.into(), RuleSetEntry { conditions });
+    }
+
+    /// 查询规则集
+    pub fn get(&self, name: &str) -> Option<&RuleSetEntry> {
+        self.sets.get(name)
+    }
+
+    /// 已装入的规则集数量
+    pub fn len(&self) -> usize {
+        self.sets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sets.is_empty()
+    }
 }

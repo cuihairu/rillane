@@ -1,0 +1,35 @@
+# RIL-014 样本：rule-providers 声明 + RULE-SET 引用 + AND/OR/NOT 逻辑规则
+# 脱敏红线：不含真实凭据（见 samples_contain_no_secrets 守卫）
+mixed-port: 7890
+rule-providers:
+  ads:
+    type: http
+    behavior: domain
+    format: yaml
+    url: "https://rules.example.invalid/ads.yaml"
+    interval: 86400
+  direct-cidr:
+    type: file
+    behavior: ipcidr
+    path: ./rules/direct-cidr.list
+
+proxies:
+  - name: "sample-ss"
+    type: ss
+    server: 203.0.113.10
+    port: 8388
+    cipher: aes-256-gcm
+    password: "REDACTED-SAMPLE"
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "sample-ss"
+
+rules:
+  - RULE-SET,ads,REJECT
+  - AND,((DOMAIN-SUFFIX,internal.corp),(DST-PORT,8443)),DIRECT
+  - OR,((SRC-PORT,9000),(DST-PORT,53)),DIRECT
+  - NOT,((GEOIP,CN)),PROXY
+  - MATCH,PROXY

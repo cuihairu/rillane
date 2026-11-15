@@ -50,10 +50,12 @@ dropped with a named report entry (RIL-093), never crash the bulk import.
 | DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX | ✅ | first-match order preserved |
 | IP-CIDR / IP-CIDR-6 | ✅ | source vs destination distinction per converter |
 | GEOIP / GEOSITE | ✅ | |
+| SRC-PORT / DST-PORT | ✅ | separate conditions (source via `net.src_port`, destination via target port); ranges expand |
+| NETWORK (inside logic) | ✅ | → `proto` condition |
 | MATCH (fallback) | ✅ | must stay last |
 | PROCESS-NAME / process fields | ❌ | rejected + reported; canonical mapping ships with RIL-015 |
-| RULE-SET / rule-providers | ❌ | rejected + reported; arrives with RIL-014 |
-| logic expressions (AND/OR/NOT) | ❌ | rejected + reported |
+| RULE-SET / rule-providers | ✅ | reference strategy (RIL-014): provider declarations land in `routing.rule_providers` (interval in seconds, passthrough), RULE-SET resolves at match time against `routing.rule_sets`; undeclared references are rejected + reported; payload downloads ship with RIL-010 |
+| logic expressions (AND/OR/NOT) | ✅ | AND flattens into the rule's match list; OR → `any`, NOT → `not`; nested AND inside OR/NOT is rejected + reported (needs single-condition form); unknown sub-conditions reject the whole rule |
 
 ## L4 Other configuration
 

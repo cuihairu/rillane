@@ -480,6 +480,7 @@ impl SubscriptionConverter {
             log_level: "info".to_string(),
             external_controller: None,
             proxy_providers: Default::default(),
+            rule_providers: Default::default(),
         };
 
         // 使用 Clash 转换器
@@ -1695,6 +1696,7 @@ proxies:
                     rules: vec![],
                     geoip_db: None,
                     geosite_db: None,
+                    ..rillane_config::RoutingConfig::default()
                 },
                 udp: rillane_config::UdpConfig::default(),
                 network: None,
