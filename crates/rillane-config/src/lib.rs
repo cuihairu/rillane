@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub mod contract;
 pub mod generations;
+pub mod preview;
 pub mod proposal;
 pub mod source;
 
@@ -27,6 +28,10 @@ pub use proposal::{
     CODE_PROPOSAL_FOREIGN, CODE_PROPOSAL_ID_CLASH, CODE_PROPOSAL_INPUT_INVALID,
     CODE_PROPOSAL_SCOPE_INVALID, CODE_PROPOSAL_TTL_INVALID, CODE_PROPOSAL_UNKNOWN,
     PROPOSAL_MAX_TTL_MS, PROPOSAL_STORE_CAP,
+};
+pub use preview::{
+    merge_patch, preview_config_patch, AffectedCategory, ConfigPreview, DiffEntry, DiffOp,
+    PreviewDiagnostic, SideEffectHint, CODE_PREVIEW_CONFIG_INVALID, CODE_PREVIEW_PATCH_INVALID,
 };
 pub use source::{
     derive_local_id, CompatibilityDiagnostic, ObjectCatalog, ObjectId, ObjectKind, ObjectRenamed,
