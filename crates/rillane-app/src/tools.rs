@@ -580,10 +580,41 @@ pub fn result_from_error(err: &AppError) -> Value {
     })
 }
 
+/// 结果字节上限执行（RIL-069「响应限长」）：任何工具答复序列化超
+/// [`crate::mcp::MAX_RESULT_BYTES`] → 有界超限答复（isError:true +
+/// `mcp.result.oversize`，上下文只带 limit/actual 字节数——不回显
+/// 载荷、不静默截断出残缺 JSON）。这是装配面最后的资源闸：守护进程
+/// 视图自身已有界，此闸防「边界聚合翻倍」（同一信封在 content 文本与
+/// structuredContent 各投影一次）与未来工具的面外膨胀。
+pub fn cap_result(result: Value) -> Value {
+    let serialized = serde_json::to_string(&result).unwrap_or_default();
+    if serialized.len() <= crate::mcp::MAX_RESULT_BYTES {
+        return result;
+    }
+    json!({
+        "resultType": "complete",
+        "content": [{"type": "text",
+            "text": "tool result exceeded the response size cap"}],
+        "structuredContent": {
+            "schema_version": 1,
+            "error": {
+                "code": "mcp.result.oversize",
+                "context": format!(
+                    "result {} bytes exceeds cap {} bytes",
+                    serialized.len(),
+                    crate::mcp::MAX_RESULT_BYTES
+                ),
+            },
+        },
+        "isError": true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mcp::codes;
+    use crate::mcp::MAX_RESULT_BYTES;
     use crate::ops::AppOperation;
     use crate::reply::AppError;
     use serde_json::json;
@@ -817,5 +848,31 @@ mod tests {
             out["structuredContent"]["error"]["code"],
             "control.unreachable"
         );
+    }
+
+    #[test]
+    fn oversized_results_are_capped_without_payload_echo() {
+        // 超限 → 有界超限答复：isError:true + 稳定码；上下文只带字节数
+        // ——载荷不回显、不静默截断出残缺 JSON
+        let big = "x".repeat(MAX_RESULT_BYTES + 1024);
+        let envelope = json!({"schema_version": 1, "blob": big});
+        let out = cap_result(result_from_envelope(&envelope));
+        assert_eq!(out["resultType"], "complete");
+        assert_eq!(out["isError"], true);
+        assert_eq!(
+            out["structuredContent"]["error"]["code"],
+            "mcp.result.oversize"
+        );
+        let text = out["content"][0]["text"].as_str().expect("text");
+        assert!(!text.contains(&big[..64]), "载荷不回显");
+        let serialized = serde_json::to_string(&out).expect("serialize");
+        assert!(serialized.len() <= MAX_RESULT_BYTES, "超限答复自身有界");
+
+        // 界内答复原样通过（不重包、不改形）
+        let ok = result_from_envelope(&json!({
+            "schema_version": 1,
+            "collector": {"traces": 3},
+        }));
+        assert_eq!(cap_result(ok.clone()), ok);
     }
 }

@@ -582,4 +582,81 @@ mod tests {
         assert_eq!(cli.rate_limit, 0);
         assert!(GrantedScopes::parse(&cli.scope).is_ok());
     }
+
+    #[test]
+    fn status_quality_answers_are_byte_faithful_envelopes() {
+        // /routing/stats 形载荷（守护进程 DTO，无信封版本字段）逐字段
+        // 贯通：时效（source=legacy/real）与缺失（p95/loss/gate null）
+        // 原样保留——不补零、不发明字段、不改名（与 CLI 消费同一守护
+        // 进程载荷——同一端点同一服务，结果一致是结构性事实）
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let payload = r#"{"groups":[{"name":"proxy","strategy":"latency","selected":"node-a","members":[{"name":"node-a","healthy":true,"source":"legacy","p95_ms":null,"loss_ratio":null,"score":null,"gate_pass":null},{"name":"node-b","healthy":false,"source":"real","p95_ms":420,"loss_ratio":0.02,"score":98.0,"gate_pass":false}]}]}"#;
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = sock.write_all(response.as_bytes());
+            }
+        });
+        let mut st = state_with(GrantedScopes::read_only(), 0);
+        // 换上指向一次性应答器的执行器（state_with 默认执行器端口不可达）
+        st.app = BlockingApp::new(&format!("http://{addr}"), None).expect("app");
+        let line = call_line(30, "routing_quality", json!({}));
+        let out = handle_line(&mut st, &line).expect("answer");
+        let sc = out["result"]["structuredContent"].clone();
+        let expected: Value = serde_json::from_str(payload).expect("payload json");
+        assert_eq!(sc, expected, "信封原文贯通——不重排不加工");
+        // 时效/缺失语义逐字段显式（legacy 数据源 + null 不当零）
+        assert_eq!(sc["groups"][0]["members"][0]["source"], "legacy");
+        assert_eq!(sc["groups"][0]["members"][0]["p95_ms"], Value::Null);
+        assert_eq!(sc["groups"][0]["members"][1]["gate_pass"], false);
+        assert_eq!(sc["groups"][0]["members"][1]["p95_ms"], 420);
+    }
+
+    #[test]
+    fn admin_token_never_appears_in_answers() {
+        // 凭证只进执行器（x-admin-token 头）：成功与失败两路的 stdout
+        // 答复都不携带凭证字符串
+        for (status, body, expect_error) in [
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"schema_version":1,"collector":{"traces":3}}"#,
+                false,
+            ),
+            (
+                "HTTP/1.1 401 Unauthorized",
+                r#"{"error":{"code":"control.auth","context":"bad token"}}"#,
+                true,
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            std::thread::spawn(move || {
+                if let Ok((mut sock, _)) = listener.accept() {
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf);
+                    let response = format!(
+                        "{status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(response.as_bytes());
+                }
+            });
+            let mut st = state_with(GrantedScopes::read_only(), 0);
+            st.app =
+                BlockingApp::new(&format!("http://{addr}"), Some("sekrit-mcp-token")).expect("app");
+            let line = call_line(31, "runtime_stats", json!({}));
+            let out = handle_line(&mut st, &line).expect("answer");
+            assert_eq!(out["result"]["isError"], expect_error);
+            assert!(
+                !out.to_string().contains("sekrit-mcp-token"),
+                "答复不携带凭证（{status}）"
+            );
+        }
+    }
 }

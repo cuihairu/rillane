@@ -166,16 +166,19 @@ fn invalid_params_from_app_error(e: &crate::reply::AppError) -> JsonRpcError {
 
 /// 边界答复 → MCP 工具答复形：JSON 信封走 structuredContent（含显式
 /// 缺席 found:false——缺席是正常答复），纯文本正文（SVG 导出面）走
-/// 纯 content；执行失败走 isError:true 带内稳定码。
+/// 纯 content；执行失败走 isError:true 带内稳定码。出口统一过
+/// [`crate::tools::cap_result`] 字节闸（RIL-069 响应限长）。
 pub fn call_result(reply: &AppReply) -> Value {
-    if let Some(text) = &reply.text {
-        return crate::tools::result_from_text(text);
-    }
-    match reply.json() {
-        Some(envelope) => crate::tools::result_from_envelope(envelope),
-        // 2xx 且既非 JSON 又非文本不可能出现——防御臂按空信封处理
-        None => crate::tools::result_from_envelope(&json!({"schema_version": 1})),
-    }
+    let result = if let Some(text) = &reply.text {
+        crate::tools::result_from_text(text)
+    } else {
+        match reply.json() {
+            Some(envelope) => crate::tools::result_from_envelope(envelope),
+            // 2xx 且既非 JSON 又非文本不可能出现——防御臂按空信封处理
+            None => crate::tools::result_from_envelope(&json!({"schema_version": 1})),
+        }
+    };
+    crate::tools::cap_result(result)
 }
 
 #[cfg(test)]
@@ -335,5 +338,24 @@ mod tests {
         // 执行失败 → isError:true（由 result_from_error 承担——此处
         // 只钉 call_result 不把错误当答复）
         assert_eq!(call_result(&reply)["resultType"], "complete");
+    }
+
+    #[test]
+    fn oversized_boundary_replies_come_back_capped() {
+        // RIL-069 响应限长：边界答复投影统一过字节闸——超限信封以
+        // mcp.result.oversize 带内作答，不把无界载荷写给模型
+        let big = "x".repeat(crate::mcp::MAX_RESULT_BYTES + 1024);
+        let reply = AppReply {
+            status: 200,
+            schema_version: Some(1),
+            json: Some(json!({"schema_version": 1, "blob": big})),
+            text: None,
+        };
+        let out = call_result(&reply);
+        assert_eq!(out["isError"], true);
+        assert_eq!(
+            out["structuredContent"]["error"]["code"],
+            "mcp.result.oversize"
+        );
     }
 }
