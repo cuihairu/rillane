@@ -20,6 +20,7 @@ pub mod fake_ip;
 pub mod hosts;
 pub mod inbound;
 pub mod meter;
+pub mod observer;
 pub mod net_mark;
 pub mod outbound;
 pub mod performance;
@@ -72,6 +73,10 @@ pub use outbound::{
 pub use meter::{
     AttributionView, OriginLedger, SessionMeter, SessionTotals, TrafficDirection, TrafficOrigin,
     CODE_METER_ATTEMPT, CODE_METER_CARRIER, CODE_METER_SESSION, MAX_TRACKED_ATTEMPTS,
+};
+pub use observer::{
+    MetricKey, ObserverStats, ObserverView, SessionObserver, SessionStage, StageEvent, StageResult,
+    CODE_OBSERVER_EVENT, OBSERVER_RING_DEFAULT,
 };
 pub use resources::{
     AssembledBackend, BackendDeclaration, LeaseGuard, LeaseKey, LeaseState, PoolResourceKind,
