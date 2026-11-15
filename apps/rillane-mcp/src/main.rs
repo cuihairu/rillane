@@ -904,6 +904,133 @@ mod tests {
     }
 
     #[test]
+    fn malicious_answer_data_stays_data_and_protocol_stays_protocol() {
+        // 守护进程载荷里的恶意订阅名（零宽 + CRLF + ANSI ESC + 伪 JSON-RPC
+        // 文本）只能作为数据贯通：序列化后无裸控制字符（stdout 恒单行——
+        // println 一行即一条协议消息，载荷变不成第二条指令）；后续协议
+        // 行照常处理（无串扰）
+        let payload = r#"{"groups":[{"name":"sub\u200bx\r\nGET /admin HTTP/1.1\u001b[31m{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\"}","members":[]}]}"#;
+        let (seen, base) = capturing_one_shot("HTTP/1.1 200 OK", payload);
+        let mut st = state_at(&base);
+        let line = call_line(60, "routing_quality", json!({}));
+        let out = handle_line(&mut st, &line).expect("answer");
+        let _ = seen.lock().expect("lock").clone().expect("one request");
+        let sc = &out["result"]["structuredContent"];
+        let name = sc["groups"][0]["name"].as_str().expect("name");
+        // 数据原文贯通（字节忠实——脱敏是守护进程侧 RIL-057 的契约）
+        assert!(name.contains("tools/call"));
+        assert!(name.contains('\r') && name.contains('\n'));
+        let text = out.to_string();
+        assert!(!text.contains('\n'), "答复序列化恒单行");
+        assert!(!text.contains('\r'), "无裸回车");
+        assert!(!text.contains('\u{1b}'), "无裸 ANSI ESC——控制字符全部转义");
+        // 后续协议行照常处理（载荷不串扰协议流）
+        let discover = r#"{"jsonrpc":"2.0","id":61,"method":"server/discover"}"#;
+        let next = handle_line(&mut st, discover).expect("answer");
+        assert_eq!(next["id"], 61);
+        assert_eq!(next["result"]["resultType"], "complete");
+    }
+
+    #[test]
+    fn malicious_flow_id_cannot_inject_boundary_requests() {
+        // 恶意 flow id（空格 + & 参数注入 + CRLF 伪请求行）到不了守护
+        // 进程第二行：ops 层消毒（控制字符→U+FFFD）+ 执行器值面百分号
+        // 编码（& %26 空格 %20）——恰一次边界请求、请求行恒单行
+        let payload = r#"{"schema_version":1,"found":true,"trace":{"flow_id":"f-1","events":[]}}"#;
+        let (seen, base) = capturing_one_shot("HTTP/1.1 200 OK", payload);
+        let mut st = state_at(&base);
+        let line = call_line(
+            62,
+            "flow_trace",
+            json!({"id": "f 1&x=2\r\nGET /admin HTTP/1.1"}),
+        );
+        let out = handle_line(&mut st, &line).expect("answer");
+        assert_eq!(out["result"]["structuredContent"]["found"], true);
+        let request = seen.lock().expect("lock").clone().expect("one request");
+        assert_eq!(
+            request.matches("GET ").count(),
+            1,
+            "请求行恰一处 GET——注入文本整体在值面内编码"
+        );
+        let first = request.lines().next().expect("request line");
+        assert!(first.starts_with("GET /trace/flow?id=f%20"), "{first}");
+        assert!(
+            first.contains("%26x%3D2"),
+            "& 编码成参数分隔符之外的值面: {first}"
+        );
+        assert!(first.contains("%EF%BF%BD"), "CRLF→U+FFFD→编码: {first}");
+        assert!(!request.contains("\r\nGET /admin"), "无注入的第二请求行");
+    }
+
+    #[test]
+    fn oversized_daemon_payload_answers_bounded_without_echo() {
+        // 超大结果样本端到端（RIL-069 闸的线上一路）：>256 KiB 载荷 →
+        // 有界 mcp.result.oversize 答复——无载荷回显、答复本身有界
+        let mut payload = String::from(r#"{"schema_version":1,"blob":""#);
+        payload.push_str(&"x".repeat(300_000));
+        payload.push_str(r#"","marker":"TOPSECRET-blob-echo-test"}"#);
+        let (seen, base) =
+            capturing_one_shot("HTTP/1.1 200 OK", Box::leak(payload.into_boxed_str()));
+        let mut st = state_at(&base);
+        let line = call_line(63, "runtime_stats", json!({}));
+        let out = handle_line(&mut st, &line).expect("answer");
+        let _ = seen.lock().expect("lock").clone().expect("one request");
+        assert_eq!(out["result"]["isError"], true);
+        assert_eq!(
+            out["result"]["structuredContent"]["error"]["code"],
+            "mcp.result.oversize"
+        );
+        let text = out.to_string();
+        assert!(text.len() < 4096, "答复自身有界: {} bytes", text.len());
+        assert!(!text.contains("TOPSECRET-blob-echo-test"), "无载荷回显");
+    }
+
+    #[test]
+    fn detailed_scope_cannot_bypass_probe_gate_or_secrecy() {
+        // 详细身份档不能绕过：probe 门对 detailed 档同样关死（错误数据
+        // 只带档名——无请求回显）；失败路径答复同样无凭证
+        for grants in ["detailed", "read,detailed,write"] {
+            let mut st = state_with(GrantedScopes::parse(grants).expect("parse"), 0);
+            let line = call_line(
+                64,
+                "probe_submit",
+                json!({"kind": "dns", "host": "example.com"}),
+            );
+            let out = handle_line(&mut st, &line).expect("answer");
+            assert_eq!(out["error"]["code"], -32001, "grants {grants}");
+            assert_eq!(out["error"]["data"]["required"], "probe");
+            assert!(
+                !out.to_string().contains("example.com"),
+                "拒绝数据无请求回显"
+            );
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let body = r#"{"error":{"code":"control.auth","context":"bad token"}}"#;
+                let response = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes());
+            }
+        });
+        let mut st = state_with(GrantedScopes::parse("read,detailed").expect("parse"), 0);
+        st.app = BlockingApp::new(&format!("http://{addr}"), Some("sekrit-detailed-token"))
+            .expect("app");
+        let line = call_line(65, "runtime_stats", json!({}));
+        let out = handle_line(&mut st, &line).expect("answer");
+        assert_eq!(out["result"]["isError"], true);
+        assert!(
+            !out.to_string().contains("sekrit-detailed-token"),
+            "详细身份档失败答复同样无凭证"
+        );
+    }
+
+    #[test]
     fn status_quality_answers_are_byte_faithful_envelopes() {
         // /routing/stats 形载荷（守护进程 DTO，无信封版本字段）逐字段
         // 贯通：时效（source=legacy/real）与缺失（p95/loss/gate null）
