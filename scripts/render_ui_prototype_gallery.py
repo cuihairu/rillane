@@ -60,14 +60,15 @@ def main():
         title='# v1 UI 原型交付' if zh else '# v1 UI prototype delivery'
         intro=('已保存 **10 张独立原型图：桌面 6 张、iOS 2 张、Android 2 张**。当前为视觉与交互提案；全部数值为示例。' if zh else '**10 standalone prototypes saved: six desktop, two iOS and two Android.** Visual/interaction proposals only; all values are fictional.')
         body=title+'\n\n'+intro+'\n\n'
-        body+=('[离线/浏览器图库](/prototypes/v1/index.html) · [交互规格](../ui-prototype-v1.md) · [生成提示词与修改记录](https://github.com/cuihairu/rillane/blob/main/docs/design/ui/prompts.json)\n\n' if zh else '[Offline/browser gallery](/prototypes/v1/index.html) · [Interaction specification](../ui-prototype-v1.md) · [Prompts/revisions](https://github.com/cuihairu/rillane/blob/main/docs/design/ui/prompts.json)\n\n')
+        body+=('[站点图库](/prototypes/v1/index.html) · [GitHub 图片目录](https://github.com/cuihairu/rillane/tree/main/docs/public/prototypes/v1) · [交互规格](../ui-prototype-v1.md) · [生成提示词与修改记录](https://github.com/cuihairu/rillane/blob/main/docs/design/ui/prompts.json)\n\n' if zh else '[Site gallery](/prototypes/v1/index.html) · [GitHub image directory](https://github.com/cuihairu/rillane/tree/main/docs/public/prototypes/v1) · [Interaction specification](../ui-prototype-v1.md) · [Prompts/revisions](https://github.com/cuihairu/rillane/blob/main/docs/design/ui/prompts.json)\n\n')
         body+=('保存目录：`docs/public/prototypes/v1/`。`index.html` 可直接用浏览器打开；`manifest.json` 包含尺寸、SHA-256 和修订号。使用内置 image_gen 生成，随后复制到仓库；生成提示词与四张图的修改提示词已落盘。\n\n' if zh else 'Files live in `docs/public/prototypes/v1/`. Open index.html directly; manifest.json records dimensions, SHA-256 and revisions. Generated with built-in image_gen and copied into the repository, with prompts and four revision prompts preserved.\n\n')
         body+=('图片表达布局与主题，Logo/图标不是已冻结品牌。产品实现以交互规格为准：状态来自内核/宿主确认，业务流量不重复累计，流媒体不承诺持续解锁，移动不承诺任意PID归因。iMac已确认Clash Verge进程，但未获实时窗口截图；参考官方预览与App Store资料。\n\n' if zh else 'Images define layout/theme; logos/icons are not a frozen brand system. Implementation follows the interaction specification, actual capability receipts, single-count business totals, measured streaming results and mobile identity limits. iMac processes were confirmed, but no live window screenshot was obtained; references use official previews/App Store information.\n\n')
         for item in records:
             label=item['title_zh'] if zh else item['title_en']
             body+=f'## {item["id"]} · {label}\n\n'
             if zh: body+=item['features']+'。\n\n'
-            body+=f'![{label} 原型示例](/prototypes/v1/{item["file"]})\n\n'
+            asset_prefix = '../../../public' if zh else '../../public'
+            body+=f'![{label} 原型示例]({asset_prefix}/prototypes/v1/{item["file"]})\n\n'
         dst.write_text(body.rstrip()+'\n',encoding='utf-8')
     print('Rendered 10-image gallery, bilingual delivery pages and SHA-256 manifest')
 
