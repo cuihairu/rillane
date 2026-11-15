@@ -2894,6 +2894,11 @@ impl RuleSetLibrary {
         self.sets.get(name)
     }
 
+    /// 清空规则集库（RIL-016 nodes-only 导入剥离策略面用）
+    pub fn clear(&mut self) {
+        self.sets.clear();
+    }
+
     /// 已装入的规则集数量
     pub fn len(&self) -> usize {
         self.sets.len()

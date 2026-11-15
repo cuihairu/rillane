@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use rillane_core::udp::{TableSnapshot, UdpIngressMetrics, UdpIngressSnapshot};
 use rillane_mesh::{LinkState, MeshRegistry, NodeCapability, NodeRecord, NodeRole};
-use rillane_runtime::{ChainConstraints, ConfigMergeStats, Runtime, RuntimeEvent, SwitchReason};
+use rillane_runtime::{ChainConstraints, Runtime, RuntimeEvent, SourceMergeStats, SwitchReason};
 use rillane_subscription::{Subscription, SubscriptionConverter, SubscriptionType};
 
 /// 请求体统一形（hyper 1.x 迁移）：产线路径 `Incoming`（服务）与测试
@@ -1750,8 +1750,15 @@ impl ControlPlane {
             Err(e) => return text(StatusCode::BAD_REQUEST, &format!("convert failed: {e}")),
         };
 
-        let merge_stats: ConfigMergeStats =
-            match self.runtime.merge_config_delta(&converted.config).await {
+        // RIL-016：订阅名作来源命名空间——刷新只动自己名下对象，
+        // 用户本地配置（游戏规则/监听口/系统路由/插件/凭证）与他订阅
+        // 对象永不覆盖
+        let merge_stats: SourceMergeStats =
+            match self
+                .runtime
+                .merge_source_delta(&trimmed, &converted.config)
+                .await
+            {
                 Ok(v) => v,
                 Err(e) => return text(StatusCode::BAD_REQUEST, &format!("apply failed: {e}")),
             };
@@ -1820,7 +1827,8 @@ impl ControlPlane {
             };
 
             match converter.auto_convert(&sub, &content).await {
-                Ok(converted) => match self.runtime.merge_config_delta(&converted.config).await {
+                // RIL-016：来源作用域合并（订阅名 = 命名空间），同上
+                Ok(converted) => match self.runtime.merge_source_delta(&name, &converted.config).await {
                     Ok(merge_stats) => out.push(serde_json::json!({
                         "name": name,
                         "ok": true,

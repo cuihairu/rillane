@@ -3,7 +3,8 @@
 
 use rillane_config::Strategy;
 use rillane_subscription::{
-    ClashConverter, ConversionOptions, Subscription, SubscriptionConverter, SubscriptionType,
+    ClashConverter, ConversionOptions, ImportMode, Subscription, SubscriptionConverter,
+    SubscriptionType,
 };
 
 /// 基线配置：全部落在已支持面（ss 节点 + select/url-test 组 + 支持的规则）
@@ -154,6 +155,74 @@ fn fallback_group_imports_with_probe_params() {
     // 配置面往返：fallback 策略 serde 口径稳定
     let text = serde_yaml::to_string(&config.routing.groups[0]).unwrap();
     assert!(text.contains("strategy: fallback"), "serde 口径: {text}");
+}
+
+// ---------- RIL-016：nodes-only 导入剥离策略面 ----------
+
+#[tokio::test]
+async fn nodes_only_import_keeps_nodes_strips_policy() {
+    let yaml = with_groups(concat!(
+        "proxy-groups:\n",
+        "  - name: g1\n",
+        "    type: select\n",
+        "    proxies: [n1, n2]\n",
+        "  - name: fb\n",
+        "    type: fallback\n",
+        "    proxies: [n1]\n",
+        "    url: https://www.gstatic.com/generate_204\n",
+        "    interval: 300"
+    ))
+    .replace(
+        "rules: []",
+        "rules:\n  - DOMAIN-SUFFIX,example.com,g1\n  - MATCH,g1",
+    );
+
+    // FullPolicy（缺省）：组/规则照收（存量行为）
+    let full = SubscriptionConverter::new();
+    let sub = Subscription {
+        name: "t".to_string(),
+        url: "unused".to_string(),
+        r#type: Some(SubscriptionType::Clash),
+        enabled: true,
+        refresh_interval: 0,
+        timeout: 5,
+        headers: std::collections::HashMap::new(),
+        user_agent: None,
+        last_updated: None,
+        last_error: None,
+        etag: None,
+        content_hash: None,
+        last_modified: None,
+    };
+    let full_result = full.auto_convert(&sub, &yaml).await.unwrap();
+    assert!(!full_result.config.routing.groups.is_empty(), "FullPolicy 保留组");
+
+    // NodesOnly：只收出口节点，策略面整块剥离并显式登记
+    let nodes_only = SubscriptionConverter::with_options(ConversionOptions {
+        import_mode: ImportMode::NodesOnly,
+        ..Default::default()
+    });
+    let result = nodes_only.auto_convert(&sub, &yaml).await.unwrap();
+    assert!(!result.config.egress.is_empty(), "出口节点保留");
+    assert!(result.config.routing.groups.is_empty(), "组剥离");
+    assert!(result.config.routing.rules.is_empty(), "规则剥离");
+    assert!(
+        result.config.routing.proxy_providers.is_empty()
+            && result.config.routing.rule_providers.is_empty()
+            && result.config.routing.rule_sets.is_empty()
+            && result.config.routing.selections.is_empty(),
+        "provider 声明/规则集库/选择面剥离"
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("nodes-only") && w.contains("剥离")),
+        "剥离条数须显式登记: {:?}",
+        result.warnings
+    );
+    assert_eq!(result.stats.output.converted_groups, 0);
+    assert_eq!(result.stats.output.converted_rules, 0);
 }
 
 // ---------- 规则：不支持规则跳过必须可见 ----------

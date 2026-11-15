@@ -128,6 +128,26 @@ impl RuntimeBuilder {
         let config = Arc::new(RwLock::new(self.config));
         let config_snapshot = config.read().expect("config poisoned").clone();
 
+        // RIL-016 本地策略所有权：构建期配置整份登记为 local——后续来源
+        // 增量以 merge_source_delta 进入时据此拒绝触碰用户名下对象
+        let local_owned = SourceOwnedNames {
+            egress: config_snapshot.egress.iter().map(|e| e.name.clone()).collect(),
+            groups: config_snapshot
+                .routing
+                .groups
+                .iter()
+                .map(|g| g.name.clone())
+                .collect(),
+            rules: config_snapshot
+                .routing
+                .rules
+                .iter()
+                .map(|r| r.name.clone())
+                .collect(),
+        };
+        let source_owned = Arc::new(DashMap::new());
+        source_owned.insert(LOCAL_SOURCE.to_string(), local_owned);
+
         // 组级 SLO 值域构建期拦截（slo-scoring.md §4：schema validate +
         // 装配前防御性调用，存量路由配置无 slo 时零开销直通）
         config_snapshot.routing.validate()?;
@@ -652,6 +672,7 @@ impl RuntimeBuilder {
             stats: Arc::new(RwLock::new(RuntimeStats::new())),
             running: Arc::new(RwLock::new(false)),
             config_apply_lock: Arc::new(tokio::sync::Mutex::new(())),
+            source_owned,
         })
     }
 
@@ -904,6 +925,41 @@ pub struct ConfigMergeStats {
     pub groups_updated: usize,
 }
 
+/// RIL-016 来源命名空间：单一来源在配置里持有的对象名集（egress /
+/// groups / rules 三个合并面各一份）。构建期配置登记在
+/// [`LOCAL_SOURCE`] 名下——本地优先级的登记底座。
+#[derive(Debug, Clone, Default)]
+pub struct SourceOwnedNames {
+    pub egress: std::collections::HashSet<String>,
+    pub groups: std::collections::HashSet<String>,
+    pub rules: std::collections::HashSet<String>,
+}
+
+/// 构建期配置的保留来源名：用户手写面（游戏规则、监听口、系统路由、
+/// 插件、凭证所在的整份启动配置）。来源增量永不触碰此名下对象。
+pub const LOCAL_SOURCE: &str = "local";
+
+/// RIL-016 来源作用域合并统计。added/updated 语义同 [`ConfigMergeStats`]；
+/// `skipped_foreign` 是「名下登记属于 local 或其它来源」被拒触碰的条数
+/// （刷新不覆盖用户游戏规则/其它订阅对象）；`*_stale` 是本来源名下但
+/// 本次载荷缺席的对象数（只计数不删除——删除策略归配置发布协调器
+/// RIL-019，提前删除会悬空用户规则对组名的引用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceMergeStats {
+    pub nodes_added: usize,
+    pub nodes_updated: usize,
+    pub groups_added: usize,
+    pub groups_updated: usize,
+    pub rules_added: usize,
+    pub rules_updated: usize,
+    pub nodes_skipped_foreign: usize,
+    pub groups_skipped_foreign: usize,
+    pub rules_skipped_foreign: usize,
+    pub nodes_stale: usize,
+    pub groups_stale: usize,
+    pub rules_stale: usize,
+}
+
 /// Runtime 实例
 pub struct Runtime {
     config: Arc<RwLock<RillaneConfig>>,
@@ -960,6 +1016,10 @@ pub struct Runtime {
     /// 订阅刷新循环三方共用，覆盖「读 config → 构建 egress → 落四态」全程。
     /// 曾为 check-then-act——并发 apply 交错即丢失更新（见 update_config 注释）。
     config_apply_lock: Arc<tokio::sync::Mutex<()>>,
+    /// RIL-016 本地策略所有权：来源→对象名登记簿。「local」= 构建期
+    /// 配置；来源刷新只替换/新增自己名下的对象，local 与他来源名下
+    /// 永不触碰（监听口/系统路由/插件/凭证根本不在合并面）。
+    source_owned: Arc<DashMap<String, SourceOwnedNames>>,
 }
 
 impl Runtime {
@@ -1580,6 +1640,175 @@ impl Runtime {
         let mut merged = self.get_config();
 
         let stats = merge_config_delta_in_place(&mut merged, delta);
+
+        self.apply_config_inner(merged).await?;
+
+        Ok(stats)
+    }
+
+    /// RIL-016 来源作用域合并：订阅刷新的规范入口。
+    ///
+    /// 所有权规则（本地优先级 + 来源命名空间）：
+    /// - 对象名登记在本来源名下 → 原位替换（RIL-008 同源刷新语义：
+    ///   内容更新必须生效，重复刷新替换不追加）
+    /// - 对象名未登记 → 采纳：进配置并登记到本来源名下
+    /// - 对象名登记在 local（构建期配置）或其它来源名下 → 跳过并计数
+    ///   （`skipped_foreign`）——订阅 A 刷新永不覆盖用户游戏规则、
+    ///   监听口、系统路由、插件或管理凭证，也不踩订阅 B 的对象
+    ///
+    /// 监听口/系统路由/插件/管理凭证不在合并面：本函数只动
+    /// egress/groups/rules 三个面，apply 的是「当前配置 + 本增量」——
+    /// control/ingress/network/obfuscation 块原样保留（有测试钉住）。
+    ///
+    /// 本来源名下但本次载荷缺席的对象只计数（`*_stale`）不删除——
+    /// 删除会悬空用户规则/组对已撤组名的引用，撤除策略归配置发布
+    /// 协调器（RIL-019）统一裁决。
+    ///
+    /// `source` 是命名空间键（推荐订阅名）；`local` 保留给构建期配置，
+    /// 传入即拒绝。
+    pub async fn merge_source_delta(
+        &self,
+        source: &str,
+        delta: &RillaneConfig,
+    ) -> Result<SourceMergeStats> {
+        anyhow::ensure!(!source.is_empty(), "来源名不得为空");
+        anyhow::ensure!(
+            source != LOCAL_SOURCE,
+            "来源名 {LOCAL_SOURCE:?} 保留给构建期配置，来源增量须用别的名字"
+        );
+        let _apply_guard = self.config_apply_lock.lock().await;
+        let mut merged = self.get_config();
+
+        // 先收集「非本来源」的全部对象名（含 local 与其它来源）。
+        // DashMap entry 持锁期间不可再迭代自身（同分页锁重入死锁），
+        // 故先克隆再 entry。
+        let mut foreign_egress = std::collections::HashSet::new();
+        let mut foreign_groups = std::collections::HashSet::new();
+        let mut foreign_rules = std::collections::HashSet::new();
+        for entry in self.source_owned.iter() {
+            if entry.key() == source {
+                continue;
+            }
+            let names = entry.value();
+            foreign_egress.extend(names.egress.iter().cloned());
+            foreign_groups.extend(names.groups.iter().cloned());
+            foreign_rules.extend(names.rules.iter().cloned());
+        }
+
+        let mut owned = self
+            .source_owned
+            .entry(source.to_string())
+            .or_default();
+        let mut stats = SourceMergeStats {
+            nodes_added: 0,
+            nodes_updated: 0,
+            groups_added: 0,
+            groups_updated: 0,
+            rules_added: 0,
+            rules_updated: 0,
+            nodes_skipped_foreign: 0,
+            groups_skipped_foreign: 0,
+            rules_skipped_foreign: 0,
+            nodes_stale: 0,
+            groups_stale: 0,
+            rules_stale: 0,
+        };
+
+        // —— egress 面 ——
+        let mut seen = std::collections::HashSet::new();
+        for e in &delta.egress {
+            seen.insert(e.name.clone());
+            if foreign_egress.contains(&e.name) {
+                stats.nodes_skipped_foreign += 1;
+                continue;
+            }
+            if owned.egress.insert(e.name.clone()) {
+                merged.egress.push(e.clone());
+                stats.nodes_added += 1;
+            } else {
+                match merged.egress.iter_mut().find(|t| t.name == e.name) {
+                    Some(slot) => {
+                        *slot = e.clone();
+                        stats.nodes_updated += 1;
+                    }
+                    None => {
+                        // 登记在册但配置里没有（外部整份替换抹掉过）：
+                        // 补回，仍算采纳面
+                        merged.egress.push(e.clone());
+                        stats.nodes_added += 1;
+                    }
+                }
+            }
+        }
+        stats.nodes_stale = owned
+            .egress
+            .iter()
+            .filter(|n| !seen.contains(*n) && merged.egress.iter().any(|e| &e.name == *n))
+            .count();
+
+        // —— groups 面 ——
+        let mut seen_groups = std::collections::HashSet::new();
+        for g in &delta.routing.groups {
+            seen_groups.insert(g.name.clone());
+            if foreign_groups.contains(&g.name) {
+                stats.groups_skipped_foreign += 1;
+                continue;
+            }
+            if owned.groups.insert(g.name.clone()) {
+                merged.routing.groups.push(g.clone());
+                stats.groups_added += 1;
+            } else {
+                match merged.routing.groups.iter_mut().find(|t| t.name == g.name) {
+                    Some(slot) => {
+                        *slot = g.clone();
+                        stats.groups_updated += 1;
+                    }
+                    None => {
+                        merged.routing.groups.push(g.clone());
+                        stats.groups_added += 1;
+                    }
+                }
+            }
+        }
+        stats.groups_stale = owned
+            .groups
+            .iter()
+            .filter(|n| {
+                !seen_groups.contains(*n) && merged.routing.groups.iter().any(|g| &g.name == *n)
+            })
+            .count();
+
+        // —— rules 面 ——
+        let mut seen_rules = std::collections::HashSet::new();
+        for rule in &delta.routing.rules {
+            seen_rules.insert(rule.name.clone());
+            if foreign_rules.contains(&rule.name) {
+                stats.rules_skipped_foreign += 1;
+                continue;
+            }
+            if owned.rules.insert(rule.name.clone()) {
+                merged.routing.rules.push(rule.clone());
+                stats.rules_added += 1;
+            } else {
+                match merged.routing.rules.iter_mut().find(|t| t.name == rule.name) {
+                    Some(slot) => {
+                        *slot = rule.clone();
+                        stats.rules_updated += 1;
+                    }
+                    None => {
+                        merged.routing.rules.push(rule.clone());
+                        stats.rules_added += 1;
+                    }
+                }
+            }
+        }
+        stats.rules_stale = owned
+            .rules
+            .iter()
+            .filter(|n| {
+                !seen_rules.contains(*n) && merged.routing.rules.iter().any(|r| &r.name == *n)
+            })
+            .count();
 
         self.apply_config_inner(merged).await?;
 
@@ -4243,6 +4472,297 @@ mod tests {
         let connectors = runtime.get_egress_connectors();
         assert!(connectors.contains_key("n1"), "并发 merge 不得丢失增量 n1");
         assert!(connectors.contains_key("n2"), "并发 merge 不得丢失增量 n2");
+    }
+
+    // ---- RIL-016 本地策略所有权：来源作用域合并 ----
+
+    /// 构造来源合并测试用最小配置
+    fn source_test_config(
+        control_bind: &str,
+        egress: Vec<EgressDescriptor>,
+        groups: Vec<PolicyGroup>,
+        rules: Vec<RouteRule>,
+    ) -> RillaneConfig {
+        RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
+            control: rillane_config::ControlConfig {
+                api_bind: control_bind.to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: rillane_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![IngressDescriptor {
+                name: "in1".to_string(),
+                spec: IngressConfig::Socks5 {
+                    bind: "127.0.0.1:0".to_string(),
+                    auth: None,
+                    udp_enabled: None,
+                },
+            }],
+            egress,
+            routing: rillane_config::RoutingConfig {
+                default_node: "direct".to_string(),
+                groups,
+                rules,
+                ..Default::default()
+            },
+            udp: rillane_config::UdpConfig::default(),
+            network: None,
+            obfuscation: None,
+            profile: None,
+            performance: None,
+            egress_pool: None,
+        }
+    }
+
+    fn socks(name: &str, port: u16) -> EgressDescriptor {
+        EgressDescriptor {
+            name: name.to_string(),
+            spec: EgressConfig::Socks5 {
+                server: "127.0.0.1".to_string(),
+                port,
+                username: None,
+                password: None,
+            },
+        }
+    }
+
+    fn node_group(name: &str, member: &str) -> PolicyGroup {
+        PolicyGroup {
+            name: name.to_string(),
+            strategy: Strategy::Fixed,
+            members: vec![GroupMember::Node {
+                name: member.to_string(),
+            }],
+            slo: None,
+            url_test: None,
+        }
+    }
+
+    fn host_rule(name: &str, target: &str) -> RouteRule {
+        RouteRule {
+            name: name.to_string(),
+            matches: vec![rillane_config::MatchCondition::DomainSuffix {
+                values: vec!["example.com".to_string()],
+            }],
+            target: target.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_source_delta_never_touches_local_objects() {
+        // 本地（构建期）配置：用户节点/游戏组/规则——来源载荷带同名对象
+        // 也必须跳过（内容不同的同名对象是「覆盖用户配置」的企图面）
+        let local = source_test_config(
+            "127.0.0.1:0",
+            vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }, socks("user-node", 1111)],
+            vec![node_group("user-game", "user-node")],
+            vec![host_rule("user-rule", "user-game")],
+        );
+        let runtime = RuntimeBuilder::new(local)
+            .with_runtime_config(RuntimeConfig {
+                enable_hot_reload: false,
+                ..RuntimeConfig::default()
+            })
+            .build()
+            .expect("build runtime");
+
+        let delta = source_test_config(
+            "127.0.0.1:9999",
+            vec![socks("user-node", 6666), socks("sub-a-node", 2222)],
+            vec![node_group("user-game", "sub-a-node"), node_group("sub-a-grp", "sub-a-node")],
+            vec![host_rule("user-rule", "direct"), host_rule("sub-a-rule-1", "sub-a-grp")],
+        );
+
+        let stats = runtime.merge_source_delta("sub-a", &delta).await.expect("merge");
+
+        // 本地名下三面各拒触碰一次；新对象三面各采纳一个
+        assert_eq!(stats.nodes_skipped_foreign, 1, "user-node 是 local 的: {stats:?}");
+        assert_eq!(stats.groups_skipped_foreign, 1, "user-game 是 local 的: {stats:?}");
+        assert_eq!(stats.rules_skipped_foreign, 1, "user-rule 是 local 的: {stats:?}");
+        assert_eq!(stats.nodes_added, 1);
+        assert_eq!(stats.groups_added, 1);
+        assert_eq!(stats.rules_added, 1);
+
+        let cfg = runtime.get_config();
+        let user_node = cfg.egress.iter().find(|e| e.name == "user-node").expect("user-node 还在");
+        match &user_node.spec {
+            EgressConfig::Socks5 { port, .. } => {
+                assert_eq!(*port, 1111, "本地节点内容不得被载荷覆盖（6666 被拒）")
+            }
+            other => panic!("user-node 应保持 Socks5，实际 {other:?}"),
+        }
+        assert!(
+            cfg.routing.groups.iter().any(|g| g.name == "user-game"
+                && matches!(&g.members[0], GroupMember::Node { name } if name == "user-node")),
+            "本地组成员引用不得被改写"
+        );
+        let user_rule = cfg.routing.rules.iter().find(|r| r.name == "user-rule").expect("user-rule 还在");
+        assert_eq!(user_rule.target, "user-game", "本地规则目标不得被改写");
+    }
+
+    #[tokio::test]
+    async fn merge_source_delta_replaces_own_and_skips_other_source() {
+        let local = source_test_config(
+            "127.0.0.1:0",
+            vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            vec![],
+            vec![],
+        );
+        let runtime = RuntimeBuilder::new(local)
+            .with_runtime_config(RuntimeConfig {
+                enable_hot_reload: false,
+                ..RuntimeConfig::default()
+            })
+            .build()
+            .expect("build runtime");
+
+        // sub-a 首刷：采纳 a-node:2222
+        let d1 = source_test_config(
+            "127.0.0.1:0",
+            vec![socks("a-node", 2222)],
+            vec![],
+            vec![],
+        );
+        let stats = runtime.merge_source_delta("sub-a", &d1).await.expect("merge1");
+        assert_eq!(stats.nodes_added, 1);
+
+        // sub-a 二刷：自己名下原位替换（RIL-008 同源刷新语义）
+        let d2 = source_test_config(
+            "127.0.0.1:0",
+            vec![socks("a-node", 3333)],
+            vec![],
+            vec![],
+        );
+        let stats = runtime.merge_source_delta("sub-a", &d2).await.expect("merge2");
+        assert_eq!(stats.nodes_updated, 1, "同源刷新原位替换: {stats:?}");
+        let cfg = runtime.get_config();
+        let a = cfg.egress.iter().find(|e| e.name == "a-node").expect("a-node 在");
+        assert!(
+            matches!(&a.spec, EgressConfig::Socks5 { port: 3333, .. }),
+            "内容更新须生效"
+        );
+
+        // sub-b 带同名 a-node：sub-a 名下对象拒触碰
+        let d3 = source_test_config(
+            "127.0.0.1:0",
+            vec![socks("a-node", 4444), socks("b-node", 5555)],
+            vec![],
+            vec![],
+        );
+        let stats = runtime.merge_source_delta("sub-b", &d3).await.expect("merge3");
+        assert_eq!(stats.nodes_skipped_foreign, 1, "a-node 归 sub-a: {stats:?}");
+        assert_eq!(stats.nodes_added, 1, "b-node 采纳");
+        let cfg = runtime.get_config();
+        let a = cfg.egress.iter().find(|e| e.name == "a-node").expect("a-node 在");
+        assert!(
+            matches!(&a.spec, EgressConfig::Socks5 { port: 3333, .. }),
+            "sub-b 不得覆盖 sub-a 的 a-node"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_source_delta_never_touches_control_ingress_faces() {
+        // 监听口/管理凭证不在合并面：载荷携带不同 control/ingress 块，
+        // 合并后原样保留本地值（验收「刷新不覆盖监听口/管理凭证」）
+        let local = source_test_config(
+            "127.0.0.1:0",
+            vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            vec![],
+            vec![],
+        );
+        let runtime = RuntimeBuilder::new(local)
+            .with_runtime_config(RuntimeConfig {
+                enable_hot_reload: false,
+                ..RuntimeConfig::default()
+            })
+            .build()
+            .expect("build runtime");
+
+        let mut delta = source_test_config(
+            "127.0.0.1:9999",
+            vec![socks("sub-node", 2222)],
+            vec![],
+            vec![],
+        );
+        delta.control.admin_token = Some("payload-token".to_string());
+        delta.ingress.push(IngressDescriptor {
+            name: "payload-in".to_string(),
+            spec: IngressConfig::Socks5 {
+                bind: "0.0.0.0:9999".to_string(),
+                auth: None,
+                udp_enabled: None,
+            },
+        });
+
+        runtime.merge_source_delta("sub-a", &delta).await.expect("merge");
+        let cfg = runtime.get_config();
+        assert_eq!(cfg.control.api_bind, "127.0.0.1:0", "监听口不得被载荷改写");
+        assert_eq!(cfg.control.admin_token, None, "管理凭证不得被载荷注入");
+        assert_eq!(cfg.ingress.len(), 1, "入口面不得被载荷追加");
+    }
+
+    #[tokio::test]
+    async fn merge_source_delta_counts_stale_without_removing() {
+        let local = source_test_config(
+            "127.0.0.1:0",
+            vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            vec![],
+            vec![],
+        );
+        let runtime = RuntimeBuilder::new(local)
+            .with_runtime_config(RuntimeConfig {
+                enable_hot_reload: false,
+                ..RuntimeConfig::default()
+            })
+            .build()
+            .expect("build runtime");
+
+        let d1 = source_test_config(
+            "127.0.0.1:0",
+            vec![socks("a-node", 2222), socks("a-node2", 2233)],
+            vec![node_group("a-grp", "a-node")],
+            vec![],
+        );
+        runtime.merge_source_delta("sub-a", &d1).await.expect("merge1");
+
+        // 二刷载荷撤掉 a-node2 与 a-grp：只计数不删除（删除策略归 RIL-019，
+        // 提前删除会悬空引用）
+        let d2 = source_test_config(
+            "127.0.0.1:0",
+            vec![socks("a-node", 2222)],
+            vec![],
+            vec![],
+        );
+        let stats = runtime.merge_source_delta("sub-a", &d2).await.expect("merge2");
+        assert_eq!(stats.nodes_stale, 1, "a-node2 计数 stale: {stats:?}");
+        assert_eq!(stats.groups_stale, 1, "a-grp 计数 stale: {stats:?}");
+        let cfg = runtime.get_config();
+        assert!(cfg.egress.iter().any(|e| e.name == "a-node2"), "stale 对象不删");
+        assert!(cfg.routing.groups.iter().any(|g| g.name == "a-grp"), "stale 组不删");
+
+        // 保留来源名拒绝
+        let err = runtime
+            .merge_source_delta(LOCAL_SOURCE, &d2)
+            .await
+            .expect_err("local 保留名拒绝");
+        assert!(err.to_string().contains("local"));
     }
 
     #[test]

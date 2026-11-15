@@ -25,9 +25,22 @@ pub struct SubscriptionConverter {
     options: ConversionOptions,
 }
 
+/// 订阅导入模式（RIL-016 本地策略所有权）。FullPolicy = 整份策略照收
+/// （存量行为）；NodesOnly = 只收出口节点——组、规则、规则集/provider
+/// 声明与用户选择面全部不带入（分流策略/游戏规则归用户本地配置，订阅
+/// 只供货节点）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImportMode {
+    #[default]
+    FullPolicy,
+    NodesOnly,
+}
+
 /// 转换选项
 #[derive(Debug, Clone)]
 pub struct ConversionOptions {
+    /// 导入模式（RIL-016）：缺省 FullPolicy（存量行为零差异）
+    pub import_mode: ImportMode,
     /// 是否启用节点名称规范化
     pub normalize_node_names: bool,
     /// 是否过滤无效节点
@@ -57,6 +70,7 @@ pub struct ConversionOptions {
 impl Default for ConversionOptions {
     fn default() -> Self {
         Self {
+            import_mode: ImportMode::FullPolicy,
             normalize_node_names: true,
             filter_invalid_nodes: true,
             filter_duplicate_nodes: true,
@@ -177,12 +191,42 @@ impl SubscriptionConverter {
         );
 
         // 根据类型进行转换
-        let result = match detected_type {
+        let mut result = match detected_type {
             SubscriptionType::Clash => self.convert_clash(content).await?,
             SubscriptionType::Rillane => self.convert_rillane_dsl(content).await?,
             SubscriptionType::V2Ray => self.convert_v2ray(content).await?,
             SubscriptionType::Custom => self.convert_custom(content).await?,
         };
+
+        // RIL-016 NodesOnly：只收出口节点。组/规则/规则集/provider 声明/
+        // 用户选择面整块剥离并显式登记剥离条数——分流策略与游戏规则归
+        // 用户本地配置，订阅载荷不得携带策略覆盖它
+        if self.options.import_mode == ImportMode::NodesOnly {
+            let groups = result.config.routing.groups.len();
+            let rules = result.config.routing.rules.len();
+            let rule_sets = result.config.routing.rule_sets.len();
+            let rule_providers = result.config.routing.rule_providers.len();
+            let proxy_providers = result.config.routing.proxy_providers.len();
+            let selections = result.config.routing.selections.len();
+            result.config.routing.groups.clear();
+            result.config.routing.rules.clear();
+            result.config.routing.rule_sets.clear();
+            result.config.routing.rule_providers.clear();
+            result.config.routing.proxy_providers.clear();
+            result.config.routing.selections.clear();
+            result.warnings.push(format!(
+                "nodes-only 导入：仅保留 {} 个出口节点，剥离组 {}、规则 {}、规则集 {}、规则 provider 声明 {}、代理 provider 声明 {}、用户选择 {}（策略归本地配置）",
+                result.config.egress.len(),
+                groups,
+                rules,
+                rule_sets,
+                rule_providers,
+                proxy_providers,
+                selections
+            ));
+            result.stats.output.converted_groups = 0;
+            result.stats.output.converted_rules = 0;
+        }
 
         let duration = start_time.elapsed().as_millis() as u64;
 
