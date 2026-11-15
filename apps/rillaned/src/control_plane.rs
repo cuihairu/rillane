@@ -147,6 +147,9 @@ impl ControlPlane {
         match (method, path.as_str()) {
             (Method::GET, "/nodes") => self.handle_nodes().await,
             (Method::GET, "/flows") => self.handle_flows().await,
+            (Method::GET, "/trace/flows") => self.handle_trace_flows(req).await,
+            (Method::GET, "/trace/flow") => self.handle_trace_flow(req).await,
+            (Method::GET, "/trace/events") => self.handle_trace_events(req).await,
             (Method::GET, "/metrics") => self.handle_metrics().await,
             (Method::GET, "/udp/stats") => self.handle_udp_stats().await,
             (Method::GET, "/egress/pool/stats") => self.handle_egress_pool_stats().await,
@@ -1344,6 +1347,170 @@ impl ControlPlane {
         json(StatusCode::OK, &stats)
     }
 
+    /// Trace 查询面（RIL-060，schema_version=1 冻结）：活动/近期连接
+    /// 分页列表（RIL-055 查询服务）。参数 offset/limit/origin(stream|
+    /// association)/state(active|closed)/generation；limit=0 与非法
+    /// 取值 400 + 稳定码。
+    async fn handle_trace_flows(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        let query = req.uri().query().unwrap_or("");
+        let mut offset = 0usize;
+        let mut limit = 20usize;
+        let mut filter = rillane_core::query::FlowQueryFilter::default();
+        for kv in query.split('&') {
+            let mut parts = kv.splitn(2, '=');
+            let key = parts.next().unwrap_or("");
+            let value = parts.next().unwrap_or("");
+            match key {
+                "offset" => match value.parse::<usize>() {
+                    Ok(v) => offset = v,
+                    Err(_) => return trace_bad_param("offset must be a number"),
+                },
+                "limit" => match value.parse::<usize>() {
+                    Ok(v) => limit = v,
+                    Err(_) => return trace_bad_param("limit must be a number"),
+                },
+                "origin" => match value {
+                    "stream" => filter.origin = Some(rillane_core::trace::FlowOrigin::Stream),
+                    "association" => {
+                        filter.origin = Some(rillane_core::trace::FlowOrigin::Association)
+                    }
+                    _ => return trace_bad_param("origin must be stream or association"),
+                },
+                "state" => match value {
+                    "active" => filter.state = Some(rillane_core::query::FlowState::Active),
+                    "closed" => filter.state = Some(rillane_core::query::FlowState::Closed),
+                    _ => return trace_bad_param("state must be active or closed"),
+                },
+                "generation" if !value.is_empty() => {
+                    filter.generation = Some(rillane_core::redact::sanitize_untrusted(value, 128));
+                }
+                _ => {}
+            }
+        }
+        let page = match self.runtime.flow_query().list(&filter, offset, limit) {
+            Ok(page) => page,
+            Err(err) => return trace_error(StatusCode::BAD_REQUEST, err.code(), &err.context),
+        };
+        let items: Vec<serde_json::Value> = page
+            .items
+            .iter()
+            .map(|summary| {
+                serde_json::json!({
+                    "flow": summary.flow.as_str(),
+                    "origin": summary.origin.as_str(),
+                    "generation": summary.generation,
+                    "state": match summary.state {
+                        rillane_core::query::FlowState::Active => "active",
+                        rillane_core::query::FlowState::Closed => "closed",
+                    },
+                    "events": summary.events,
+                    "first_wall_ms": summary.first_wall_ms,
+                    "last_code": summary.last_code,
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "schema_version": 1u32,
+            "total_matching": page.total_matching,
+            "offset": page.offset,
+            "limit": limit,
+            "items": items,
+        });
+        json(StatusCode::OK, &out)
+    }
+
+    /// 单流详情（RIL-060）：命中 = 完整轨迹；缺席 = 200 + found:false
+    /// + 稳定缺席码与采集计数（显式缺席不是 404 错误——CLI 据此退出码 2）。
+    async fn handle_trace_flow(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        let query = req.uri().query().unwrap_or("");
+        let Some(id) = query.split('&').find_map(|kv| {
+            let mut parts = kv.splitn(2, '=');
+            if parts.next() == Some("id") {
+                parts.next().map(|v| v.to_string())
+            } else {
+                None
+            }
+        }) else {
+            return trace_bad_param("id is required");
+        };
+        let flow = match rillane_core::trace::FlowId::new(&id) {
+            Ok(flow) => flow,
+            Err(err) => return trace_error(StatusCode::BAD_REQUEST, err.code(), &err.context),
+        };
+        let record = self.runtime.flow_query().flow(&flow);
+        let out = match record {
+            rillane_core::query::FlowRecord::Found(trace) => serde_json::json!({
+                "schema_version": 1u32,
+                "found": true,
+                "trace": trace_trace_json(&trace),
+                "absence": null,
+            }),
+            rillane_core::query::FlowRecord::Absent(absent) => serde_json::json!({
+                "schema_version": 1u32,
+                "found": false,
+                "trace": null,
+                "absence": {
+                    "code": absent.code,
+                    "note": absent.note,
+                    "collector": collector_stats_json(&absent.collector),
+                },
+            }),
+        };
+        json(StatusCode::OK, &out)
+    }
+
+    /// 事件增量读取（RIL-060）：缺席/未知 ID → 404 + 稳定码；limit=0
+    /// → 400 query.page.invalid。
+    async fn handle_trace_events(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        let query = req.uri().query().unwrap_or("");
+        let mut id: Option<String> = None;
+        let mut from_seq = 0u64;
+        let mut limit = 200usize;
+        for kv in query.split('&') {
+            let mut parts = kv.splitn(2, '=');
+            let key = parts.next().unwrap_or("");
+            let value = parts.next().unwrap_or("");
+            match key {
+                "id" if !value.is_empty() => id = Some(value.to_string()),
+                "from_seq" => match value.parse::<u64>() {
+                    Ok(v) => from_seq = v,
+                    Err(_) => return trace_bad_param("from_seq must be a number"),
+                },
+                "limit" => match value.parse::<usize>() {
+                    Ok(v) => limit = v,
+                    Err(_) => return trace_bad_param("limit must be a number"),
+                },
+                _ => {}
+            }
+        }
+        let Some(id) = id else {
+            return trace_bad_param("id is required");
+        };
+        let flow = match rillane_core::trace::FlowId::new(&id) {
+            Ok(flow) => flow,
+            Err(err) => return trace_error(StatusCode::BAD_REQUEST, err.code(), &err.context),
+        };
+        match self.runtime.flow_query().events(&flow, from_seq, limit) {
+            Ok(events) => {
+                let items: Vec<serde_json::Value> = events.iter().map(trace_event_json).collect();
+                let out = serde_json::json!({
+                    "schema_version": 1u32,
+                    "flow": flow.as_str(),
+                    "from_seq": from_seq,
+                    "events": items,
+                });
+                json(StatusCode::OK, &out)
+            }
+            Err(err) => match err.code() {
+                rillane_core::query::CODE_QUERY_PAGE_INVALID => {
+                    trace_error(StatusCode::BAD_REQUEST, err.code(), &err.context)
+                }
+                // 缺席（未知/逐出/过期/采样/取走/关闭）= 404 + 稳定码
+                _ => trace_error(StatusCode::NOT_FOUND, err.code(), &err.context),
+            },
+        }
+    }
+
     /// Clash 兼容 `/proxies`：只读子集——每个出口名映射到 Clash 代理对象。
     /// `type` 取 direct/reject/其余按 egress_kind；`now`/`udp`/`history` 提供
     /// 面板所需最小字段。metacubexd/yacd 可直连读取。
@@ -2517,6 +2684,64 @@ async fn read_json<T: for<'de> Deserialize<'de>>(
         .to_bytes();
     serde_json::from_slice::<T>(&bytes)
         .map_err(|e| text(StatusCode::BAD_REQUEST, &format!("invalid json: {e}")))
+}
+
+/// Trace 查询面参数非法（400 + 稳定码）
+fn trace_bad_param(context: &str) -> Response<RespBody> {
+    trace_error(StatusCode::BAD_REQUEST, "query.param.invalid", context)
+}
+
+/// Trace 查询面稳定码错误（schema_version 冻结在错误信封内）
+fn trace_error(status: StatusCode, code: &'static str, context: &str) -> Response<RespBody> {
+    let out = serde_json::json!({
+        "schema_version": 1u32,
+        "error": {
+            "code": code,
+            "context": context,
+        },
+    });
+    json(status, &out)
+}
+
+/// FlowTrace → 冻结 JSON 形态（schema_version=1：字段面 + 机器码——
+/// stage/evidence 用恒定机器口径，attempt 仅 Attempt 事件携带）
+fn trace_trace_json(trace: &rillane_core::trace::FlowTrace) -> serde_json::Value {
+    serde_json::json!({
+        "flow": trace.flow.as_str(),
+        "origin": trace.origin.as_str(),
+        "generation": trace.generation,
+        "closed": trace.closed,
+        "events": trace.events.iter().map(trace_event_json).collect::<Vec<_>>(),
+    })
+}
+
+/// TraceEvent → 冻结 JSON 形态（RIL-051 schema 的线格式）
+fn trace_event_json(event: &rillane_core::trace::TraceEvent) -> serde_json::Value {
+    serde_json::json!({
+        "seq": event.seq,
+        "stage": event.stage.as_str(),
+        "attempt": event.attempt.map(|a| a.0),
+        "code": event.code,
+        "evidence": event.evidence.as_str(),
+        "monotonic_ms": event.monotonic_ms,
+        "wall_ms": event.wall_ms,
+        "detail": event.detail,
+    })
+}
+
+/// CollectorStats → 冻结 JSON 形态（缺席答复的计数可见面）
+fn collector_stats_json(stats: &rillane_core::collector::CollectorStats) -> serde_json::Value {
+    serde_json::json!({
+        "traces_admitted": stats.traces_admitted,
+        "traces_sampled_out": stats.traces_sampled_out,
+        "flows_dropped_active_limit": stats.flows_dropped_active_limit,
+        "events_dropped_per_flow": stats.events_dropped_per_flow,
+        "traces_dropped_overflow": stats.traces_dropped_overflow,
+        "events_dropped_overflow": stats.events_dropped_overflow,
+        "traces_expired": stats.traces_expired,
+        "closed_pending": stats.closed_pending,
+        "active_traces": stats.active_traces,
+    })
 }
 
 fn json<T: Serialize>(status: StatusCode, value: &T) -> Response<RespBody> {
@@ -4498,5 +4723,108 @@ mod tests {
         let second = &items[1];
         assert_eq!(second["id"], serde_json::json!("tun-in-DIRECT"));
         assert_eq!(second["download"], serde_json::json!(0), "零值与缺失可辨");
+    }
+
+    /// 非法参数请求（400/404 等）：与 get_body 同构但不断言 200
+    async fn get_status_and_body(cp: &ControlPlane, path: &str) -> (StatusCode, String) {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .body(RespBody::new(Bytes::new()))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    /// RIL-060：/trace/flows 空态诚实——schema_version=1 + total_matching=0
+    /// + 空 items（数据路径未接线 → 无流可报，不造数）
+    #[tokio::test]
+    async fn trace_flows_empty_state_is_versioned_and_honest() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let body = get_body(&cp, "/trace/flows?limit=10").await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["schema_version"], serde_json::json!(1));
+        assert_eq!(v["total_matching"], serde_json::json!(0));
+        assert_eq!(v["offset"], serde_json::json!(0));
+        assert_eq!(v["limit"], serde_json::json!(10));
+        assert!(v["items"].as_array().unwrap().is_empty());
+    }
+
+    /// RIL-060：/trace/flow 未知 ID = 200 + found:false + 稳定缺席码
+    /// query.flow.unknown + 采集计数快照（显式缺席不是 404）
+    #[tokio::test]
+    async fn trace_flow_unknown_id_answers_explicit_absence() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let body = get_body(&cp, "/trace/flow?id=never-seen").await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["schema_version"], serde_json::json!(1));
+        assert_eq!(v["found"], serde_json::json!(false));
+        assert!(v["trace"].is_null());
+        assert_eq!(
+            v["absence"]["code"],
+            serde_json::json!("query.flow.unknown")
+        );
+        assert_eq!(
+            v["absence"]["note"],
+            serde_json::json!("no record is not evidence of no traffic")
+        );
+        // 采集计数可见（缺席可对账）
+        assert!(v["absence"]["collector"]["traces_admitted"]
+            .as_u64()
+            .is_some());
+    }
+
+    /// RIL-060：/trace/events 未知 ID = 404 + 稳定码信封（与 flow 的
+    /// 200 found:false 有意不同——增量读取没有"部分答案"可给）
+    #[tokio::test]
+    async fn trace_events_unknown_id_is_404_with_stable_code() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let (status, body) = get_status_and_body(&cp, "/trace/events?id=never-seen").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["schema_version"], serde_json::json!(1));
+        assert_eq!(v["error"]["code"], serde_json::json!("query.flow.unknown"));
+    }
+
+    /// RIL-060：参数非法逐项显式拒绝——limit=0（内核 query.page.invalid）、
+    /// 非法 origin/state/缺 id（控制面 query.param.invalid）
+    #[tokio::test]
+    async fn trace_param_validation_is_explicit_per_param() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+
+        let (status, body) = get_status_and_body(&cp, "/trace/flows?limit=0").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!("query.page.invalid"));
+
+        let (status, body) = get_status_and_body(&cp, "/trace/flows?origin=tcp").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!("query.param.invalid"));
+
+        let (status, body) = get_status_and_body(&cp, "/trace/flows?state=open").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!("query.param.invalid"));
+
+        let (status, body) = get_status_and_body(&cp, "/trace/flow").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!("query.param.invalid"));
+
+        // limit=0 校验发生在 id 解析之后——带 id 才能触达内核分页校验
+        let (status, body) = get_status_and_body(&cp, "/trace/events?id=x&limit=0").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["code"], serde_json::json!("query.page.invalid"));
     }
 }

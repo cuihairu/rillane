@@ -14,7 +14,7 @@
 - **控制面命令**（`stats` / `group` / `switches` / `nodes` / `chain` / `pool` / `subscription` / `route` / `diagnose` / `mtls revoke status`）：HTTP 取 `rillaned` 控制面；`control.admin_token` 非空时附 `x-admin-token` 头，未配置即匿名请求。
   - `--endpoint` 语义分两型（易混）：
     - **完整 URL 型**（替换整个目标 URL，须含路径）：`stats`（缺省 `http://{api_bind}/flows`）、`group`（`/routing/stats`）、`switches`（`/mesh/switches`）、`pool status`（`/egress/pool/stats`）、`nodes`（`/nodes`）；
-    - **base URL 型**（仅替换 base，路径内部拼接）：`chain`、`subscription`、`route`、`diagnose`、`mtls revoke status`。
+    - **base URL 型**（仅替换 base，路径内部拼接）：`chain`、`subscription`、`route`、`diagnose`、`trace`、`mtls revoke status`。
 - **离线命令**（`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / `mtls` 证书工具）：不经控制面，只读本地文件（`udp-probe` 例外——直接连 SOCKS5 入口实测）。
 - 无 `rillanectl reload` 子命令：rillaned 启动一次性读配置，运行期热更新仅由订阅刷新与控制面端点驱动（见 [architecture.md](architecture.md) 热更新口径）。
 
@@ -54,6 +54,9 @@
 | GET | `/network/route/status` | 路由应用状态 | `route status` |
 | POST | `/mesh/nodes/register` | 节点注册（mesh 面内部） | —（节点间） |
 | POST | `/mesh/link-states` | 链路状态上报（mesh 面内部） | —（节点间） |
+| GET | `/trace/flows` | 逐连接轨迹分页列表（可过滤；版本化信封 `schema_version=1`） | `trace list` |
+| GET | `/trace/flow?id=` | 单流完整轨迹或显式缺席答复（`found:false` + 稳定码） | `trace flow` |
+| GET | `/trace/events?id=&from_seq=&limit=` | 事件增量读取（未知/缺席 ID → 404 + 稳定码） | `trace events` |
 
 ## 命令总览
 
@@ -76,6 +79,7 @@
 | `subscription` | 订阅管理（list/add/remove/refresh） | 控制面 |
 | `route` | 系统路由管理（apply/clear/status） | 控制面 + 本机 ip 命令 |
 | `diagnose` | 一键诊断信息收集（生成诊断目录） | 控制面 + 本机快照 |
+| `trace` | 逐连接轨迹查询（list / 单流详情 / 事件增量；显式缺席 = 退出码 2） | 控制面 `/trace/*` |
 | `mtls` | Mesh mTLS 证书工具（init-ca/issue/rotate/bundle-ca/rotate-ca/revoke） | 离线（revoke status 例外走控制面） |
 
 ## 各命令旗标
@@ -176,6 +180,18 @@ rillanectl diagnose [--endpoint <base URL>] [--output <目录>] [--scope safe|fu
 ```
 
 按范围选择包内容（默认 `safe`）：`safe` 不采集订阅列表/运行配置/完整日志并对配置脱敏；`full` 全量采集但每个出口都剥除秘密（配置秘密键、订阅 URL 凭证、日志 key=value 秘密对与 PEM 块）；`raw` 不脱敏落盘——清单标注 `ai_upload_policy: do-not-upload`（仅供本地人工排查）。`--no-redact` 等价 `--scope raw`；`--no-local` 跳过本机快照（路由/DNS/接口）。`meta.json` 恒记录范围、需人工复核文件清单与上传政策——rillanectl 不做任何自动上传；诊断包不自动构成可安全上传 AI 的材料，分享前先复核。
+
+### trace
+
+```bash
+rillanectl trace list   [--state active|closed] [--origin stream|association] [--generation <G>] [--offset N] [--limit N] [--json]
+rillanectl trace flow   <id> [--json]
+rillanectl trace events <id> [--from-seq N] [--limit N] [--json]
+```
+
+逐连接轨迹查询（RIL-060，走内核逐连接查询服务）。`--endpoint` 为 base URL 型（默认 `http://{api_bind}`）。以真实 flow ID 锚定——`stats`/`/flows` 展示的 ingress/egress 聚合键在本面不作为流 ID 命中。缺席显式分码（`query.flow.unknown` / `query.tracing.disabled` / `collector.flow.evicted|expired|active_limit|sampled_out|drained`）；缺席答复恒携带采集计数快照与固定说明「无记录 ≠ 应用未发包」——绝不把缺席报告为「未发包」。默认文本输出；`--json` 原样打印版本化信封（`schema_version=1`）。
+
+退出码：`0` 查询有答；`1` 连接或用法错误；`2` 显式缺席（`trace flow` 答复 `found:false`，或 `trace events` 收到 404 错误信封）。
 
 ### mtls
 

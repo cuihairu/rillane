@@ -154,6 +154,15 @@ enum Command {
         #[command(subcommand)]
         command: RouteCommand,
     },
+    /// 真实连接轨迹查询（Trace CLI，RIL-060；语法冻结：
+    /// 退出码 0=成功 / 1=用法或连接错误 / 2=显式缺席）
+    Trace {
+        /// 控制面 base URL，如 http://127.0.0.1:9090
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[command(subcommand)]
+        command: TraceCommand,
+    },
     /// 一键诊断信息收集（生成诊断目录，按范围选择快照/日志/配置）
     Diagnose {
         /// 控制面 base URL，如 http://127.0.0.1:9090
@@ -178,6 +187,48 @@ enum Command {
     Mtls {
         #[command(subcommand)]
         command: MtlsCommand,
+    },
+}
+
+/// Trace CLI 子命令（RIL-060，语法冻结——文本/版本化 JSON 双形态）
+#[derive(Subcommand)]
+enum TraceCommand {
+    /// 活动/近期连接分页列表
+    List {
+        /// 按状态过滤：active|closed
+        #[arg(long)]
+        state: Option<String>,
+        /// 按起止语义过滤：stream|association
+        #[arg(long)]
+        origin: Option<String>,
+        /// 按计划代际过滤
+        #[arg(long)]
+        generation: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// 输出版本化 JSON（schema_version=1 信封原样）
+        #[arg(long)]
+        json: bool,
+    },
+    /// 单流详情（完整轨迹或显式缺席答复——缺席退出码 2）
+    Flow {
+        /// 真实 flow ID（聚合键不在此面）
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 事件增量读取（from_seq 起至多 limit 条）
+    Events {
+        /// 真实 flow ID
+        id: String,
+        #[arg(long, default_value_t = 0)]
+        from_seq: u64,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1144,6 +1195,102 @@ fn main() -> Result<()> {
 
             println!("诊断信息已生成: {}（范围 {scope_name}）", out_dir.display());
             println!("上传政策: {ai_policy}——rillanectl 不做任何自动上传，分享前先看 meta.json");
+        }
+        Command::Trace { endpoint, command } => {
+            // RIL-060 Trace CLI：语法冻结（文本/版本化 JSON 双形态），
+            // 退出码 0=成功 / 1=用法或连接错误 / 2=显式缺席
+            let config = RillaneConfig::load_from_path(&cli.config)?;
+            let base = endpoint.unwrap_or_else(|| format!("http://{}", config.control.api_bind));
+            let token = config.control.admin_token.clone();
+            let client = Client::new();
+            match command {
+                TraceCommand::List {
+                    state,
+                    origin,
+                    generation,
+                    offset,
+                    limit,
+                    json,
+                } => {
+                    validate_trace_filter(state.as_deref(), origin.as_deref())?;
+                    let mut url = trace_query_url(&base, "/trace/flows")?;
+                    url.push_str(&format!("&offset={offset}&limit={limit}"));
+                    if let Some(state) = &state {
+                        url.push_str(&format!("&state={state}"));
+                    }
+                    if let Some(origin) = &origin {
+                        url.push_str(&format!("&origin={origin}"));
+                    }
+                    if let Some(generation) = &generation {
+                        url.push_str(&format!(
+                            "&generation={}",
+                            rillane_core::redact::sanitize_untrusted(generation, 128)
+                        ));
+                    }
+                    let v = trace_fetch_json(&client, token.as_deref(), &url)?;
+                    if let Some(absent) = trace_absence(&v) {
+                        print!("{}", render_trace_absent("-", &absent));
+                        std::process::exit(2);
+                    }
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&v)?);
+                    } else {
+                        print!("{}", render_trace_list(&v));
+                    }
+                }
+                TraceCommand::Flow { id, json } => {
+                    let mut url = trace_query_url(&base, "/trace/flow")?;
+                    url.push_str(&format!(
+                        "&id={}",
+                        rillane_core::redact::sanitize_untrusted(&id, 256)
+                    ));
+                    let v = trace_fetch_json(&client, token.as_deref(), &url)?;
+                    if let Some(absent) = trace_absence(&v) {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&v)?);
+                        } else {
+                            print!("{}", render_trace_absent(&id, &absent));
+                        }
+                        std::process::exit(2);
+                    }
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&v)?);
+                    } else {
+                        print!("{}", render_trace_flow(&v));
+                    }
+                }
+                TraceCommand::Events {
+                    id,
+                    from_seq,
+                    limit,
+                    json,
+                } => {
+                    let mut url = trace_query_url(&base, "/trace/events")?;
+                    url.push_str(&format!(
+                        "&id={}&from_seq={from_seq}&limit={limit}",
+                        rillane_core::redact::sanitize_untrusted(&id, 256)
+                    ));
+                    let result = trace_fetch_json_or_404(&client, token.as_deref(), &url);
+                    let v = match result {
+                        Ok(v) => v,
+                        Err(status) => {
+                            // 404 显式缺席：退出码 2（打印已拿到的错误信封）
+                            if status.as_u16() == 404 {
+                                eprintln!(
+                                    "trace events: 显式缺席（HTTP 404，query.flow.unknown 口径）"
+                                );
+                                std::process::exit(2);
+                            }
+                            anyhow::bail!("控制面返回错误: {status}");
+                        }
+                    };
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&v)?);
+                    } else {
+                        print!("{}", render_trace_events(&v));
+                    }
+                }
+            }
         }
         Command::Mtls { command } => match command {
             MtlsCommand::InitCa {
@@ -2265,6 +2412,212 @@ fn fetch_udp_stats(client: &Client, token: Option<&str>, base: &str) -> Option<U
     resp.json::<UdpStatsDto>().ok()
 }
 
+// Trace CLI 纯辅助（RIL-060）：URL 拼装/参数校验/渲染均抽纯函数
+// 便于单测——网络与进程退出只在 main 分发臂发生。
+
+/// 拼装 Trace 查询 URL（base 去尾斜杠 + path + `?`，调用方续接参数）
+fn trace_query_url(base: &str, path: &str) -> Result<String> {
+    let trimmed = base.trim_end_matches('/');
+    if trimmed.is_empty() {
+        anyhow::bail!("控制面地址为空");
+    }
+    Ok(format!("{trimmed}{path}?"))
+}
+
+/// 客户端侧过滤参数校验（state/origin 取值面冻结——非法值不发请求）
+fn validate_trace_filter(state: Option<&str>, origin: Option<&str>) -> Result<()> {
+    if let Some(state) = state {
+        if state != "active" && state != "closed" {
+            anyhow::bail!("state 只接受 active 或 closed，得到 {state}");
+        }
+    }
+    if let Some(origin) = origin {
+        if origin != "stream" && origin != "association" {
+            anyhow::bail!("origin 只接受 stream 或 association，得到 {origin}");
+        }
+    }
+    Ok(())
+}
+
+/// GET + x-admin-token → JSON（非 2xx 一律 anyhow 错误——退出码 1 路径）
+fn trace_fetch_json(client: &Client, token: Option<&str>, url: &str) -> Result<serde_json::Value> {
+    let mut req = client.get(url);
+    if let Some(token) = token {
+        req = req.header("x-admin-token", token);
+    }
+    let resp = req.send().with_context(|| format!("无法访问 {url}"))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .with_context(|| format!("读取 {url} 响应失败"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&body).with_context(|| format!("解析 {url} 响应失败"))?;
+    if !status.is_success() {
+        anyhow::bail!("控制面返回错误: {status}: {body}");
+    }
+    Ok(v)
+}
+
+/// 同 [`trace_fetch_json`] 但非 2xx 返回状态码（404 显式缺席 → 退出码 2）
+fn trace_fetch_json_or_404(
+    client: &Client,
+    token: Option<&str>,
+    url: &str,
+) -> std::result::Result<serde_json::Value, reqwest::StatusCode> {
+    let mut req = client.get(url);
+    if let Some(token) = token {
+        req = req.header("x-admin-token", token);
+    }
+    let resp = req
+        .send()
+        .map_err(|_| reqwest::StatusCode::SERVICE_UNAVAILABLE)?;
+    let status = resp.status();
+    let body = resp.text().map_err(|_| status)?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|_| status)?;
+    if !status.is_success() {
+        return Err(status);
+    }
+    Ok(v)
+}
+
+/// 显式缺席答复（found:false 信封的 absence 对象投影）
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceAbsentAnswer {
+    code: String,
+    note: String,
+    collector: serde_json::Value,
+}
+
+/// 从响应信封提取显式缺席（found:false 才算——其余形态不算缺席）
+fn trace_absence(v: &serde_json::Value) -> Option<TraceAbsentAnswer> {
+    if v.get("found").and_then(|f| f.as_bool()) != Some(false) {
+        return None;
+    }
+    let absence = v.get("absence")?;
+    Some(TraceAbsentAnswer {
+        code: absence
+            .get("code")
+            .and_then(|c| c.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        note: absence
+            .get("note")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string(),
+        collector: absence.get("collector").cloned().unwrap_or_default(),
+    })
+}
+
+/// 缺席答复文本（固定说明原样带出——无记录 ≠ 未发包）
+fn render_trace_absent(id: &str, absent: &TraceAbsentAnswer) -> String {
+    format!(
+        "flow {id}: 显式缺席（{}）\n{}\ncollector: {}\n",
+        absent.code,
+        absent.note,
+        serde_json::to_string(&absent.collector).unwrap_or_default()
+    )
+}
+
+/// 列表文本：表头 + 逐行摘要 + 总数（items 空 = 无匹配不造行）
+fn render_trace_list(v: &serde_json::Value) -> String {
+    let items = v.get("items").and_then(|i| i.as_array());
+    let Some(items) = items else {
+        return "trace list: 响应缺少 items 字段\n".into();
+    };
+    if items.is_empty() {
+        return "无匹配轨迹（追踪关闭或暂无连接埋点）\n".into();
+    }
+    let mut out = String::from("FLOW\tORIGIN\tSTATE\tEVENTS\tGENERATION\tLAST\n");
+    for item in items {
+        let flow = item.get("flow").and_then(|x| x.as_str()).unwrap_or("-");
+        let origin = item.get("origin").and_then(|x| x.as_str()).unwrap_or("-");
+        let state = item.get("state").and_then(|x| x.as_str()).unwrap_or("-");
+        let events = item.get("events").and_then(|x| x.as_u64()).unwrap_or(0);
+        let generation = item
+            .get("generation")
+            .and_then(|x| x.as_str())
+            .unwrap_or("-");
+        let last = item
+            .get("last_code")
+            .and_then(|x| x.as_str())
+            .unwrap_or("-");
+        out.push_str(&format!(
+            "{flow}\t{origin}\t{state}\t{events}\t{generation}\t{last}\n"
+        ));
+    }
+    if let Some(total) = v.get("total_matching").and_then(|t| t.as_u64()) {
+        let offset = v.get("offset").and_then(|t| t.as_u64()).unwrap_or(0);
+        out.push_str(&format!("共 {total} 条匹配，offset={offset}\n"));
+    }
+    out
+}
+
+/// 单事件行（flow 详情与 events 增量共用）
+fn trace_event_line(event: &serde_json::Value) -> String {
+    let seq = event.get("seq").and_then(|x| x.as_u64()).unwrap_or(0);
+    let stage = event.get("stage").and_then(|x| x.as_str()).unwrap_or("-");
+    let code = event.get("code").and_then(|x| x.as_str()).unwrap_or("-");
+    let evidence = event
+        .get("evidence")
+        .and_then(|x| x.as_str())
+        .unwrap_or("-");
+    let attempt = event
+        .get("attempt")
+        .and_then(|x| x.as_u64())
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "-".into());
+    let mono = event
+        .get("monotonic_ms")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let wall = event.get("wall_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+    let detail = event.get("detail").and_then(|x| x.as_str()).unwrap_or("");
+    format!(
+        "  #{seq} {stage} {code} evidence={evidence} attempt={attempt} mono={mono} wall={wall} {detail}\n"
+    )
+}
+
+/// 流详情文本：头部（flow/origin/generation/closed）+ 全量事件行
+fn render_trace_flow(v: &serde_json::Value) -> String {
+    let trace = v.get("trace").unwrap_or(&serde_json::Value::Null);
+    let flow = trace.get("flow").and_then(|x| x.as_str()).unwrap_or("-");
+    let origin = trace.get("origin").and_then(|x| x.as_str()).unwrap_or("-");
+    let generation = trace
+        .get("generation")
+        .and_then(|x| x.as_str())
+        .unwrap_or("-");
+    let closed = trace
+        .get("closed")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let mut out = format!("flow {flow} origin={origin} generation={generation} closed={closed}\n");
+    if let Some(events) = trace.get("events").and_then(|e| e.as_array()) {
+        for event in events {
+            out.push_str(&trace_event_line(event));
+        }
+    }
+    out
+}
+
+/// 事件增量文本：头部（flow/from_seq/count）+ 事件行
+fn render_trace_events(v: &serde_json::Value) -> String {
+    let flow = v.get("flow").and_then(|x| x.as_str()).unwrap_or("-");
+    let from_seq = v.get("from_seq").and_then(|x| x.as_u64()).unwrap_or(0);
+    let count = v
+        .get("events")
+        .and_then(|e| e.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let mut out = format!("flow {flow} from_seq={from_seq} count={count}\n");
+    if let Some(events) = v.get("events").and_then(|e| e.as_array()) {
+        for event in events {
+            out.push_str(&trace_event_line(event));
+        }
+    }
+    out
+}
+
 /// 从完整 URL 提取 scheme://host 部分（§3.2：UDP 段与 /flows 同 base 推导）
 fn url_base(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {
@@ -3028,5 +3381,133 @@ mod tests {
             clean.lines().count() <= raw.lines().count(),
             "PEM 块塌缩为占位——行数只减不增"
         );
+    }
+
+    /// RIL-060：URL 拼装——base 尾斜杠剥除；空 base 显式拒绝
+    #[test]
+    fn trace_query_url_builds_and_rejects_empty_base() {
+        let url = trace_query_url("http://127.0.0.1:9090/", "/trace/flows").expect("合法 base");
+        assert_eq!(url, "http://127.0.0.1:9090/trace/flows?");
+        assert!(trace_query_url("", "/trace/flows").is_err(), "空 base 拒绝");
+    }
+
+    /// RIL-060：过滤参数客户端校验——非法值不发请求
+    #[test]
+    fn trace_filter_validation_rejects_unknown_values() {
+        assert!(validate_trace_filter(Some("active"), Some("association")).is_ok());
+        assert!(validate_trace_filter(None, Some("stream")).is_ok());
+        assert!(
+            validate_trace_filter(Some("open"), None).is_err(),
+            "state 非法"
+        );
+        assert!(
+            validate_trace_filter(None, Some("tcp")).is_err(),
+            "origin 非法"
+        );
+    }
+
+    /// RIL-060：显式缺席提取——只认 found:false 信封；code/note/collector
+    /// 三件齐全
+    #[test]
+    fn trace_absence_extracts_found_false_envelope() {
+        let absent = serde_json::json!({
+            "schema_version": 1,
+            "found": false,
+            "trace": null,
+            "absence": {
+                "code": "query.flow.unknown",
+                "note": "no record is not evidence of no traffic",
+                "collector": {"traces_admitted": 0}
+            }
+        });
+        let answer = trace_absence(&absent).expect("found:false 是缺席");
+        assert_eq!(answer.code, "query.flow.unknown");
+        assert_eq!(answer.note, "no record is not evidence of no traffic");
+        assert_eq!(answer.collector["traces_admitted"], 0);
+
+        let found = serde_json::json!({"schema_version": 1, "found": true, "trace": {}});
+        assert!(trace_absence(&found).is_none(), "found:true 不是缺席");
+    }
+
+    /// RIL-060：列表文本——空页不造行；有页逐行 + 总数尾行
+    #[test]
+    fn render_trace_list_handles_empty_and_populated_pages() {
+        let empty = serde_json::json!({
+            "schema_version": 1, "total_matching": 0, "offset": 0, "limit": 20, "items": []
+        });
+        let out = render_trace_list(&empty);
+        assert!(out.contains("无匹配轨迹"), "空页显式说明");
+
+        let page = serde_json::json!({
+            "schema_version": 1, "total_matching": 2, "offset": 1, "limit": 20,
+            "items": [
+                {"flow": "f-b", "origin": "association", "state": "closed",
+                 "events": 3, "generation": "gen-9", "last_code": "stream.closed"},
+                {"flow": "f-a", "origin": "stream", "state": "active",
+                 "events": 1, "generation": "gen-1", "last_code": null}
+            ]
+        });
+        let out = render_trace_list(&page);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "FLOW\tORIGIN\tSTATE\tEVENTS\tGENERATION\tLAST");
+        assert!(lines[1].starts_with("f-b\tassociation\tclosed\t3\tgen-9\tstream.closed"));
+        assert!(
+            lines[2].starts_with("f-a\tstream\tactive\t1\tgen-1\t-"),
+            "null last_code 占位 -"
+        );
+        assert!(
+            out.contains("共 2 条匹配，offset=1"),
+            "总数与 offset 诚实回显"
+        );
+    }
+
+    /// RIL-060：详情/事件文本——事件行携带 seq/stage/code/evidence/attempt，
+    /// attempt 缺省占位 -
+    #[test]
+    fn render_trace_flow_and_events_lines() {
+        let found = serde_json::json!({
+            "schema_version": 1, "found": true,
+            "trace": {
+                "flow": "f-1", "origin": "stream", "generation": "gen-1", "closed": false,
+                "events": [
+                    {"seq": 0, "stage": "takeover", "attempt": null, "code": "trace.takeover",
+                     "evidence": "observed", "monotonic_ms": 1000, "wall_ms": 1,
+                     "detail": "tcp 8.8.8.8:443"},
+                    {"seq": 1, "stage": "attempt", "attempt": 2, "code": "outbound.established",
+                     "evidence": "observed", "monotonic_ms": 1010, "wall_ms": 11,
+                     "detail": "node A"}
+                ]
+            }
+        });
+        let out = render_trace_flow(&found);
+        assert!(out.starts_with("flow f-1 origin=stream generation=gen-1 closed=false\n"));
+        assert!(out.contains("#0 takeover trace.takeover evidence=observed attempt=- mono=1000 wall=1 tcp 8.8.8.8:443"));
+        assert!(out.contains(
+            "#1 attempt outbound.established evidence=observed attempt=2 mono=1010 wall=11 node A"
+        ));
+
+        let events = serde_json::json!({
+            "schema_version": 1, "flow": "f-1", "from_seq": 1,
+            "events": [{"seq": 1, "stage": "attempt", "attempt": 2,
+                        "code": "outbound.established", "evidence": "observed",
+                        "monotonic_ms": 1010, "wall_ms": 11, "detail": "node A"}]
+        });
+        let out = render_trace_events(&events);
+        assert!(out.starts_with("flow f-1 from_seq=1 count=1\n"));
+        assert!(out.contains("#1 attempt outbound.established"));
+    }
+
+    /// RIL-060：缺席文本——稳定码 + 固定说明 + 采集计数齐全
+    #[test]
+    fn render_trace_absent_carries_code_note_and_collector() {
+        let answer = TraceAbsentAnswer {
+            code: "query.flow.unknown".into(),
+            note: "no record is not evidence of no traffic".into(),
+            collector: serde_json::json!({"traces_admitted": 7}),
+        };
+        let out = render_trace_absent("f-ghost", &answer);
+        assert!(out.starts_with("flow f-ghost: 显式缺席（query.flow.unknown）"));
+        assert!(out.contains("no record is not evidence of no traffic"));
+        assert!(out.contains("\"traces_admitted\":7"), "计数快照可见");
     }
 }

@@ -131,7 +131,11 @@ impl RuntimeBuilder {
         // RIL-016 本地策略所有权：构建期配置整份登记为 local——后续来源
         // 增量以 merge_source_delta 进入时据此拒绝触碰用户名下对象
         let local_owned = SourceOwnedNames {
-            egress: config_snapshot.egress.iter().map(|e| e.name.clone()).collect(),
+            egress: config_snapshot
+                .egress
+                .iter()
+                .map(|e| e.name.clone())
+                .collect(),
             groups: config_snapshot
                 .routing
                 .groups
@@ -646,6 +650,17 @@ impl RuntimeBuilder {
             flow_outputs: Arc::new(RwLock::new(self.flow_outputs)),
             egress_connectors: Arc::new(RwLock::new(self.egress_connectors)),
             flow_stats: Arc::new(DashMap::new()),
+            // RIL-052/055：诊断采集器（有界默认：1024 迹/256 活动/256 事件/
+            // 1h TTL/全采 1/启用）——RIL-064 做开销与留存对照后如需调整，
+            // 改这里一处
+            trace_collector: Arc::new(std::sync::Mutex::new(
+                rillane_core::collector::FlowCollector::new(
+                    rillane_core::collector::CollectorConfig::new(
+                        1024, 256, 256, 3_600_000, 1, true,
+                    )
+                    .expect("诊断采集器有界默认配置合法"),
+                ),
+            )),
             mesh_registry,
             chain_manager,
             chain_failure_tx,
@@ -992,6 +1007,11 @@ pub struct Runtime {
     udp_client_metrics: Option<Arc<UdpClientMetrics>>,
     /// P1-5 §4.1：出站连接池单例（D-10 跨热更新共享；None = 块缺席/未启用）
     transport_pool: Option<Arc<TransportPool>>,
+    /// RIL-052/055：诊断事件采集器单例（控制面 /trace/* 查询面取数；
+    /// 有界配置在 build 钉死——容量/上限/TTL 见 trace_collector_config）。
+    /// 会话执行面的 SessionTracer 接线随数据面装配推进；此前列表恒空
+    /// 属诚实空态（查询面回答 tracing 启用状态而非伪造活动流）。
+    trace_collector: Arc<std::sync::Mutex<rillane_core::collector::FlowCollector>>,
     /// P1-5 §4.1：TLS 连接器工厂单例（tls_resumption 独立于池生效）
     tls_factory: Option<Arc<TlsConnectorFactory>>,
     network_manager: Option<Arc<Mutex<NetworkManager>>>,
@@ -1695,10 +1715,7 @@ impl Runtime {
             foreign_rules.extend(names.rules.iter().cloned());
         }
 
-        let mut owned = self
-            .source_owned
-            .entry(source.to_string())
-            .or_default();
+        let mut owned = self.source_owned.entry(source.to_string()).or_default();
         let mut stats = SourceMergeStats {
             nodes_added: 0,
             nodes_updated: 0,
@@ -1790,7 +1807,12 @@ impl Runtime {
                 merged.routing.rules.push(rule.clone());
                 stats.rules_added += 1;
             } else {
-                match merged.routing.rules.iter_mut().find(|t| t.name == rule.name) {
+                match merged
+                    .routing
+                    .rules
+                    .iter_mut()
+                    .find(|t| t.name == rule.name)
+                {
                     Some(slot) => {
                         *slot = rule.clone();
                         stats.rules_updated += 1;
@@ -1912,6 +1934,22 @@ impl Runtime {
         self.egress_connectors
             .read()
             .expect("egress_connectors lock poisoned")
+            .clone()
+    }
+
+    /// 诊断轨迹查询面（RIL-055；控制面 /trace/* 经此取数——查询是
+    /// 只读快照，与订阅 drain 互不影响）
+    pub fn flow_query(&self) -> rillane_core::query::FlowQueryService {
+        rillane_core::query::FlowQueryService::new(self.trace_collector.clone())
+    }
+
+    /// 诊断采集器配置快照（追踪开关/上限的可见面——查询面回答「为
+    /// 何缺席」时对照）
+    pub fn trace_collector_config(&self) -> rillane_core::collector::CollectorConfig {
+        self.trace_collector
+            .lock()
+            .expect("trace collector poisoned")
+            .config()
             .clone()
     }
 
@@ -2851,9 +2889,9 @@ fn scan_udp_capability(
                     | GroupMember::Group { name }
                     | GroupMember::WeightedNode { name, .. }
                     | GroupMember::WeightedGroup { name, .. } => name.clone(),
-                    GroupMember::Provider { .. } => unreachable!(
-                        "provider 成员已在上方跳过（构建期无静态节点集）"
-                    ),
+                    GroupMember::Provider { .. } => {
+                        unreachable!("provider 成员已在上方跳过（构建期无静态节点集）")
+                    }
                 };
                 queue.push((member, format!("group:{}", g.name)));
             }
@@ -4571,10 +4609,13 @@ mod tests {
         // 也必须跳过（内容不同的同名对象是「覆盖用户配置」的企图面）
         let local = source_test_config(
             "127.0.0.1:0",
-            vec![EgressDescriptor {
-                name: "direct".to_string(),
-                spec: EgressConfig::Direct,
-            }, socks("user-node", 1111)],
+            vec![
+                EgressDescriptor {
+                    name: "direct".to_string(),
+                    spec: EgressConfig::Direct,
+                },
+                socks("user-node", 1111),
+            ],
             vec![node_group("user-game", "user-node")],
             vec![host_rule("user-rule", "user-game")],
         );
@@ -4589,22 +4630,44 @@ mod tests {
         let delta = source_test_config(
             "127.0.0.1:9999",
             vec![socks("user-node", 6666), socks("sub-a-node", 2222)],
-            vec![node_group("user-game", "sub-a-node"), node_group("sub-a-grp", "sub-a-node")],
-            vec![host_rule("user-rule", "direct"), host_rule("sub-a-rule-1", "sub-a-grp")],
+            vec![
+                node_group("user-game", "sub-a-node"),
+                node_group("sub-a-grp", "sub-a-node"),
+            ],
+            vec![
+                host_rule("user-rule", "direct"),
+                host_rule("sub-a-rule-1", "sub-a-grp"),
+            ],
         );
 
-        let stats = runtime.merge_source_delta("sub-a", &delta).await.expect("merge");
+        let stats = runtime
+            .merge_source_delta("sub-a", &delta)
+            .await
+            .expect("merge");
 
         // 本地名下三面各拒触碰一次；新对象三面各采纳一个
-        assert_eq!(stats.nodes_skipped_foreign, 1, "user-node 是 local 的: {stats:?}");
-        assert_eq!(stats.groups_skipped_foreign, 1, "user-game 是 local 的: {stats:?}");
-        assert_eq!(stats.rules_skipped_foreign, 1, "user-rule 是 local 的: {stats:?}");
+        assert_eq!(
+            stats.nodes_skipped_foreign, 1,
+            "user-node 是 local 的: {stats:?}"
+        );
+        assert_eq!(
+            stats.groups_skipped_foreign, 1,
+            "user-game 是 local 的: {stats:?}"
+        );
+        assert_eq!(
+            stats.rules_skipped_foreign, 1,
+            "user-rule 是 local 的: {stats:?}"
+        );
         assert_eq!(stats.nodes_added, 1);
         assert_eq!(stats.groups_added, 1);
         assert_eq!(stats.rules_added, 1);
 
         let cfg = runtime.get_config();
-        let user_node = cfg.egress.iter().find(|e| e.name == "user-node").expect("user-node 还在");
+        let user_node = cfg
+            .egress
+            .iter()
+            .find(|e| e.name == "user-node")
+            .expect("user-node 还在");
         match &user_node.spec {
             EgressConfig::Socks5 { port, .. } => {
                 assert_eq!(*port, 1111, "本地节点内容不得被载荷覆盖（6666 被拒）")
@@ -4616,7 +4679,12 @@ mod tests {
                 && matches!(&g.members[0], GroupMember::Node { name } if name == "user-node")),
             "本地组成员引用不得被改写"
         );
-        let user_rule = cfg.routing.rules.iter().find(|r| r.name == "user-rule").expect("user-rule 还在");
+        let user_rule = cfg
+            .routing
+            .rules
+            .iter()
+            .find(|r| r.name == "user-rule")
+            .expect("user-rule 还在");
         assert_eq!(user_rule.target, "user-game", "本地规则目标不得被改写");
     }
 
@@ -4640,26 +4708,26 @@ mod tests {
             .expect("build runtime");
 
         // sub-a 首刷：采纳 a-node:2222
-        let d1 = source_test_config(
-            "127.0.0.1:0",
-            vec![socks("a-node", 2222)],
-            vec![],
-            vec![],
-        );
-        let stats = runtime.merge_source_delta("sub-a", &d1).await.expect("merge1");
+        let d1 = source_test_config("127.0.0.1:0", vec![socks("a-node", 2222)], vec![], vec![]);
+        let stats = runtime
+            .merge_source_delta("sub-a", &d1)
+            .await
+            .expect("merge1");
         assert_eq!(stats.nodes_added, 1);
 
         // sub-a 二刷：自己名下原位替换（RIL-008 同源刷新语义）
-        let d2 = source_test_config(
-            "127.0.0.1:0",
-            vec![socks("a-node", 3333)],
-            vec![],
-            vec![],
-        );
-        let stats = runtime.merge_source_delta("sub-a", &d2).await.expect("merge2");
+        let d2 = source_test_config("127.0.0.1:0", vec![socks("a-node", 3333)], vec![], vec![]);
+        let stats = runtime
+            .merge_source_delta("sub-a", &d2)
+            .await
+            .expect("merge2");
         assert_eq!(stats.nodes_updated, 1, "同源刷新原位替换: {stats:?}");
         let cfg = runtime.get_config();
-        let a = cfg.egress.iter().find(|e| e.name == "a-node").expect("a-node 在");
+        let a = cfg
+            .egress
+            .iter()
+            .find(|e| e.name == "a-node")
+            .expect("a-node 在");
         assert!(
             matches!(&a.spec, EgressConfig::Socks5 { port: 3333, .. }),
             "内容更新须生效"
@@ -4672,11 +4740,18 @@ mod tests {
             vec![],
             vec![],
         );
-        let stats = runtime.merge_source_delta("sub-b", &d3).await.expect("merge3");
+        let stats = runtime
+            .merge_source_delta("sub-b", &d3)
+            .await
+            .expect("merge3");
         assert_eq!(stats.nodes_skipped_foreign, 1, "a-node 归 sub-a: {stats:?}");
         assert_eq!(stats.nodes_added, 1, "b-node 采纳");
         let cfg = runtime.get_config();
-        let a = cfg.egress.iter().find(|e| e.name == "a-node").expect("a-node 在");
+        let a = cfg
+            .egress
+            .iter()
+            .find(|e| e.name == "a-node")
+            .expect("a-node 在");
         assert!(
             matches!(&a.spec, EgressConfig::Socks5 { port: 3333, .. }),
             "sub-b 不得覆盖 sub-a 的 a-node"
@@ -4720,7 +4795,10 @@ mod tests {
             },
         });
 
-        runtime.merge_source_delta("sub-a", &delta).await.expect("merge");
+        runtime
+            .merge_source_delta("sub-a", &delta)
+            .await
+            .expect("merge");
         let cfg = runtime.get_config();
         assert_eq!(cfg.control.api_bind, "127.0.0.1:0", "监听口不得被载荷改写");
         assert_eq!(cfg.control.admin_token, None, "管理凭证不得被载荷注入");
@@ -4752,22 +4830,29 @@ mod tests {
             vec![node_group("a-grp", "a-node")],
             vec![],
         );
-        runtime.merge_source_delta("sub-a", &d1).await.expect("merge1");
+        runtime
+            .merge_source_delta("sub-a", &d1)
+            .await
+            .expect("merge1");
 
         // 二刷载荷撤掉 a-node2 与 a-grp：只计数不删除（删除策略归 RIL-019，
         // 提前删除会悬空引用）
-        let d2 = source_test_config(
-            "127.0.0.1:0",
-            vec![socks("a-node", 2222)],
-            vec![],
-            vec![],
-        );
-        let stats = runtime.merge_source_delta("sub-a", &d2).await.expect("merge2");
+        let d2 = source_test_config("127.0.0.1:0", vec![socks("a-node", 2222)], vec![], vec![]);
+        let stats = runtime
+            .merge_source_delta("sub-a", &d2)
+            .await
+            .expect("merge2");
         assert_eq!(stats.nodes_stale, 1, "a-node2 计数 stale: {stats:?}");
         assert_eq!(stats.groups_stale, 1, "a-grp 计数 stale: {stats:?}");
         let cfg = runtime.get_config();
-        assert!(cfg.egress.iter().any(|e| e.name == "a-node2"), "stale 对象不删");
-        assert!(cfg.routing.groups.iter().any(|g| g.name == "a-grp"), "stale 组不删");
+        assert!(
+            cfg.egress.iter().any(|e| e.name == "a-node2"),
+            "stale 对象不删"
+        );
+        assert!(
+            cfg.routing.groups.iter().any(|g| g.name == "a-grp"),
+            "stale 组不删"
+        );
 
         // 保留来源名拒绝
         let err = runtime

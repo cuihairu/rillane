@@ -14,7 +14,7 @@ This page describes existing commands; use `rillanectl <command> --help` for cur
 - **Control-plane commands** (`stats` / `group` / `switches` / `nodes` / `chain` / `pool` / `subscription` / `route` / `diagnose` / `mtls revoke status`): HTTP against the `rillaned` control plane; when `control.admin_token` is non-empty an `x-admin-token` header is attached, otherwise the request is anonymous.
   - `--endpoint` comes in two flavors (easy to confuse):
     - **Full-URL flavor** (replaces the whole target URL, must include the path): `stats` (default `http://{api_bind}/flows`), `group` (`/routing/stats`), `switches` (`/mesh/switches`), `pool status` (`/egress/pool/stats`), `nodes` (`/nodes`);
-    - **Base-URL flavor** (replaces only the base, path appended internally): `chain`, `subscription`, `route`, `diagnose`, `mtls revoke status`.
+    - **Base-URL flavor** (replaces only the base, path appended internally): `chain`, `subscription`, `route`, `diagnose`, `trace`, `mtls revoke status`.
 - **Offline commands** (`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / the `mtls` cert tools): no control plane, only local files are read (exception: `udp-probe` dials the SOCKS5 ingress directly).
 - There is no `rillanectl reload` subcommand: rillaned reads config once at startup, and runtime hot reloads are driven only by subscription refresh and control-plane endpoints (see the hot-reload scope in [architecture.md](architecture.md)).
 
@@ -54,6 +54,9 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | GET | `/network/route/status` | route application status | `route status` |
 | POST | `/mesh/nodes/register` | node registration (internal to the mesh plane) | — (inter-node) |
 | POST | `/mesh/link-states` | link state reporting (internal to the mesh plane) | — (inter-node) |
+| GET | `/trace/flows` | per-connection trace list (paged, filtered; versioned envelope `schema_version=1`) | `trace list` |
+| GET | `/trace/flow?id=` | one flow's full trace, or an explicit absence answer (`found:false` + stable code) | `trace flow` |
+| GET | `/trace/events?id=&from_seq=&limit=` | incremental event read (unknown/absent id → 404 + stable code) | `trace events` |
 
 ## Command overview
 
@@ -76,6 +79,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | `subscription` | subscription management (list/add/remove/refresh) | control plane |
 | `route` | system route management (apply/clear/status) | control plane + local ip commands |
 | `diagnose` | one-shot diagnostics collection (creates a diagnostics directory) | control plane + local snapshot |
+| `trace` | per-connection trace queries (list / flow detail / incremental events; explicit absence = exit 2) | control plane `/trace/*` |
 | `mtls` | mesh mTLS certificate tools (init-ca/issue/rotate/bundle-ca/rotate-ca/revoke) | offline (except revoke status, which uses the control plane) |
 
 ## Flags per command
@@ -176,6 +180,18 @@ rillanectl diagnose [--endpoint <base URL>] [--output <dir>] [--scope safe|full|
 ```
 
 Scope selection (default `safe`): `safe` omits the subscription list, runtime config and full logs and redacts the config; `full` collects everything but strips secrets on every exit (config secret keys, subscription URL credentials, log key=value pairs and PEM blocks); `raw` writes the bundle unredacted — the manifest marks it `ai_upload_policy: do-not-upload` (local human inspection only). `--no-redact` is equivalent to `--scope raw`; `--no-local` skips the local snapshot (routes/DNS/interfaces). `meta.json` always records the scope, the review-required file list, and the upload policy — rillanectl never uploads a bundle anywhere; bundles are not automatically safe for AI upload, review before sharing.
+
+### trace
+
+```bash
+rillanectl trace list   [--state active|closed] [--origin stream|association] [--generation <G>] [--offset N] [--limit N] [--json]
+rillanectl trace flow   <id> [--json]
+rillanectl trace events <id> [--from-seq N] [--limit N] [--json]
+```
+
+Per-connection trace queries against the kernel's flow query service (RIL-060). `--endpoint` is the base-URL flavor (default `http://{api_bind}`). Anchored on real flow IDs — the ingress/egress aggregate keys shown by `stats`/`/flows` never resolve as flow IDs here. Absence is explicit and coded (`query.flow.unknown` / `query.tracing.disabled` / `collector.flow.evicted|expired|active_limit|sampled_out|drained`); an absent answer always carries the collector counter snapshot and the fixed note "no record is not evidence of no traffic" — absence is never reported as "the app sent no packets". Text output is default; `--json` prints the versioned envelope (`schema_version=1`) verbatim.
+
+Exit codes: `0` query answered; `1` connection or usage error; `2` explicit absence (`trace flow` answered `found:false`, or `trace events` got a 404 error envelope).
 
 ### mtls
 
