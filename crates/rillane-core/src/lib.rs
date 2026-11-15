@@ -31,6 +31,7 @@ pub mod redact;
 pub mod schedule;
 pub mod scoring;
 pub mod session;
+pub mod underlay;
 pub mod session_trace;
 pub mod trace;
 pub mod trace_svg;
@@ -65,6 +66,13 @@ pub use outbound::{
     OpenedAssociation, OpenedStream, OutboundCapabilities, StreamIo, StreamOutbound, TargetBinding,
     CODE_OPEN_CANCELLED, CODE_OPEN_HANDSHAKE, CODE_OPEN_POOL_EXHAUSTED, CODE_OPEN_REFUSED,
     CODE_OPEN_TIMEOUT, CODE_OPEN_UNSUPPORTED,
+};
+pub use underlay::{
+    BypassCapability, BypassOutcome, BypassPolicy, CompositionError, DialOutcome, DialTarget,
+    PlatformBypass, RawSocketHandle, StreamTransport, TransportClass, TransportStack,
+    UnderlayDialer, CODE_BYPASS_UNINJECTABLE, CODE_DIAL_TARGET, CODE_STACK_DUP, CODE_STACK_NATIVE,
+    CODE_STACK_ORDER, CODE_STACK_UNKNOWN, CODE_STACK_UNREGISTERED, NATIVE_TRANSPORTS,
+    STREAM_TRANSPORTS, check_bypass_compat, check_dial_target, wrap_chain,
 };
 pub use plan::{
     DecisionSnapshot, EndpointRef, ExecutionOutcome, FlowAssociation, GenerationRef,
