@@ -6310,9 +6310,15 @@ routing:
         }
     }
 
+    /// s2 组互斥：free_bind 的「探端口→释放→复绑」窗口在并行测试下会
+    /// 被同组其他测试偷走（TOCTOU——复绑前端口回到内核空闲池）——组内
+    /// 串行化让绑定/探测时序确定可重放
+    static S2_BIND_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn per_ingress_override_disabled_entry_rejects_associate() {
         // 测试 2：全局开 + socks5 显式 false → 该入口 0x07；mixed（None 继承）可受理
+        let _guard = S2_BIND_GUARD.lock().await;
         let cfg = s2_config(
             UdpConfig {
                 enabled: true,
@@ -6345,6 +6351,7 @@ routing:
     async fn per_ingress_override_true_enables_when_global_off() {
         // 测试 3：全局关 + mixed 显式 true → 该入口可受理；socks5（None）回 0x07。
         // 构建期 WARN 不强测（判定与装配为准）；UDP 服务因覆盖而构建。
+        let _guard = S2_BIND_GUARD.lock().await;
         let cfg = s2_config(UdpConfig::default(), None, Some(true));
         let socks = socks_bind(&cfg);
         let mixed = mixed_bind(&cfg);
@@ -6376,6 +6383,7 @@ routing:
     #[tokio::test]
     async fn udp_disabled_all_ingress_closed() {
         // 测试 4（验收 #4 构建断言半边）：全局关且无覆盖 → 全部入口 0x07、无 UDP 服务
+        let _guard = S2_BIND_GUARD.lock().await;
         let cfg = s2_config(UdpConfig::default(), None, None);
         let socks = socks_bind(&cfg);
         let mixed = mixed_bind(&cfg);
