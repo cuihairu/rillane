@@ -98,7 +98,7 @@ pub fn classify_request(method: &str) -> Option<ServerMethod> {
 /// JSON-RPC id（MCP：请求 id 必须为字符串或整数——null/布尔/数组/
 /// 对象一律 -32600；官方 schema：Unlike base JSON-RPC, the ID MUST
 /// NOT be null）
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum RequestId {
     Num(i64),
