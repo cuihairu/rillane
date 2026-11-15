@@ -30,7 +30,7 @@
 | 多场景 | `profile` 在配置期填充默认值；已有规则可分别选出口 | 并列 ScenarioPolicy、资源预算和有类型的质量闭环 |
 | 诊断 | 聚合统计、组状态、Mesh dry-run、diagnose | 真正逐流轨迹、纯 Explain、显式 Probe；可选 MCP 尚无实现 |
 
-RouteDecision/RoutePath 已包含组、链路与原因；v1 的 RoutePlan 在其上扩展，不新增第二套路由器。`plan` 模块（RIL-006）把规则结果冻结为只读 `DecisionSnapshot`，执行结果（拨号成功/失败）与规则结果分离，经 `SessionPin` 把流钉在明确代际上，TCP 字节流与 UDP 数据报关联在类型层面分侧。订阅已有 SHA-256 变更检测，但不能据此声称有来源签名或新代际事务；不可变代际契约在 `rillane-config`（RIL-003 `RuntimeGeneration`）。
+RouteDecision/RoutePath 已包含组、链路与原因；v1 的 RoutePlan 在其上扩展，不新增第二套路由器。`plan` 模块（RIL-006）把规则结果冻结为只读 `DecisionSnapshot`，执行结果（拨号成功/失败）与规则结果分离，经 `SessionPin` 把流钉在明确代际上，TCP 字节流与 UDP 数据报关联在类型层面分侧。质量样本契约（RIL-026 `quality` 模块）：metric/source/target/count/time/validity 全字段类型化，连接失败率与丢包率是不同指标（拨号来源的旧 `packet_loss_rate` 迁移时改名），未知/过期显式报错不当零，丢包样本必须说明测量对端。订阅已有 SHA-256 变更检测，但不能据此声称有来源签名或新代际事务；不可变代际契约在 `rillane-config`（RIL-003 `RuntimeGeneration`）。
 
 ## 控制与配置更新
 

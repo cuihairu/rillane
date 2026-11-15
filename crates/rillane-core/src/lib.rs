@@ -17,11 +17,16 @@ pub mod hosts;
 pub mod net_mark;
 pub mod performance;
 pub mod plan;
+pub mod quality;
 pub mod udp;
 
 pub use plan::{
     DecisionSnapshot, EndpointRef, ExecutionOutcome, FlowAssociation, GenerationRef,
     MetadataOrigin, ObjectRef, Provenanced, RoutePlan, SessionPin,
+};
+pub use quality::{
+    QualityMetric, QualitySample, QualitySampleError, SampleSource, SampleStatus, SampleValue,
+    CODE_QUALITY_EXPIRED, CODE_QUALITY_PEER_MISSING, CODE_QUALITY_UNKNOWN,
 };
 
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.

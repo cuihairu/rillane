@@ -77,8 +77,8 @@
   交付：场景会话数、拨号、UDP 映射、发送队列及内存上限。验收：压力下拒绝/背压可解释、内存不无界增长，控制请求不阻塞转发。
 - [ ] **RIL-025｜P0｜并行负载公平调度**；依赖：RIL-024。
   交付：游戏小包与网页吞吐的调度规则。验收：持续下载时游戏尾延迟可测、网页不饥饿；报告只能影响本地可控瓶颈。
-- [ ] **RIL-026｜P0｜类型化质量样本**；依赖：RIL-006。
-  交付：metric/source/target/count/time/validity 与当前指标迁移。验收：连接失败率不再名为丢包率；未知/过期不当零，真实丢包说明测量对端。
+- [x] **RIL-026｜P0｜类型化质量样本**；依赖：RIL-006。（2026-11-15 完成）
+  交付：`crates/rillane-core/src/quality.rs` 新增 `QualitySample`（quality.rs:169，metric/source/target/count/time/validity 全字段；不实现 `Default`——「无测量=0.0=完美」是要消灭的反模式）与五类指标 `QualityMetric`（:31，handshake_ms/rtt_ms/connection_failure_ratio/packet_loss_ratio/throughput_mbps，`as_str` 恒定）、四类来源 `SampleSource`（:60，probe/dial_outcome/mesh_link/manual——同名字段语义随来源变化）、类型化值 `SampleValue`（:85，Latency p50/p95、Ratio 显式分子分母、Throughput）、状态 `SampleStatus`（:123，Current/Expired{age_ms}/Unknown）。构造入口 `latency`/`connection_failures`（:210）/`packet_loss`（:235，**测量对端必填**，空则拒绝）/`throughput`/`migrate_legacy_loss`（:288，当前指标迁移——拨号/探活来源旧 `packet_loss_rate` 改名迁移为连接失败率；mesh 链路来源保留丢包率但缺对端说明拒绝；比率万分比显式化）。未知/过期不当零：`status`（:375，age>lifetime 显式过期、分母 0 显式未知、时钟回拨按有效处理）+ `ratio_value`（:396，过期/未知以稳定码报错绝不回 0.0）+ 稳定原因码 `quality.expired`/`quality.unknown`/`quality.peer.missing`（quality.rs:23/25/27）。吞吐 0 是显式测得非缺失。验收证据：quality.rs 5 单测全绿——失败率是独立指标（as_str=connection_failure_ratio）且 3/10→0.3；分母 0 → unknown 码、超期 5s → expired 码带 age_ms、边界 age==lifetime 仍有效、非比率取比率 → unknown；丢包样本缺对端构造拒绝、带对端可查；迁移按来源改名（DialOutcome/Probe→connection_failure_ratio、MeshLink 缺对端 peer.missing 码拒绝、带对端保留 packet_loss_ratio、越界 7.5 收敛 1.0、Manual 来源拒绝不猜语义）。rillane-core 91 测全绿、`cargo clippy -p rillane-core --all-targets --all-features -- -D warnings` 干净。接线边界：mesh/chain 消费侧迁移归 RIL-027（rillane-mesh 不依赖 rillane-core，迁移入口在本模块供消费方调用）。文档同步：docs/architecture.md（en/zh）。commit：见 git log `feat: add typed quality samples`。
 - [ ] **RIL-027｜P0｜场景评分与迟滞**；依赖：RIL-021、RIL-026。
   交付：不同目标权重、样本时效、切换阈值与冷却。验收：输入快照可重放理由；样本不足不伪造 SLO 达标，不影响已绑定流。
 - [ ] **RIL-028｜P2｜网页连接优化边界**；依赖：RIL-022、RIL-024。
