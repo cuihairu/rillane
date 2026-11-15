@@ -27,6 +27,7 @@ pub mod quality;
 pub mod schedule;
 pub mod scoring;
 pub mod session;
+pub mod trace;
 pub mod udp;
 
 pub use budgets::{

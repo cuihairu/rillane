@@ -177,8 +177,8 @@
 
 交付顺序：真实连接列表 → 逐连接时间线 → 规则解释 → 主动探测。先准备共用契约与脱敏；Trace CLI 可先于 Explain 发布，只读 MCP 不等待主动探测或 GUI。字段与复现要求见 [链路诊断实施规格](docs/zh/design/debug-and-mcp.md)。
 
-- [ ] **RIL-051｜P0｜诊断与事件 Schema**；依赖：RIL-002、RIL-006、RIL-026。
-  交付：FlowTrace/TraceEvent、原因码、generation/flow/attempt ID、时间与证据类型。验收：预测/观测/推断/未知互不混淆，schema 版本与兼容规则明确。
+- [x] **RIL-051｜P0｜诊断与事件 Schema**；依赖：RIL-002、RIL-006、RIL-026。（2026-11-15 完成）
+  交付：`crates/rillane-core/src/trace.rs` 真实连接轨迹的类型化契约（debug-and-mcp.md §3.2/§8）。**FlowTrace**（:165）：每 TCP 会话/UDP association 一条，`FlowId`（:109，空白拒绝 `trace.flow_id.invalid`）+ `FlowOrigin`（:45，Stream/Association 在类型上分侧——TCP 与 UDP 起止语义不混用）+ 计划代际 ID（RIL-006，事件不逐条重复代际）。**TraceEvent**（:141）：序号（会话内从 0 连续递增，`push` :200 自动分配，跨边界读取经 `validate` :252 校验——断裂/非终态关闭报 `trace.seq.broken`）、单调时钟 + 墙钟成对携带（耗时计算与跨进程对齐分开，时钟由调用方注入，本模块不依赖时钟）、稳定原因码（`&'static str` 机器判定）、逐条证据类型（复用 RIL-097 `EvidenceKind`，预测/观测/推断/未知互不混淆，机器口径恒定且两两不同）、已脱敏 `detail`（载荷/HTTP 内容在 schema 里**没有字段可填**——没有字段可填就没有东西可泄，RIL-057 在此之上继续收窄）。**AttemptId**（:136）与 RIL-097 `OpenContext::attempt_id` 同源口径，仅 Attempt 阶段事件携带。**TraceStage**（:65）10 阶段钉死设计顺序：takeover→identity→dns/sniff（分列——来源不同不能混写）→rule→plan→attempt→egress→transfer→close，各带恒定机器口径。**终态冻结**：`close`（:229）写入关闭/失败事件后轨迹不可再追加（`trace.closed`）——关闭后的轨迹是冻结事实。**schema 版本与兼容规则明确**：`TRACE_SCHEMA_VERSION`（:32）=1，兼容规则只有一条（`schema_supported` :268）——主版本精确一致才可读，更高/更低主版本按 `trace.schema.unsupported` 拒绝（静默降级会混淆语义）；同主版本内新增字段视为可容忍演进（schema 即字段面 + 机器码，与 RIL-026 质量样本同口径，JSON 形态在 RIL-055 查询服务冻结）。验收证据：trace.rs 7 单测全绿（稳定码/版本常量；兼容规则主版本精确；flow ID/代际空白拒绝；序号连续分配+close 计入序列+冻结后追加拒绝；校验器抓序号断裂与非终态关闭；证据/阶段机器口径全覆盖两两不同；**A 失败 B 成功的 schema 形状**——两次 Attempt 事件各带 attempt_id，Plan 阶段预测证据 vs Egress 阶段观测证据分立（选中 ≠ 实际），耗时由成对单调时钟可算）。rillane-core lib 114 测全绿、`cargo clippy -p rillane-core --all-targets --all-features -- -D warnings` 退出 0、rustfmt 干净。Cargo.toml 零 rillane-* 依赖保持、零新增依赖。docs/architecture.md 与 docs/zh/architecture.md 的 rillane-core 行与叙述段同步。commit：见 git log `feat: add diagnostic trace schema`。
 - [ ] **RIL-052｜P0｜有界事件采集器**；依赖：RIL-024、RIL-051。
   交付：环形缓冲、TTL、采样、每流上限和订阅背压。验收：慢消费者/满缓冲不阻塞数据面，丢事件计数可见，关闭追踪不影响转发。
 - [ ] **RIL-053｜P0｜真实流生命周期埋点**；依赖：RIL-020、RIL-022、RIL-052。
