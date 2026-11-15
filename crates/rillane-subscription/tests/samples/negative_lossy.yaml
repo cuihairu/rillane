@@ -1,8 +1,8 @@
 # RIL-007 订阅兼容样本：full-policy 有损反例（已脱敏）
 # 预期（宽松模式）：损失清单非空——
 #   丢弃节点 good-node-*（port: 0 无效）与 sample-snell（类型暂不支持）
-#   降级组 fb-group（fallback→Random）与 relay-group（relay→ConsistentHash）
-#   跳过规则 rule-1（PROCESS-NAME 暂不支持）与 rule-2（RULE-SET 暂不支持）
+#   降级组 relay-group（relay→ConsistentHash）；fb-group 自 RIL-012 起同语义直映不降级
+#   跳过规则 rule-2（未声明的 RULE-SET 引用）；降级规则 rule-1（进程规则引擎降级，RIL-015）
 # 预期（严格模式）：整体拒绝，错误含完整损失清单。
 proxies:
   - name: good-node-a

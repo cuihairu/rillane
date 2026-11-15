@@ -2662,6 +2662,9 @@ impl GroupMember {
 pub enum Strategy {
     Fixed,
     Latency,
+    /// 按序回退（RIL-012）：恒取声明序里首个健康成员——首位恢复健康即
+    /// 回到首位，不为延迟次序所动（那是 Latency 的语义）
+    Fallback,
     Random,
     /// 基于带宽选择
     Bandwidth,

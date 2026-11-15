@@ -38,7 +38,7 @@ dropped with a named report entry (RIL-093), never crash the bulk import.
 |---|---|---|
 | select | ✅ | member order preserved; user picks persist across updates (`routing.selections`, RIL-011): a still-present pick is honored even if unhealthy, a deleted pick falls back to the first healthy member with the recovery named in the decision reason, and reload keeps selections the new config does not carry. Nested group references are validated at build time — cycles and dangling refs are rejected by name |
 | url-test | ✅ | `url` mapped; **`interval` unit is seconds** (official default 300; `0`/empty → 300, RIL-092); export side emits seconds as well |
-| fallback | ⚠️ | degrades to Random with a named report entry; faithful ordered fallback ships with RIL-012 |
+| fallback | ✅ | faithful since RIL-012: maps to `Strategy::Fallback` — always the first healthy member in declaration order (failover walks the list, recovery returns to the head; never random). The group's `url`/`interval` come along as probe params (`UrlTestConfig`, interval in seconds), so imported configs keep probing members on the original cadence |
 | relay | ⚠️ | degrades to ConsistentHash with a named report entry; faithful chain support decided in RIL-013 |
 | load-balance | ✅ | distribution algorithms audited in RIL-013 |
 | nested group references / `use:` | ✅ | provider references expand at evaluation time against `routing.provider_nodes` (reference strategy, RIL-009); an empty or absent library yields an empty member set, so a dead provider contributes no new-flow candidates — it never impersonates membership. Declarations without payloads are reported as engine-degraded |

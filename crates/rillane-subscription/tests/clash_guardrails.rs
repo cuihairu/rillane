@@ -27,51 +27,82 @@ fn with_rules(rules: &str) -> String {
     CLEAN.replace("rules: []", rules)
 }
 
-// ---------- 组：fallback / relay 不再伪装成功 ----------
+// ---------- 组：relay 不再伪装成功；fallback 自 RIL-012 同语义直映 ----------
 
 #[test]
-fn strict_rejects_fallback_and_relay_groups() {
-    for group_type in ["fallback", "relay"] {
-        let yaml = with_groups(&format!(
-            "proxy-groups:\n  - name: g1\n    type: {group_type}\n    proxies: [n1]"
-        ));
-        let converter = ClashConverter::new().with_strict(true);
-        let clash = converter.parse(&yaml).unwrap();
-        let err = converter
-            .convert_to_rillane(&clash)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains(group_type) && err.contains("g1"),
-            "严格模式应点名 {group_type} 组 g1，实际: {err}"
-        );
-    }
+fn strict_rejects_relay_group_and_accepts_fallback() {
+    // relay：严格模式点名拒绝
+    let yaml = with_groups("proxy-groups:\n  - name: g1\n    type: relay\n    proxies: [n1]");
+    let converter = ClashConverter::new().with_strict(true);
+    let clash = converter.parse(&yaml).unwrap();
+    let err = converter
+        .convert_to_rillane(&clash)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("relay") && err.contains("g1"),
+        "严格模式应点名 relay 组 g1，实际: {err}"
+    );
+
+    // RIL-012：fallback 同语义直映 Strategy::Fallback，严格模式也不再拒绝
+    let yaml = with_groups("proxy-groups:\n  - name: g1\n    type: fallback\n    proxies: [n1]");
+    let clash = converter.parse(&yaml).unwrap();
+    let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+    assert_eq!(config.routing.groups[0].strategy, Strategy::Fallback);
+    assert!(
+        !report.degraded_groups.iter().any(|(n, _)| n == "g1"),
+        "fallback 不再降级: {:?}",
+        report.degraded_groups
+    );
 }
 
 #[test]
-fn lenient_degrades_and_reports_groups() {
-    for (group_type, degraded) in [
-        ("fallback", Strategy::Random),
-        ("relay", Strategy::ConsistentHash),
-    ] {
-        let yaml = with_groups(&format!(
-            "proxy-groups:\n  - name: g1\n    type: {group_type}\n    proxies: [n1]"
-        ));
-        let converter = ClashConverter::new();
-        let clash = converter.parse(&yaml).unwrap();
-        let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+fn lenient_degrades_and_reports_relay_only() {
+    // relay：宽松照常产出但降级必须报告
+    let yaml = with_groups("proxy-groups:\n  - name: g1\n    type: relay\n    proxies: [n1]");
+    let converter = ClashConverter::new();
+    let clash = converter.parse(&yaml).unwrap();
+    let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+    assert_eq!(config.routing.groups[0].strategy, Strategy::ConsistentHash);
+    assert_eq!(report.degraded_groups.len(), 1);
+    assert_eq!(report.degraded_groups[0].0, "g1");
+    assert!(
+        report.degraded_groups[0].1.contains("relay"),
+        "降级说明应点名 relay，实际: {:?}",
+        report.degraded_groups[0].1
+    );
+    assert!(!report.is_empty());
+}
 
-        // 宽松：照常产出，但降级必须报告
-        assert_eq!(config.routing.groups[0].strategy, degraded);
-        assert_eq!(report.degraded_groups.len(), 1);
-        assert_eq!(report.degraded_groups[0].0, "g1");
-        assert!(
-            report.degraded_groups[0].1.contains(group_type),
-            "降级说明应点名 {group_type}，实际: {:?}",
-            report.degraded_groups[0].1
-        );
-        assert!(!report.is_empty());
-    }
+// ---------- RIL-012：fallback 导入保真（策略 + 探测参数 + 秒单位） ----------
+
+#[test]
+fn fallback_group_imports_with_probe_params() {
+    let yaml = with_groups(concat!(
+        "proxy-groups:\n",
+        "  - name: fb\n",
+        "    type: fallback\n",
+        "    proxies: [n1, n2]\n",
+        "    url: https://www.gstatic.com/generate_204\n",
+        "    interval: 300"
+    ));
+    let converter = ClashConverter::new();
+    let clash = converter.parse(&yaml).unwrap();
+    let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+    assert_eq!(config.routing.groups[0].strategy, Strategy::Fallback);
+    // 探测参数随行：url/interval → UrlTestConfig；interval 单位是秒（RIL-092）
+    let ut = config.routing.groups[0].url_test.as_ref().expect("fallback 组带 url 应注入探测参数");
+    assert_eq!(ut.probe, "www.gstatic.com:443");
+    assert_eq!(ut.path, "/generate_204");
+    assert_eq!(ut.interval_secs, 300);
+    assert!(
+        !report.degraded_groups.iter().any(|(n, _)| n == "fb"),
+        "fallback 组不得进降级清单: {:?}",
+        report.degraded_groups
+    );
+    // 配置面往返：fallback 策略 serde 口径稳定
+    let text = serde_yaml::to_string(&config.routing.groups[0]).unwrap();
+    assert!(text.contains("strategy: fallback"), "serde 口径: {text}");
 }
 
 // ---------- 规则：不支持规则跳过必须可见 ----------
@@ -227,7 +258,7 @@ rules:
 
 #[test]
 fn report_summary_renders_counts_and_names() {
-    let yaml = with_groups("proxy-groups:\n  - name: g1\n    type: fallback\n    proxies: [n1]")
+    let yaml = with_groups("proxy-groups:\n  - name: g1\n    type: relay\n    proxies: [n1]")
         .replace("rules: []", "rules:\n  - PROCESS-NAME,game.exe,n1");
     let converter = ClashConverter::new();
     let clash = converter.parse(&yaml).unwrap();
@@ -248,7 +279,7 @@ fn report_summary_renders_counts_and_names() {
 
 #[tokio::test]
 async fn strict_import_option_propagates_to_pipeline() {
-    let yaml = with_groups("proxy-groups:\n  - name: fb\n    type: fallback\n    proxies: [n1]");
+    let yaml = with_groups("proxy-groups:\n  - name: fb\n    type: relay\n    proxies: [n1]");
 
     let sub = Subscription {
         name: "test".to_string(),

@@ -1199,7 +1199,7 @@ fn default_log_level() -> String {
 pub struct ConversionReport {
     /// 被丢弃的节点（节点名, 原因）：未通过有效性校验或类型暂不支持
     pub dropped_nodes: Vec<(String, String)>,
-    /// 语义被降级的组（组名, 降级说明）：fallback/relay 无同语义策略
+    /// 语义被降级的组（组名, 降级说明）：relay 无同语义策略
     pub degraded_groups: Vec<(String, String)>,
     /// 被跳过的规则（规则名, 原因）：暂不支持的规则类型
     pub dropped_rules: Vec<(String, String)>,
@@ -1907,13 +1907,13 @@ impl ClashConverter {
             let strategy = match self.convert_group_type_to_strategy(group.group_type) {
                 Ok(strategy) => strategy,
                 Err(err) => {
-                    // fallback/relay 语义当前无法无损表达：宽松降级+报告，
-                    // 严格记入清单最终统一拒绝（完整 fallback 实现归 RIL-012）
+                    // relay 语义当前无法无损表达：宽松降级+报告，严格记入
+                    // 清单最终统一拒绝（链式保真归 RIL-013 决策）。fallback
+                    // 自 RIL-012 起同语义直映 Strategy::Fallback，不再降级
                     let degraded = match group.group_type {
-                        ClashProxyGroupType::Fallback => Strategy::Random,
                         ClashProxyGroupType::Relay => Strategy::ConsistentHash,
                         // 理论不可达：convert_group_type_to_strategy 只对
-                        // fallback/relay 报错
+                        // relay 报错
                         _ => return Err(err),
                     };
                     report.degraded_groups.push((name.clone(), err.to_string()));
@@ -1944,9 +1944,13 @@ impl ClashConverter {
             // G1-9：url-test 组的测试 URL/间隔映射为 UrlTestConfig，订阅导入
             // 后即按原节奏探活选路。url 缺席或解析失败 = 不注入（宁缺不造，
             // 不发明探测目标）；Clash interval 单位是秒，原样透传（RIL-092）。
+            // RIL-012：fallback 组的 url/interval 与 url-test 同语义——
+            // Clash 用同一套成员探活参数判定「首位是否还活着」，原样注入
+            // UrlTestConfig（interval 秒透传，RIL-092），导入后即按原节奏
+            // 探活驱动按序回退
             let url_test =
                 match group.group_type {
-                    ClashProxyGroupType::UrlTest => group
+                    ClashProxyGroupType::UrlTest | ClashProxyGroupType::Fallback => group
                         .url
                         .as_deref()
                         .and_then(split_probe_url)
@@ -1972,18 +1976,17 @@ impl ClashConverter {
         Ok(groups)
     }
 
-    /// 转换代理组类型为策略。fallback/relay 在 Rillane v1 尚无同语义策略
-    /// （fallback=按序回退、relay=链式转发）：映射成 Random/ConsistentHash
-    /// 属有损转换——Err 携带说明，调用方决定降级（宽松+报告）或拒绝（严格），
-    /// 不再静默映射伪装成功（RIL-093；完整 fallback 实现归 RIL-012）
+    /// 转换代理组类型为策略。relay 在 Rillane v1 尚无同语义策略
+    /// （relay=链式转发）：映射成 ConsistentHash 属有损转换——Err 携带说明，
+    /// 调用方决定降级（宽松+报告）或拒绝（严格），不再静默映射伪装成功
+    /// （RIL-093；链式保真归 RIL-013 决策）。fallback 自 RIL-012 起同语义
+    /// 直映 Strategy::Fallback（恒取声明序首健康成员），不再降级
     fn convert_group_type_to_strategy(&self, group_type: ClashProxyGroupType) -> Result<Strategy> {
         match group_type {
             ClashProxyGroupType::Select => Ok(Strategy::Fixed),
             ClashProxyGroupType::UrlTest => Ok(Strategy::Latency),
             ClashProxyGroupType::LoadBalance => Ok(Strategy::Weighted),
-            ClashProxyGroupType::Fallback => Err(anyhow!(
-                "fallback 组语义是按序回退，映射成随机会伪装成功（完整实现归 RIL-012）"
-            )),
+            ClashProxyGroupType::Fallback => Ok(Strategy::Fallback),
             ClashProxyGroupType::Relay => Err(anyhow!(
                 "relay 组语义是链式转发，映射成一致性哈希会伪装成功"
             )),

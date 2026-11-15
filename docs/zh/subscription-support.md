@@ -35,7 +35,7 @@
 |---|---|---|
 | select | ✅ | 成员顺序保持；用户选择跨更新持久（`routing.selections`，RIL-011）：仍存在的点选即使不健康也生效，已被删除的点选回落首健康成员且恢复原因进决策原因，reload 保留新配置未携带的选择。嵌套组引用构建期校验——循环与悬空引用点名拒绝 |
 | url-test | ✅ | `url` 映射；**`interval` 单位是秒**（官方缺省 300；`0`/缺省→300，RIL-092）；导出侧同样按秒产出 |
-| fallback | ⚠️ | 降级 Random，点名进损失清单；按序回退保真随 RIL-012 |
+| fallback | ✅ | RIL-012 起保真：映射 `Strategy::Fallback`——恒取声明序里首个健康成员（故障沿顺序回退，恢复即回首首位，绝不随机替代）。组上的 `url`/`interval` 随行注入探测参数（`UrlTestConfig`，interval 单位秒），导入后按原节奏探活成员 |
 | relay | ⚠️ | 降级 ConsistentHash，点名进损失清单；链式保真归 RIL-013 决策 |
 | load-balance | ✅ | 分配算法审计归 RIL-013 |
 | 嵌套组引用 / `use:` | ✅ | provider 引用在求值期按 `routing.provider_nodes` 展开（引用策略，RIL-009）；库为空或缺省时成员集为空，失效 provider 不提供任何新流候选——不伪装成有成员。无载荷的声明按引擎降级报告 |

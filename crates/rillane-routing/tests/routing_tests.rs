@@ -569,6 +569,89 @@ async fn select_honors_user_selection() -> Result<()> {
     Ok(())
 }
 
+/// RIL-012：`Strategy::Fallback` 按声明序取首个健康成员——故障优先级
+/// 符合样本：首位下线顺延次位，再下线顺延第三位；恢复后回到首位。
+/// 健康态经 `set_node_health` 注入，可核验、无随机性。
+#[tokio::test]
+async fn fallback_follows_declaration_order() -> Result<()> {
+    let config = RoutingConfig {
+        default_node: "fb".to_string(),
+        groups: vec![PolicyGroup {
+            name: "fb".to_string(),
+            strategy: Strategy::Fallback,
+            members: vec![
+                GroupMember::Node { name: "n1".into() },
+                GroupMember::Node { name: "n2".into() },
+                GroupMember::Node { name: "n3".into() },
+            ],
+            slo: None,
+            url_test: None,
+        }],
+        rules: vec![],
+        ..RoutingConfig::default()
+    };
+    let engine = RoutingEngine::new(config);
+
+    // 全健康 → 首位 n1（重复路由同答案，无随机替代）
+    for _ in 0..3 {
+        let decision = engine.route(create_flow_context("example.com", 80)).await?;
+        assert_eq!(decision.final_node(), "n1", "全健康恒取首位");
+    }
+
+    // 首位下线 → 顺延次位 n2
+    engine.set_node_health("n1", false);
+    let decision = engine.route(create_flow_context("example.com", 80)).await?;
+    assert_eq!(decision.final_node(), "n2", "首位下线须顺延次位");
+
+    // 前两位下线 → 顺延第三位 n3
+    engine.set_node_health("n2", false);
+    let decision = engine.route(create_flow_context("example.com", 80)).await?;
+    assert_eq!(decision.final_node(), "n3", "前两位下线须顺延第三位");
+
+    // 首位恢复 → 回到首位（按序回退，不是随机换点）
+    engine.set_node_health("n1", true);
+    let decision = engine.route(create_flow_context("example.com", 80)).await?;
+    assert_eq!(decision.final_node(), "n1", "首位恢复即回首位");
+
+    // 次位也恢复但首位仍健康 → 保持首位
+    engine.set_node_health("n2", true);
+    let decision = engine.route(create_flow_context("example.com", 80)).await?;
+    assert_eq!(decision.final_node(), "n1", "次位恢复不夺位");
+    Ok(())
+}
+
+/// RIL-012：fallback 全员不健康 → 显式报错（不伪装随机选点）。
+#[tokio::test]
+async fn fallback_all_unhealthy_errors() -> Result<()> {
+    let config = RoutingConfig {
+        default_node: "fb".to_string(),
+        groups: vec![PolicyGroup {
+            name: "fb".to_string(),
+            strategy: Strategy::Fallback,
+            members: vec![
+                GroupMember::Node { name: "n1".into() },
+                GroupMember::Node { name: "n2".into() },
+            ],
+            slo: None,
+            url_test: None,
+        }],
+        rules: vec![],
+        ..RoutingConfig::default()
+    };
+    let engine = RoutingEngine::new(config);
+    engine.set_node_health("n1", false);
+    engine.set_node_health("n2", false);
+    let err = engine
+        .route(create_flow_context("example.com", 80))
+        .await
+        .expect_err("全员不健康须报错");
+    assert!(
+        err.to_string().contains("无健康成员"),
+        "报错须点名无健康成员，实际: {err}"
+    );
+    Ok(())
+}
+
 /// RIL-011：所选成员不健康时仍尊重手动点选（显式意图不被健康门槛
 /// 二次猜测，与 Clash select 语义一致）。
 #[tokio::test]

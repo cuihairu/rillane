@@ -80,14 +80,22 @@ fn negative_lossy_reports_every_expected_loss() {
         "snell 类型节点必须进清单: {dropped:?}"
     );
 
-    // 降级组：fallback→Random、relay→ConsistentHash
+    // 降级组：RIL-012 起 fallback 同语义直映不再降级，仅 relay→ConsistentHash
     let degraded: Vec<&str> = report
         .degraded_groups
         .iter()
         .map(|(name, _)| name.as_str())
         .collect();
-    assert!(degraded.contains(&"fb-group"), "fallback 降级必须进清单");
-    assert!(degraded.contains(&"relay-group"), "relay 降级必须进清单");
+    assert_eq!(degraded, vec!["relay-group"], "仅 relay 降级: {degraded:?}");
+    // fb-group 保真：Strategy::Fallback + 探测参数随行
+    let fb = config
+        .routing
+        .groups
+        .iter()
+        .find(|g| g.name.ends_with("fb-group"))
+        .expect("fb-group 须产出");
+    assert_eq!(fb.strategy, rillane_config::Strategy::Fallback);
+    assert!(fb.url_test.is_some(), "fb-group 带 url/interval 须注入探测参数");
 
     // 跳过规则：仅未声明引用的 RULE-SET（rule-2）。RIL-015 起
     // PROCESS-NAME（rule-1）转换保留并按引擎降级显式报告
@@ -132,7 +140,7 @@ fn negative_lossy_reports_every_expected_loss() {
     );
     let group_diagnostic = diagnostics
         .iter()
-        .find(|d| d.location.pointer == "proxy-groups/fb-group")
+        .find(|d| d.location.pointer == "proxy-groups/relay-group")
         .expect("降级组定位到 proxy-groups/<名>");
     assert_eq!(group_diagnostic.code, CODE_COMPAT_LOSSY);
     let rule_diagnostic = diagnostics
@@ -160,7 +168,6 @@ fn negative_lossy_strict_rejects_with_full_list() {
     for expected in [
         "bad-port-node",
         "sample-snell",
-        "fb-group",
         "relay-group",
         "rule-1",
         "rule-2",

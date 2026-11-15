@@ -156,6 +156,7 @@ fn strategy_name(s: &Strategy) -> &'static str {
     match s {
         Strategy::Fixed => "fixed",
         Strategy::Latency => "latency",
+        Strategy::Fallback => "fallback",
         Strategy::Random => "random",
         Strategy::Bandwidth => "bandwidth",
         Strategy::Weighted => "weighted",
@@ -471,12 +472,15 @@ impl RoutingEngine {
     }
 
     /// 手动标记节点健康态（RIL-011 求值面：控制面/运维手动摘除节点；
-    /// 与探活任务写入同一健康缓存，TTL 内生效）
+    /// 与探活任务写入同一健康缓存，TTL 内生效）。RIL-012：写入后重建
+    /// 组描述符缓存——成员 `is_healthy` 在构建期烙进描述符，不重建则
+    /// 摘除/恢复对后续路由不可见（健康状态必须可核验）。
     pub fn set_node_health(&self, node_name: &str, is_healthy: bool) {
         self.health_status.insert(
             node_name.to_string(),
             (is_healthy, std::time::Instant::now()),
         );
+        self.build_group_cache();
     }
 
     /// 启动健康检查任务
@@ -550,6 +554,10 @@ impl RoutingEngine {
                 }
             }
         }
+        // RIL-012：探测结果写入健康缓存后重建组描述符缓存，让本轮
+        // 探活在下一次路由即刻可见（否则描述符烙的是上一轮健康态，
+        // url-test/fallback 探活形同虚设）
+        self.build_group_cache();
     }
 
     /// 基于带宽选择成员
@@ -910,6 +918,10 @@ impl RoutingEngine {
             Strategy::Latency => {
                 self.select_latency_member(&healthy_members, descriptor.slo.as_ref())
             }
+            // RIL-012 按序回退：healthy_members 保声明序（filter 不重排），
+            // 首个健康成员即答案——首位下线顺延次位，首位恢复即回首位；
+            // 随机性在此策略无位置（Clash fallback 口径）
+            Strategy::Fallback => healthy_members.first().copied(),
         };
 
         let selected_member =

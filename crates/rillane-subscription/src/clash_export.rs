@@ -8,7 +8,8 @@
 //! - **规则**：rillane `RouteRule.matches` 为 AND 语义（rillane-routing
 //!   `matches.iter().all`），Clash 规则为首中即停的 OR 列表——单条件规则
 //!   逐值展开为 Clash 规则串；多条件规则跳过并登记。
-//! - **组策略**：`Fixed`→select；`Latency`→url-test；`RoundRobin`/
+//! - **组策略**：`Fixed`→select；`Latency`→url-test；`Fallback`→fallback
+//!   （RIL-012 起同语义往返，url/interval 随行）；`RoundRobin`/
 //!   `Random`/`Bandwidth`/`Weighted`→load-balance(round-robin)，
 //!   `ConsistentHash`→load-balance(consistent-hashing)（Random/Weighted/
 //!   Bandwidth 无精确对应，登记降级）。
@@ -747,6 +748,8 @@ fn group_type(strategy: &Strategy) -> ClashProxyGroupType {
     match strategy {
         Strategy::Fixed => ClashProxyGroupType::Select,
         Strategy::Latency => ClashProxyGroupType::UrlTest,
+        // RIL-012：fallback 同语义往返
+        Strategy::Fallback => ClashProxyGroupType::Fallback,
         Strategy::Random
         | Strategy::Bandwidth
         | Strategy::Weighted
@@ -755,10 +758,13 @@ fn group_type(strategy: &Strategy) -> ClashProxyGroupType {
     }
 }
 
-/// url-test 的测速 URL（仅 Latency 策略生成）
+/// url-test/fallback 的探测 URL（Latency 与 Fallback 生成；RIL-012 起
+/// fallback 组也带探活参数，与 Clash 口径一致）
 fn url_test_url(strategy: &Strategy) -> Option<String> {
     match strategy {
-        Strategy::Latency => Some("http://www.gstatic.com/generate_204".to_string()),
+        Strategy::Latency | Strategy::Fallback => {
+            Some("http://www.gstatic.com/generate_204".to_string())
+        }
         _ => None,
     }
 }
@@ -768,7 +774,7 @@ fn url_test_url(strategy: &Strategy) -> Option<String> {
 /// （RIL-092 同源缺陷，导入/导出两侧统一到秒）。
 fn interval_secs(strategy: &Strategy) -> Option<u64> {
     match strategy {
-        Strategy::Latency => Some(300),
+        Strategy::Latency | Strategy::Fallback => Some(300),
         _ => None,
     }
 }
@@ -780,7 +786,7 @@ fn load_balance_strategy(strategy: &Strategy) -> Option<String> {
         Strategy::Random | Strategy::Bandwidth | Strategy::Weighted | Strategy::RoundRobin => {
             Some("round-robin".to_string())
         }
-        Strategy::Fixed | Strategy::Latency => None,
+        Strategy::Fixed | Strategy::Latency | Strategy::Fallback => None,
     }
 }
 
