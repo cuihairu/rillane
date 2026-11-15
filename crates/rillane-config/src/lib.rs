@@ -8,12 +8,20 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub mod approval;
 pub mod contract;
 pub mod generations;
 pub mod preview;
 pub mod proposal;
 pub mod source;
 
+pub use approval::{
+    proposal_digest, ApprovalAuthority, ApprovalError, PreauthorizedGrant, ProposalApproval,
+    CODE_APPROVAL_CAPACITY, CODE_APPROVAL_EXPIRED, CODE_APPROVAL_FOREIGN,
+    CODE_APPROVAL_POLICY_EXHAUSTED, CODE_APPROVAL_REPLAYED, CODE_APPROVAL_REQUIRED,
+    CODE_APPROVAL_SCOPE_EXCEEDED, CODE_APPROVAL_SCOPE_INVALID, CODE_APPROVAL_STALE,
+    CODE_APPROVAL_UNKNOWN, APPROVAL_STORE_CAP, PREAUTH_GRANT_CAP,
+};
 pub use contract::{
     CapabilitySet, ConfigError, ConfigVersion, CODE_UNKNOWN_VERSION, CODE_UNSUPPORTED_COMBINATION,
 };
