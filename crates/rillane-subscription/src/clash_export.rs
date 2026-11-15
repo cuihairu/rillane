@@ -107,15 +107,22 @@ impl ClashExporter {
                     group.name, group.strategy
                 ));
             }
-            let members: Vec<String> = group
-                .members
-                .iter()
-                .map(|m| member_name(m, &direct_names))
-                .collect();
+            // RIL-009 往返：provider 成员回 Clash `use:` 引用（不是 proxies
+            // 名单里的名字——provider 是来源，不是节点）；其余成员按
+            // 名称直映
+            let mut members = Vec::new();
+            let mut use_providers = Vec::new();
+            for m in &group.members {
+                match m {
+                    GroupMember::Provider { name } => use_providers.push(name.clone()),
+                    _ => members.push(member_name(m, &direct_names)),
+                }
+            }
             groups.push(ClashProxyGroup {
                 name: group.name.clone(),
                 group_type: group_type(&group.strategy),
                 proxies: members,
+                use_providers,
                 url: url_test_url(&group.strategy),
                 interval: interval_secs(&group.strategy),
                 strategy: load_balance_strategy(&group.strategy),
@@ -717,6 +724,7 @@ fn member_name(member: &GroupMember, direct_names: &[String]) -> String {
         GroupMember::Group { name } => name,
         GroupMember::WeightedNode { name, .. } => name,
         GroupMember::WeightedGroup { name, .. } => name,
+        GroupMember::Provider { name } => name,
     };
     if direct_names.iter().any(|d| d == name) {
         "DIRECT".to_string()

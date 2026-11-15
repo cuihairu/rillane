@@ -2611,11 +2611,20 @@ fn scan_udp_capability(
                 continue; // 环/重复：该组已展开，跳过
             }
             for m in &g.members {
+                // RIL-009：provider 成员是来源引用，其节点集随 provider
+                // 载荷装入（运行时刷新）——构建期无静态节点可入队，跳过
+                // 而非展开成 provider 名（那不是出口，会误报悬空引用）。
+                if matches!(m, GroupMember::Provider { .. }) {
+                    continue;
+                }
                 let member = match m {
                     GroupMember::Node { name }
                     | GroupMember::Group { name }
                     | GroupMember::WeightedNode { name, .. }
                     | GroupMember::WeightedGroup { name, .. } => name.clone(),
+                    GroupMember::Provider { .. } => unreachable!(
+                        "provider 成员已在上方跳过（构建期无静态节点集）"
+                    ),
                 };
                 queue.push((member, format!("group:{}", g.name)));
             }

@@ -184,26 +184,39 @@ fn provider_only_surfaces_block_loss_not_silent() {
         "provider 生命周期归 RIL-009，当前不得伪装吸收"
     );
 
-    // 整块进未支持清单（宽松可见）
-    assert_eq!(report.unsupported_blocks.len(), 1);
-    let (block_name, reason) = &report.unsupported_blocks[0];
-    assert_eq!(block_name, "proxy-providers");
+    // RIL-009：声明已吸收（不再整块未支持），但节点目录载荷未装入 = 降级
     assert!(
-        reason.contains('1'),
-        "原因须含 provider 数量，实际: {reason}"
+        report.unsupported_blocks.is_empty(),
+        "声明已吸收不应再报未支持块: {report:?}"
     );
+    assert_eq!(
+        config.routing.proxy_providers.len(),
+        1,
+        "provider 声明须落 routing.proxy_providers"
+    );
+    let decl = config.routing.proxy_providers.get("sample-provider").expect("声明");
+    assert_eq!(decl.provider_type, "http");
+    assert_eq!(decl.interval_secs, Some(3600), "interval 秒口径原样");
+    assert_eq!(
+        decl.health_check.as_ref().and_then(|h| h.interval_secs),
+        Some(300),
+        "health-check 周期须保留"
+    );
+    // 载荷未装入须显式可见：组成员集为空集，失效成员退出候选
+    assert_eq!(report.degraded_providers.len(), 1, "载荷未装入须按降级报告");
+    assert_eq!(report.degraded_providers[0].0, "sample-provider");
     assert!(!report.is_empty());
 
-    // 诊断桥：compat.unsupported 定位 blocks/proxy-providers
+    // 诊断桥：compat.lossy 定位 proxy-providers/<名>
     let source = SourceId::new("sample-provider-only").unwrap();
     let diagnostics = report.diagnostics(&source);
-    let block = diagnostics
+    let degraded = diagnostics
         .iter()
-        .find(|d| d.location.pointer == "blocks/proxy-providers")
-        .expect("provider 块必须被诊断定位");
-    assert_eq!(block.code, CODE_COMPAT_UNSUPPORTED);
+        .find(|d| d.location.pointer == "proxy-providers/sample-provider")
+        .expect("provider 降级必须被诊断定位");
+    assert_eq!(degraded.code, CODE_COMPAT_LOSSY);
 
-    // 严格模式：整块缺失即拒绝
+    // 严格模式：载荷未装入即拒绝（不伪装成员已吸收）
     let yaml = sample("provider_only.yaml");
     let converter = ClashConverter::new().with_strict(true);
     let clash = converter.parse(&yaml).expect("样本必须可解析");
@@ -211,8 +224,8 @@ fn provider_only_surfaces_block_loss_not_silent() {
         .convert_to_rillane_with_report(&clash)
         .expect_err("严格导入必须拒绝 provider-only 样本");
     assert!(
-        err.to_string().contains("proxy-providers"),
-        "拒绝错误须点名块: {}",
+        err.to_string().contains("sample-provider"),
+        "拒绝错误须点名 provider: {}",
         err
     );
 }

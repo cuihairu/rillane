@@ -41,7 +41,7 @@ dropped with a named report entry (RIL-093), never crash the bulk import.
 | fallback | ⚠️ | degrades to Random with a named report entry; faithful ordered fallback ships with RIL-012 |
 | relay | ⚠️ | degrades to ConsistentHash with a named report entry; faithful chain support decided in RIL-013 |
 | load-balance | ✅ | distribution algorithms audited in RIL-013 |
-| nested group references / `use:` | ⏳ | RIL-009 (proxy-providers/use) |
+| nested group references / `use:` | ✅ | provider references expand at evaluation time against `routing.provider_nodes` (reference strategy, RIL-009); an empty or absent library yields an empty member set, so a dead provider contributes no new-flow candidates — it never impersonates membership. Declarations without payloads are reported as engine-degraded |
 
 ## L3 Rules
 
@@ -61,7 +61,7 @@ dropped with a named report entry (RIL-093), never crash the bulk import.
 
 | Block | Status | Notes |
 |---|---|---|
-| `proxy-providers` | ❌ (whole block) | captured at parse time and reported as an unsupported block (RIL-007); provider lifecycle arrives with RIL-009/RIL-010 |
+| `proxy-providers` | ✅ | declarations land in `routing.proxy_providers` (type/url/path/interval/health-check; **`interval` unit is seconds**, passthrough, RIL-092); group `use:` references become provider members; undeclared references are rejected + reported. Payload download/update lifecycle ships with RIL-010, so each declaration is reported as engine-degraded until then |
 | `dns` | captured, not imported | DNS partitioning belongs to the local policy layer (RIL-020) |
 | mixed-port / allow-lan / external-controller | captured, not imported | ingress ownership stays with the user config (RIL-016) |
 

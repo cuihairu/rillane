@@ -386,8 +386,15 @@ pub struct ClashProxyGroup {
     /// 代理组类型
     #[serde(rename = "type")]
     pub group_type: ClashProxyGroupType,
-    /// 代理列表
+    /// 代理列表（RIL-009 起可缺省：`use:` 型组成员来自 provider）
+    #[serde(default)]
     pub proxies: Vec<String>,
+    /// provider 引用（Clash `use:` 口径，RIL-009）：成员集 = 所列 provider
+    /// 当前提供的节点。引用须指向已声明 proxy-provider，未声明引用显式
+    /// 进损失清单（与 RULE-SET 同口径）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(rename = "use")]
+    pub use_providers: Vec<String>,
     /// URL 测试地址（用于 url-test）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -1117,12 +1124,12 @@ pub struct ClashConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "external-controller")]
     pub external_controller: Option<String>,
-    /// proxy-providers 原样捕获（RIL-007）：provider-only 输入的关键语义
-    /// 不得在解析期静默消失——进转换损失清单显式可见；完整 provider
-    /// 生命周期归 RIL-009/RIL-010
+    /// proxy-provider 声明捕获（RIL-009）：节点目录来源元数据——转换期
+    /// 按名落 `routing.proxy_providers` 声明并做 `use:` 引用追踪（未声明
+    /// 引用显式进损失清单）；载荷下载/更新归 RIL-010
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[serde(rename = "proxy-providers")]
-    pub proxy_providers: HashMap<String, Value>,
+    pub proxy_providers: HashMap<String, ClashProxyProvider>,
     /// rule-providers 声明捕获（RIL-014）：RULE-SET 引用的规则集来源
     /// 元数据——转换期按名落 `routing.rule_providers` 声明并做引用追踪
     /// （未声明的 RULE-SET 引用显式进损失清单）；载荷下载/更新归 RIL-010
@@ -1150,6 +1157,38 @@ pub struct ClashRuleProvider {
     pub interval: Option<u64>,
 }
 
+/// Clash proxy-provider 声明（RIL-009）：`type`(http/file) + 来源（url 或
+/// path）+ `interval` 更新周期（秒——Clash 口径即秒，导入不换算单位）+
+/// 目录级 `health-check`。`interval_secs` 与 rule-provider 同判（RIL-092）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClashProxyProvider {
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    /// 更新周期（秒）；0 = 不自动更新（Clash 口径）
+    #[serde(default)]
+    pub interval: Option<u64>,
+    /// 目录级健康检查块
+    #[serde(default)]
+    #[serde(rename = "health-check")]
+    pub health_check: Option<ClashProviderHealthCheck>,
+}
+
+/// Clash provider `health-check` 块（RIL-009）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClashProviderHealthCheck {
+    #[serde(default)]
+    pub enable: bool,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// 探测周期（秒）
+    #[serde(default)]
+    pub interval: Option<u64>,
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -1171,6 +1210,11 @@ pub struct ConversionReport {
     /// 未吸收的整块输入（块名, 原因）（RIL-007）：如 proxy-providers——
     /// 关键语义整块缺失必须显式可见，不得伪装成完整配置转换成功
     pub unsupported_blocks: Vec<(String, String)>,
+    /// 语义被降级的 provider（provider 名, 降级说明）（RIL-009）：声明已
+    /// 吸收（落 `routing.proxy_providers`）但节点目录载荷尚未装入——
+    /// 组成员集为空集，失效成员退出新流候选，载荷装入归 RIL-010。降级
+    /// 必须显式可见，不得伪装成「组已带成员」
+    pub degraded_providers: Vec<(String, String)>,
 }
 
 impl ConversionReport {
@@ -1180,6 +1224,7 @@ impl ConversionReport {
             && self.degraded_groups.is_empty()
             && self.dropped_rules.is_empty()
             && self.degraded_rules.is_empty()
+            && self.degraded_providers.is_empty()
             && self.unsupported_blocks.is_empty()
     }
 
@@ -1220,6 +1265,18 @@ impl ConversionReport {
                 self.degraded_rules
                     .iter()
                     .map(|(name, reason)| format!("  规则 {name}: {reason}")),
+            );
+        }
+        if !self.degraded_providers.is_empty() {
+            lines.push(format!(
+                "降级 provider {} 个:",
+                self.degraded_providers.len()
+            ));
+            lines.extend(
+                self
+                    .degraded_providers
+                    .iter()
+                    .map(|(name, reason)| format!("  provider {name}: {reason}")),
             );
         }
         if !self.unsupported_blocks.is_empty() {
@@ -1271,6 +1328,15 @@ impl ConversionReport {
             diagnostics.push(CompatibilityDiagnostic::lossy(
                 Some(id),
                 SourceLocation::new(source.clone(), format!("rules/{name}")),
+                None,
+                reason.clone(),
+            ));
+        }
+        for (name, reason) in &self.degraded_providers {
+            let id = ObjectId::new(source.clone(), name.clone());
+            diagnostics.push(CompatibilityDiagnostic::lossy(
+                Some(id),
+                SourceLocation::new(source.clone(), format!("proxy-providers/{name}")),
                 None,
                 reason.clone(),
             ));
@@ -1405,8 +1471,11 @@ impl ClashConverter {
         let egress = self.convert_proxies_to_egress(&clash_config.proxies, &mut report)?;
 
         // 转换代理组为策略组
-        let groups =
-            self.convert_proxy_groups_to_groups(&clash_config.proxy_groups, &mut report)?;
+        let groups = self.convert_proxy_groups_to_groups(
+            &clash_config.proxy_groups,
+            &clash_config.proxy_providers,
+            &mut report,
+        )?;
 
         // 转换规则为路由规则（RIL-014：RULE-SET 引用按 rule-providers
         // 声明追踪，未声明引用显式进损失清单）
@@ -1416,15 +1485,42 @@ impl ClashConverter {
             &mut report,
         )?;
 
-        // proxy-providers 整块未吸收必须显式可见（RIL-007）：provider-only
-        // 输入的关键语义不得静默消失；完整 provider 生命周期归 RIL-009/
-        // RIL-010。宽松模式进清单随行返回，严格模式据此整体拒绝
-        if !clash_config.proxy_providers.is_empty() {
-            report.unsupported_blocks.push((
-                "proxy-providers".to_string(),
+        // RIL-009：proxy-provider 声明按名落 routing.proxy_providers
+        // （interval 秒口径原样、health-check 原样）。载荷下载与生命周期
+        // 归 RIL-010：节点集此时为空——provider 组成员展开为空集，
+        // 失效成员退出新流候选，不伪装成员已吸收
+        let mut proxy_provider_decls = std::collections::BTreeMap::new();
+        for (name, provider) in &clash_config.proxy_providers {
+            proxy_provider_decls.insert(
+                name.clone(),
+                rillane_config::ProxyProviderDecl {
+                    provider_type: provider.provider_type.clone(),
+                    url: provider.url.clone(),
+                    path: provider.path.clone(),
+                    // RIL-092 同判：Clash interval 口径即秒，0/缺省 = 不自动更新
+                    interval_secs: provider.interval.filter(|v| *v > 0),
+                    health_check: provider.health_check.as_ref().map(|hc| {
+                        rillane_config::ProviderHealthCheck {
+                            enable: hc.enable,
+                            url: hc.url.clone(),
+                            interval_secs: hc.interval.filter(|v| *v > 0),
+                        }
+                    }),
+                },
+            );
+            // 声明已吸收 ≠ 节点已吸收：导入链不下载载荷（归 RIL-010），
+            // 故每个声明的 provider 都按降级显式报告——组成员集为空集，
+            // 失效成员退出新流候选；不得伪装成「组已带成员」
+            report.degraded_providers.push((
+                name.clone(),
                 format!(
-                    "{} 个 provider 未吸收（provider 生命周期归 RIL-009/RIL-010，当前不支持）",
-                    clash_config.proxy_providers.len()
+                    "声明已吸收（type={}，更新周期 {}）但节点目录载荷未装入（下载生命周期归 RIL-010）：该 provider 当前提供 0 个节点，引用它的组成员集为空集",
+                    provider.provider_type,
+                    provider
+                        .interval
+                        .filter(|v| *v > 0)
+                        .map(|v| format!("{v} 秒"))
+                        .unwrap_or_else(|| "未设定".to_string())
                 ),
             ));
         }
@@ -1464,6 +1560,10 @@ impl ClashConverter {
                 },
             );
         }
+
+        // RIL-009：proxy-provider 声明挂配置（与 rule-provider 同形；
+        // HashMap 迭代无序，声明面已是 BTreeMap 故序列化确定）
+        routing.proxy_providers = proxy_provider_decls;
 
         let config = rillane_config::RillaneConfig {
             version: rillane_config::ConfigVersion::default(),
@@ -1797,6 +1897,7 @@ impl ClashConverter {
     fn convert_proxy_groups_to_groups(
         &self,
         proxy_groups: &[ClashProxyGroup],
+        providers: &HashMap<String, ClashProxyProvider>,
         report: &mut ConversionReport,
     ) -> Result<Vec<PolicyGroup>> {
         let mut groups = Vec::new();
@@ -1819,7 +1920,26 @@ impl ClashConverter {
                     degraded
                 }
             };
-            let members = self.convert_proxies_to_group_members(&group.proxies);
+            // RIL-009：`use:` 引用按已声明 proxy-provider 追踪——未声明
+            // 引用是导入链 bug（悬空引用会让组静默少成员），显式进损失
+            // 清单；已声明引用落 GroupMember::Provider，求值期按
+            // provider 节点库展开（载荷未装入 = 空集 = 失效成员退出候选）
+            let mut members = self.convert_proxies_to_group_members(&group.proxies);
+            for provider in &group.use_providers {
+                if providers.contains_key(provider) {
+                    members.push(GroupMember::Provider {
+                        name: provider.clone(),
+                    });
+                } else {
+                    report.dropped_rules.push((
+                        format!("proxy-groups/{}/use/{provider}", group.name),
+                        format!(
+                            "组 {} 引用了未声明的 provider `{provider}`（须在 proxy-providers 中声明）",
+                            group.name
+                        ),
+                    ));
+                }
+            }
 
             // G1-9：url-test 组的测试 URL/间隔映射为 UrlTestConfig，订阅导入
             // 后即按原节奏探活选路。url 缺席或解析失败 = 不注入（宁缺不造，
@@ -2305,7 +2425,7 @@ rules:
         let converter = ClashConverter::new();
         let config = converter.parse(yaml_content).unwrap();
         let groups = converter
-            .convert_proxy_groups_to_groups(&config.proxy_groups, &mut Default::default())
+            .convert_proxy_groups_to_groups(&config.proxy_groups, &std::collections::HashMap::new(), &mut Default::default())
             .unwrap();
         assert_eq!(groups.len(), 3);
 
@@ -2369,7 +2489,7 @@ rules:
         let converter = ClashConverter::new();
         let config = converter.parse(yaml_content).unwrap();
         let groups = converter
-            .convert_proxy_groups_to_groups(&config.proxy_groups, &mut Default::default())
+            .convert_proxy_groups_to_groups(&config.proxy_groups, &std::collections::HashMap::new(), &mut Default::default())
             .unwrap();
 
         let interval_of = |suffix: &str| -> u64 {

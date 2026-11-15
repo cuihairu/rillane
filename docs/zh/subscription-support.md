@@ -38,7 +38,7 @@
 | fallback | ⚠️ | 降级 Random，点名进损失清单；按序回退保真随 RIL-012 |
 | relay | ⚠️ | 降级 ConsistentHash，点名进损失清单；链式保真归 RIL-013 决策 |
 | load-balance | ✅ | 分配算法审计归 RIL-013 |
-| 嵌套组引用 / `use:` | ⏳ | RIL-009（proxy-providers/use） |
+| 嵌套组引用 / `use:` | ✅ | provider 引用在求值期按 `routing.provider_nodes` 展开（引用策略，RIL-009）；库为空或缺省时成员集为空，失效 provider 不提供任何新流候选——不伪装成有成员。无载荷的声明按引擎降级报告 |
 
 ## L3 规则
 
@@ -58,7 +58,7 @@
 
 | 块 | 状态 | 说明 |
 |---|---|---|
-| `proxy-providers` | ❌（整块） | 解析期捕获并按未支持块报告（RIL-007）；provider 生命周期随 RIL-009/RIL-010 |
+| `proxy-providers` | ✅ | 声明落入 `routing.proxy_providers`（type/url/path/interval/health-check；**`interval` 单位为秒**，原样带入，RIL-092）；组内 `use:` 引用成为 provider 成员；未声明引用被拒并报告。载荷下载与更新生命周期随 RIL-010，故在此之前每个声明均按引擎降级报告 |
 | `dns` | 捕获不导入 | DNS 分流归本地策略层（RIL-020） |
 | mixed-port / allow-lan / external-controller | 捕获不导入 | 入口所有权归用户主配置（RIL-016） |
 

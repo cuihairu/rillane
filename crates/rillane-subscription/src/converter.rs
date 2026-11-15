@@ -466,6 +466,7 @@ impl SubscriptionConverter {
                 name: "auto".to_string(),
                 group_type: ClashProxyGroupType::UrlTest,
                 proxies: node_names,
+                use_providers: Vec::new(),
                 url: Some("http://www.gstatic.com/generate_204".to_string()),
                 interval: Some(300),
                 strategy: None,

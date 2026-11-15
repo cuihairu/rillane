@@ -375,6 +375,19 @@ impl RoutingEngine {
                         }
                     }
                 }
+                // RIL-009：provider 成员展开为 provider 当前提供的节点集。
+                // 库未装入/来源失效 = 空集，即失效成员退出新流候选——
+                // 该组不因此伪装出成员（与 RuleSetRef 缺库恒不命中同语义）。
+                rillane_config::GroupMember::Provider { name } => {
+                    for node in config.provider_nodes.nodes(name) {
+                        let is_healthy = self.get_node_health(&node);
+                        members.push(GroupDescriptorMember::Node {
+                            name: node,
+                            weight: 1,
+                            is_healthy,
+                        });
+                    }
+                }
             }
         }
 
@@ -486,6 +499,11 @@ impl RoutingEngine {
 
             // 逐成员串行探测：并发探测互相抢带宽会失真 RTT
             for member in &group.members {
+                // RIL-009：provider 成员是来源引用而非节点，不能作为
+                // 探测目标（其展开节点随库装入，装入后按节点名探测）
+                if matches!(member, rillane_config::GroupMember::Provider { .. }) {
+                    continue;
+                }
                 let node_name = member.as_name();
                 match probe(&node_name, &host, port, &path, timeout).await {
                     Ok(rtt) => {
@@ -648,16 +666,22 @@ impl RoutingEngine {
                 let is_latency = matches!(group.strategy, Strategy::Latency);
                 let slo = if is_latency { group.slo.as_ref() } else { None };
                 let penalty = slo.map(SloPolicy::penalty_or_default).unwrap_or(1000.0);
-                let names: Vec<String> = group
-                    .members
-                    .iter()
-                    .map(|m| match m {
+                // RIL-009：provider 成员按节点库展开，观测面与求值面同口径
+                // （库未装入 = 空集，该 provider 不贡献候选）
+                let mut names: Vec<String> = Vec::new();
+                for m in &group.members {
+                    match m {
                         rillane_config::GroupMember::Node { name }
-                        | rillane_config::GroupMember::WeightedNode { name, .. } => name.clone(),
+                        | rillane_config::GroupMember::WeightedNode { name, .. } => names.push(name.clone()),
                         rillane_config::GroupMember::Group { name }
-                        | rillane_config::GroupMember::WeightedGroup { name, .. } => name.clone(),
-                    })
-                    .collect();
+                        | rillane_config::GroupMember::WeightedGroup { name, .. } => names.push(name.clone()),
+                        rillane_config::GroupMember::Provider { name } => {
+                            for node in config.provider_nodes.nodes(name) {
+                                names.push(node);
+                            }
+                        }
+                    }
+                }
                 let candidates = self.quality_candidates(names.iter().cloned());
                 // selected 仅 latency 组计算（gate_and_pick 对 slo=None 也会
                 // 取最低分，非 latency 组的确定性选点无意义）

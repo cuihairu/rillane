@@ -444,3 +444,86 @@ async fn test_config_reload() -> Result<()> {
 
     Ok(())
 }
+
+// ---------- RIL-009：provider 成员按节点库展开 ----------
+
+fn provider_group_config(provider_nodes: Vec<String>) -> RoutingConfig {
+    let mut config = RoutingConfig {
+        default_node: "direct-node".to_string(),
+        groups: vec![PolicyGroup {
+            name: "provider-group".to_string(),
+            strategy: Strategy::Fixed,
+            members: vec![
+                GroupMember::Node {
+                    name: "node1".to_string(),
+                },
+                GroupMember::Provider {
+                    name: "remote".to_string(),
+                },
+            ],
+            slo: None,
+            url_test: None,
+        }],
+        rules: vec![],
+        ..RoutingConfig::default()
+    };
+    if !provider_nodes.is_empty() {
+        config.provider_nodes.insert("remote", provider_nodes);
+    }
+    config
+}
+
+/// RIL-009：provider 成员展开为 provider 节点库当前提供的节点集，
+/// 与静态节点成员并列进组。库未装入 = 空集——失效成员退出新流候选，
+/// 组不因此伪装出成员（与 RuleSetRef 缺库恒不命中同语义）。
+#[test]
+fn provider_member_expands_from_provider_node_library() {
+    // 库已装入：静态节点 + provider 展开的节点集都在观测面
+    let engine =
+        RoutingEngine::new(provider_group_config(vec!["remote-a".into(), "remote-b".into()]));
+    let report = engine.group_quality_report();
+    let members: Vec<String> = report
+        .iter()
+        .find(|g| g.name == "provider-group")
+        .expect("provider 组应解析出描述符")
+        .members
+        .iter()
+        .map(|m| m.name.clone())
+        .collect();
+    assert_eq!(members, vec!["node1", "remote-a", "remote-b"]);
+
+    // 库未装入：provider 展开空集，仅静态成员存活
+    let empty = RoutingEngine::new(provider_group_config(Vec::new()));
+    let members: Vec<String> = empty
+        .group_quality_report()
+        .iter()
+        .find(|g| g.name == "provider-group")
+        .expect("仅静态成员的组仍应解析出描述符")
+        .members
+        .iter()
+        .map(|m| m.name.clone())
+        .collect();
+    assert_eq!(members, vec!["node1"], "provider 空集不得伪装出成员");
+
+    // 全 provider 组 + 库未装入：组仍存在但成员集为空 = 退出新流候选。
+    // 组不因此消失（配置事实），但不得伪装出成员（求值面对该组无候选可给）
+    let only_provider = RoutingEngine::new(RoutingConfig {
+        default_node: "direct-node".to_string(),
+        groups: vec![PolicyGroup {
+            name: "only-provider".to_string(),
+            strategy: Strategy::Fixed,
+            members: vec![GroupMember::Provider {
+                name: "remote".to_string(),
+            }],
+            slo: None,
+            url_test: None,
+        }],
+        ..RoutingConfig::default()
+    });
+    let report = only_provider.group_quality_report();
+    let only = report
+        .iter()
+        .find(|g| g.name == "only-provider")
+        .expect("组仍在配置中，不应从观测面消失");
+    assert!(only.members.is_empty(), "provider 空集不得伪装出成员");
+}

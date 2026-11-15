@@ -1730,6 +1730,19 @@ pub struct RoutingConfig {
     /// 重装，热更随 `RoutingConfig` 整体替换。
     #[serde(default, skip_serializing_if = "RuleSetLibrary::is_empty")]
     pub rule_sets: RuleSetLibrary,
+    /// proxy-provider 声明（RIL-009）：远端/本地节点目录的来源元数据
+    /// （type/url/path/interval/health-check）。引用可追踪：组内 `use:`
+    /// 引用须指向已声明的 provider。载荷下载与更新生命周期归 RIL-010；
+    /// 此处仅声明面，供引用追踪与下载器配置。键 = provider 名。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub proxy_providers: BTreeMap<String, ProxyProviderDecl>,
+    /// 命名 provider 节点库（RIL-009）：`GroupMember::Provider` 的解析
+    /// 结果面——`provider 名 → 当前提供的出口节点名列表`。载荷未装入或
+    /// 来源失效时该名为空集：失效成员退出新流候选（不伪装成有成员），
+    /// 与 `RuleSetRef` 缺库恒不命中同语义。控制面随快照刷新重装，热更
+    /// 随 `RoutingConfig` 整体替换。
+    #[serde(default, skip_serializing_if = "ProviderNodeLibrary::is_empty")]
+    pub provider_nodes: ProviderNodeLibrary,
 }
 
 /// rule-provider 声明（RIL-014）：一个 RULE-SET 规则集的来源元数据。
@@ -1766,6 +1779,8 @@ impl Default for RoutingConfig {
             geosite_db: None,
             rule_providers: BTreeMap::new(),
             rule_sets: RuleSetLibrary::default(),
+            proxy_providers: BTreeMap::new(),
+            provider_nodes: ProviderNodeLibrary::default(),
         }
     }
 }
@@ -1789,6 +1804,18 @@ impl RoutingConfig {
         for rule in &self.rules {
             for cond in &rule.matches {
                 validate_condition_regex(cond, &rule.name)?;
+            }
+        }
+        // RIL-009：provider 成员引用须已声明（悬空引用会让组静默少成员）
+        for group in &self.groups {
+            for member in &group.members {
+                if let GroupMember::Provider { name } = member {
+                    anyhow::ensure!(
+                        self.proxy_providers.contains_key(name),
+                        "组 {} 引用了未声明的 provider `{name}`",
+                        group.name
+                    );
+                }
             }
         }
         // RIL-014：RuleSetRef 引用名非空（空名是导入链 bug，不是合法配置；
@@ -1920,6 +1947,85 @@ mod geo_db_tests {
         let empty_text = serde_yaml::to_string(&empty).expect("序列化");
         assert!(
             !empty_text.contains("rule_sets:") && !empty_text.contains("rule_providers:"),
+            "空面不落盘: {empty_text}"
+        );
+    }
+
+    /// RIL-009：proxy-provider 声明、provider 成员、provider 节点库的
+    /// serde 往返——声明 interval 秒口径原样、库平铺为 名字→节点集；空面
+    /// 不落盘。悬空 provider 引用由 `RoutingConfig::validate` 构建期拦截。
+    #[test]
+    fn proxy_provider_and_member_roundtrip() {
+        let yaml = r#"
+default_node: direct
+groups:
+  - name: pgroup
+    strategy: fixed
+    members:
+      - { type: provider, name: remote }
+rules: []
+proxy_providers:
+  remote:
+    type: http
+    url: https://provider.example.com/sub.yaml
+    interval_secs: 3600
+    health_check:
+      enable: true
+      interval_secs: 300
+provider_nodes:
+  remote:
+    nodes: [node-a]
+"#;
+        let mut cfg: RoutingConfig = serde_yaml::from_str(yaml).expect("应解析");
+        let decl = cfg.proxy_providers.get("remote").expect("provider 声明");
+        assert_eq!(decl.provider_type, "http");
+        assert_eq!(decl.interval_secs, Some(3600), "interval 秒口径原样");
+        assert_eq!(
+            decl.health_check.as_ref().and_then(|h| h.interval_secs),
+            Some(300),
+            "health-check 周期须保留"
+        );
+        assert_eq!(
+            cfg.groups[0].members,
+            vec![GroupMember::Provider {
+                name: "remote".to_string()
+            }]
+        );
+        assert_eq!(
+            cfg.provider_nodes.nodes("remote"),
+            vec!["node-a".to_string()]
+        );
+
+        // 往返：序列化再解析语义不变（须在清空声明前）
+        let text = serde_yaml::to_string(&cfg).expect("序列化");
+        let back: RoutingConfig = serde_yaml::from_str(&text).expect("往返解析");
+        assert_eq!(
+            back.proxy_providers.get("remote").and_then(|d| d.interval_secs),
+            Some(3600),
+            "声明 interval 往返语义不变"
+        );
+        assert_eq!(
+            back.groups[0].members, cfg.groups[0].members,
+            "provider 成员往返语义不变"
+        );
+        assert_eq!(
+            back.provider_nodes.nodes("remote"),
+            cfg.provider_nodes.nodes("remote"),
+            "节点库往返语义不变"
+        );
+
+        // 引用已声明 → 校验通过；清空声明 → 悬空引用构建期点名拦截
+        cfg.validate().expect("已声明引用应通过校验");
+        cfg.proxy_providers.clear();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("remote"), "悬空引用须点名: {err}");
+
+        // 空面不落盘
+        let empty_text =
+            serde_yaml::to_string(&RoutingConfig::default()).expect("序列化");
+        assert!(
+            !empty_text.contains("proxy_providers:")
+                && !empty_text.contains("provider_nodes:"),
             "空面不落盘: {empty_text}"
         );
     }
@@ -2227,7 +2333,7 @@ impl GroupDescriptor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GroupMember {
     /// 直接节点引用
     Node { name: String },
@@ -2237,6 +2343,13 @@ pub enum GroupMember {
     WeightedNode { name: String, weight: u32 },
     /// 带权重的组
     WeightedGroup { name: String, weight: u32 },
+    /// 远端 provider 引用（RIL-009，Clash `use:` 口径）：成员集不是静态
+    /// 名单而是「该 provider 当前提供的节点」。求值期按
+    /// `RoutingConfig::provider_nodes` 库展开——载荷未装入/下载失败时展开
+    /// 为空集，即**失效成员退出新流候选**（不伪装成有成员），与
+    /// `RuleSetRef` 缺库恒不命中同语义。与 `Node`/`Group` 语义独立：
+    /// provider 是来源（source），不是某个具体出口的名字。
+    Provider { name: String },
 }
 
 /// 手写序列化（internally-tagged `{type, name, weight?}` 形）：derive 出的
@@ -2252,6 +2365,7 @@ impl Serialize for GroupMember {
             GroupMember::Group { name } => ("group", name, None),
             GroupMember::WeightedNode { name, weight } => ("weighted_node", name, Some(*weight)),
             GroupMember::WeightedGroup { name, weight } => ("weighted_group", name, Some(*weight)),
+            GroupMember::Provider { name } => ("provider", name, None),
         };
         let mut st =
             serializer.serialize_struct("GroupMember", if weight.is_some() { 3 } else { 2 })?;
@@ -2271,6 +2385,7 @@ enum GroupMemberTagged {
     Group { name: String },
     WeightedNode { name: String, weight: u32 },
     WeightedGroup { name: String, weight: u32 },
+    Provider { name: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2292,6 +2407,7 @@ impl From<GroupMemberTagged> for GroupMember {
             GroupMemberTagged::WeightedGroup { name, weight } => {
                 GroupMember::WeightedGroup { name, weight }
             }
+            GroupMemberTagged::Provider { name } => GroupMember::Provider { name },
         }
     }
 }
@@ -2316,6 +2432,8 @@ impl GroupMember {
             GroupMember::Group { name } => name.clone(),
             GroupMember::WeightedNode { name, .. } => name.clone(),
             GroupMember::WeightedGroup { name, .. } => name.clone(),
+            // provider 名即引用名（展开结果面在 provider_nodes 库）
+            GroupMember::Provider { name } => name.clone(),
         }
     }
 
@@ -2325,6 +2443,8 @@ impl GroupMember {
             GroupMember::Group { .. } => 1,
             GroupMember::WeightedNode { weight, .. } => *weight,
             GroupMember::WeightedGroup { weight, .. } => *weight,
+            // provider 展开为多个等权节点，成员自身权重不参与组内选点
+            GroupMember::Provider { .. } => 1,
         }
     }
 }
@@ -2350,6 +2470,91 @@ pub struct RouteRule {
     pub name: String,
     pub matches: Vec<MatchCondition>,
     pub target: String,
+}
+
+/// proxy-provider 声明（RIL-009）：一个远端/本地节点目录的来源元数据。
+/// 与 rule-provider 分离：provider 交付的是**出口节点**（egress 候选集），
+/// rule-provider 交付的是**规则条件**（规则集载荷）。
+/// `interval_secs` 是 Clash 口径的**秒**——原样透传，导入不换算单位
+/// （RIL-092 同判：误当毫秒会把更新节奏放大约 1000 倍）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyProviderDecl {
+    /// 来源类型：`http`（远端）/ `file`（本地路径）
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    /// 远端 URL（type=http 必有；凭证不得出现在 URL 查询串——RIL-010 口径）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// 本地路径（type=file 必有）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// 更新周期（秒）；None = 不自动更新
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
+    /// 目录级健康检查（Clash `health-check` 块）；原样带入供下载器与
+    /// 节点健康面消费
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<ProviderHealthCheck>,
+}
+
+/// provider 目录健康检查参数（Clash `health-check` 块）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderHealthCheck {
+    pub enable: bool,
+    /// 探测目标 URL（Clash `url`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// 探测周期（秒，Clash 口径即秒）；None = 继承 provider 周期
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
+}
+
+/// 命名 provider 节点库（RIL-009）：`GroupMember::Provider` 引用的解析
+/// 结果——`provider 名 → 当前提供的出口节点名`。载荷来源：provider
+/// 快照内容（下载生命周期归 RIL-010；快照原子替换归 RIL-008），由
+/// 控制面解析后装入；随 `RoutingConfig` 热更整体替换。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderNodeLibrary {
+    /// 平铺序列化：`provider_nodes: { <名>: { nodes: [...] } }`
+    #[serde(flatten)]
+    providers: BTreeMap<String, ProviderNodeEntry>,
+}
+
+/// 单个 provider 条目：当前提供的出口节点名列表。空列表 = 载荷未装入或
+/// 来源失效，展开为空集（失效成员退出新流候选）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderNodeEntry {
+    pub nodes: Vec<String>,
+}
+
+impl ProviderNodeLibrary {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 装入/替换一个 provider 的节点集（调用方持有载荷解析职责）
+    pub fn insert(&mut self, name: impl Into<String>, nodes: Vec<String>) {
+        self.providers.insert(name.into(), ProviderNodeEntry { nodes });
+    }
+
+    /// 查询 provider 当前节点集；无此名 = 未装入，返回 None
+    pub fn get(&self, name: &str) -> Option<&ProviderNodeEntry> {
+        self.providers.get(name)
+    }
+
+    /// provider 当前提供的节点名；缺席或载荷为空均为空集
+    pub fn nodes(&self, name: &str) -> Vec<String> {
+        self.providers.get(name).map(|e| e.nodes.clone()).unwrap_or_default()
+    }
+
+    /// 已装入的 provider 数量
+    pub fn len(&self) -> usize {
+        self.providers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
