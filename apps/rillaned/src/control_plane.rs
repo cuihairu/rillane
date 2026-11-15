@@ -3439,6 +3439,7 @@ mod tests {
     /// socks5 入口 + direct 出口 + udp.enabled 的最小配置（真 socket 往返用）
     fn s4_udp_config() -> RillaneConfig {
         RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,
@@ -3483,6 +3484,7 @@ mod tests {
     ///（全缺省子字段——验证缺省面 enabled=true/tls_resumption=true）
     fn pool_enabled_config() -> RillaneConfig {
         RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,

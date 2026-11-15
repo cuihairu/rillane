@@ -16,8 +16,8 @@
 
 ## 1. 共享契约与配置基础
 
-- [ ] **RIL-001｜P0｜配置/能力契约**；依赖：无。
-  交付：规范 IR、CapabilitySet、版本字段和旧配置适配边界。验收：旧配置样例通过；未知版本/不支持组合产生稳定原因码，内核不依赖 Clash 格式。
+- [x] **RIL-001｜P0｜配置/能力契约**；依赖：无。（2026-11-15 完成）
+  交付：`crates/rillane-config/src/contract.rs` 新增 ConfigVersion（唯一 V1；接受 "1"/"1.0"/"1.1"，自定义 serde 串/整数双向）、ConfigError 稳定原因码（`config.version.unknown`/`config.combo.unsupported`/`config.ingress.unknown`/`config.egress.unknown` + `code()` 恒定机器口径）、CapabilitySet 六能力位（full/minimal/Default=full 零差异）与 `validate_config`（contract.rs:179，逐块点名 `udp.enabled`/`network`/`network.dns`/`obfuscation`/`egress_pool`）。`lib.rs:34` RillaneConfig 增 `#[serde(default)] version` 字段——旧配置缺 version 适配 V1；`lib.rs:1197` `peek_version_error_probe` + `lib.rs:1264` `parse_any_format` 让未知版本穿透三格式 fallback 链携带稳定码浮出。验收证据：`tests/config_contract.rs` 5 测全绿（旧配置样例通过；显式 "1"/1 双写法；未知版本字符串/整数拒绝且原样回显字面量+码恒定；全能力集放行全部块；逐块最小能力集拒绝并点名特性+最小配置×最小能力集正例；序列化携带 `"version":"1"` 且 round-trip 保持）+ contract.rs 3 单测。内核不依赖 Clash 格式核验：`crates/rillane-core/Cargo.toml` 零 rillane/clash 依赖，全仓 Cargo.toml 无 clash 引用，Clash 解析仅存在于 rillane-subscription。workspace 测试 52 个 result 行全 ok、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 干净。commit：见 git log `feat: add config contract with version and capabilities`。
 - [ ] **RIL-002｜P0｜来源与诊断契约**；依赖：RIL-001。
   交付：SourceSnapshot、来源位置、对象稳定 ID 和 CompatibilityDiagnostic。验收：同名跨来源对象无冲突，诊断能定位对象与字段，删除与改名语义明确。
 - [ ] **RIL-003｜P0｜不可变代际模型**；依赖：RIL-001、RIL-002。

@@ -1011,6 +1011,7 @@ impl ClashConverter {
         };
 
         let config = rillane_config::RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:9090".to_string(),
                 uds_path: None,

@@ -7,7 +7,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use thiserror::Error;
+
+pub mod contract;
+
+pub use contract::{
+    CapabilitySet, ConfigError, ConfigVersion, CODE_UNKNOWN_VERSION, CODE_UNSUPPORTED_COMBINATION,
+};
 
 /// 场景预设（P2-3 scenario-profiles.md §3）：配置期展开为既有块缺省填充
 /// （§2 D-2），运行期不可见——展开产物与手写等价配置走同一 build() 链
@@ -23,6 +28,10 @@ pub enum ProfileKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RillaneConfig {
+    /// 规范配置版本（RIL-001，contract 模块）：缺省 V1——旧配置无此字段
+    /// 按 V1 适配；显式未知版本解析期稳定拒绝（`contract::CODE_UNKNOWN_VERSION`）
+    #[serde(default)]
+    pub version: ConfigVersion,
     pub control: ControlConfig,
     pub telemetry: TelemetryConfig,
     pub ingress: Vec<IngressDescriptor>,
@@ -1183,6 +1192,26 @@ impl EgressPoolBlock {
 }
 
 impl RillaneConfig {
+    /// 版本字段合约错误探测（parse_any_format 用）：合法 YAML 且 version
+    /// 值非法 → 返回携带稳定原因码的错误；其余情形返回 None。
+    fn peek_version_error_probe(raw: &str) -> Option<anyhow::Error> {
+        let value = serde_yaml::from_str::<serde_yaml::Value>(raw).ok()?;
+        let ver = value.get("version")?;
+        if let Some(text) = ver.as_str() {
+            return contract::ConfigVersion::parse(text)
+                .err()
+                .map(anyhow::Error::msg);
+        }
+        if let Some(n) = ver.as_i64() {
+            if n != 1 {
+                return contract::ConfigVersion::parse(&n.to_string())
+                    .err()
+                    .map(anyhow::Error::msg);
+            }
+        }
+        None
+    }
+
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let raw = fs::read_to_string(path)
@@ -1218,12 +1247,23 @@ impl RillaneConfig {
             Some("json") => serde_json::from_str(raw).context("JSON 配置解析失败")?,
             Some("toml") => toml::from_str(raw).context("TOML 配置解析失败")?,
             Some("yaml") | Some("yml") => serde_yaml::from_str(raw).context("YAML 配置解析失败")?,
-            _ => serde_yaml::from_str(raw)
-                .or_else(|_| serde_json::from_str(raw))
-                .or_else(|_| toml::from_str(raw))
-                .context("无法识别配置格式")?,
+            _ => Self::parse_any_format(raw)?,
         };
         Ok(config)
+    }
+
+    /// 无格式提示的自动检测：YAML → JSON → TOML 依次尝试。全败时若内容
+    /// 是合法 YAML 且 version 值非法，优先透出合约稳定原因码
+    /// （`config.version.unknown`），不让三格式回退链把它埋成
+    /// 「无法识别配置格式」（RIL-001 验收：未知版本产生稳定原因码）。
+    fn parse_any_format(raw: &str) -> Result<Self> {
+        serde_yaml::from_str(raw)
+            .or_else(|_| serde_json::from_str(raw))
+            .or_else(|_| toml::from_str(raw))
+            .map_err(|_| {
+                Self::peek_version_error_probe(raw)
+                    .unwrap_or_else(|| anyhow::anyhow!("无法识别配置格式"))
+            })
     }
 
     /// 场景预设展开（scenario-profiles.md §2-D2/D4）：**缺省填充，显式恒
@@ -2223,12 +2263,4 @@ pub enum MatchCondition {
     Process {
         values: Vec<String>,
     },
-}
-
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    #[error("未知的入口类型: {0}")]
-    UnknownIngress(String),
-    #[error("未知的出口类型: {0}")]
-    UnknownEgress(String),
 }

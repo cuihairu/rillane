@@ -10,6 +10,7 @@ use rillane_runtime::{MeshConfig, RuntimeBuilder, RuntimeConfig};
 async fn mesh_target_routes_to_chain_decision() {
     // Minimal config: socks ingress + direct egress, with default_node pointing at a mesh target.
     let cfg = RillaneConfig {
+        version: rillane_config::ConfigVersion::default(),
         control: ControlConfig {
             api_bind: "127.0.0.1:0".into(),
             uds_path: None,

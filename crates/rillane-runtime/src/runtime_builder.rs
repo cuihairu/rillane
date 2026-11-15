@@ -3903,6 +3903,7 @@ mod tests {
     #[tokio::test]
     async fn merge_config_delta_updates_egress_connectors() {
         let cfg = RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,
@@ -3950,6 +3951,7 @@ mod tests {
         assert!(!runtime.get_egress_connectors().contains_key("p1"));
 
         let delta = RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,
@@ -3999,6 +4001,7 @@ mod tests {
     #[tokio::test]
     async fn update_config_waits_for_config_apply_lock() {
         let cfg = RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,
@@ -4068,6 +4071,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_merge_config_delta_keeps_both_deltas() {
         let cfg = RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,
@@ -4114,6 +4118,7 @@ mod tests {
         );
 
         let mk_delta = |name: &str| RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,
@@ -4162,6 +4167,7 @@ mod tests {
     #[test]
     fn merge_config_delta_in_place_dedupes_egress_and_groups() {
         let mut target = RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,
@@ -4200,6 +4206,7 @@ mod tests {
         };
 
         let delta = RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,
@@ -4312,6 +4319,7 @@ mod tests {
 
     fn s5_udp_config(udp_enabled: bool) -> RillaneConfig {
         RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,
@@ -5303,6 +5311,7 @@ mod tests {
         mixed_udp_enabled: Option<bool>,
     ) -> RillaneConfig {
         RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,
@@ -5493,6 +5502,7 @@ mod tests {
 
     fn pool_assembly_config(egress_pool: Option<rillane_config::EgressPoolBlock>) -> RillaneConfig {
         RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
                 api_bind: "127.0.0.1:0".to_string(),
                 uds_path: None,
