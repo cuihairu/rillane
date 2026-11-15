@@ -47,6 +47,14 @@ hysteria2.workspace = true
 # AnyTLS（RIL-106）
 anytls.workspace = true
 
+# REALITY 认证与传输适配（RIL-107）：见 outbound/reality.rs
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+hmac.workspace = true
+hkdf.workspace = true
+subtle.workspace = true
+x509-parser.workspace = true
+
 # android 不编 wireguard（defguard_boringtun 无平台支撑，见 outbound/wireguard_stub.rs）；
 # armv7-ohos 同因剥离（boringtun epoll.rs 的 libc::timespec 字面量撞 32 位 ohos libc
 # 私有 __pad0 字段，E0451；aarch64/x86_64-ohos 上 boringtun 实测可编，不回退，见

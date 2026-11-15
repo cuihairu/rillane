@@ -99,6 +99,15 @@ aes-gcm = "0.10"
 chacha20poly1305 = "0.10"
 sha3 = "0.10"
 crc32fast = "1.4"
+# REALITY 认证（RIL-107，xray REALITY 语义）：x25519 认证 ECDH + HKDF-SHA256
+# （info="REALITY"）派生 + AES-256-GCM session-id seal/open（AAD=ClientHello
+# session-id 槽置零）+ HMAC-SHA512 证书绑定；ed25519-dalek 供测试对端
+# CertificateVerify 签名（纯 Rust 面，aws-lc-rs 仅经 rustls fork 特性进入）
+x25519-dalek = "2"
+ed25519-dalek = { version = "2", features = ["pkcs8"] }
+hmac = "0.12"
+# REALITY HMAC 证书绑定的恒时比较面（Go hmac.Equal 口径）
+subtle = { version = "2", default-features = false }
 # GeoIP/GeoSite database access (G0-2): maxminddb for GeoLite2/GeoIP2 .mmdb
 # and geosite-rs for v2fly .dat (both geoip and geosite protobuf formats).
 maxminddb = "0.32"

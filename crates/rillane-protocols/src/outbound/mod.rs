@@ -9,6 +9,7 @@ mod h2;
 mod http;
 mod httpupgrade;
 mod hysteria2;
+mod reality;
 mod shadowsocks;
 mod socks5;
 mod trojan;
@@ -32,6 +33,10 @@ pub use anytls::{AnytlsConnector, AnytlsUdpConnector};
 pub use direct::DirectConnector;
 pub use http::HttpConnector;
 pub use hysteria2::Hysteria2Connector;
+pub use reality::{
+    RealityAuthSession, RealityDial, RealityStream, TlsAdapter, CORE_VERSION, derive_auth_key,
+    handshake, hmac_cert_tag, open_session_id, seal_session_id, zero_session_id_slot,
+};
 pub use shadowsocks::{ShadowsocksConnector, ShadowsocksUdpConnector};
 pub use socks5::{Socks5Connector, Socks5UdpConnector};
 pub use trojan::{TrojanConnector, TrojanUdpConnector};
