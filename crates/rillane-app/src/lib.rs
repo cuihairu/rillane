@@ -12,13 +12,18 @@
 //! - [`reply`]：状态码 + 正文 → [`reply::AppReply`] / [`reply::AppError`]
 //!   （版本化信封 + 稳定码解码——缺席/错误语义不随执行器漂移）；
 //! - `client`（`client-blocking` 特性）：参考执行器 [`client::BlockingApp`]
-//!   ——base URL 与 admin token 只进不出，公有面只有 `execute`。
+//!   ——base URL 与 admin token 只进不出，公有面只有 `execute`；
+//! - [`mcp`] / [`tools`]（RIL-066）：MCP 协议契约（钉死版本 + JSON-RPC
+//!   2.0 信封 + 取消语义）与冻结工具目录（输入 schema / 注解 / 服务端
+//!   授权档分立——注解不充当授权）。
 //!
 //! 内核（rillane-core）不依赖本 crate、不依赖任何 MCP SDK——边界是
 //! 单向的：表面消费内核契约，内核对面无感知。
 
+pub mod mcp;
 pub mod ops;
 pub mod reply;
+pub mod tools;
 
 #[cfg(feature = "client-blocking")]
 pub mod client;
