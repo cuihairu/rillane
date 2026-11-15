@@ -2411,7 +2411,17 @@ pub enum MatchCondition {
     /// 按源进程名匹配（tun-dataplane.md §2.5）：值为 `/proc/<pid>/comm` 口径
     /// 的进程名（内核截断 15 字节），由 TUN 入口首包归因后写入
     /// `process.name` 注解——仅 TUN 面有该注解，其它 ingress 流恒不命中。
+    /// 大小写语义独立（RIL-015）：**精确区分大小写**比较，不做域名式
+    /// 小写折叠；平台适配器如需不区分大小写语义在注解注入侧归一。
     Process {
+        values: Vec<String>,
+    },
+    /// 按源进程可执行路径匹配（RIL-015）：值为完整可执行路径，经
+    /// `process.path` 注解进入求值面（TUN 归因产出；对应
+    /// `ProcessIdentity::executable_path`——不可得时注解缺席恒不命中，
+    /// 不以短名冒充路径）。与 `Process`（短名）语义独立：路径精确
+    /// 区分大小写、含分隔符全串比较，不做 comm 截断。
+    ProcessPath {
         values: Vec<String>,
     },
     /// 源端口匹配（RIL-014）：本机侧五元组源端口。取值经 `net.src_port`

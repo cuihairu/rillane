@@ -89,27 +89,34 @@ fn negative_lossy_reports_every_expected_loss() {
     assert!(degraded.contains(&"fb-group"), "fallback 降级必须进清单");
     assert!(degraded.contains(&"relay-group"), "relay 降级必须进清单");
 
-    // 跳过规则：PROCESS-NAME 与 RULE-SET（rule-N 命名含序号）
+    // 跳过规则：仅未声明引用的 RULE-SET（rule-2）。RIL-015 起
+    // PROCESS-NAME（rule-1）转换保留并按引擎降级显式报告
     let dropped_rules: Vec<&str> = report
         .dropped_rules
         .iter()
         .map(|(name, _)| name.as_str())
         .collect();
-    assert!(
-        dropped_rules.contains(&"rule-1") && dropped_rules.contains(&"rule-2"),
-        "前两条不支持规则必须进清单: {dropped_rules:?}"
-    );
+    assert_eq!(dropped_rules, vec!["rule-2"], "仅未声明引用须进跳过清单");
+    let degraded_rules: Vec<&str> = report
+        .degraded_rules
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(degraded_rules, vec!["rule-1"], "进程规则须按降级报告");
 
-    // 保留面：好节点、select 组、支持的两条规则照常产出
+    // 保留面：好节点、select 组、进程规则与两条支持规则照常产出
     assert_eq!(config.egress.len(), 1, "只有 good-node-a 产出");
-    assert_eq!(config.routing.rules.len(), 2, "DOMAIN-SUFFIX+MATCH 保留");
+    assert_eq!(config.routing.rules.len(), 3, "进程+DOMAIN-SUFFIX+MATCH 保留");
 
     // 诊断桥（RIL-002 契约）：每条损失带稳定码并定位到来源对象
     let source = SourceId::new("sample-lossy").unwrap();
     let diagnostics = report.diagnostics(&source);
     assert_eq!(
         diagnostics.len(),
-        report.dropped_nodes.len() + report.degraded_groups.len() + report.dropped_rules.len()
+        report.dropped_nodes.len()
+            + report.degraded_groups.len()
+            + report.dropped_rules.len()
+            + report.degraded_rules.len()
     );
     for diagnostic in &diagnostics {
         assert_eq!(diagnostic.location.source.as_str(), "sample-lossy");
@@ -130,9 +137,15 @@ fn negative_lossy_reports_every_expected_loss() {
     assert_eq!(group_diagnostic.code, CODE_COMPAT_LOSSY);
     let rule_diagnostic = diagnostics
         .iter()
-        .find(|d| d.location.pointer == "rules/rule-1")
+        .find(|d| d.location.pointer == "rules/rule-2")
         .expect("跳过规则定位到 rules/<名>");
     assert_eq!(rule_diagnostic.code, CODE_COMPAT_UNSUPPORTED);
+    // 进程规则降级是"有损但保留"，不是"不支持"
+    let process_diagnostic = diagnostics
+        .iter()
+        .find(|d| d.location.pointer == "rules/rule-1")
+        .expect("降级规则定位到 rules/<名>");
+    assert_eq!(process_diagnostic.code, CODE_COMPAT_LOSSY);
 }
 
 #[test]

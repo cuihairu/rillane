@@ -544,6 +544,13 @@ pub enum ClashRule {
         processes: Vec<String>,
         target: String,
     },
+    /// 进程可执行路径（RIL-015）：与进程名语义独立（路径全串精确比较、
+    /// 不做 comm 截断）
+    ProcessPath {
+        #[serde(rename = "process-path")]
+        paths: Vec<String>,
+        target: String,
+    },
     /// 规则集
     RuleSet {
         #[serde(rename = "rule-set")]
@@ -631,6 +638,11 @@ enum ClashRuleTagged {
         processes: Vec<String>,
         target: String,
     },
+    ProcessPath {
+        #[serde(rename = "process-path")]
+        paths: Vec<String>,
+        target: String,
+    },
     RuleSet {
         #[serde(rename = "rule-set")]
         rulesets: Vec<String>,
@@ -680,6 +692,9 @@ impl From<ClashRuleTagged> for ClashRule {
             ClashRuleTagged::DstPort { ports, target } => ClashRule::DstPort { ports, target },
             ClashRuleTagged::ProcessName { processes, target } => {
                 ClashRule::ProcessName { processes, target }
+            }
+            ClashRuleTagged::ProcessPath { paths, target } => {
+                ClashRule::ProcessPath { paths, target }
             }
             ClashRuleTagged::RuleSet { rulesets, target } => {
                 ClashRule::RuleSet { rulesets, target }
@@ -758,6 +773,11 @@ impl ClashRule {
             }),
             "PROCESS-NAME" => Ok(ClashRule::ProcessName {
                 processes: vec![get(1)?.to_string()],
+                target: get(2)?.to_string(),
+            }),
+            // RIL-015：进程路径——与进程名语义独立
+            "PROCESS-PATH" => Ok(ClashRule::ProcessPath {
+                paths: vec![get(1)?.to_string()],
                 target: get(2)?.to_string(),
             }),
             "RULE-SET" => Ok(ClashRule::RuleSet {
@@ -1023,6 +1043,9 @@ fn parse_payload_rule(entry: &str) -> Result<MatchCondition> {
         "PROCESS-NAME" => MatchCondition::Process {
             values: vec![value.to_string()],
         },
+        "PROCESS-PATH" => MatchCondition::ProcessPath {
+            values: vec![value.to_string()],
+        },
         "AND" | "OR" | "NOT" => {
             return Err(anyhow!("载荷内嵌套逻辑规则暂不支持: {kind}"));
         }
@@ -1141,6 +1164,10 @@ pub struct ConversionReport {
     pub degraded_groups: Vec<(String, String)>,
     /// 被跳过的规则（规则名, 原因）：暂不支持的规则类型
     pub dropped_rules: Vec<(String, String)>,
+    /// 语义被降级的规则（规则名, 降级说明）（RIL-015）：如进程名/路径
+    /// 规则——转换保留但依赖平台归因能力（TUN 面/路径可得性），降级
+    /// 必须显式可见，不得伪装成无损
+    pub degraded_rules: Vec<(String, String)>,
     /// 未吸收的整块输入（块名, 原因）（RIL-007）：如 proxy-providers——
     /// 关键语义整块缺失必须显式可见，不得伪装成完整配置转换成功
     pub unsupported_blocks: Vec<(String, String)>,
@@ -1152,6 +1179,7 @@ impl ConversionReport {
         self.dropped_nodes.is_empty()
             && self.degraded_groups.is_empty()
             && self.dropped_rules.is_empty()
+            && self.degraded_rules.is_empty()
             && self.unsupported_blocks.is_empty()
     }
 
@@ -1182,6 +1210,14 @@ impl ConversionReport {
             lines.push(format!("跳过规则 {} 条:", self.dropped_rules.len()));
             lines.extend(
                 self.dropped_rules
+                    .iter()
+                    .map(|(name, reason)| format!("  规则 {name}: {reason}")),
+            );
+        }
+        if !self.degraded_rules.is_empty() {
+            lines.push(format!("降级规则 {} 条:", self.degraded_rules.len()));
+            lines.extend(
+                self.degraded_rules
                     .iter()
                     .map(|(name, reason)| format!("  规则 {name}: {reason}")),
             );
@@ -1227,6 +1263,15 @@ impl ConversionReport {
             diagnostics.push(CompatibilityDiagnostic::unsupported(
                 Some(id),
                 SourceLocation::new(source.clone(), format!("rules/{name}")),
+                reason.clone(),
+            ));
+        }
+        for (name, reason) in &self.degraded_rules {
+            let id = ObjectId::new(source.clone(), name.clone());
+            diagnostics.push(CompatibilityDiagnostic::lossy(
+                Some(id),
+                SourceLocation::new(source.clone(), format!("rules/{name}")),
+                None,
                 reason.clone(),
             ));
         }
@@ -1848,6 +1893,19 @@ impl ClashConverter {
             let name = format!("{}rule-{}", self.rule_prefix, index + 1);
             match self.convert_clash_rule(rule, providers) {
                 Ok((matches, target)) => {
+                    // RIL-015：进程条件只对 TUN 归因流有效——非 TUN ingress
+                    // 与进程归因不可得的平台恒不命中，降级必须显式可见
+                    if matches.iter().any(|m| {
+                        matches!(
+                            m,
+                            MatchCondition::Process { .. } | MatchCondition::ProcessPath { .. }
+                        )
+                    }) {
+                        report.degraded_rules.push((
+                            name.clone(),
+                            "进程条件依赖 TUN 入口进程归因（process.name/process.path 注解）——非 TUN 流与归因不可得平台恒不命中；comm 可能被内核截断，路径不可得时不以短名冒充".to_string(),
+                        ));
+                    }
                     routing_rules.push(RouteRule {
                         name,
                         matches,
@@ -1941,16 +1999,23 @@ impl ClashConverter {
                 }];
                 Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
-            ClashRule::ProcessName {
-                processes: _,
-                target: _,
-            } => {
-                // Rillane 暂不支持进程名匹配
-                warn!(
-                    target: "rillane::subscription::clash",
-                    "跳过进程名规则，Rillane 暂不支持"
-                );
-                Err(anyhow!("进程名规则暂不支持"))
+            // RIL-015：进程名 → Process（comm 口径，区分大小写不折叠）。
+            // 保留而非丢弃：路由面按 `process.name` 注解求值，注解由
+            // TUN 入口归因注入——非 TUN 面恒不命中、comm 可能被内核截断，
+            // 这些能力缺口由调用方按 degraded_rules 显式可见（不伪装无损）
+            ClashRule::ProcessName { processes, target } => {
+                let matches = vec![MatchCondition::Process {
+                    values: processes.clone(),
+                }];
+                Ok((matches, format!("{}{}", self.group_prefix, target)))
+            }
+            // RIL-015：进程路径 → ProcessPath（全串精确比较，不做 comm
+            // 截断）；路径不可得时注解缺席恒不命中，不以短名冒充
+            ClashRule::ProcessPath { paths, target } => {
+                let matches = vec![MatchCondition::ProcessPath {
+                    values: paths.clone(),
+                }];
+                Ok((matches, format!("{}{}", self.group_prefix, target)))
             }
             // RIL-014：RULE-SET → 命名引用（展开/引用策略取引用侧——载荷
             // 生命周期归 RIL-010，导入期不内联展开）。引用可追踪：指向
@@ -3499,4 +3564,68 @@ rules:
             .expect_err("未知类型必须报错");
         assert!(err.to_string().contains("FUTURE-TYPE"), "点名未知类型: {err}");
     }
+
+    /// RIL-015：进程名/路径规则转换到规范条件，并作为引擎降级显式报告。
+    /// PROCESS-NAME → Process（comm 口径）、PROCESS-PATH → ProcessPath（全串
+    /// 精确）；两条转换保留，靠 degraded_rules 声明依赖平台归因能力。
+    #[test]
+    fn process_rules_convert_and_report_degraded() {
+        let yaml = r#"
+proxies:
+  - name: "ss-1"
+    type: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: password
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "ss-1"
+rules:
+  - PROCESS-NAME,game.exe,PROXY
+  - PROCESS-PATH,/Applications/Safari.app/Contents/MacOS/Safari,PROXY
+        "#;
+        let converter = ClashConverter::new();
+        let clash = converter.parse(yaml).unwrap();
+        let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+        assert_eq!(config.routing.rules.len(), 2, "两条进程规则都应转换保留");
+        assert_eq!(
+            config.routing.rules[0].matches,
+            vec![MatchCondition::Process {
+                values: vec!["game.exe".to_string()]
+            }]
+        );
+        assert_eq!(
+            config.routing.rules[1].matches,
+            vec![MatchCondition::ProcessPath {
+                values: vec![
+                    "/Applications/Safari.app/Contents/MacOS/Safari".to_string()
+                ]
+            }]
+        );
+        assert_eq!(report.dropped_rules.len(), 0);
+
+        // 降级必须显式可见：两条规则都点名，理由指向进程归因能力
+        let names: Vec<&str> = report
+            .degraded_rules
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(names, vec!["rule-1", "rule-2"], "进程规则须逐条报告");
+        assert!(
+            report.degraded_rules[0].1.contains("进程"),
+            "降级理由须点名进程归因: {:?}",
+            report.degraded_rules
+        );
+        // 汇总与诊断都带出降级（不得埋在无损报告里）
+        assert!(report.summary().contains("降级规则 2 条"));
+        let source = SourceId::new("process-report").unwrap();
+        assert!(report
+            .diagnostics(&source)
+            .iter()
+            .any(|d| d.location.pointer == "rules/rule-1"));
+    }
+
 }

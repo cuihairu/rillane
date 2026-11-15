@@ -987,12 +987,22 @@ fn matches_condition(
         }
         MatchCondition::Port { values } => values.contains(&ctx.target.port),
         // tun-dataplane.md §2.5：TUN 首包归因注入的 process.name 注解
-        // （= /proc/<pid>/comm，内核截断 15 字节）精确匹配；注解缺席恒不命中
+        // （= /proc/<pid>/comm，内核截断 15 字节）精确匹配（区分大小写
+        // ——RIL-015 大小写语义独立，不折叠）；注解缺席恒不命中
         MatchCondition::Process { values } => ctx
             .metadata
             .annotations
             .get("process.name")
             .map(|name| values.iter().any(|v| v == name))
+            .unwrap_or(false),
+        // RIL-015：进程可执行路径——`process.path` 注解全串精确比较
+        // （区分大小写、不做 comm 截断）；路径不可得时注解缺席恒不命中，
+        // 不以短名冒充路径（ProcessIdentity 同口径）
+        MatchCondition::ProcessPath { values } => ctx
+            .metadata
+            .annotations
+            .get("process.path")
+            .map(|path| values.iter().any(|v| v == path))
             .unwrap_or(false),
         // RIL-014：源端口——本机五元组源端口经 `net.src_port` 注解进入
         // 求值面（与 client.cidr/process.name 同一注入先例）；注解缺席
@@ -1304,12 +1314,87 @@ mod tests {
             "comm 不匹配应落默认节点"
         );
 
+        // 不命中：仅大小写不同（comm 比较区分大小写，不折叠）
+        ctx.metadata
+            .annotations
+            .insert("process.name".into(), "CS2".into());
+        assert_eq!(
+            engine.route(ctx.clone()).await.expect("route").final_node(),
+            "direct",
+            "comm 比较区分大小写"
+        );
+
         // 不命中：注解缺席（非 TUN 流 / 归因 miss）→ 落默认
         ctx.metadata.annotations.clear();
         assert_eq!(
             engine.route(ctx).await.expect("route").final_node(),
             "direct",
             "注解缺席应落默认节点"
+        );
+    }
+
+    /// RIL-015：进程路径条件——`process.path` 注解全串精确相等命中；
+    /// 仅短名（comm）不得冒充路径；大小写不同不命中；注解缺席恒不命中。
+    #[tokio::test]
+    async fn process_path_condition_matches_full_path_exactly() {
+        use rillane_core::{FlowId, FlowMetadata, FlowTarget, TargetProto};
+
+        let engine = RoutingEngine::new(RoutingConfig {
+            default_node: "direct".into(),
+            rules: vec![RouteRule {
+                name: "browser".into(),
+                matches: vec![MatchCondition::ProcessPath {
+                    values: vec!["/usr/bin/firefox".into()],
+                }],
+                target: "browse-node".into(),
+            }],
+            ..Default::default()
+        });
+        let mut ctx = FlowContext {
+            id: FlowId::new(),
+            target: FlowTarget {
+                host: "203.0.113.9".into(),
+                port: 443,
+                proto: TargetProto::Tcp,
+            },
+            metadata: FlowMetadata::default(),
+        };
+
+        // 命中：全串路径精确相等
+        ctx.metadata
+            .annotations
+            .insert("process.path".into(), "/usr/bin/firefox".into());
+        assert_eq!(
+            engine.route(ctx.clone()).await.expect("route").final_node(),
+            "browse-node"
+        );
+
+        // 不命中：只有短名（comm），不得冒充路径
+        ctx.metadata.annotations.clear();
+        ctx.metadata
+            .annotations
+            .insert("process.name".into(), "firefox".into());
+        assert_eq!(
+            engine.route(ctx.clone()).await.expect("route").final_node(),
+            "direct",
+            "短名不得替代全路径命中"
+        );
+
+        // 不命中：大小写不同（不折叠）
+        ctx.metadata
+            .annotations
+            .insert("process.path".into(), "/usr/bin/Firefox".into());
+        assert_eq!(
+            engine.route(ctx.clone()).await.expect("route").final_node(),
+            "direct",
+            "路径比较区分大小写"
+        );
+
+        // 不命中：注解缺席
+        ctx.metadata.annotations.clear();
+        assert_eq!(
+            engine.route(ctx).await.expect("route").final_node(),
+            "direct"
         );
     }
 

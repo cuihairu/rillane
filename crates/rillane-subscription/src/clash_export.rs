@@ -681,6 +681,12 @@ fn condition_to_rules(
                 rules.push(format!("PROCESS-NAME,{v},{target}"));
             }
         }
+        // RIL-015：进程路径独立导出（与 PROCESS-NAME 语义分离）
+        MatchCondition::ProcessPath { values } => {
+            for v in values {
+                rules.push(format!("PROCESS-PATH,{v},{target}"));
+            }
+        }
         // RIL-014：源端口独立导出（与 DST-PORT 语义分离，往返保真）
         MatchCondition::SrcPort { values } => {
             for p in values {
@@ -946,6 +952,27 @@ mod tests {
             )
             .unwrap()
         }
+    }
+
+    /// RIL-015 导出面：Process / ProcessPath 分别回写 PROCESS-NAME /
+    /// PROCESS-PATH，两种语义不互相混写。
+    #[test]
+    fn process_conditions_export_distinct_kinds() {
+        let cond = MatchCondition::Process {
+            values: vec!["game.exe".to_string()],
+        };
+        let mut rules = Vec::new();
+        let mut skipped = Vec::new();
+        condition_to_rules(&cond, "PROXY", &mut rules, &mut skipped);
+        assert_eq!(rules, vec!["PROCESS-NAME,game.exe,PROXY"]);
+        assert!(skipped.is_empty());
+
+        let cond = MatchCondition::ProcessPath {
+            values: vec!["/usr/bin/firefox".to_string()],
+        };
+        let mut rules = Vec::new();
+        condition_to_rules(&cond, "PROXY", &mut rules, &mut skipped);
+        assert_eq!(rules, vec!["PROCESS-PATH,/usr/bin/firefox,PROXY"]);
     }
 
     /// 全类型映射 + 组 + 规则 + MATCH + DIRECT 映射逐项断言

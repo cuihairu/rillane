@@ -10,7 +10,7 @@ Inputs include Clash YAML, share-link lists/base64 and Rillane DSL. Converter/ru
 |---|---|---|
 | proxies | egress | Parsed fields do not prove platform/protocol availability |
 | proxy-groups | routing.groups | fallback → Random and relay → ConsistentHash lose semantics |
-| rules | routing.rules | Important PROCESS-NAME/RULE-SET conditions can be warned and skipped |
+| rules | routing.rules | Process conditions convert but are reported as engine-degraded (TUN attribution); undeclared RULE-SET references are skipped with a name |
 | url-test interval | Probe seconds | Read in seconds as of the RIL-092 fix; 0 and omission both default to 300 seconds |
 
 Conversion success is not sufficient. Inspect critical conditions/groups/units. Root `todo.md` RIL-092/RIL-093 addresses early fixes; RIL-007–RIL-016 covers full fidelity. See [verified gaps](research/proxy-architectures-2026-11-14.md#verified-gaps).

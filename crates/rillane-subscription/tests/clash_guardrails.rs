@@ -82,26 +82,28 @@ fn unsupported_rules_reported_and_strict_rejected() {
         "rules:\n  - PROCESS-NAME,game.exe,n1\n  - RULE-SET,ads,n1\n  - DOMAIN-SUFFIX,example.com,n1",
     );
 
-    // 严格：两条不支持规则都点名拒绝（RIL-014 起 RULE-SET 走引用追踪：
-    // 未在 rule-providers 中声明的引用仍按损失拒绝，原因措辞更新）
+    // 严格：未声明的 RULE-SET 引用点名拒绝（RIL-014 起走引用追踪）；
+    // RIL-015 起 PROCESS-NAME 可转换，不再构成拒绝理由。
     let strict = ClashConverter::new().with_strict(true);
     let clash = strict.parse(&yaml).unwrap();
     let err = strict.convert_to_rillane(&clash).unwrap_err().to_string();
-    assert!(
-        err.contains("rule-1") && err.contains("rule-2"),
-        "实际: {err}"
-    );
-    assert!(err.contains("进程名规则暂不支持"));
+    assert!(err.contains("rule-2"), "实际: {err}");
     assert!(err.contains("ads"), "未声明引用须点名规则集名: {err}");
     assert!(err.contains("rule-providers"));
 
-    // 宽松：跳过并报告，支持规则照常转换
+    // 宽松：仅丢未声明引用，进程规则转换并按降级显式报告
     let lenient = ClashConverter::new();
     let clash = lenient.parse(&yaml).unwrap();
     let (config, report) = lenient.convert_to_rillane_with_report(&clash).unwrap();
-    assert_eq!(report.dropped_rules.len(), 2);
-    assert_eq!(config.routing.rules.len(), 1);
+    assert_eq!(report.dropped_rules.len(), 1);
+    assert_eq!(config.routing.rules.len(), 2);
     assert_eq!(config.routing.rules[0].target, "n1");
+    let degraded: Vec<&str> = report
+        .degraded_rules
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    assert_eq!(degraded, vec!["rule-1"]);
 }
 
 // ---------- 节点：无效与类型不支持分别报告，支持类型硬错误保持 ----------
@@ -234,7 +236,8 @@ fn report_summary_renders_counts_and_names() {
     let summary = report.summary();
     assert!(summary.contains("降级组 1 个"));
     assert!(summary.contains("g1"));
-    assert!(summary.contains("跳过规则 1 条"));
+    // RIL-015：进程规则不再是跳过项，而是显式降级项
+    assert!(summary.contains("降级规则 1 条"), "进程规则须按降级报告: {summary}");
     assert!(summary.contains("rule-1"));
     // 空报告字面量
     assert_eq!(
