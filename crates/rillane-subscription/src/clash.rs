@@ -814,6 +814,68 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+/// 转换损失清单：宽松模式导入继续，但被丢弃/降级的内容必须在这里可见，
+/// 不能伪装成无损成功；严格模式清单非空即整体拒绝（RIL-093）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConversionReport {
+    /// 被丢弃的节点（节点名, 原因）：未通过有效性校验或类型暂不支持
+    pub dropped_nodes: Vec<(String, String)>,
+    /// 语义被降级的组（组名, 降级说明）：fallback/relay 无同语义策略
+    pub degraded_groups: Vec<(String, String)>,
+    /// 被跳过的规则（规则名, 原因）：暂不支持的规则类型
+    pub dropped_rules: Vec<(String, String)>,
+}
+
+impl ConversionReport {
+    /// 是否没有任何丢弃或降级
+    pub fn is_empty(&self) -> bool {
+        self.dropped_nodes.is_empty()
+            && self.degraded_groups.is_empty()
+            && self.dropped_rules.is_empty()
+    }
+
+    /// 人可读的损失清单（逐行）；空报告返回「无损失」
+    pub fn summary(&self) -> String {
+        if self.is_empty() {
+            return "无损失".to_string();
+        }
+
+        let mut lines = Vec::new();
+        if !self.dropped_nodes.is_empty() {
+            lines.push(format!("丢弃节点 {} 个:", self.dropped_nodes.len()));
+            lines.extend(
+                self.dropped_nodes
+                    .iter()
+                    .map(|(name, reason)| format!("  节点 {name}: {reason}")),
+            );
+        }
+        if !self.degraded_groups.is_empty() {
+            lines.push(format!("降级组 {} 个:", self.degraded_groups.len()));
+            lines.extend(
+                self.degraded_groups
+                    .iter()
+                    .map(|(name, reason)| format!("  组 {name}: {reason}")),
+            );
+        }
+        if !self.dropped_rules.is_empty() {
+            lines.push(format!("跳过规则 {} 条:", self.dropped_rules.len()));
+            lines.extend(
+                self.dropped_rules
+                    .iter()
+                    .map(|(name, reason)| format!("  规则 {name}: {reason}")),
+            );
+        }
+        lines.join("\n")
+    }
+}
+
+/// 该代理类型是否已有到 Rillane 的换算表（RIL-093：类型级不支持的节点按
+/// 丢弃+报告处理，不再让单个节点炸掉整个导入；已支持类型的配置级错误——
+/// 如 reality 缺 public-key——仍点名硬错误，不降级成静默丢节点，G1-6 保持）。
+fn is_supported_proxy_type(proxy_type: ClashProxyType) -> bool {
+    !matches!(proxy_type, ClashProxyType::Snell)
+}
+
 /// Clash 配置转换器
 pub struct ClashConverter {
     /// 节点名称前缀
@@ -824,6 +886,10 @@ pub struct ClashConverter {
     rule_prefix: String,
     /// 是否过滤无效节点
     filter_invalid_nodes: bool,
+    /// 严格导入：任何语义损失（不支持类型/组/规则、无效节点）整体拒绝，
+    /// 不产出半份伪装成功的配置；宽松模式继续导入但损失进 ConversionReport
+    /// （RIL-093）
+    strict: bool,
 }
 
 impl ClashConverter {
@@ -834,6 +900,7 @@ impl ClashConverter {
             group_prefix: String::new(),
             rule_prefix: String::new(),
             filter_invalid_nodes: true,
+            strict: false,
         }
     }
 
@@ -861,6 +928,14 @@ impl ClashConverter {
         self
     }
 
+    /// 设置严格导入模式。严格 = true：任何语义损失整体拒绝；宽松 = false
+    /// （缺省）：导入继续但损失清单随 `convert_to_rillane_with_report` 返回
+    /// （RIL-093）
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
     /// 解析 Clash 配置
     pub fn parse(&self, content: &str) -> Result<ClashConfig> {
         debug!(
@@ -882,24 +957,45 @@ impl ClashConverter {
         Ok(config)
     }
 
-    /// 转换为 Rillane 配置
+    /// 转换为 Rillane 配置。丢弃/降级内容只记日志不返回——需要损失清单
+    /// （宽松模式报告 / 严格模式拒绝）用 `convert_to_rillane_with_report`
+    /// （RIL-093）
     pub fn convert_to_rillane(
         &self,
         clash_config: &ClashConfig,
     ) -> Result<rillane_config::RillaneConfig> {
+        self.convert_to_rillane_with_report(clash_config)
+            .map(|(config, _)| config)
+    }
+
+    /// 转换为 Rillane 配置并返回损失清单。宽松模式：配置照常产出，被丢弃/
+    /// 降级的内容进 `ConversionReport`；严格模式：清单非空即整体拒绝，
+    /// Err 信息即完整损失清单，绝不产出半份伪装成功的配置（RIL-093）。
+    pub fn convert_to_rillane_with_report(
+        &self,
+        clash_config: &ClashConfig,
+    ) -> Result<(rillane_config::RillaneConfig, ConversionReport)> {
         debug!(
             target: "rillane::subscription::clash",
             "开始转换为 Rillane 配置"
         );
 
+        let mut report = ConversionReport::default();
+
         // 转换代理为出口节点
-        let egress = self.convert_proxies_to_egress(&clash_config.proxies)?;
+        let egress = self.convert_proxies_to_egress(&clash_config.proxies, &mut report)?;
 
         // 转换代理组为策略组
-        let groups = self.convert_proxy_groups_to_groups(&clash_config.proxy_groups)?;
+        let groups =
+            self.convert_proxy_groups_to_groups(&clash_config.proxy_groups, &mut report)?;
 
         // 转换规则为路由规则
-        let rules = self.convert_rules_to_routing_rules(&clash_config.rules)?;
+        let rules = self.convert_rules_to_routing_rules(&clash_config.rules, &mut report)?;
+
+        // 严格导入：任何语义损失都拒绝，错误携带完整损失清单
+        if self.strict && !report.is_empty() {
+            return Err(anyhow!("严格导入拒绝有损转换:\n{}", report.summary()));
+        }
 
         // 创建默认节点
         let default_node = egress
@@ -946,11 +1042,15 @@ impl ClashConverter {
             "Rillane 配置转换完成"
         );
 
-        Ok(config)
+        Ok((config, report))
     }
 
     /// 转换代理为出口节点
-    fn convert_proxies_to_egress(&self, proxies: &[ClashProxy]) -> Result<Vec<EgressDescriptor>> {
+    fn convert_proxies_to_egress(
+        &self,
+        proxies: &[ClashProxy],
+        report: &mut ConversionReport,
+    ) -> Result<Vec<EgressDescriptor>> {
         let mut egress = Vec::new();
 
         for proxy in proxies {
@@ -961,11 +1061,29 @@ impl ClashConverter {
                     proxy_type = ?proxy.proxy_type,
                     "跳过无效代理节点"
                 );
+                // 丢节点必须可见：宽松模式进损失清单，严格模式据此整体拒绝
+                report.dropped_nodes.push((
+                    proxy.name.clone(),
+                    "未通过有效性校验（缺 server/port 或类型必填字段）".to_string(),
+                ));
                 continue;
             }
 
             let name = format!("{}{}", self.node_prefix, proxy.name);
-            let egress_config = self.convert_proxy_to_egress_config(proxy)?;
+            let egress_config = match self.convert_proxy_to_egress_config(proxy) {
+                Ok(spec) => spec,
+                Err(err) => {
+                    // 类型级不支持（如 Snell）：宽松丢弃并报告、严格记入清单
+                    // 统一拒绝——单节点不再炸掉整个导入；已支持类型的配置级
+                    // 错误（如 reality 缺 public-key）保持点名硬错误，不降级
+                    // 成静默丢节点（G1-6 拒绝策略，RIL-093 保持）
+                    if is_supported_proxy_type(proxy.proxy_type) {
+                        return Err(err);
+                    }
+                    report.dropped_nodes.push((name.clone(), err.to_string()));
+                    continue;
+                }
+            };
 
             egress.push(EgressDescriptor {
                 name,
@@ -1223,12 +1341,28 @@ impl ClashConverter {
     fn convert_proxy_groups_to_groups(
         &self,
         proxy_groups: &[ClashProxyGroup],
+        report: &mut ConversionReport,
     ) -> Result<Vec<PolicyGroup>> {
         let mut groups = Vec::new();
 
         for group in proxy_groups {
             let name = format!("{}{}", self.group_prefix, group.name);
-            let strategy = self.convert_group_type_to_strategy(group.group_type);
+            let strategy = match self.convert_group_type_to_strategy(group.group_type) {
+                Ok(strategy) => strategy,
+                Err(err) => {
+                    // fallback/relay 语义当前无法无损表达：宽松降级+报告，
+                    // 严格记入清单最终统一拒绝（完整 fallback 实现归 RIL-012）
+                    let degraded = match group.group_type {
+                        ClashProxyGroupType::Fallback => Strategy::Random,
+                        ClashProxyGroupType::Relay => Strategy::ConsistentHash,
+                        // 理论不可达：convert_group_type_to_strategy 只对
+                        // fallback/relay 报错
+                        _ => return Err(err),
+                    };
+                    report.degraded_groups.push((name.clone(), err.to_string()));
+                    degraded
+                }
+            };
             let members = self.convert_proxies_to_group_members(&group.proxies);
 
             // G1-9：url-test 组的测试 URL/间隔映射为 UrlTestConfig，订阅导入
@@ -1262,14 +1396,24 @@ impl ClashConverter {
         Ok(groups)
     }
 
-    /// 转换代理组类型为策略
-    fn convert_group_type_to_strategy(&self, group_type: ClashProxyGroupType) -> Strategy {
+    /// 转换代理组类型为策略。fallback/relay 在 Rillane v1 尚无同语义策略
+    /// （fallback=按序回退、relay=链式转发）：映射成 Random/ConsistentHash
+    /// 属有损转换——Err 携带说明，调用方决定降级（宽松+报告）或拒绝（严格），
+    /// 不再静默映射伪装成功（RIL-093；完整 fallback 实现归 RIL-012）
+    fn convert_group_type_to_strategy(
+        &self,
+        group_type: ClashProxyGroupType,
+    ) -> Result<Strategy> {
         match group_type {
-            ClashProxyGroupType::Select => Strategy::Fixed,
-            ClashProxyGroupType::UrlTest => Strategy::Latency,
-            ClashProxyGroupType::LoadBalance => Strategy::Weighted,
-            ClashProxyGroupType::Fallback => Strategy::Random,
-            ClashProxyGroupType::Relay => Strategy::ConsistentHash,
+            ClashProxyGroupType::Select => Ok(Strategy::Fixed),
+            ClashProxyGroupType::UrlTest => Ok(Strategy::Latency),
+            ClashProxyGroupType::LoadBalance => Ok(Strategy::Weighted),
+            ClashProxyGroupType::Fallback => Err(anyhow!(
+                "fallback 组语义是按序回退，映射成随机会伪装成功（完整实现归 RIL-012）"
+            )),
+            ClashProxyGroupType::Relay => Err(anyhow!(
+                "relay 组语义是链式转发，映射成一致性哈希会伪装成功"
+            )),
         }
     }
 
