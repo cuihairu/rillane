@@ -346,6 +346,11 @@ pub struct ProbeService {
 }
 
 impl ProbeService {
+    /// 装配限额（只读面——控制面/CLI 展示资源边界）
+    pub fn limits(&self) -> &ProbeLimits {
+        &self.limits
+    }
+
     /// 装配：范围 + 限额 + 执行器 + 注入钟（unix ms）一次性钉死
     pub fn new(
         scope: TargetScope,

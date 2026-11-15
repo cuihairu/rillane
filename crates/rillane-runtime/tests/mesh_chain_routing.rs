@@ -47,6 +47,7 @@ async fn mesh_target_routes_to_chain_decision() {
         scenarios: Default::default(),
         performance: None,
         egress_pool: None,
+        probe: None,
     };
 
     let rt_cfg = RuntimeConfig {

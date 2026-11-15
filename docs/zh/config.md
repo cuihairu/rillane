@@ -22,6 +22,7 @@
 | `network` | 可选 | TUN/系统路由/DNS 分流（缺省关） |
 | `obfuscation` | 可选 | 混淆横切层（缺省关） |
 | `egress_pool` | 可选 | 出站连接池（缺省关） |
+| `probe` | 可选 | 主动探测授权（缺省 None = 整面关） |
 | `profile` | 可选 | 场景预设 `proxy\|game\|web` |
 | `performance` | 可选 | relay 缓冲参数 |
 
@@ -194,6 +195,20 @@ network:
 | `pre_dial_direct` | `false` | 须搭配 `enabled: true` |
 
 快照观测：`GET /egress/pool/stats` 或 `rillanectl pool status`。
+
+## probe（缺省 None = 整面关；targets 是闭合登记表，本版无 handshake 种类）
+
+| 字段 | 缺省 | 约束 |
+|------|------|------|
+| `targets` | `[]` | 闭合目标登记表（空 = 无目标可探测）；逐条 `kind: dns`（`host`）、`kind: connect`（`addr`）、`kind: udp_echo`（`addr`）；`addr` 为 `ip:port`，装载期校验 |
+| `limits.max_active` | `4` | ≥ 1；超额作业排队不丢弃 |
+| `limits.job_timeout_ms` | `5000` | ≥ 1，单作业 deadline |
+| `limits.udp_payload_max_bytes` | `512` | ≥ 1；超上限提交被拒 |
+| `limits.byte_budget` | `65536` | ≥ 1；提交预留、完成按实发字节双向结算（退还 + 超耗） |
+
+本块只存在于操作员本地配置：来源合并面是对象登记（`SourceSnapshot.objects`），顶层 `probe` 块结构上进不了合并面——不可信订阅文本永远无法扩探测范围。无 `probe` 块 = 探测面整体关闭：端点答 `503 probe.disabled`，无网络副作用。测量只含执行器实际观测（`failure` / `rtt_ms` / UDP 回显 `sent`/`replies`/`loss_ratio`/`payload_len`），不含任何机场内部路径推断（debug-and-mcp.md §3）。代理握手目标本版刻意不在配置面——egress connector 是流级 forward 面，无「拨号并测握手」形态。
+
+端点/CLI 面：`GET /probe`、`POST /probe`、`GET /probe/result?id=`、`POST /probe/cancel?id=` 与 `rillanectl probe submit|cancel|result|list`（见 [cli.md](cli.md) § probe）。
 
 ## profile / performance
 

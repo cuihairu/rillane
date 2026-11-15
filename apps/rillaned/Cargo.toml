@@ -26,6 +26,8 @@ serde_json.workspace = true
 uuid.workspace = true
 rillane-config = { path = "../../crates/rillane-config" }
 rillane-core = { path = "../../crates/rillane-core" }
+# 探测执行器 trait 实现（RIL-061 测试桩实现 ProbeExecutor 需要）
+async-trait.workspace = true
 rillane-platform = { path = "../../crates/rillane-platform" }
 rillane-runtime = { path = "../../crates/rillane-runtime", default-features = false }
 rillane-telemetry = { path = "../../crates/rillane-telemetry" }

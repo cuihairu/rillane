@@ -57,6 +57,10 @@
 | GET | `/trace/flows` | 逐连接轨迹分页列表（可过滤；版本化信封 `schema_version=1`） | `trace list` |
 | GET | `/trace/flow?id=` | 单流完整轨迹或显式缺席答复（`found:false` + 稳定码） | `trace flow` |
 | GET | `/trace/events?id=&from_seq=&limit=` | 事件增量读取（未知/缺席 ID → 404 + 稳定码） | `trace events` |
+| GET | `/probe` | 探测作业列表（限额 + 作业快照） | `probe list` |
+| GET | `/probe/result?id=` | 单作业测量快照，或显式缺席答复（`found:false` + 稳定码） | `probe result` |
+| POST | `/probe` | 发起探测作业（目标必须在服务端 probe 范围登记过） | `probe submit` |
+| POST | `/probe/cancel?id=` | 取消作业（排队中 → 立即终态；运行中 → 协作取消请求） | `probe cancel` |
 
 ## 命令总览
 
@@ -80,6 +84,7 @@
 | `route` | 系统路由管理（apply/clear/status） | 控制面 + 本机 ip 命令 |
 | `diagnose` | 一键诊断信息收集（生成诊断目录） | 控制面 + 本机快照 |
 | `trace` | 逐连接轨迹查询（list / 单流详情 / 事件增量；显式缺席 = 退出码 2） | 控制面 `/trace/*` |
+| `probe` | 主动探测作业（submit/cancel/result/list；只展示测量，不推断机场内部路径） | 控制面 `/probe*` |
 | `mtls` | Mesh mTLS 证书工具（init-ca/issue/rotate/bundle-ca/rotate-ca/revoke） | 离线（revoke status 例外走控制面） |
 
 ## 各命令旗标
@@ -192,6 +197,19 @@ rillanectl trace events <id> [--from-seq N] [--limit N] [--json]
 逐连接轨迹查询（RIL-060，走内核逐连接查询服务）。`--endpoint` 为 base URL 型（默认 `http://{api_bind}`）。以真实 flow ID 锚定——`stats`/`/flows` 展示的 ingress/egress 聚合键在本面不作为流 ID 命中。缺席显式分码（`query.flow.unknown` / `query.tracing.disabled` / `collector.flow.evicted|expired|active_limit|sampled_out|drained`）；缺席答复恒携带采集计数快照与固定说明「无记录 ≠ 应用未发包」——绝不把缺席报告为「未发包」。默认文本输出；`--json` 原样打印版本化信封（`schema_version=1`）。
 
 退出码：`0` 查询有答；`1` 连接或用法错误；`2` 显式缺席（`trace flow` 答复 `found:false`，或 `trace events` 收到 404 错误信封）。
+
+### probe
+
+```bash
+rillanectl probe submit --kind dns|connect|udp-echo [--host <H>] [--addr <ip:port>] [--payload-len N] [--json]
+rillanectl probe cancel <id> [--json]
+rillanectl probe result <id> [--json]
+rillanectl probe list [--json]
+```
+
+显式发起的主动探测作业，目标限于操作员登记表（RIL-061）。目标必须在守护进程 `probe.targets` 范围内（只来自操作员本地配置——订阅文本永远无法扩范围）；范围外提交以稳定码拒绝（`probe.target.out_of_scope`）。配置无 `probe` 块时探测面整体关闭，所有端点答 `503 probe.disabled`——无授权无网络副作用。测量只含执行器实际观测：`failure`（稳定码 + 说明）或 null、`rtt_ms`（无回应即 null——绝不造数）、UDP 回显 `sent`/`replies`/`loss_ratio`/`payload_len`（丢包率由回应计数算得）。测量不含任何机场内部路径推断。代理握手探测本版不提供（egress connector 是流级 forward 面，无「拨号并测握手」形态），CLI 与配置面均无 handshake 种类。默认文本输出；`--json` 原样打印版本化信封（`schema_version=1`）。
+
+退出码：`0` 有答；`1` 连接、被拒或用法错误；`2` 显式缺席（`probe result` 未知作业 ID）。
 
 ### mtls
 

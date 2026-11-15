@@ -185,6 +185,24 @@ udp:
 # performance:
 #   relay_buffer: 8192             # 缺省 8192
 
+# 主动探测授权块（RIL-061）：显式发起/取消探测作业的授权面。
+# 块缺席 = 探测面整体关闭（端点 503 probe.disabled，无网络副作用）。
+# targets 是闭合登记表——只认本块，订阅文本永远无法扩范围；
+# 本版无 handshake 种类（执行器无代理握手测量）。
+# probe:
+#   targets:
+#     - kind: dns
+#       host: one.one.one.one
+#     - kind: connect
+#       addr: 1.1.1.1:443
+#     - kind: udp_echo
+#       addr: 1.1.1.1:53
+#   limits:                        # 缺省 = 内核定值（并发 4 / 超时 5s /
+#     max_active: 4                # UDP 载荷 512B / 预算 64KiB）
+#     job_timeout_ms: 5000
+#     udp_payload_max_bytes: 512
+#     byte_budget: 65536
+
 # mesh UDP 明文数据面门（环境变量，非 YAML 字段）：
 # chain+udp 未配置加密时需显式放行明文转发，在运行 rillaned 的环境中设置：
 #   export RILLANE_MESH_UDP_ALLOW_PLAINTEXT=1

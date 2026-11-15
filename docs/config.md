@@ -22,6 +22,7 @@ This page describes current configuration, not completed v1 fields. Definitions 
 | `network` | optional | TUN/system routing/DNS partition (default off) |
 | `obfuscation` | optional | obfuscation cross-cutting layer (default off) |
 | `egress_pool` | optional | egress connection pool (default off) |
+| `probe` | optional | active-probe authorization (default None = the whole surface off) |
 | `profile` | optional | scenario preset `proxy\|game\|web` |
 | `performance` | optional | relay buffer parameters |
 
@@ -194,6 +195,20 @@ With `enabled: true`, at least one dimension of policy must be configured (any o
 | `pre_dial_direct` | `false` | requires `enabled: true` |
 
 Snapshot observability: `GET /egress/pool/stats` or `rillanectl pool status`.
+
+## probe (default None = the whole surface off; targets are a closed registry, no handshake kind in this version)
+
+| Field | Default | Constraint |
+|------|------|------|
+| `targets` | `[]` | closed target registry (empty = nothing probeable); each entry is `kind: dns` (`host`), `kind: connect` (`addr`), or `kind: udp_echo` (`addr`); `addr` is `ip:port`, validated at load time |
+| `limits.max_active` | `4` | >= 1; jobs over the cap queue instead of being dropped |
+| `limits.job_timeout_ms` | `5000` | >= 1, per-job deadline |
+| `limits.udp_payload_max_bytes` | `512` | >= 1; submits above the cap are rejected |
+| `limits.byte_budget` | `65536` | >= 1; reserved on submit, settled by actual bytes sent (refund + overage) |
+
+The block only exists in operator-local config: the source merge surface is object registration (`SourceSnapshot.objects`), so a top-level `probe` block is structurally unreachable from subscription text — untrusted input can never extend the probe scope. No `probe` block = the whole surface off: the endpoints answer `503 probe.disabled` and no network side effects occur. Measurements are exactly what the executor observed (`failure` / `rtt_ms` / UDP echo `sent`/`replies`/`loss_ratio`/`payload_len`) and never include provider-internal path inference (debug-and-mcp.md §3). Proxy-handshake targets are deliberately absent from this version's config surface — the egress connector is a flow-level forward surface without a dial-and-measure shape.
+
+Endpoint/CLI surface: `GET /probe`, `POST /probe`, `GET /probe/result?id=`, `POST /probe/cancel?id=` and `rillanectl probe submit|cancel|result|list` (see [cli.md](cli.md) § probe).
 
 ## profile / performance
 

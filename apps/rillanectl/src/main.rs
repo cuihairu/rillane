@@ -163,6 +163,16 @@ enum Command {
         #[command(subcommand)]
         command: TraceCommand,
     },
+    /// 主动探测作业（Probe CLI，RIL-061；语法冻结：
+    /// 退出码 0=成功 / 1=用法或连接错误 / 2=显式缺席。
+    /// 显式网络副作用——目标必须在服务端登记范围内）
+    Probe {
+        /// 控制面 base URL，如 http://127.0.0.1:9090
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[command(subcommand)]
+        command: ProbeCommand,
+    },
     /// 一键诊断信息收集（生成诊断目录，按范围选择快照/日志/配置）
     Diagnose {
         /// 控制面 base URL，如 http://127.0.0.1:9090
@@ -227,6 +237,49 @@ enum TraceCommand {
         from_seq: u64,
         #[arg(long, default_value_t = 200)]
         limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Probe CLI 子命令（RIL-061，语法冻结——文本/版本化 JSON 双形态）。
+/// id 用 String 手工解析：clap 参数错误退出码会顶掉冻结的缺席码 2。
+#[derive(Subcommand)]
+enum ProbeCommand {
+    /// 显式发起探测作业（目标必须在服务端 probe.targets 登记范围内）
+    Submit {
+        /// 目标类型：dns | connect | udp-echo
+        #[arg(long)]
+        kind: String,
+        /// dns 目标域名（kind=dns 必填）
+        #[arg(long)]
+        host: Option<String>,
+        /// connect / udp-echo 目标地址 ip:port（对应 kind 必填）
+        #[arg(long)]
+        addr: Option<String>,
+        /// udp-echo 载荷字节数（默认 64；服务端按上限拒绝超额）
+        #[arg(long, default_value_t = 64)]
+        payload_len: usize,
+        /// 输出版本化 JSON（schema_version=1 信封原样）
+        #[arg(long)]
+        json: bool,
+    },
+    /// 取消作业（排队中 → 立即终态；运行中 → 协作取消请求）
+    Cancel {
+        /// 作业 ID（probe submit 返回的 job_id）
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 查询单个作业结果（未知 ID → 显式缺席，退出码 2）
+    Result {
+        /// 作业 ID
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 作业列表（限额与快照一屏可见）
+    List {
         #[arg(long)]
         json: bool,
     },
@@ -1288,6 +1341,138 @@ fn main() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&v)?);
                     } else {
                         print!("{}", render_trace_events(&v));
+                    }
+                }
+            }
+        }
+        Command::Probe { endpoint, command } => {
+            // RIL-061 Probe CLI：语法冻结（文本/版本化 JSON 双形态），
+            // 退出码 0=成功 / 1=用法或连接错误 / 2=显式缺席
+            let config = RillaneConfig::load_from_path(&cli.config)?;
+            let base = endpoint.unwrap_or_else(|| format!("http://{}", config.control.api_bind));
+            let token = config.control.admin_token.clone();
+            let client = Client::new();
+            match command {
+                ProbeCommand::Submit {
+                    kind,
+                    host,
+                    addr,
+                    payload_len,
+                    json,
+                } => {
+                    // 客户端侧用法校验（kind/参数对应/addr 可解析——非法
+                    // 值不发请求，退出码 1）
+                    let body = validate_probe_submit(
+                        &kind,
+                        host.as_deref(),
+                        addr.as_deref(),
+                        payload_len,
+                    )?;
+                    let (status, text) =
+                        probe_post(&client, token.as_deref(), &base, "/probe", &body)?;
+                    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                    if !status.is_success() {
+                        // 400 稳定码信封（范围外/预算）/ 503 探测面关闭——
+                        // 用法或授权问题，退出码 1
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&v)?);
+                        } else {
+                            eprintln!("probe submit: {}", render_probe_error(&v, &text));
+                        }
+                        std::process::exit(1);
+                    }
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&v)?);
+                    } else {
+                        let id = v.get("job_id").and_then(|x| x.as_u64()).unwrap_or(0);
+                        println!("作业 {id} 已提交（probe result {id} 查询结果）");
+                    }
+                }
+                ProbeCommand::Cancel { id, json } => {
+                    let id = parse_probe_id(&id)?;
+                    let (status, text) = probe_post(
+                        &client,
+                        token.as_deref(),
+                        &base,
+                        &format!("/probe/cancel?id={id}"),
+                        "",
+                    )?;
+                    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                    if status.as_u16() == 404 {
+                        // 未知作业：显式缺席（退出码 2）
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&v)?);
+                        } else {
+                            eprintln!("probe cancel {id}: 显式缺席（probe.job.unknown）");
+                        }
+                        std::process::exit(2);
+                    }
+                    if !status.is_success() {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&v)?);
+                        } else {
+                            eprintln!("probe cancel: {}", render_probe_error(&v, &text));
+                        }
+                        std::process::exit(1);
+                    }
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&v)?);
+                    } else {
+                        let verdict = v.get("verdict").and_then(|x| x.as_str()).unwrap_or("-");
+                        println!("作业 {id} 取消裁决: {verdict}");
+                    }
+                }
+                ProbeCommand::Result { id, json } => {
+                    let id = parse_probe_id(&id)?;
+                    let (status, text) = probe_fetch(
+                        &client,
+                        token.as_deref(),
+                        &base,
+                        &format!("/probe/result?id={id}"),
+                    )?;
+                    if status.as_u16() == 404 {
+                        // 显式缺席（probe.job.unknown）：退出码 2
+                        if json {
+                            println!("{text}");
+                        } else {
+                            let v: serde_json::Value =
+                                serde_json::from_str(&text).unwrap_or_default();
+                            let note = v
+                                .get("absence")
+                                .and_then(|a| a.get("note"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("");
+                            eprintln!("probe result {id}: 显式缺席（probe.job.unknown）{note}");
+                        }
+                        std::process::exit(2);
+                    }
+                    if !status.is_success() {
+                        eprintln!("probe result: 控制面返回错误: {status}: {text}");
+                        std::process::exit(1);
+                    }
+                    let v: serde_json::Value = serde_json::from_str(&text)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&v)?);
+                    } else {
+                        print!("{}", render_probe_job(&v));
+                    }
+                }
+                ProbeCommand::List { json } => {
+                    let (status, text) = probe_fetch(&client, token.as_deref(), &base, "/probe")?;
+                    if !status.is_success() {
+                        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&v)?);
+                        } else {
+                            eprintln!("probe list: {}", render_probe_error(&v, &text));
+                        }
+                        std::process::exit(1);
+                    }
+                    let v: serde_json::Value = serde_json::from_str(&text)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&v)?);
+                    } else {
+                        print!("{}", render_probe_list(&v));
                     }
                 }
             }
@@ -2628,6 +2813,266 @@ fn url_base(url: &str) -> String {
     format!("{scheme}://{host}")
 }
 
+// ---------- Probe CLI 纯辅助（RIL-061）：用法校验/请求/渲染均抽纯函数
+// 便于单测——网络与进程退出只在 main 分发臂发生 ----------
+
+/// 作业 ID 解析（非负整数；clap 参数错误退出码会顶掉冻结缺席码 2——
+/// 手工解析让非法 ID 走退出码 1）
+fn parse_probe_id(id: &str) -> Result<u64> {
+    id.parse::<u64>()
+        .with_context(|| format!("作业 ID 须为非负整数（得到 {id}）"))
+}
+
+/// 客户端侧提交用法校验 + 请求体拼装：kind/参数对应、addr 可解析、
+/// 载荷为正——非法值不发请求（退出码 1 路径）
+fn validate_probe_submit(
+    kind: &str,
+    host: Option<&str>,
+    addr: Option<&str>,
+    payload_len: usize,
+) -> Result<String> {
+    match kind {
+        "dns" => {
+            let h = host
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("kind=dns 需要 --host"))?;
+            Ok(serde_json::json!({"kind": "dns", "host": h}).to_string())
+        }
+        "connect" => {
+            let a = addr.ok_or_else(|| anyhow::anyhow!("kind=connect 需要 --addr"))?;
+            let parsed: std::net::SocketAddr = a
+                .parse()
+                .with_context(|| format!("--addr 须为 ip:port（得到 {a}）"))?;
+            Ok(serde_json::json!({"kind": "connect", "addr": parsed}).to_string())
+        }
+        "udp-echo" => {
+            let a = addr.ok_or_else(|| anyhow::anyhow!("kind=udp-echo 需要 --addr"))?;
+            let parsed: std::net::SocketAddr = a
+                .parse()
+                .with_context(|| format!("--addr 须为 ip:port（得到 {a}）"))?;
+            if payload_len == 0 {
+                anyhow::bail!("--payload-len 须 ≥ 1");
+            }
+            Ok(
+                serde_json::json!({"kind": "udp_echo", "addr": parsed, "payload_len": payload_len})
+                    .to_string(),
+            )
+        }
+        other => anyhow::bail!("kind 只接受 dns|connect|udp-echo，得到 {other}"),
+    }
+}
+
+/// 控制面 URL 拼装（base 去尾斜杠 + path；query 由调用方续接）
+fn probe_url(base: &str, path: &str) -> Result<String> {
+    let trimmed = base.trim_end_matches('/');
+    if trimmed.is_empty() {
+        anyhow::bail!("控制面地址为空");
+    }
+    Ok(format!("{trimmed}{path}"))
+}
+
+/// GET + x-admin-token → (status, body)；连接失败 → Err（退出码 1 路径）
+fn probe_fetch(
+    client: &Client,
+    token: Option<&str>,
+    base: &str,
+    path: &str,
+) -> Result<(reqwest::StatusCode, String)> {
+    let url = probe_url(base, path)?;
+    let mut req = client.get(&url);
+    if let Some(token) = token {
+        req = req.header("x-admin-token", token);
+    }
+    let resp = req.send().with_context(|| format!("无法访问 {url}"))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .with_context(|| format!("读取 {url} 响应失败"))?;
+    Ok((status, body))
+}
+
+/// POST + x-admin-token → (status, body)；连接失败 → Err（退出码 1 路径）
+fn probe_post(
+    client: &Client,
+    token: Option<&str>,
+    base: &str,
+    path: &str,
+    body: &str,
+) -> Result<(reqwest::StatusCode, String)> {
+    let url = probe_url(base, path)?;
+    let mut req = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(body.to_string());
+    if let Some(token) = token {
+        req = req.header("x-admin-token", token);
+    }
+    let resp = req.send().with_context(|| format!("无法访问 {url}"))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .with_context(|| format!("读取 {url} 响应失败"))?;
+    Ok((status, text))
+}
+
+/// 错误信封可读形（error.code + context；非 JSON 原样带出）
+fn render_probe_error(v: &serde_json::Value, raw: &str) -> String {
+    let code = v
+        .get("error")
+        .and_then(|e| e.get("code"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("-");
+    let context = v
+        .get("error")
+        .and_then(|e| e.get("context"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    if code == "-" {
+        // 非 JSON/无信封：原文截断带出（不造语义）
+        raw.chars().take(200).collect()
+    } else {
+        format!("{code}: {context}")
+    }
+}
+
+/// 测量文本（outcome 三路标记逐行显式——无回应不造 RTT，丢包由计数
+/// 可算，无任何路径/跳点推断）
+fn probe_outcome_line(outcome: &serde_json::Value) -> String {
+    let measurement = outcome
+        .get("measurement")
+        .and_then(|x| x.as_str())
+        .unwrap_or("-");
+    let rtt = outcome
+        .get("rtt_ms")
+        .map(|x| {
+            x.as_u64()
+                .map(|n| format!("{n}ms"))
+                .unwrap_or_else(|| "none".into())
+        })
+        .unwrap_or_else(|| "-".into());
+    match measurement {
+        "dns" => {
+            let resolved = outcome
+                .get("resolved")
+                .and_then(|r| r.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|x| x.as_str().unwrap_or("?").to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            format!("    measurement=dns resolved={resolved} rtt={rtt}\n")
+        }
+        "connect" => format!("    measurement=connect rtt={rtt}\n"),
+        "udp_echo" => {
+            let sent = outcome.get("sent").and_then(|x| x.as_u64()).unwrap_or(0);
+            let replies = outcome.get("replies").and_then(|x| x.as_u64()).unwrap_or(0);
+            let payload = outcome
+                .get("payload_len")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
+            let loss = outcome
+                .get("loss_ratio")
+                .map(|x| {
+                    x.as_f64()
+                        .map(|f| format!("{f}"))
+                        .unwrap_or_else(|| "none".into())
+                })
+                .unwrap_or_else(|| "-".into());
+            format!("    measurement=udp_echo sent={sent} replies={replies} loss={loss} rtt={rtt} payload={payload}B\n")
+        }
+        other => format!("    measurement={other}\n"),
+    }
+}
+
+/// 单作业文本：头部（id/target/state/时刻）+ 失败行 + 测量行
+fn render_probe_job(v: &serde_json::Value) -> String {
+    let job = v.get("job").unwrap_or(v);
+    let id = job.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
+    let target = job.get("target").and_then(|x| x.as_str()).unwrap_or("-");
+    let state = job.get("state").and_then(|x| x.as_str()).unwrap_or("-");
+    let submitted = job
+        .get("submitted_unix_ms")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let finished = job
+        .get("finished_unix_ms")
+        .and_then(|x| x.as_u64())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "-".into());
+    let mut out =
+        format!("job {id} {target}\n  state={state} submitted={submitted} finished={finished}\n");
+    match job.get("failure") {
+        Some(f) if !f.is_null() => {
+            let code = f.get("code").and_then(|x| x.as_str()).unwrap_or("-");
+            let detail = f.get("detail").and_then(|x| x.as_str()).unwrap_or("");
+            out.push_str(&format!("  failure: {code} {detail}\n"));
+        }
+        _ => out.push_str("  failure: none\n"),
+    }
+    match job.get("outcome") {
+        Some(o) if !o.is_null() => {
+            out.push_str("  outcome:\n");
+            out.push_str(&probe_outcome_line(o));
+        }
+        _ => out.push_str("  outcome: none（未完成/失败/取消无测量）\n"),
+    }
+    out
+}
+
+/// 列表文本：限额行 + 表头 + 逐作业行（jobs 空 = 无作业不造行）
+fn render_probe_list(v: &serde_json::Value) -> String {
+    let limits = v.get("limits");
+    let max_active = limits
+        .and_then(|l| l.get("max_active"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let timeout = limits
+        .and_then(|l| l.get("job_timeout_ms"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let udp_max = limits
+        .and_then(|l| l.get("udp_payload_max_bytes"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let budget = limits
+        .and_then(|l| l.get("byte_budget"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let mut out = format!(
+        "limits: max_active={max_active} timeout={timeout}ms udp_max={udp_max}B budget={budget}B\n"
+    );
+    let jobs = v.get("jobs").and_then(|j| j.as_array());
+    let Some(jobs) = jobs else {
+        return out;
+    };
+    if jobs.is_empty() {
+        out.push_str("无探测作业（probe submit 显式发起）\n");
+        return out;
+    }
+    out.push_str("ID\tTARGET\tSTATE\tSUBMITTED\tFINISHED\n");
+    for job in jobs {
+        let id = job.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
+        let target = job.get("target").and_then(|x| x.as_str()).unwrap_or("-");
+        let state = job.get("state").and_then(|x| x.as_str()).unwrap_or("-");
+        let submitted = job
+            .get("submitted_unix_ms")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let finished = job
+            .get("finished_unix_ms")
+            .and_then(|x| x.as_u64())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".into());
+        out.push_str(&format!(
+            "{id}\t{target}\t{state}\t{submitted}\t{finished}\n"
+        ));
+    }
+    out
+}
+
 // ---------- network-route.md §4：route 输出渲染（纯函数，§7.1 断言消费） ----------
 
 /// step 数组 → 逐行 argv 表（两空格缩进、argv 空格连接；缺键/非数组 → 空表）
@@ -3509,5 +3954,200 @@ mod tests {
         assert!(out.starts_with("flow f-ghost: 显式缺席（query.flow.unknown）"));
         assert!(out.contains("no record is not evidence of no traffic"));
         assert!(out.contains("\"traces_admitted\":7"), "计数快照可见");
+    }
+
+    // -------------------------------------------------------------------
+    // Probe CLI 纯辅助（RIL-061）
+    // -------------------------------------------------------------------
+
+    /// 提交用法校验：kind/参数对应 + addr 客户端预解析 + 载荷为正
+    #[test]
+    fn probe_submit_validation_maps_kind_to_body() {
+        let dns = validate_probe_submit("dns", Some(" example.invalid "), None, 64).unwrap();
+        assert_eq!(dns, r#"{"host":"example.invalid","kind":"dns"}"#);
+
+        let connect = validate_probe_submit("connect", None, Some("192.0.2.1:443"), 64).unwrap();
+        assert_eq!(connect, r#"{"addr":"192.0.2.1:443","kind":"connect"}"#);
+
+        let echo = validate_probe_submit("udp-echo", None, Some("192.0.2.1:53"), 128).unwrap();
+        assert_eq!(
+            echo,
+            r#"{"addr":"192.0.2.1:53","kind":"udp_echo","payload_len":128}"#
+        );
+
+        // kind 与参数错配 / 非法值 → 不发请求
+        assert!(validate_probe_submit("dns", None, None, 64).is_err());
+        assert!(validate_probe_submit("dns", Some("  "), None, 64).is_err());
+        assert!(validate_probe_submit("connect", None, None, 64).is_err());
+        assert!(validate_probe_submit("connect", None, Some("no-port"), 64).is_err());
+        assert!(validate_probe_submit("udp-echo", None, Some("127.0.0.1:53"), 0).is_err());
+        assert!(validate_probe_submit("handshake", None, Some("127.0.0.1:1"), 64).is_err());
+    }
+
+    /// 作业 ID 手工解析：非负整数通过、负数/非数字拒绝（退出码 1 路径，
+    /// 不与缺席码 2 冲突）
+    #[test]
+    fn probe_id_parses_non_negative_integers_only() {
+        assert_eq!(parse_probe_id("7").unwrap(), 7);
+        assert_eq!(parse_probe_id("0").unwrap(), 0);
+        assert!(parse_probe_id("-1").is_err());
+        assert!(parse_probe_id("abc").is_err());
+        assert!(parse_probe_id("").is_err());
+    }
+
+    /// URL 拼装：尾斜杠归一 + 空地址拒绝
+    #[test]
+    fn probe_url_trims_base_slash() {
+        assert_eq!(
+            probe_url("http://127.0.0.1:9090/", "/probe").unwrap(),
+            "http://127.0.0.1:9090/probe"
+        );
+        assert!(probe_url("", "/probe").is_err());
+        assert!(probe_url("///", "/probe").is_err());
+    }
+
+    /// 单作业渲染：头部 + 失败/测量三路标记分列（丢包由计数可算、
+    /// 无回应 rtt=none 不造数、failure none/null 分明）
+    #[test]
+    fn probe_job_renders_measurements_separately() {
+        let completed = serde_json::json!({
+            "schema_version": 1,
+            "found": true,
+            "job": {
+                "id": 3,
+                "target": "udp-echo:127.0.0.1:53?len=64",
+                "state": "completed",
+                "submitted_unix_ms": 1760000000000u64,
+                "finished_unix_ms": 1760000000040u64,
+                "outcome": {
+                    "measurement": "udp_echo",
+                    "sent": 3,
+                    "replies": 1,
+                    "payload_len": 64,
+                    "loss_ratio": 0.6667,
+                    "rtt_ms": 9
+                },
+                "failure": null
+            }
+        });
+        let out = render_probe_job(&completed);
+        assert!(
+            out.contains("job 3 udp-echo:127.0.0.1:53?len=64\n"),
+            "{out}"
+        );
+        assert!(out.contains("state=completed submitted=1760000000000 finished=1760000000040"));
+        assert!(out.contains("failure: none"));
+        assert!(
+            out.contains("measurement=udp_echo sent=3 replies=1 loss=0.6667 rtt=9ms payload=64B")
+        );
+
+        // 无回应：rtt=none（不造数）；丢失率 none→sent=0 场景 null
+        let silent = serde_json::json!({
+            "job": {
+                "id": 1,
+                "target": "udp-echo:127.0.0.1:53?len=32",
+                "state": "completed",
+                "submitted_unix_ms": 1,
+                "finished_unix_ms": 2,
+                "outcome": {
+                    "measurement": "udp_echo",
+                    "sent": 3,
+                    "replies": 0,
+                    "payload_len": 32,
+                    "loss_ratio": 1.0,
+                    "rtt_ms": null
+                },
+                "failure": null
+            }
+        });
+        let out = render_probe_job(&silent);
+        assert!(out.contains("rtt=none"), "{out}");
+        assert!(out.contains("loss=1"));
+
+        // 失败态：failure 带稳定码 + detail，outcome 显式 none（无测量）
+        let failed = serde_json::json!({
+            "job": {
+                "id": 2,
+                "target": "connect:192.0.2.1:443",
+                "state": "failed",
+                "submitted_unix_ms": 1,
+                "finished_unix_ms": 2,
+                "outcome": null,
+                "failure": {"code": "probe.exec.failed", "detail": "tcp connect failed: refused"}
+            }
+        });
+        let out = render_probe_job(&failed);
+        assert!(out.contains("state=failed"));
+        assert!(out.contains("failure: probe.exec.failed tcp connect failed: refused"));
+        assert!(out.contains("outcome: none（未完成/失败/取消无测量）"));
+
+        // dns 测量：解析地址逐个列出 + rtt
+        let dns = serde_json::json!({
+            "job": {
+                "id": 4,
+                "target": "dns:example.invalid",
+                "state": "completed",
+                "submitted_unix_ms": 1,
+                "finished_unix_ms": 2,
+                "outcome": {
+                    "measurement": "dns",
+                    "resolved": ["192.0.2.1", "2001:db8::1"],
+                    "rtt_ms": 5
+                },
+                "failure": null
+            }
+        });
+        let out = render_probe_job(&dns);
+        assert!(
+            out.contains("measurement=dns resolved=192.0.2.1,2001:db8::1 rtt=5ms"),
+            "{out}"
+        );
+    }
+
+    /// 列表渲染：限额行 + 表头 + 逐行；空列表不造行
+    #[test]
+    fn probe_list_renders_limits_and_rows() {
+        let empty = serde_json::json!({
+            "schema_version": 1,
+            "limits": {"max_active": 4, "job_timeout_ms": 5000,
+                       "udp_payload_max_bytes": 512, "byte_budget": 65536},
+            "jobs": []
+        });
+        let out = render_probe_list(&empty);
+        assert!(out.contains("limits: max_active=4 timeout=5000ms udp_max=512B budget=65536B"));
+        assert!(out.contains("无探测作业（probe submit 显式发起）"));
+
+        let one = serde_json::json!({
+            "schema_version": 1,
+            "limits": {"max_active": 2, "job_timeout_ms": 3000,
+                       "udp_payload_max_bytes": 256, "byte_budget": 32768},
+            "jobs": [
+                {"id": 0, "target": "connect:127.0.0.1:443", "state": "completed",
+                 "submitted_unix_ms": 1760000000000u64, "finished_unix_ms": 1760000000005u64},
+                {"id": 1, "target": "dns:example.invalid", "state": "running",
+                 "submitted_unix_ms": 1760000000010u64, "finished_unix_ms": null}
+            ]
+        });
+        let out = render_probe_list(&one);
+        assert!(out.contains("ID\tTARGET\tSTATE\tSUBMITTED\tFINISHED\n"));
+        assert!(out.contains("0\tconnect:127.0.0.1:443\tcompleted\t1760000000000\t1760000000005"));
+        assert!(out.contains("1\tdns:example.invalid\trunning\t1760000000010\t-"));
+    }
+
+    /// 错误信封可读形：code+context 提取；非 JSON 原文带出
+    #[test]
+    fn probe_error_envelope_renders_code_and_fallback() {
+        let envelope = serde_json::json!({
+            "schema_version": 1,
+            "error": {"code": "probe.target.out_of_scope", "context": "connect:192.0.2.1:443 not registered"}
+        });
+        let out = render_probe_error(&envelope, "raw");
+        assert_eq!(
+            out,
+            "probe.target.out_of_scope: connect:192.0.2.1:443 not registered"
+        );
+
+        let out = render_probe_error(&serde_json::Value::Null, "probe disabled plain text");
+        assert_eq!(out, "probe disabled plain text");
     }
 }

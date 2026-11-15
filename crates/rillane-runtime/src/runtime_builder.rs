@@ -4288,6 +4288,7 @@ mod tests {
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         };
 
         let runtime = RuntimeBuilder::new(cfg)
@@ -4336,6 +4337,7 @@ mod tests {
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         };
 
         let stats = runtime
@@ -4390,6 +4392,7 @@ mod tests {
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         };
         let runtime = Arc::new(
             RuntimeBuilder::new(cfg.clone())
@@ -4462,6 +4465,7 @@ mod tests {
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         };
         let runtime = Arc::new(
             RuntimeBuilder::new(cfg)
@@ -4504,6 +4508,7 @@ mod tests {
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         };
 
         let d1 = mk_delta("n1");
@@ -4566,6 +4571,7 @@ mod tests {
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         }
     }
 
@@ -4903,6 +4909,7 @@ mod tests {
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         };
 
         let delta = RillaneConfig {
@@ -4979,6 +4986,7 @@ mod tests {
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         };
 
         let stats = merge_config_delta_in_place(&mut target, &delta);
@@ -5137,6 +5145,7 @@ routing:
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         }
     }
 
@@ -6145,6 +6154,7 @@ routing:
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         }
     }
 
@@ -6346,6 +6356,7 @@ routing:
             profile: None,
             scenarios: Default::default(),
             performance: None,
+            probe: None,
         }
     }
 

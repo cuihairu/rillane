@@ -7,6 +7,9 @@ use tracing::info;
 // Re-export network module
 pub mod network;
 
+/// 真实探测执行器（RIL-061）：ProbeExecutor 的本机 I/O 装配面
+pub mod probe_exec;
+
 #[derive(Debug, Clone, Copy)]
 pub enum PlatformKind {
     Linux,

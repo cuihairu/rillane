@@ -1590,6 +1590,7 @@ impl ClashConverter {
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         };
 
         debug!(

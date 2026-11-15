@@ -20,6 +20,7 @@ use hyper::{
 use serde::{Deserialize, Serialize};
 
 use rillane_core::udp::{TableSnapshot, UdpIngressMetrics, UdpIngressSnapshot};
+use rillane_core::{JobSnapshot, ProbeOutcome, ProbeService};
 use rillane_mesh::{LinkState, MeshRegistry, NodeCapability, NodeRecord, NodeRole};
 use rillane_runtime::{
     ChainConstraints, FlowStatItem, Runtime, RuntimeEvent, SourceMergeStats, SwitchReason,
@@ -44,6 +45,10 @@ pub struct ControlPlane {
     max_event_log_lines: usize,
     telemetry_export: Arc<tokio::sync::RwLock<TelemetryExport>>,
     event_counters: Arc<tokio::sync::RwLock<CounterExport>>,
+    /// RIL-061：主动探测作业服务（None = 探测面关闭——端点 503）。
+    /// 装配在 rillaned 侧（build_probe_service）：探测授权只来自操作员
+    /// 本地 config 的 probe 块，与 runtime 数据面零耦合。
+    probe: Option<Arc<ProbeService>>,
 }
 
 impl ControlPlane {
@@ -57,12 +62,20 @@ impl ControlPlane {
             max_event_log_lines: 1000,
             telemetry_export: Arc::new(tokio::sync::RwLock::new(TelemetryExport::new(2000))),
             event_counters: Arc::new(tokio::sync::RwLock::new(CounterExport::new(2000))),
+            probe: None,
         };
         // 立即订阅事件：ControlPlane::new 在 runtime.start() 之前构造（main.rs），
         // 提前 subscribe 避免启动初段事件（ConfigUpdated/链路建链等）在 serve 才
         // 订阅而被广播通道静默丢弃（P2：事件广播 fire-and-forget）。
         cp.spawn_event_log_task();
         cp
+    }
+
+    /// RIL-061：挂探测作业服务（builder 风格——不改动既有 new 签名与
+    /// 全部既有测试调用点；None 保持探测面关闭）。
+    pub fn with_probe_service(mut self, probe: Option<Arc<ProbeService>>) -> Self {
+        self.probe = probe;
+        self
     }
 
     pub async fn serve(
@@ -150,6 +163,10 @@ impl ControlPlane {
             (Method::GET, "/trace/flows") => self.handle_trace_flows(req).await,
             (Method::GET, "/trace/flow") => self.handle_trace_flow(req).await,
             (Method::GET, "/trace/events") => self.handle_trace_events(req).await,
+            (Method::GET, "/probe") => self.handle_probe_list().await,
+            (Method::GET, "/probe/result") => self.handle_probe_result(req).await,
+            (Method::POST, "/probe") => self.handle_probe_submit(req).await,
+            (Method::POST, "/probe/cancel") => self.handle_probe_cancel(req).await,
             (Method::GET, "/metrics") => self.handle_metrics().await,
             (Method::GET, "/udp/stats") => self.handle_udp_stats().await,
             (Method::GET, "/egress/pool/stats") => self.handle_egress_pool_stats().await,
@@ -1511,6 +1528,131 @@ impl ControlPlane {
         }
     }
 
+    /// 主动探测作业列表（RIL-061）：限额与作业快照一屏可见——网络副作用
+    /// 只经 POST /probe 发生，本端点是纯读。
+    async fn handle_probe_list(&self) -> Response<RespBody> {
+        let Some(service) = self.probe.as_ref() else {
+            return probe_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "probe.disabled",
+                "probe block absent from config: no probe authority assembled",
+            );
+        };
+        let limits = service.limits();
+        let jobs: Vec<serde_json::Value> = service.list().iter().map(probe_job_json).collect();
+        let out = serde_json::json!({
+            "schema_version": 1u32,
+            "limits": {
+                "max_active": limits.max_active,
+                "job_timeout_ms": limits.job_timeout_ms,
+                "udp_payload_max_bytes": limits.udp_payload_max_bytes,
+                "byte_budget": limits.byte_budget,
+            },
+            "jobs": jobs,
+        });
+        json(StatusCode::OK, &out)
+    }
+
+    /// 主动探测作业结果（RIL-061）：完成态带显式测量（RTT / 回显计数 /
+    /// 丢包率分别标记——字段全部来自执行器回报，不推断机场内部路径）；
+    /// 未知 ID → 404 + 显式缺席信封（`probe.job.unknown`）。
+    async fn handle_probe_result(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        let Some(service) = self.probe.as_ref() else {
+            return probe_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "probe.disabled",
+                "probe block absent from config: no probe authority assembled",
+            );
+        };
+        let Some(id) = probe_id_from_query(req.uri().query().unwrap_or("")) else {
+            return probe_bad_param("id must be a number");
+        };
+        match service.result(id) {
+            Ok(snap) => {
+                let out = serde_json::json!({
+                    "schema_version": 1u32,
+                    "found": true,
+                    "job": probe_job_json(&snap),
+                    "absence": null,
+                });
+                json(StatusCode::OK, &out)
+            }
+            Err(err) => {
+                let out = serde_json::json!({
+                    "schema_version": 1u32,
+                    "found": false,
+                    "job": null,
+                    "absence": {
+                        "code": err.code,
+                        "note": err.detail,
+                    },
+                });
+                json(StatusCode::NOT_FOUND, &out)
+            }
+        }
+    }
+
+    /// 显式发起探测（RIL-061）：目标必须已在装配范围登记（`probe.target.
+    /// out_of_scope`），预算耗尽显式拒绝（`probe.limit.budget`）——拒绝
+    /// 不产生作业（服务面契约）。网络副作用只经此端点发生。
+    async fn handle_probe_submit(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        let Some(service) = self.probe.as_ref() else {
+            return probe_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "probe.disabled",
+                "probe block absent from config: no probe authority assembled",
+            );
+        };
+        let body: ProbeSubmitBody = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let target = match probe_target_from_body(body) {
+            Ok(t) => t,
+            Err(context) => return probe_bad_param(&context),
+        };
+        match service.submit(target) {
+            Ok(id) => json(
+                StatusCode::OK,
+                &serde_json::json!({"schema_version": 1u32, "job_id": id}),
+            ),
+            Err(err) => {
+                // 范围外/预算耗尽 = 请求语义问题（400 + 稳定码——服务面
+                // 拒绝不产生作业，错误信封带服务面稳定码原样）
+                json(
+                    StatusCode::BAD_REQUEST,
+                    &serde_json::json!({
+                        "schema_version": 1u32,
+                        "error": {"code": err.code, "context": err.detail},
+                    }),
+                )
+            }
+        }
+    }
+
+    /// 取消探测作业（RIL-061）：排队中取消立即终态（verdict = cancelled）；
+    /// 运行中取消置协作令牌（verdict = probe.cancel.requested，终态由执行
+    /// 器协作退出归类）；已终态作业返回其状态原样。未知 ID → 404。
+    async fn handle_probe_cancel(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        let Some(service) = self.probe.as_ref() else {
+            return probe_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "probe.disabled",
+                "probe block absent from config: no probe authority assembled",
+            );
+        };
+        let Some(id) = probe_id_from_query(req.uri().query().unwrap_or("")) else {
+            return probe_bad_param("id must be a number");
+        };
+        match service.cancel(id) {
+            Ok(verdict) => json(
+                StatusCode::OK,
+                &serde_json::json!({"schema_version": 1u32, "id": id, "verdict": verdict}),
+            ),
+            Err(err) => probe_error(StatusCode::NOT_FOUND, err.code, &err.detail),
+        }
+    }
+
     /// Clash 兼容 `/proxies`：只读子集——每个出口名映射到 Clash 代理对象。
     /// `type` 取 direct/reject/其余按 egress_kind；`now`/`udp`/`history` 提供
     /// 面板所需最小字段。metacubexd/yacd 可直连读取。
@@ -2703,6 +2845,140 @@ fn trace_error(status: StatusCode, code: &'static str, context: &str) -> Respons
     json(status, &out)
 }
 
+// ---------------------------------------------------------------------------
+// 主动探测端点辅助（RIL-061）：与 trace 面同构的稳定码信封 + 快照冻结
+// JSON 形。测量字段全部来自执行器回报——丢包率由 sent/replies 计数可算
+// 而非独立发明，失败与丢包与 RTT 三路标记互不混写，无任何路径/跳点字段
+// （不推断机场内部路径，debug-and-mcp.md §3）。
+// ---------------------------------------------------------------------------
+
+/// probe 端点稳定码错误（信封形状同 trace_error）
+fn probe_error(status: StatusCode, code: &'static str, context: &str) -> Response<RespBody> {
+    let out = serde_json::json!({
+        "schema_version": 1u32,
+        "error": {
+            "code": code,
+            "context": context,
+        },
+    });
+    json(status, &out)
+}
+
+/// probe 端点参数非法（400 + 稳定码）
+fn probe_bad_param(context: &str) -> Response<RespBody> {
+    probe_error(StatusCode::BAD_REQUEST, "probe.param.invalid", context)
+}
+
+/// query 里的作业 ID（`?id=N`，非负整数；缺失/非数字 = None）
+fn probe_id_from_query(query: &str) -> Option<u64> {
+    query.split('&').find_map(|kv| {
+        let mut parts = kv.splitn(2, '=');
+        if parts.next() == Some("id") {
+            parts.next().and_then(|v| v.parse::<u64>().ok())
+        } else {
+            None
+        }
+    })
+}
+
+/// 作业快照 → 冻结 JSON 形（schema_version=1：失败/测量分列，快照原样）
+fn probe_job_json(s: &JobSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "id": s.id,
+        "target": s.target,
+        "state": s.state,
+        "submitted_unix_ms": s.submitted_unix_ms,
+        "finished_unix_ms": s.finished_unix_ms,
+        "outcome": s.outcome.as_ref().map(probe_outcome_json),
+        "failure": s.fail_code.map(|code| serde_json::json!({
+            "code": code,
+            "detail": s.fail_detail,
+        })),
+    })
+}
+
+/// 测量 → 冻结 JSON 形：`measurement` 字段显式标记测量类型；UDP 回显的
+/// 丢包率由 sent/replies 可算（sent=0 → null，不造数），RTT 缺席如实 null
+fn probe_outcome_json(o: &ProbeOutcome) -> serde_json::Value {
+    match o {
+        ProbeOutcome::Dns { resolved, rtt_ms } => serde_json::json!({
+            "measurement": "dns",
+            "resolved": resolved,
+            "rtt_ms": rtt_ms,
+        }),
+        ProbeOutcome::Connect { rtt_ms } => serde_json::json!({
+            "measurement": "connect",
+            "rtt_ms": rtt_ms,
+        }),
+        ProbeOutcome::ProxyHandshake { rtt_ms } => serde_json::json!({
+            "measurement": "proxy_handshake",
+            "rtt_ms": rtt_ms,
+        }),
+        ProbeOutcome::UdpEcho {
+            sent,
+            replies,
+            payload_len,
+            rtt_ms,
+        } => {
+            let loss_ratio = if *sent > 0 {
+                let raw = (*sent - *replies) as f64 / *sent as f64;
+                Some((raw * 10_000.0).round() / 10_000.0)
+            } else {
+                None
+            };
+            serde_json::json!({
+                "measurement": "udp_echo",
+                "sent": sent,
+                "replies": replies,
+                "payload_len": payload_len,
+                "loss_ratio": loss_ratio,
+                "rtt_ms": rtt_ms,
+            })
+        }
+    }
+}
+
+/// 提交体（显式类型标签——与配置登记表同构的闭合枚举，无自由文本；
+/// addr 为 `ip:port` 文本，转换时解析校验）
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ProbeSubmitBody {
+    Dns {
+        host: String,
+    },
+    Connect {
+        addr: String,
+    },
+    UdpEcho {
+        #[serde(default = "default_probe_payload_len")]
+        payload_len: usize,
+        addr: String,
+    },
+}
+
+fn default_probe_payload_len() -> usize {
+    64
+}
+
+/// 提交体 → 内核目标（addr 解析失败 = 参数非法，400 不入队）
+fn probe_target_from_body(body: ProbeSubmitBody) -> Result<rillane_core::ProbeTarget, String> {
+    match body {
+        ProbeSubmitBody::Dns { host } => Ok(rillane_core::ProbeTarget::Dns { host }),
+        ProbeSubmitBody::Connect { addr } => {
+            let addr: SocketAddr = addr
+                .parse()
+                .map_err(|e| format!("addr must be ip:port ({e})"))?;
+            Ok(rillane_core::ProbeTarget::Connect { addr })
+        }
+        ProbeSubmitBody::UdpEcho { payload_len, addr } => {
+            let addr: SocketAddr = addr
+                .parse()
+                .map_err(|e| format!("addr must be ip:port ({e})"))?;
+            Ok(rillane_core::ProbeTarget::UdpEcho { addr, payload_len })
+        }
+    }
+}
+
 /// FlowTrace → 冻结 JSON 形态（schema_version=1：字段面 + 机器码——
 /// stage/evidence 用恒定机器口径，attempt 仅 Attempt 事件携带）
 fn trace_trace_json(trace: &rillane_core::trace::FlowTrace) -> serde_json::Value {
@@ -3750,6 +4026,7 @@ mod tests {
             scenarios: Default::default(),
             performance: None,
             egress_pool: None,
+            probe: None,
         }
     }
 
@@ -3820,6 +4097,7 @@ mod tests {
                 session_cache_size: None,
                 pre_dial_direct: None,
             }),
+            probe: None,
         }
     }
 
@@ -4826,5 +5104,369 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["error"]["code"], serde_json::json!("query.page.invalid"));
+    }
+
+    // -------------------------------------------------------------------
+    // 主动探测端点（RIL-061）
+    // -------------------------------------------------------------------
+
+    use rillane_core::{
+        ProbeExecError, ProbeExecutor, ProbeLimits, ProbeTarget, TargetScope,
+        CODE_PROBE_EXEC_FAILED, CODE_PROBE_JOB_UNKNOWN,
+    };
+
+    /// 固定测量桩：UDP 回显 sent=3 / replies=1 / rtt=9——丢包率标记断言用
+    struct FixedEcho;
+
+    #[async_trait::async_trait]
+    impl ProbeExecutor for FixedEcho {
+        async fn run(
+            &self,
+            _target: &ProbeTarget,
+            _deadline: std::time::Instant,
+            _cancel: &rillane_core::probe::CancelToken,
+        ) -> Result<ProbeOutcome, ProbeExecError> {
+            Ok(ProbeOutcome::UdpEcho {
+                sent: 3,
+                replies: 1,
+                payload_len: 64,
+                rtt_ms: Some(9),
+            })
+        }
+    }
+
+    fn probe_service_for(
+        addrs: &[SocketAddr],
+        executor: Arc<dyn ProbeExecutor>,
+    ) -> Arc<ProbeService> {
+        let mut scope = TargetScope::empty();
+        for a in addrs {
+            scope.allow_addr(*a);
+        }
+        let limits = ProbeLimits {
+            max_active: 2,
+            ..ProbeLimits::default()
+        };
+        Arc::new(ProbeService::new(
+            scope,
+            limits,
+            executor,
+            Arc::new(|| 1_760_000_000_000),
+        ))
+    }
+
+    async fn post_probe(cp: &ControlPlane, path: &str, body: &str) -> (StatusCode, String) {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .body(RespBody::new(Bytes::from(body.to_string())))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        let status = resp.status();
+        let text = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        (status, text)
+    }
+
+    async fn poll_probe_result(cp: &ControlPlane, id: u64, want_state: &str) -> serde_json::Value {
+        for _ in 0..500 {
+            let (_, body) = get_status_and_body(cp, &format!("/probe/result?id={id}")).await;
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if v["job"]["state"] == serde_json::json!(want_state) {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("作业 {id} 未进入 {want_state}");
+    }
+
+    /// 未装配探测服务 → 四端点全部 503 + `probe.disabled`（/nodes 先例
+    /// 分层口径：端点形状不因能力缺席消失）
+    #[tokio::test]
+    async fn probe_endpoints_503_without_service() {
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true); // 无 with_probe_service
+
+        for (method, path) in [
+            (Method::GET, "/probe"),
+            (Method::GET, "/probe/result?id=0"),
+            (Method::POST, "/probe"),
+            (Method::POST, "/probe/cancel?id=0"),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(RespBody::new(Bytes::new()))
+                .unwrap();
+            let resp = cp.handle(req).await;
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            let body = String::from_utf8(
+                resp.into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["error"]["code"], serde_json::json!("probe.disabled"));
+        }
+    }
+
+    /// 显式发起 → 完成 → 结果可见：测量类型/RTT/失败三路分别标记；
+    /// 目标必须在装配范围登记（真实回环建连）。
+    #[tokio::test]
+    async fn probe_submit_connect_completes_with_explicit_measurement() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let runtime = build_runtime(false, false).await;
+        let cp =
+            ControlPlane::new(runtime, None, true).with_probe_service(Some(probe_service_for(
+                &[addr],
+                Arc::new(rillane_platform::probe_exec::LocalProbeExecutor::new()),
+            )));
+
+        let body = format!(r#"{{"kind":"connect","addr":"{addr}"}}"#);
+        let (status, text) = post_probe(&cp, "/probe", &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["job_id"], serde_json::json!(0));
+
+        let v = poll_probe_result(&cp, 0, "completed").await;
+        assert_eq!(v["found"], serde_json::json!(true));
+        assert_eq!(
+            v["job"]["target"],
+            serde_json::json!(format!("connect:{addr}"))
+        );
+        assert_eq!(
+            v["job"]["outcome"]["measurement"],
+            serde_json::json!("connect")
+        );
+        assert!(
+            v["job"]["outcome"]["rtt_ms"].is_u64(),
+            "回环建连必有实测 RTT"
+        );
+        assert_eq!(v["job"]["failure"], serde_json::Value::Null);
+    }
+
+    /// 范围外目标显式拒绝（400 + 稳定码）且不产生作业；未知作业 ID
+    /// 结果/取消均 404 显式缺席（`probe.job.unknown`）。
+    #[tokio::test]
+    async fn probe_out_of_scope_and_unknown_id_are_explicit() {
+        let runtime = build_runtime(false, false).await;
+        // 范围登记 127.0.0.1:9——提交目标不在其中
+        let registered: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let cp = ControlPlane::new(runtime, None, true)
+            .with_probe_service(Some(probe_service_for(&[registered], Arc::new(FixedEcho))));
+
+        let (status, text) = post_probe(
+            &cp,
+            "/probe",
+            r#"{"kind":"connect","addr":"192.0.2.1:443"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["error"]["code"],
+            serde_json::json!("probe.target.out_of_scope")
+        );
+
+        // 拒绝不产生作业
+        let (_, body) = get_status_and_body(&cp, "/probe").await;
+        let list: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(list["jobs"].as_array().map(Vec::len), Some(0));
+
+        // 未知 ID：结果 = 404 显式缺席信封；取消 = 404 稳定码
+        let (status, body) = get_status_and_body(&cp, "/probe/result?id=999").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["found"], serde_json::json!(false));
+        assert_eq!(
+            v["absence"]["code"],
+            serde_json::json!(CODE_PROBE_JOB_UNKNOWN)
+        );
+
+        let (status, text) = post_probe(&cp, "/probe/cancel?id=999", "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["error"]["code"],
+            serde_json::json!(CODE_PROBE_JOB_UNKNOWN)
+        );
+    }
+
+    /// 非法提交体：坏 JSON / 未知 kind / addr 非法 → 400（不入队）
+    #[tokio::test]
+    async fn probe_malformed_submit_is_400() {
+        let runtime = build_runtime(false, false).await;
+        let registered: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let cp = ControlPlane::new(runtime, None, true)
+            .with_probe_service(Some(probe_service_for(&[registered], Arc::new(FixedEcho))));
+
+        let cases = [
+            ("{not json", "invalid json"),
+            (
+                r#"{"kind":"handshake","egress":"x","addr":"127.0.0.1:1"}"#,
+                "unknown variant",
+            ),
+            (r#"{"kind":"connect"}"#, "missing field"),
+            (
+                r#"{"kind":"connect","addr":"no-port"}"#,
+                "probe.param.invalid",
+            ),
+            (r#"{"kind":"dns"}"#, "missing field"),
+        ];
+        for (body, needle) in cases {
+            let (status, text) = post_probe(&cp, "/probe", body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(text.contains(needle), "{body} → {text}");
+        }
+        // 参数非法不产生作业
+        let (_, body) = get_status_and_body(&cp, "/probe").await;
+        let list: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(list["jobs"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// 终态作业再取消：verdict 返回状态原样（服务面契约）；列表带限额
+    /// 与快照（只读面）。
+    #[tokio::test]
+    async fn probe_cancel_terminal_returns_state_and_list_shows_limits() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let runtime = build_runtime(false, false).await;
+        let cp =
+            ControlPlane::new(runtime, None, true).with_probe_service(Some(probe_service_for(
+                &[addr],
+                Arc::new(rillane_platform::probe_exec::LocalProbeExecutor::new()),
+            )));
+
+        let body = format!(r#"{{"kind":"connect","addr":"{addr}"}}"#);
+        let (_, text) = post_probe(&cp, "/probe", &body).await;
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let id = v["job_id"].as_u64().unwrap();
+        poll_probe_result(&cp, id, "completed").await;
+
+        let (status, text) = post_probe(&cp, &format!("/probe/cancel?id={id}"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["verdict"], serde_json::json!("completed"));
+
+        let (_, body) = get_status_and_body(&cp, "/probe").await;
+        let list: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(list["limits"]["max_active"], serde_json::json!(2));
+        assert_eq!(list["jobs"].as_array().map(Vec::len), Some(1));
+        assert_eq!(list["jobs"][0]["state"], serde_json::json!("completed"));
+    }
+
+    /// UDP 回显测量三路标记：丢包率由计数可算（3 发 1 回 → 0.6667）、
+    /// RTT 独立、failure 独立 null——逐字段来自执行器回报。
+    #[tokio::test]
+    async fn probe_udp_echo_marks_loss_rtt_failure_separately() {
+        let runtime = build_runtime(false, false).await;
+        let registered: SocketAddr = "127.0.0.1:53".parse().unwrap();
+        let cp = ControlPlane::new(runtime, None, true)
+            .with_probe_service(Some(probe_service_for(&[registered], Arc::new(FixedEcho))));
+
+        let (status, text) = post_probe(
+            &cp,
+            "/probe",
+            r#"{"kind":"udp_echo","addr":"127.0.0.1:53"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let id = v["job_id"].as_u64().unwrap();
+
+        let v = poll_probe_result(&cp, id, "completed").await;
+        let outcome = &v["job"]["outcome"];
+        assert_eq!(outcome["measurement"], serde_json::json!("udp_echo"));
+        assert_eq!(outcome["sent"], serde_json::json!(3));
+        assert_eq!(outcome["replies"], serde_json::json!(1));
+        assert_eq!(outcome["payload_len"], serde_json::json!(64));
+        assert_eq!(outcome["loss_ratio"], serde_json::json!(0.6667));
+        assert_eq!(outcome["rtt_ms"], serde_json::json!(9));
+        assert_eq!(v["job"]["failure"], serde_json::Value::Null);
+    }
+
+    /// 提交/取消是 mutating 面：admin_token 在场时无凭证 401（读面
+    /// /probe 与 /probe/result 不要求）。
+    #[tokio::test]
+    async fn probe_mutating_endpoints_require_token() {
+        let runtime = build_runtime(false, false).await;
+        let registered: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let cp = ControlPlane::new(runtime, Some("t".into()), true)
+            .with_probe_service(Some(probe_service_for(&[registered], Arc::new(FixedEcho))));
+
+        let (status, _) =
+            post_probe(&cp, "/probe", r#"{"kind":"dns","host":"example.invalid"}"#).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = post_probe(&cp, "/probe/cancel?id=0", "").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = get_status_and_body(&cp, "/probe/result?id=0").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "读面无 token 可达（未知 ID 显式缺席）"
+        );
+    }
+
+    /// 执行器失败归类：稳定码 + detail 进 failure 对象（state=failed、
+    /// outcome null——失败无测量）。
+    #[tokio::test]
+    async fn probe_failure_carries_stable_code() {
+        struct Failing;
+        #[async_trait::async_trait]
+        impl ProbeExecutor for Failing {
+            async fn run(
+                &self,
+                _target: &ProbeTarget,
+                _deadline: std::time::Instant,
+                _cancel: &rillane_core::probe::CancelToken,
+            ) -> Result<ProbeOutcome, ProbeExecError> {
+                Err(ProbeExecError::failed("boom"))
+            }
+        }
+        let runtime = build_runtime(false, false).await;
+        let registered: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let cp = ControlPlane::new(runtime, None, true)
+            .with_probe_service(Some(probe_service_for(&[registered], Arc::new(Failing))));
+
+        let (status, text) =
+            post_probe(&cp, "/probe", r#"{"kind":"connect","addr":"127.0.0.1:9"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let id = v["job_id"].as_u64().unwrap();
+        let v = poll_probe_result(&cp, id, "failed").await;
+        assert_eq!(
+            v["job"]["failure"]["code"],
+            serde_json::json!(CODE_PROBE_EXEC_FAILED)
+        );
+        assert_eq!(v["job"]["failure"]["detail"], serde_json::json!("boom"));
+        assert_eq!(v["job"]["outcome"], serde_json::Value::Null);
     }
 }

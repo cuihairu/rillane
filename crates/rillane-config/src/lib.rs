@@ -105,6 +105,12 @@ pub struct RillaneConfig {
     /// 不构池不注工厂，行为零差异 §3.4）
     #[serde(default)]
     pub egress_pool: Option<EgressPoolBlock>,
+    /// 主动探测授权块（RIL-061，debug-and-mcp.md §3；缺省 None = 探测面
+    /// 整体关闭——无授权无网络副作用，端点 503）。块只存在于操作员本地
+    /// 配置：来源合并面是对象登记（SourceSnapshot.objects），顶层块结构上
+    /// 不在合并面——订阅文本永远无法扩探测范围。
+    #[serde(default)]
+    pub probe: Option<ProbeConfigBlock>,
     /// 场景预设（P2-3 scenario-profiles.md §2-D1；缺省 None = 存量零差异；
     /// 仅 from_str 入口展开——订阅/程序化构造不触发，§5-1）。
     /// RIL-017 起为 legacy 面：与 `scenarios` 并列面互斥，解析期二选一。
@@ -1250,6 +1256,96 @@ impl EgressPoolBlock {
     }
 }
 
+/// 主动探测授权块（RIL-061，debug-and-mcp.md §3「Probe: active
+/// verification」）：块存在 = 操作员显式授权探测面；targets 是闭合登记表
+/// （无登记 = 无目标可探测）。untrusted 文本不授权内网扫描——本块只有
+/// 本地配置一个入口（订阅/来源合并面是对象登记，顶层块结构上不可达）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeConfigBlock {
+    /// 可探测目标逐条登记（缺省空 = 无目标；submit 对未登记目标以
+    /// `probe.target.out_of_scope` 拒绝）
+    #[serde(default)]
+    pub targets: Vec<ProbeTargetSpec>,
+    /// 限额覆盖（缺省 = 全部内核定值）
+    #[serde(default)]
+    pub limits: ProbeLimitsConfig,
+}
+
+impl ProbeConfigBlock {
+    /// 构建期校验：目标字段非空、addr 形如合法 SocketAddr、限额为正——
+    /// 非法值启动期拒绝，不带病装配探测授权。
+    pub fn validate(&self) -> Result<()> {
+        for (i, t) in self.targets.iter().enumerate() {
+            match t {
+                ProbeTargetSpec::Dns { host } => {
+                    if host.trim().is_empty() {
+                        anyhow::bail!("probe.targets[{i}] dns.host 不能为空");
+                    }
+                }
+                ProbeTargetSpec::Connect { addr } | ProbeTargetSpec::UdpEcho { addr } => {
+                    addr.parse::<std::net::SocketAddr>().map_err(|e| {
+                        anyhow::anyhow!("probe.targets[{i}] addr 非法（{addr}）: {e}")
+                    })?;
+                }
+            }
+        }
+        if let Some(n) = self.limits.max_active {
+            if n == 0 {
+                anyhow::bail!("probe.limits.max_active 须 ≥ 1（当前 0）");
+            }
+        }
+        if let Some(ms) = self.limits.job_timeout_ms {
+            if ms == 0 {
+                anyhow::bail!("probe.limits.job_timeout_ms 须 ≥ 1（当前 0）");
+            }
+        }
+        if let Some(n) = self.limits.udp_payload_max_bytes {
+            if n == 0 {
+                anyhow::bail!("probe.limits.udp_payload_max_bytes 须 ≥ 1（当前 0）");
+            }
+        }
+        if let Some(n) = self.limits.byte_budget {
+            if n == 0 {
+                anyhow::bail!("probe.limits.byte_budget 须 ≥ 1（当前 0）");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 单条探测目标（显式类型标签——无自由文本变体，与内核 ProbeTarget
+/// 闭合枚举同构；`addr` 为 `ip:port` 文本，validate() 里解析校验）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProbeTargetSpec {
+    /// DNS 解析探测目标
+    Dns { host: String },
+    /// TCP connect 探测目标
+    Connect { addr: String },
+    /// UDP 回显探测目标（对端须具备回显能力——无回应按丢包如实报告）
+    UdpEcho { addr: String },
+}
+
+/// 探测限额覆盖（全可选——None = 内核定值：并发 4 / 超时 5s /
+/// UDP 载荷 512B / 预算 64KiB）
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeLimitsConfig {
+    /// 同时运行作业上限（超额排队不丢弃）
+    #[serde(default)]
+    pub max_active: Option<usize>,
+    /// 单作业超时（毫秒）
+    #[serde(default)]
+    pub job_timeout_ms: Option<u64>,
+    /// UDP 回显载荷上限（字节）
+    #[serde(default)]
+    pub udp_payload_max_bytes: Option<usize>,
+    /// 流量预算（字节；提交预留、完成按实耗双向结算）
+    #[serde(default)]
+    pub byte_budget: Option<u64>,
+}
+
 impl RillaneConfig {
     /// 版本字段合约错误探测（parse_any_format 用）：合法 YAML 且 version
     /// 值非法 → 返回携带稳定原因码的错误；其余情形返回 None。
@@ -1323,6 +1419,11 @@ impl RillaneConfig {
             diagnostics.push(
                 "配置使用了旧 profile 单枚举（proxy/game/web 互斥）；建议迁移到 scenarios 并列面（proxy/game/web 可同时声明）".to_string(),
             );
+        }
+        // RIL-061：探测授权块构建期校验——非法目标/限额启动期拒绝，
+        // 不带病装配（块缺席 = 探测面整体关闭，无校验面）
+        if let Some(probe) = &config.probe {
+            probe.validate()?;
         }
         config.apply_profile();
         Ok((config, diagnostics))

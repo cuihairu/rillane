@@ -1,7 +1,14 @@
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{
+    env,
+    net::SocketAddr,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Result;
-use rillane_config::RillaneConfig;
+use rillane_config::{ProbeTargetSpec, RillaneConfig};
+use rillane_core::{ProbeLimits, ProbeService, TargetScope};
+use rillane_platform::probe_exec::LocalProbeExecutor;
 use rillane_runtime::{RuntimeBuilder, RuntimeConfig};
 use rillane_telemetry::TelemetryOptions;
 use tracing::info;
@@ -33,6 +40,53 @@ fn derive_runtime_config(config: &RillaneConfig) -> Result<RuntimeConfig> {
             .transpose()?,
         ..RuntimeConfig::default()
     })
+}
+
+/// RIL-061：探测作业服务装配（probe 块缺席 = None = 探测面整体关闭，
+/// 端点 503——无授权无网络副作用）。目标登记表只来自操作员本地配置：
+/// 来源合并面是对象登记（SourceSnapshot.objects），顶层 probe 块结构上
+/// 进不了这里——不可信订阅文本无法扩探测范围（debug-and-mcp.md §3）。
+/// 代理握手目标不在配置面（本版执行器无握手测量，见 probe_exec.rs）。
+fn build_probe_service(config: &RillaneConfig) -> Result<Option<Arc<ProbeService>>> {
+    let Some(block) = config.probe.as_ref() else {
+        return Ok(None);
+    };
+    // 装配侧兜底校验（load 入口已校验——程序化构造路径同门把关）
+    block.validate()?;
+    let mut scope = TargetScope::empty();
+    for target in &block.targets {
+        match target {
+            ProbeTargetSpec::Dns { host } => {
+                scope.allow_host(host.trim().to_string());
+            }
+            ProbeTargetSpec::Connect { addr } | ProbeTargetSpec::UdpEcho { addr } => {
+                let addr: SocketAddr = addr
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("probe 目标 addr 非法（{addr}）: {e}"))?;
+                scope.allow_addr(addr);
+            }
+        }
+    }
+    let mut limits = ProbeLimits::default();
+    if let Some(v) = block.limits.max_active {
+        limits.max_active = v;
+    }
+    if let Some(v) = block.limits.job_timeout_ms {
+        limits.job_timeout_ms = v;
+    }
+    if let Some(v) = block.limits.udp_payload_max_bytes {
+        limits.udp_payload_max_bytes = v;
+    }
+    if let Some(v) = block.limits.byte_budget {
+        limits.byte_budget = v;
+    }
+    let clock: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64)
+    });
+    let service = ProbeService::new(scope, limits, Arc::new(LocalProbeExecutor::new()), clock);
+    Ok(Some(Arc::new(service)))
 }
 
 /// SIGTERM 监听（unix；其余平台永不就绪——退出语义仍由 Ctrl-C 承担）。
@@ -105,11 +159,13 @@ async fn main() -> Result<()> {
         );
     }
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let probe_service = build_probe_service(&config)?;
     let cp = control_plane::ControlPlane::new(
         runtime.clone(),
         config.control.admin_token.clone(),
         config.telemetry.enable_metrics,
-    );
+    )
+    .with_probe_service(probe_service);
     let cp_task = tokio::spawn(async move { cp.serve(bind, shutdown_rx).await });
 
     // Start runtime background tasks.
@@ -205,5 +261,53 @@ mod tests {
         assert!(rc.enable_network_virtualization);
         let nc = rc.network_config.expect("network 块应完成平台转换");
         assert!(matches!(nc.mode, NetworkMode::Tun));
+    }
+
+    /// RIL-061 装配契约：probe 块缺席 = None（探测面关闭，行为零差异）；
+    /// 有块 = 服务装配成功且登记表逐条入范围（登记外目标提交必被拒）。
+    /// submit 触发服务面 worker——需要 tokio 上下文。
+    #[tokio::test]
+    async fn probe_service_assembles_from_config_block() {
+        use rillane_config::{ProbeConfigBlock, ProbeLimitsConfig, ProbeTargetSpec};
+
+        // 基线 = 仓库示例配置（无 probe 块）→ 探测面整体关闭
+        let cfg_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/rillane.yaml");
+        let mut cfg = RillaneConfig::load_from_path(&cfg_path).unwrap();
+        assert!(cfg.probe.is_none());
+        assert!(build_probe_service(&cfg).unwrap().is_none());
+
+        // 有块：三类目标入范围（闭合登记）；limits 覆盖生效
+        cfg.probe = Some(ProbeConfigBlock {
+            targets: vec![
+                ProbeTargetSpec::Dns {
+                    host: "  example.invalid  ".into(),
+                },
+                ProbeTargetSpec::Connect {
+                    addr: "127.0.0.1:9".into(),
+                },
+                ProbeTargetSpec::UdpEcho {
+                    addr: "127.0.0.1:53".into(),
+                },
+            ],
+            limits: ProbeLimitsConfig {
+                max_active: Some(1),
+                job_timeout_ms: None,
+                udp_payload_max_bytes: None,
+                byte_budget: None,
+            },
+        });
+        let service = build_probe_service(&cfg).unwrap().expect("有块应装配");
+        // 范围登记可见性：trim 过的 host / 解析过的 addr 逐条允许
+        // （TargetScope 无遍历口——经 allows_* 正向核对登记生效）
+        let probe_cfg = cfg.probe.as_ref().unwrap();
+        assert_eq!(probe_cfg.targets.len(), 3);
+        // 服务真实接受已登记目标（唯一入口 submit——范围外必拒）
+        let id = service
+            .submit(rillane_core::ProbeTarget::Dns {
+                host: "example.invalid".into(),
+            })
+            .expect("登记过的 host 应可提交");
+        let _ = service.cancel(id);
     }
 }

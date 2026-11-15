@@ -57,6 +57,10 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | GET | `/trace/flows` | per-connection trace list (paged, filtered; versioned envelope `schema_version=1`) | `trace list` |
 | GET | `/trace/flow?id=` | one flow's full trace, or an explicit absence answer (`found:false` + stable code) | `trace flow` |
 | GET | `/trace/events?id=&from_seq=&limit=` | incremental event read (unknown/absent id → 404 + stable code) | `trace events` |
+| GET | `/probe` | probe job list (limits + job snapshots) | `probe list` |
+| GET | `/probe/result?id=` | one job's measurement snapshot, or an explicit absence answer (`found:false` + stable code) | `probe result` |
+| POST | `/probe` | submit a probe job (target must be registered in the server's probe scope) | `probe submit` |
+| POST | `/probe/cancel?id=` | cancel a job (queued → immediate final state; running → cooperative cancel request) | `probe cancel` |
 
 ## Command overview
 
@@ -80,6 +84,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | `route` | system route management (apply/clear/status) | control plane + local ip commands |
 | `diagnose` | one-shot diagnostics collection (creates a diagnostics directory) | control plane + local snapshot |
 | `trace` | per-connection trace queries (list / flow detail / incremental events; explicit absence = exit 2) | control plane `/trace/*` |
+| `probe` | active probe jobs (submit/cancel/result/list; measurements only, no provider-internal path inference) | control plane `/probe*` |
 | `mtls` | mesh mTLS certificate tools (init-ca/issue/rotate/bundle-ca/rotate-ca/revoke) | offline (except revoke status, which uses the control plane) |
 
 ## Flags per command
@@ -192,6 +197,19 @@ rillanectl trace events <id> [--from-seq N] [--limit N] [--json]
 Per-connection trace queries against the kernel's flow query service (RIL-060). `--endpoint` is the base-URL flavor (default `http://{api_bind}`). Anchored on real flow IDs — the ingress/egress aggregate keys shown by `stats`/`/flows` never resolve as flow IDs here. Absence is explicit and coded (`query.flow.unknown` / `query.tracing.disabled` / `collector.flow.evicted|expired|active_limit|sampled_out|drained`); an absent answer always carries the collector counter snapshot and the fixed note "no record is not evidence of no traffic" — absence is never reported as "the app sent no packets". Text output is default; `--json` prints the versioned envelope (`schema_version=1`) verbatim.
 
 Exit codes: `0` query answered; `1` connection or usage error; `2` explicit absence (`trace flow` answered `found:false`, or `trace events` got a 404 error envelope).
+
+### probe
+
+```bash
+rillanectl probe submit --kind dns|connect|udp-echo [--host <H>] [--addr <ip:port>] [--payload-len N] [--json]
+rillanectl probe cancel <id> [--json]
+rillanectl probe result <id> [--json]
+rillanectl probe list [--json]
+```
+
+Explicit active-probe jobs against operator-registered targets (RIL-061). The target must be in the daemon's `probe.targets` scope (operator config only — subscription text can never extend the scope); an out-of-scope submit is rejected with a stable code (`probe.target.out_of_scope`). With no `probe` block in the config the whole surface is off and every endpoint answers `503 probe.disabled` — no authorization, no network side effects. Measurements are exactly what the executor observed: `failure` (stable code + detail) or null, `rtt_ms` (null when nothing answered — never synthesized), and for UDP echo `sent`/`replies`/`loss_ratio`/`payload_len` (loss ratio computed from the reply counts). Measurements never include provider-internal path inference. Proxy-handshake probing is not offered in this version (the egress connector is a flow-level forward surface without a dial-and-measure shape), so no handshake kind exists on the CLI or in the config. Text output is default; `--json` prints the versioned envelope (`schema_version=1`) verbatim.
+
+Exit codes: `0` answered; `1` connection, rejection or usage error; `2` explicit absence (`probe result` for an unknown job id).
 
 ### mtls
 
