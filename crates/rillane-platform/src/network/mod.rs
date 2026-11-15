@@ -16,8 +16,13 @@ use tracing::{error, info, warn};
 pub mod dns;
 pub mod dns_engine;
 pub mod filter;
+// 本机身份契约（RIL-005）：OwnerResolver 三态 + 截止时间 + unknown 策略
+pub mod owner;
 // IP/UDP/TCP 报文编解码纯函数（tun-dataplane.md §2.3/§4.1）
 pub mod ipcodec;
+// 平台端口契约（RIL-004）：CapturePort/SocketBypass/NetworkEvents/
+// RouteTransaction 最小接口，packet 与 socket 输入分别建模
+pub mod ports;
 pub mod route;
 pub mod tun;
 // Linux TUN 真实现（tun-dataplane.md §1.4）；其余平台待落地
@@ -37,6 +42,15 @@ pub use dns_engine::{
 pub use filter::{
     ApplicationRule, DomainPattern as FilterDomainPattern, FilterAction, FilterResult, FilterStats,
     FilteringConfig, FilteringMode, IpRule, PacketFilter, PortRule, ProcessRule, ProtocolRule,
+};
+pub use owner::{
+    ConnectionKey, InMemoryOwnerResolver, OwnerCapability, OwnerResolution, OwnerResolver,
+    ProcessIdentity, UnknownOwnerPolicy, UnknownReason,
+};
+pub use ports::{
+    CapturePort, CapturedInput, InMemoryNetworkEvents, InMemoryRouteTransaction, IpProtocol,
+    NetworkEvent, NetworkEvents, PacketInput, PacketMeta, RouteTransaction, SocketBypass,
+    SocketHandle, SocketInput, SystemChange, TransportProtocol,
 };
 pub use route::{
     BypassAction, BypassCondition, BypassRule, RouteDestination, RouteManager, RouteRule,
