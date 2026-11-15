@@ -12,7 +12,7 @@ use dashmap::DashMap;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use rillane_config::{
     GroupDescriptor, GroupDescriptorMember, MatchCondition, PolicyGroup, RouteRule, RoutingConfig,
-    RuleSetLibrary, SloPolicy, Strategy,
+    RuleSetLibrary, ScenarioFailureAction, SloPolicy, Strategy,
 };
 use rillane_core::{FlowContext, FlowRouter, RouteDecision, TargetProto};
 use serde::Serialize;
@@ -814,6 +814,56 @@ impl FlowRouter for RoutingEngine {
     async fn route(&self, ctx: FlowContext) -> Result<RouteDecision> {
         let config = self.snapshot();
         let geo = self.geo.read().expect("geo lock poisoned").clone();
+
+        // RIL-021 并列场景面：声明的场景意图先于泛化规则。优先级数值小者
+        // 先评估（stable sort——同优先级按声明序，不重排）；条件合取（AND
+        // 全中，复用规则匹配面：process/proto/domain 同一语义）即命中，
+        // 命中场景的 target 即决策入口（reason 带 scenario:<名> 可追溯）。
+        // 失败动作：目标解析失败（组无健康成员等）时 fallback = 落回规则
+        // 面继续评估（warn 点名场景与原因，不静默）；reject = 显式上抛，
+        // 不悄悄改道。
+        if !config.scenarios.is_empty() {
+            let mut ordered: Vec<&rillane_config::ScenarioRule> =
+                config.scenarios.iter().collect();
+            ordered.sort_by_key(|s| s.priority);
+            for scenario in ordered {
+                if scenario
+                    .conditions
+                    .iter()
+                    .all(|c| matches_condition(&self.regex_cache, &geo, &config.rule_sets, c, &ctx))
+                {
+                    match self
+                        .resolve_target(
+                            &scenario.target,
+                            Some(format!("scenario:{}", scenario.name)),
+                            Some(&ctx),
+                        )
+                        .await
+                    {
+                        Ok(decision) => return Ok(decision),
+                        Err(e) => match scenario.on_failure {
+                            ScenarioFailureAction::Fallback => {
+                                tracing::warn!(
+                                    target: "rillane::routing",
+                                    scenario = %scenario.name,
+                                    target = %scenario.target,
+                                    "场景目标不可用，fallback 落回规则面: {e:#}"
+                                );
+                                continue;
+                            }
+                            ScenarioFailureAction::Reject => {
+                                return Err(anyhow!(
+                                    "场景 {} 目标 {} 不可用（on_failure: reject）: {e}",
+                                    scenario.name,
+                                    scenario.target
+                                ));
+                            }
+                        },
+                    }
+                }
+            }
+        }
+
         for rule in &config.rules {
             // RIL-014：规则按数组序首匹配——先声明的规则先参与匹配，
             // RULE-SET 引用按 config.rule_sets 库解析（载荷缺席恒不命中）。
@@ -1176,6 +1226,7 @@ mod tests {
     fn latency_strategy_flips_on_real_quality_degradation() {
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "good".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![],
             ..Default::default()
@@ -1205,6 +1256,7 @@ mod tests {
     fn slo_gate_filters_violators_and_never_dead_ends() {
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "good".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![],
             ..Default::default()
@@ -1274,6 +1326,7 @@ mod tests {
     fn quality_source_priority_and_unknown_compliance() {
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "good".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![],
             ..Default::default()
@@ -1327,6 +1380,7 @@ mod tests {
         use rillane_config::RoutingConfig as Cfg;
         let ok = Cfg {
             default_node: "n".into(),
+            scenarios: Vec::new(),
             groups: vec![PolicyGroup {
                 name: "g".into(),
                 strategy: Strategy::Latency,
@@ -1387,6 +1441,7 @@ mod tests {
 
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![RouteRule {
                 name: "game".into(),
@@ -1451,6 +1506,7 @@ mod tests {
 
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             rules: vec![RouteRule {
                 name: "browser".into(),
                 matches: vec![MatchCondition::ProcessPath {
@@ -1516,6 +1572,7 @@ mod tests {
 
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             rules: vec![RouteRule {
                 name: "local-src".into(),
                 matches: vec![MatchCondition::SrcPort {
@@ -1579,6 +1636,7 @@ mod tests {
 
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             rules: vec![RouteRule {
                 name: "udp-only".into(),
                 matches: vec![MatchCondition::Proto {
@@ -1644,6 +1702,7 @@ mod tests {
 
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             rules: vec![
                 RouteRule {
                     name: "ads-block".into(),
@@ -1738,6 +1797,7 @@ mod tests {
     fn quality_report_marks_sources() {
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![PolicyGroup {
                 name: "g".into(),
                 strategy: Strategy::Latency,
@@ -1793,6 +1853,7 @@ mod tests {
     fn quality_report_gate_marks_only_real_members() {
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![PolicyGroup {
                 name: "g".into(),
                 strategy: Strategy::Latency,
@@ -1839,6 +1900,7 @@ mod tests {
     fn quality_report_no_dead_end_and_non_latency_neutral() {
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![
                 PolicyGroup {
                     name: "all-bad".into(),
@@ -1904,6 +1966,7 @@ mod tests {
         use rillane_core::{FlowId, FlowTarget, TargetProto};
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![RouteRule {
                 name: "private-net".into(),
@@ -1969,6 +2032,7 @@ mod tests {
         use rillane_core::{FlowId, FlowTarget, TargetProto};
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![
                 RouteRule {
@@ -2047,6 +2111,7 @@ mod tests {
         use rillane_core::{FlowId, FlowTarget, TargetProto};
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![RouteRule {
                 name: "ads-regex".into(),
@@ -2091,6 +2156,7 @@ mod tests {
         use rillane_core::{FlowId, FlowTarget, TargetProto};
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![RouteRule {
                 name: "bad-regex".into(),
@@ -2122,6 +2188,7 @@ mod tests {
         use rillane_core::{FlowId, FlowTarget, TargetProto};
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![RouteRule {
                 name: "cached".into(),
@@ -2161,6 +2228,7 @@ mod tests {
         use rillane_core::{FlowId, FlowTarget, TargetProto};
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![
                 RouteRule {
@@ -2226,6 +2294,7 @@ mod tests {
         use rillane_core::{FlowId, FlowTarget, TargetProto};
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![RouteRule {
                 name: "old".into(),
@@ -2253,6 +2322,7 @@ mod tests {
         );
         engine.reload(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![RouteRule {
                 name: "new".into(),
@@ -2290,6 +2360,7 @@ mod tests {
         use rillane_core::{FlowId, FlowTarget, TargetProto};
         let engine = std::sync::Arc::new(RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![RouteRule {
                 name: "concurrent".into(),
@@ -2401,6 +2472,7 @@ mod tests {
 
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![
                 RouteRule {
@@ -2484,6 +2556,7 @@ mod tests {
         use rillane_core::{FlowId, FlowTarget, TargetProto};
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![
                 RouteRule {
@@ -2522,6 +2595,7 @@ mod tests {
         use rillane_core::{FlowId, FlowTarget, TargetProto};
         let engine = RoutingEngine::new(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![RouteRule {
                 name: "cn".into(),
@@ -2573,6 +2647,7 @@ mod tests {
 
         engine.reload(RoutingConfig {
             default_node: "direct".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![RouteRule {
                 name: "cn".into(),

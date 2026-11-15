@@ -926,6 +926,7 @@ mod tests {
             ],
             routing: RoutingConfig {
                 default_node: "direct-out".into(),
+                scenarios: Vec::new(),
                 groups: vec![PolicyGroup {
                     name: "auto".into(),
                     strategy: Strategy::Latency,

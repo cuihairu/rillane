@@ -8,6 +8,7 @@ use rillane_config::{MatchCondition, RouteRule, RoutingConfig};
 fn cfg(rules: Vec<RouteRule>) -> RoutingConfig {
     RoutingConfig {
         default_node: "direct".into(),
+        scenarios: Vec::new(),
         groups: vec![],
         rules,
         ..Default::default()

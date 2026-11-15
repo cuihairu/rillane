@@ -1737,6 +1737,7 @@ proxies:
                 egress: vec![],
                 routing: rillane_config::RoutingConfig {
                     default_node: "direct".to_string(),
+                    scenarios: Vec::new(),
                     groups: vec![],
                     rules: vec![],
                     geoip_db: None,

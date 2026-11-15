@@ -3485,6 +3485,7 @@ mod tests {
             }],
             routing: rillane_config::RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![],
                 rules: vec![],
                 ..Default::default()
@@ -3544,6 +3545,7 @@ mod tests {
             }],
             routing: rillane_config::RoutingConfig {
                 default_node: "trojan-out".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![],
                 rules: vec![],
                 ..Default::default()

@@ -1927,6 +1927,58 @@ pub struct RoutingConfig {
     /// 并集合并）。空面不落盘。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub selections: BTreeMap<String, String>,
+    /// 并列场景面（RIL-021）：game/web/general 等场景的路由期求值——
+    /// 条件合取（AND 全中）即命中，命中场景的 `target` 即决策入口。
+    /// 优先级数值小者先评估（同优先级按声明序稳定）；场景面先于规则
+    /// 面（声明的场景意图压过泛化规则）。失败动作：目标组不可用时
+    /// `fallback` = 落回规则面继续评估，`reject` = 显式拒绝。空面不落盘。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenarios: Vec<ScenarioRule>,
+}
+
+/// 场景失败动作（RIL-021）：场景命中但目标不可用（组无健康成员等
+/// 解析/前置失败）时的处置——执行面拨号失败的排空重试归 RIL-022 消费。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScenarioFailureAction {
+    /// 回落规则面（场景不命中同路径继续评估；默认动作）
+    #[default]
+    Fallback,
+    /// 显式拒绝（错误上抛点名场景与原因，不悄悄改道）
+    Reject,
+}
+
+/// 场景规则（RIL-021）：并列场景求值的声明面。
+///
+/// - **条件**：[`MatchCondition`] 合取（AND 全中才算本场景），复用规则
+///   匹配面（process/proto/domain/… 同一语义）；空条件 = 无条件命中
+///   （general 兜底场景，应配最低优先级放最后）；
+/// - **优先级**：数值小者先评估，同优先级按声明序（稳定排序不重排）；
+/// - **目标**：组名或直连节点名（与规则 target 同口径）；
+/// - **失败动作**：见 [`ScenarioFailureAction`]。
+///
+/// 验收锚点：同目标的不同本机应用按 process 条件选不同组；QUIC 按
+/// proto 字面归类（`quic` ≠ `udp`）——游戏场景 `proto: [udp]` 不会把
+/// 浏览器 QUIC 流量并进去。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenarioRule {
+    /// 场景名（决策 reason 与诊断面可读标识）
+    pub name: String,
+    /// 条件合取（AND 全中）；空 = 无条件命中（兜底场景）
+    #[serde(default)]
+    pub conditions: Vec<MatchCondition>,
+    /// 目标组/直连节点名
+    pub target: String,
+    /// 优先级：数值小者先评估；缺省 100
+    #[serde(default = "default_scenario_priority")]
+    pub priority: i64,
+    /// 失败动作（目标不可用时）；缺省 fallback
+    #[serde(default)]
+    pub on_failure: ScenarioFailureAction,
+}
+
+fn default_scenario_priority() -> i64 {
+    100
 }
 
 /// rule-provider 声明（RIL-014）：一个 RULE-SET 规则集的来源元数据。
@@ -1957,6 +2009,7 @@ impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             default_node: "direct".to_string(),
+            scenarios: Vec::new(),
             groups: Vec::new(),
             rules: Vec::new(),
             geoip_db: None,
@@ -2097,6 +2150,24 @@ impl RoutingConfig {
                     }
                     _ => {}
                 }
+            }
+        }
+        // RIL-021：场景面构建期校验——name/target 非空（空 = 导入链 bug，
+        // 不是合法配置）；条件正则逐条编译验证（与规则面同口径，非法正则
+        // 不得吞成默认路由）。target 是否已声明组不拒绝——直连节点名是
+        // 合法 target（与规则面同口径），组存在性由求值面处理。
+        for scenario in &self.scenarios {
+            anyhow::ensure!(
+                !scenario.name.trim().is_empty(),
+                "场景名不得为空"
+            );
+            anyhow::ensure!(
+                !scenario.target.trim().is_empty(),
+                "场景 {} 的 target 不得为空",
+                scenario.name
+            );
+            for cond in &scenario.conditions {
+                validate_condition_regex(cond, &format!("scenario:{}", scenario.name))?;
             }
         }
         Ok(())

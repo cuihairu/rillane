@@ -35,6 +35,7 @@ async fn mesh_target_routes_to_chain_decision() {
         }],
         routing: RoutingConfig {
             default_node: "mesh.exit1".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![],
             ..Default::default()

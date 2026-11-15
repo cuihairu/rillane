@@ -14,6 +14,7 @@ use tokio::time::Duration;
 fn create_test_config() -> RoutingConfig {
     RoutingConfig {
         default_node: "direct-node".to_string(),
+        scenarios: Vec::new(),
         groups: vec![
             PolicyGroup {
                 name: "primary-group".to_string(),
@@ -450,6 +451,7 @@ async fn test_config_reload() -> Result<()> {
 fn provider_group_config(provider_nodes: Vec<String>) -> RoutingConfig {
     let mut config = RoutingConfig {
         default_node: "direct-node".to_string(),
+        scenarios: Vec::new(),
         groups: vec![PolicyGroup {
             name: "provider-group".to_string(),
             strategy: Strategy::Fixed,
@@ -509,6 +511,7 @@ fn provider_member_expands_from_provider_node_library() {
     // 组不因此消失（配置事实），但不得伪装出成员（求值面对该组无候选可给）
     let only_provider = RoutingEngine::new(RoutingConfig {
         default_node: "direct-node".to_string(),
+        scenarios: Vec::new(),
         groups: vec![PolicyGroup {
             name: "only-provider".to_string(),
             strategy: Strategy::Fixed,
@@ -533,6 +536,7 @@ fn provider_member_expands_from_provider_node_library() {
 fn fixed_pick_group(members: Vec<GroupMember>) -> RoutingConfig {
     let config = RoutingConfig {
         default_node: "pick".to_string(),
+        scenarios: Vec::new(),
         groups: vec![PolicyGroup {
             name: "pick".to_string(),
             strategy: Strategy::Fixed,
@@ -576,6 +580,7 @@ async fn select_honors_user_selection() -> Result<()> {
 async fn fallback_follows_declaration_order() -> Result<()> {
     let config = RoutingConfig {
         default_node: "fb".to_string(),
+        scenarios: Vec::new(),
         groups: vec![PolicyGroup {
             name: "fb".to_string(),
             strategy: Strategy::Fallback,
@@ -625,6 +630,7 @@ async fn fallback_follows_declaration_order() -> Result<()> {
 async fn fallback_all_unhealthy_errors() -> Result<()> {
     let config = RoutingConfig {
         default_node: "fb".to_string(),
+        scenarios: Vec::new(),
         groups: vec![PolicyGroup {
             name: "fb".to_string(),
             strategy: Strategy::Fallback,
@@ -733,5 +739,300 @@ async fn reload_preserves_valid_selections() -> Result<()> {
         "node2",
         "更新后有效选择不得被随意清空"
     );
+    Ok(())
+}
+
+// ===== RIL-021 并列场景求值 =====
+
+use rillane_config::{ScenarioFailureAction, ScenarioRule};
+
+fn one_node_group(name: &str, node: &str) -> PolicyGroup {
+    PolicyGroup {
+        name: name.to_string(),
+        strategy: Strategy::RoundRobin,
+        members: vec![GroupMember::Node {
+            name: node.to_string(),
+        }],
+        slo: None,
+        url_test: None,
+    }
+}
+
+fn scenario(
+    name: &str,
+    conditions: Vec<MatchCondition>,
+    target: &str,
+    priority: i64,
+    on_failure: ScenarioFailureAction,
+) -> ScenarioRule {
+    ScenarioRule {
+        name: name.to_string(),
+        conditions,
+        target: target.to_string(),
+        priority,
+        on_failure,
+    }
+}
+
+fn ctx_with_process(host: &str, port: u16, proto: TargetProto, process: Option<&str>) -> FlowContext {
+    let mut ctx = create_flow_context(host, port);
+    ctx.target.proto = proto;
+    if let Some(p) = process {
+        ctx.metadata
+            .annotations
+            .insert("process.name".to_string(), p.to_string());
+    }
+    ctx
+}
+
+/// 验收①：同目标（同 host:port）的不同本机应用可选不同组——场景面按
+/// 进程注解分流，先于泛化规则。
+#[tokio::test]
+async fn scenario_same_target_different_apps_pick_different_groups() -> Result<()> {
+    let config = RoutingConfig {
+        default_node: "direct-node".to_string(),
+        scenarios: vec![
+            scenario(
+                "game-scene",
+                vec![MatchCondition::Process {
+                    values: vec!["cs2".to_string()],
+                }],
+                "game-exit",
+                10,
+                ScenarioFailureAction::Fallback,
+            ),
+            scenario(
+                "web-scene",
+                vec![MatchCondition::Process {
+                    values: vec!["firefox".to_string()],
+                }],
+                "web-exit",
+                10,
+                ScenarioFailureAction::Fallback,
+            ),
+        ],
+        groups: vec![
+            one_node_group("game-exit", "game-node"),
+            one_node_group("web-exit", "web-node"),
+        ],
+        rules: vec![],
+        ..Default::default()
+    };
+    let engine = RoutingEngine::new(config);
+
+    let game = engine
+        .route(ctx_with_process(
+            "match.example.com",
+            27015,
+            TargetProto::Udp,
+            Some("cs2"),
+        ))
+        .await?;
+    assert_eq!(game.final_node(), "game-node");
+    assert_eq!(game.reason.as_deref(), Some("scenario:game-scene"));
+
+    let web = engine
+        .route(ctx_with_process(
+            "match.example.com",
+            27015,
+            TargetProto::Tcp,
+            Some("firefox"),
+        ))
+        .await?;
+    assert_eq!(web.final_node(), "web-node");
+    assert_eq!(web.reason.as_deref(), Some("scenario:web-scene"));
+
+    Ok(())
+}
+
+/// 验收②：浏览器 QUIC 不因 UDP 承载被归入游戏——场景 Proto 条件
+/// quic ≠ udp（与规则面同一非折叠语义），QUIC 流落规则面默认路由。
+#[tokio::test]
+async fn browser_quic_flow_not_caught_by_udp_game_scenario() -> Result<()> {
+    let config = RoutingConfig {
+        default_node: "direct-node".to_string(),
+        scenarios: vec![scenario(
+            "game-scene",
+            vec![MatchCondition::Proto {
+                protocols: vec!["udp".to_string()],
+            }],
+            "game-exit",
+            10,
+            ScenarioFailureAction::Fallback,
+        )],
+        groups: vec![one_node_group("game-exit", "game-node")],
+        rules: vec![],
+        ..Default::default()
+    };
+    let engine = RoutingEngine::new(config);
+
+    // 真 UDP 游戏流命中场景
+    let udp = engine
+        .route(ctx_with_process("relay.example.com", 27015, TargetProto::Udp, None))
+        .await?;
+    assert_eq!(udp.final_node(), "game-node");
+    assert_eq!(udp.reason.as_deref(), Some("scenario:game-scene"));
+
+    // QUIC 流：不入 udp 场景，落默认路由
+    let quic = engine
+        .route(ctx_with_process(
+            "http3.example.com",
+            443,
+            TargetProto::Quic,
+            Some("firefox"),
+        ))
+        .await?;
+    assert_eq!(quic.final_node(), "direct-node");
+    assert_ne!(
+        quic.reason.as_deref(),
+        Some("scenario:game-scene"),
+        "QUIC 不得因 UDP 承载被归入游戏场景"
+    );
+
+    Ok(())
+}
+
+/// 失败动作：目标组无健康成员时 fallback = warn 落回规则面（规则面
+/// 接管，决策不带场景原因）；reject = 显式上抛并点名场景与目标。
+#[tokio::test]
+async fn scenario_on_failure_fallback_falls_to_rules_reject_errors() -> Result<()> {
+    let build = |on_failure: ScenarioFailureAction| RoutingConfig {
+        default_node: "direct-node".to_string(),
+        scenarios: vec![scenario(
+            "game-scene",
+            vec![MatchCondition::DomainSuffix {
+                values: vec!["play.example.com".to_string()],
+            }],
+            "dead-group",
+            10,
+            on_failure,
+        )],
+        groups: vec![
+            one_node_group("dead-group", "dead-node"),
+            one_node_group("primary-group", "primary-node"),
+        ],
+        rules: vec![RouteRule {
+            name: "catch".to_string(),
+            matches: vec![MatchCondition::DomainSuffix {
+                values: vec!["play.example.com".to_string()],
+            }],
+            target: "primary-group".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    // fallback：dead-group 无健康成员 → 落回规则面，catch 规则接管
+    let engine = RoutingEngine::new(build(ScenarioFailureAction::Fallback));
+    engine.set_node_health("dead-node", false);
+    let ctx = create_flow_context("play.example.com", 443);
+    let decision = engine.route(ctx).await?;
+    assert_eq!(
+        decision.final_node(),
+        "primary-node",
+        "fallback 应由规则面接管"
+    );
+    assert_eq!(
+        decision.reason.as_deref(),
+        Some("catch"),
+        "决策原因应为规则名（非场景）"
+    );
+
+    // reject：同名失配场景显式报错，含场景名与目标
+    let engine = RoutingEngine::new(build(ScenarioFailureAction::Reject));
+    engine.set_node_health("dead-node", false);
+    let ctx = create_flow_context("play.example.com", 443);
+    let err = engine.route(ctx).await.expect_err("reject 应显式上抛");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("game-scene"), "错误应点名场景: {msg}");
+    assert!(msg.contains("dead-group"), "错误应点名目标: {msg}");
+
+    Ok(())
+}
+
+/// 优先级：数值小者先评估（与声明序无关）；同优先级保持声明序，
+/// 先声明的兜底场景先吃掉流量。
+#[tokio::test]
+async fn scenario_priority_ascending_and_tie_keeps_declaration_order() -> Result<()> {
+    let config = RoutingConfig {
+        default_node: "direct-node".to_string(),
+        scenarios: vec![
+            scenario(
+                "late-high",
+                Vec::new(),
+                "late-exit",
+                200,
+                ScenarioFailureAction::Fallback,
+            ),
+            scenario(
+                "early-low",
+                Vec::new(),
+                "early-exit",
+                10,
+                ScenarioFailureAction::Fallback,
+            ),
+            scenario(
+                "tie-first",
+                Vec::new(),
+                "tie-exit",
+                10,
+                ScenarioFailureAction::Fallback,
+            ),
+        ],
+        groups: vec![
+            one_node_group("late-exit", "late-node"),
+            one_node_group("early-exit", "early-node"),
+            one_node_group("tie-exit", "tie-node"),
+        ],
+        rules: vec![],
+        ..Default::default()
+    };
+    let engine = RoutingEngine::new(config);
+
+    let decision = engine
+        .route(create_flow_context("example.com", 80))
+        .await?;
+    assert_eq!(
+        decision.reason.as_deref(),
+        Some("scenario:early-low"),
+        "优先级数值小者先评估（200 的兜底场景不得抢先）"
+    );
+    assert_eq!(decision.final_node(), "early-node");
+
+    // 同优先级：仅 tie-first 生效（声明序第一），命中即返回
+    let config = RoutingConfig {
+        default_node: "direct-node".to_string(),
+        scenarios: vec![
+            scenario(
+                "tie-a",
+                Vec::new(),
+                "exit-a",
+                100,
+                ScenarioFailureAction::Fallback,
+            ),
+            scenario(
+                "tie-b",
+                Vec::new(),
+                "exit-b",
+                100,
+                ScenarioFailureAction::Fallback,
+            ),
+        ],
+        groups: vec![
+            one_node_group("exit-a", "node-a"),
+            one_node_group("exit-b", "node-b"),
+        ],
+        rules: vec![],
+        ..Default::default()
+    };
+    let engine = RoutingEngine::new(config);
+    let decision = engine
+        .route(create_flow_context("example.com", 80))
+        .await?;
+    assert_eq!(
+        decision.reason.as_deref(),
+        Some("scenario:tie-a"),
+        "同优先级按声明序，不重排"
+    );
+
     Ok(())
 }

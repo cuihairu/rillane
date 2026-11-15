@@ -455,6 +455,7 @@ impl RillaneDslConverter {
 
         let routing = RoutingConfig {
             default_node: rillane_config.default_target.clone(),
+            scenarios: Vec::new(),
             groups,
             rules,
             ..RoutingConfig::default()

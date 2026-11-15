@@ -4238,6 +4238,7 @@ mod tests {
             }],
             routing: rillane_config::RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![],
                 rules: vec![],
                 ..Default::default()
@@ -4285,6 +4286,7 @@ mod tests {
             }],
             routing: rillane_config::RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![],
                 rules: vec![],
                 ..Default::default()
@@ -4338,6 +4340,7 @@ mod tests {
             }],
             routing: rillane_config::RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![],
                 rules: vec![],
                 ..Default::default()
@@ -4409,6 +4412,7 @@ mod tests {
             }],
             routing: rillane_config::RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![],
                 rules: vec![],
                 ..Default::default()
@@ -4450,6 +4454,7 @@ mod tests {
             }],
             routing: rillane_config::RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![],
                 rules: vec![],
                 ..Default::default()
@@ -4511,6 +4516,7 @@ mod tests {
             egress,
             routing: rillane_config::RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups,
                 rules,
                 ..Default::default()
@@ -4792,6 +4798,7 @@ mod tests {
             }],
             routing: RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![PolicyGroup {
                     name: "g1".to_string(),
                     strategy: Strategy::Random,
@@ -4843,6 +4850,7 @@ mod tests {
             ],
             routing: RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![
                     PolicyGroup {
                         name: "g1".to_string(),
@@ -5029,6 +5037,7 @@ routing:
             }],
             routing: rillane_config::RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![],
                 rules: vec![],
                 ..Default::default()
@@ -5488,6 +5497,7 @@ routing:
         let mut cfg = s5_udp_config(false);
         cfg.routing = rillane_config::RoutingConfig {
             default_node: "direct".to_string(),
+            scenarios: Vec::new(),
             groups: vec![rillane_config::PolicyGroup {
                 name: "auto".to_string(),
                 strategy: rillane_config::Strategy::Latency,
@@ -5760,6 +5770,7 @@ routing:
         let connectors = build_udp_connectors(&egress, None, None).unwrap();
         let routing = RoutingConfig {
             default_node: "direct-out".into(),
+            scenarios: Vec::new(),
             groups: vec![group(
                 "g",
                 &[
@@ -5789,6 +5800,7 @@ routing:
         assert!(connectors.contains_key("block-ads"), "reject 应注册连接器");
         let routing = RoutingConfig {
             default_node: "direct-out".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![rule("ads", "block-ads")],
             ..Default::default()
@@ -5828,6 +5840,7 @@ routing:
         assert!(connectors.is_empty(), "vmess-ws/hy2 均不产 UDP 连接器");
         let routing = RoutingConfig {
             default_node: "vmess-ws".into(),
+            scenarios: Vec::new(),
             groups: vec![group("g", &[("hy2-out", 1)])],
             rules: vec![rule("r1", "g")],
             ..Default::default()
@@ -5854,6 +5867,7 @@ routing:
         let connectors = build_udp_connectors(&egress, None, None).unwrap();
         let routing = RoutingConfig {
             default_node: "ss-out".into(),
+            scenarios: Vec::new(),
             groups: vec![],
             rules: vec![rule("r1", "mesh.exit1")],
             ..Default::default()
@@ -5883,6 +5897,7 @@ routing:
         };
         let routing = RoutingConfig {
             default_node: "g1".into(),
+            scenarios: Vec::new(),
             groups: vec![g1, g2],
             rules: vec![],
             ..Default::default()
@@ -6033,6 +6048,7 @@ routing:
             }],
             routing: rillane_config::RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![],
                 rules: vec![],
                 ..Default::default()
@@ -6233,6 +6249,7 @@ routing:
             ],
             routing: rillane_config::RoutingConfig {
                 default_node: "direct".to_string(),
+                scenarios: Vec::new(),
                 groups: vec![],
                 rules: vec![],
                 ..Default::default()
