@@ -14,6 +14,7 @@ pub mod contract;
 pub mod generations;
 pub mod preview;
 pub mod proposal;
+pub mod rollback;
 pub mod source;
 
 pub use approval::{
@@ -28,6 +29,12 @@ pub use apply::{
     ExecutionOutcome, APPLY_LABEL_MAX_CHARS, APPLY_RECEIPT_CAP, CODE_APPLY_BASE_CONFLICT,
     CODE_APPLY_CAPACITY, CODE_APPLY_EXECUTE_FAILED, CODE_APPLY_HASH_CONFLICT,
     CODE_APPLY_INPUT_INVALID, CODE_APPLY_KEY_MISMATCH,
+};
+pub use rollback::{
+    rollback_apply, ConnectionTruth, DrainPlan, RollbackError, RollbackExecution, RollbackReport,
+    RollbackRequest, CODE_ROLLBACK_CANDIDATE_MISMATCH, CODE_ROLLBACK_INPUT_INVALID,
+    CODE_ROLLBACK_LIVE_MOVED, CODE_ROLLBACK_TARGET_FOREIGN, CODE_ROLLBACK_TARGET_NOT_APPLIED,
+    CODE_ROLLBACK_TARGET_UNKNOWN, CONNECTION_TRUTH_STATEMENT,
 };
 pub use contract::{
     CapabilitySet, ConfigError, ConfigVersion, CODE_UNKNOWN_VERSION, CODE_UNSUPPORTED_COMBINATION,
