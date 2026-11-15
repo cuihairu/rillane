@@ -23,6 +23,7 @@ pub mod performance;
 pub mod plan;
 pub mod quality;
 pub mod schedule;
+pub mod scoring;
 pub mod udp;
 
 pub use outbound::{
@@ -57,6 +58,11 @@ pub use plan::{
 pub use quality::{
     QualityMetric, QualitySample, QualitySampleError, SampleSource, SampleStatus, SampleValue,
     CODE_QUALITY_EXPIRED, CODE_QUALITY_PEER_MISSING, CODE_QUALITY_UNKNOWN,
+};
+pub use scoring::{
+    MetricContribution, MetricRefs, ObjectiveWeights, ScenarioProfile, ScenarioScorer,
+    ScoreError, ScoreInputs, ScoreReport, SloSpec, SloUnknownReason, SloVerdict, StayReason,
+    SwitchDecision, CODE_PROFILE_INVALID, CODE_WEIGHTS_INVALID,
 };
 
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.
