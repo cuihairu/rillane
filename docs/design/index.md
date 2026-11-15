@@ -17,4 +17,4 @@ The repository-root [todo.md](https://github.com/cuihairu/rillane/blob/main/todo
 
 [Current implementation](../architecture.md), [configuration](../config.md) and [CLI reference](../cli.md) describe existing behavior, not completed v1 delivery. Old designs, roadmaps and audits have been removed from the active documentation tree; consult Git history for historical material.
 
-[Minimal R logo concepts](brand/README.md): three unselected PNG concepts, with saved prompts and metadata.
+[Minimal R logo concepts](brand/README.md): B selected; production SVGs and retained concept provenance.

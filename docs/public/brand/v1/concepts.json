@@ -1,5 +1,5 @@
 {
-  "status": "unselected generated concepts",
+  "status": "B-compact selected by user; vector master delivered separately",
   "generator": "built-in image_gen",
   "model": "not exposed by tool",
   "constraint_delivery": "main-prompt constraints",
@@ -34,5 +34,7 @@
       "height": 1254,
       "sha256": "3ff4311cbea4ca84fd484c0b10490eb54df66a47a751c4358fc8496dd9a826db"
     }
-  ]
+  ],
+  "selected": "B-compact",
+  "production_master": "final/rillane-symbol.svg"
 }

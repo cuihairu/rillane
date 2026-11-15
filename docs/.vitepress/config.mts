@@ -49,7 +49,11 @@ export default defineConfig({
   lang: 'en-US',
   title: 'Rillane',
   description: 'Rillane v1 design: one proxy core, six platforms, concurrent game/web policies and optional diagnostic MCP.',
-  head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/logo.svg' }]],
+  head: [
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }],
+    ['link', { rel: 'icon', type: 'image/png', sizes: '32x32', href: '/brand/v1/final/web/favicon-32.png' }],
+    ['link', { rel: 'apple-touch-icon', sizes: '180x180', href: '/brand/v1/final/web/apple-touch-icon.png' }],
+  ],
   locales: {
     root: { label: 'English', lang: 'en-US' },
     zh: { label: '简体中文', lang: 'zh-CN', link: '/zh/' },
