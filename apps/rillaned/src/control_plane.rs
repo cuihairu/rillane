@@ -21,7 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use rillane_core::udp::{TableSnapshot, UdpIngressMetrics, UdpIngressSnapshot};
 use rillane_mesh::{LinkState, MeshRegistry, NodeCapability, NodeRecord, NodeRole};
-use rillane_runtime::{ChainConstraints, Runtime, RuntimeEvent, SourceMergeStats, SwitchReason};
+use rillane_runtime::{
+    ChainConstraints, FlowStatItem, Runtime, RuntimeEvent, SourceMergeStats, SwitchReason,
+};
 use rillane_subscription::{Subscription, SubscriptionConverter, SubscriptionType};
 
 /// 请求体统一形（hyper 1.x 迁移）：产线路径 `Incoming`（服务）与测试
@@ -1362,32 +1364,11 @@ impl ControlPlane {
         json(StatusCode::OK, &map)
     }
 
-    /// Clash 兼容 `/connections`：只读子集——从 flow stats 派生连接表。
+    /// Clash 兼容 `/connections`：只读子集——从 flow stats 派生。
+    /// 聚合语义显式化（RIL-056）：映射细节见 [`clash_connections_view`]。
     async fn handle_clash_connections(&self) -> Response<RespBody> {
         let flows = self.runtime.get_flow_stats();
-        let items: Vec<ClashConnectionDto> = flows
-            .into_iter()
-            .map(|f| ClashConnectionDto {
-                id: format!("{}-{}", f.ingress, f.egress),
-                metadata: ClashConnMeta {
-                    host: String::new(),
-                },
-                rule: f.ingress.clone(),
-                rule_payload: String::new(),
-                chains: vec![f.egress.clone()],
-                start: 0,
-                upload: f.upstream,
-                download: f.downstream,
-                upload_total: f.upstream,
-                download_total: f.downstream,
-            })
-            .collect();
-        let out = serde_json::json!({
-            "downloadTotal": 0u64,
-            "uploadTotal": 0u64,
-            "connections": items,
-        });
-        json(StatusCode::OK, &out)
+        json(StatusCode::OK, &clash_connections_view(flows))
     }
 
     /// Clash 兼容 `/traffic`：只读子集——runtime 全局流量（up/down）。
@@ -1753,15 +1734,14 @@ impl ControlPlane {
         // RIL-016：订阅名作来源命名空间——刷新只动自己名下对象，
         // 用户本地配置（游戏规则/监听口/系统路由/插件/凭证）与他订阅
         // 对象永不覆盖
-        let merge_stats: SourceMergeStats =
-            match self
-                .runtime
-                .merge_source_delta(&trimmed, &converted.config)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => return text(StatusCode::BAD_REQUEST, &format!("apply failed: {e}")),
-            };
+        let merge_stats: SourceMergeStats = match self
+            .runtime
+            .merge_source_delta(trimmed, &converted.config)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return text(StatusCode::BAD_REQUEST, &format!("apply failed: {e}")),
+        };
 
         json(
             StatusCode::OK,
@@ -2223,14 +2203,58 @@ struct ClashProxyHistory {
 }
 
 /// Clash 兼容 `/connections` 单连接（只读子集）。
+/// Clash 兼容 `/connections` 视图映射（RIL-056，纯函数便于契约测试）：
+/// 每条是 (ingress, egress) 流量统计对，**不是逐连接记录**。真实字段
+/// 只有字节计数与聚合键；缺失事实（开始时刻/域名/规则/链路）一律
+/// null/空不伪造；顶层 `rillane` 块显式声明聚合语义与可用性边界；
+/// totals 是表内可见项求和（不虚报全局数）。逐连接真实轨迹在内核
+/// 查询服务（RIL-055），与本聚合视图语义分立（`/flows` 同为聚合面）。
+fn clash_connections_view(flows: Vec<FlowStatItem>) -> serde_json::Value {
+    let upload_total: u64 = flows.iter().map(|f| f.upstream).sum();
+    let download_total: u64 = flows.iter().map(|f| f.downstream).sum();
+    let items: Vec<ClashConnectionDto> = flows
+        .into_iter()
+        .map(|f| ClashConnectionDto {
+            id: format!("{}-{}", f.ingress, f.egress),
+            metadata: ClashConnMeta { host: None },
+            rule: None,
+            rule_payload: None,
+            chains: Vec::new(),
+            start: None,
+            upload: f.upstream,
+            download: f.downstream,
+            upload_total: f.upstream,
+            download_total: f.downstream,
+        })
+        .collect();
+    serde_json::json!({
+        "downloadTotal": download_total,
+        "uploadTotal": upload_total,
+        "connections": items,
+        "rillane": {
+            "view": "aggregate",
+            "id_semantics": "ingress-egress pair key, not a per-flow id",
+            "note": "missing time/domain/rule/chains are null, not fabricated; per-flow traces live in the kernel query service",
+        }
+    })
+}
+
+/// Clash 兼容 `/connections` 条目（RIL-056）：聚合语义显式化——缺失
+/// 事实序列化为 null/空（面板可辨「无记录」与「零值」的区别）。
 #[derive(Debug, Clone, Serialize)]
 struct ClashConnectionDto {
+    /// 聚合键（`<ingress>-<egress>`）——不是逐连接 flow ID
     id: String,
     metadata: ClashConnMeta,
-    rule: String,
-    rule_payload: String,
+    /// 聚合统计不携带规则事实——null = 无记录，不伪造
+    rule: Option<String>,
+    /// 聚合统计不携带规则载荷——null = 无记录，不伪造
+    rule_payload: Option<String>,
+    /// 聚合统计不携带链路事实——空 = 无记录，不伪造
     chains: Vec<String>,
-    start: u64,
+    /// 聚合统计不携带开始时刻——null = 无记录，不伪造
+    start: Option<u64>,
+    /// 观测窗口内上行/下行字节（真实计数）
     upload: u64,
     download: u64,
     upload_total: u64,
@@ -2239,7 +2263,8 @@ struct ClashConnectionDto {
 
 #[derive(Debug, Clone, Serialize)]
 struct ClashConnMeta {
-    host: String,
+    /// 聚合统计不携带域名事实——null = 无记录，不伪造
+    host: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4414,5 +4439,64 @@ mod tests {
         assert_eq!(v["mtu"], serde_json::json!(1400));
         assert_eq!(v["up"], serde_json::json!(false));
         assert!(v["applied"].as_array().unwrap().is_empty());
+    }
+
+    /// RIL-056：兼容 `/connections` 视图——真实字段映射与可用性说明。
+    /// 缺失时间/域名/规则/链路不伪造（null/空）；id 是聚合键；顶层
+    /// `rillane` 块声明聚合语义；totals 是表内求和；字节计数如实映射。
+    #[test]
+    fn clash_connections_view_maps_fields_honestly() {
+        let flows = vec![
+            FlowStatItem {
+                ingress: "mixed-in".to_string(),
+                egress: "proxy-a".to_string(),
+                flows: 2,
+                upstream: 100,
+                downstream: 900,
+            },
+            FlowStatItem {
+                ingress: "tun-in".to_string(),
+                egress: "DIRECT".to_string(),
+                flows: 1,
+                upstream: 10,
+                downstream: 0,
+            },
+        ];
+        let view = clash_connections_view(flows);
+
+        // totals 是表内可见项求和（不虚报全局数）
+        assert_eq!(view["uploadTotal"], serde_json::json!(110));
+        assert_eq!(view["downloadTotal"], serde_json::json!(900));
+
+        // 视图语义显式声明：聚合面、聚合键口径、缺失即 null 的说明
+        assert_eq!(view["rillane"]["view"], serde_json::json!("aggregate"));
+        assert!(view["rillane"]["id_semantics"]
+            .as_str()
+            .unwrap()
+            .contains("not a per-flow id"));
+        assert!(view["rillane"]["note"].as_str().unwrap().contains("null"));
+
+        let items = view["connections"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let first = &items[0];
+        // 真实字段：聚合键 id + 字节计数如实映射
+        assert_eq!(first["id"], serde_json::json!("mixed-in-proxy-a"));
+        assert_eq!(first["upload"], serde_json::json!(100));
+        assert_eq!(first["download"], serde_json::json!(900));
+        assert_eq!(first["upload_total"], serde_json::json!(100));
+        assert_eq!(first["download_total"], serde_json::json!(900));
+        // 缺失事实不伪造：时间/域名/规则/链路 = null/空
+        assert!(first["start"].is_null(), "缺失时间不伪造为 0");
+        assert!(first["metadata"]["host"].is_null(), "缺失域名不伪造为空串");
+        assert!(first["rule"].is_null(), "聚合统计无规则事实");
+        assert!(first["rule_payload"].is_null());
+        assert!(
+            first["chains"].as_array().unwrap().is_empty(),
+            "聚合统计无链路事实，不拿出口标签冒充链路"
+        );
+        // 旧聚合 API 语义独立：ingress/egress 不再被塞进 rule/chains
+        let second = &items[1];
+        assert_eq!(second["id"], serde_json::json!("tun-in-DIRECT"));
+        assert_eq!(second["download"], serde_json::json!(0), "零值与缺失可辨");
     }
 }
