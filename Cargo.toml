@@ -105,3 +105,11 @@ maxminddb = "0.32"
 geosite-rs = "0.1.6"
 # Test-only writer to synthesize a small .mmdb without external files.
 maxminddb-writer = "0.1.3"
+
+# REALITY 传输面（RIL-107）：cfal/rustls fork——上游 049d39b9（0.23.46）+
+# 5 个 REALITY 提交（ClientHooks/new_reality/PreparedServerHello/隔离加固），
+# 固定 rev 全仓换用；选库评估见 docs/zh/protocol-backends.md#vless。
+# fork 的 REALITY 面不认证对端——认证与证书绑定由 rillane-protocols 装配。
+# 记录层填充仅 aws_lc_rs 后端实现（ring 默认实现拒绝非零填充）。
+[patch.crates-io]
+rustls = { git = "https://github.com/cfal/rustls", rev = "d17d0fc304c03fe6e2c96ade6cd39c33b951c3af" }
