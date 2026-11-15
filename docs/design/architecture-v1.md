@@ -215,3 +215,5 @@ P0 covers first user value, core foundations and risk spikes; P1 covers later co
 Six-platform summaries/full-scope documentation are closing evidence, not a universal lock on intermediate deliveries. Mesh enhancement may wait; insecure existing paths must still reject. Candidates do not imply stable-release authorization. Missing device evidence remains unverified.
 
 See [v1 IO and accounting contracts](io-and-accounting.md) for inbound/outbound boundaries, ownership, transport composition and layered counters.
+
+Protocol modules prefer external-library adapters; separate protocol identity from Factory/feature-selected backends. Keep dependency types outside routing/sessions and validate socket bypass, cancellation and equivalent accounting. See [IO contracts](io-and-accounting.md).

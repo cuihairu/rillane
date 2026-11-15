@@ -71,3 +71,32 @@ TrafficMeter uses bounded lightweight counters. SessionObserver emits low-freque
 ## 6. Migration gates
 
 Freeze contracts/ownership then adapt current implementations. Verify responses, cancellation, half-close, partial writes, multi-target/zero-length UDP, pool isolation and no replay on fallback. Reconcile authoritative session totals with ingress/egress attribution while keeping transport totals separate. Root todo.md owns atomic RIL-096–103; this document does not claim implementation completion.
+
+## 7. Prefer external protocol libraries and replaceable backends
+
+A protocol directory is primarily an **adaptation/integration boundary**. Prefer mature existing implementations. Rillane owns contracts, option conversion, capabilities, ownership and necessary compatibility code. Add minimal custom implementation only for verified library gaps, documenting the cost. Existing dependencies already include shadowsocks, hysteria2, tokio-socks and defguard_wireguard_rs.
+
+```text
+SessionExecutor
+    → StreamOutbound / DatagramOutbound / Inbound contracts
+        → protocol adapter
+            → external Rust library (preferred) / justified alternative backend
+```
+
+Separate protocol identity from implementation backend. Keep user configuration semantic; Factory/features choose a validated default backend rather than requiring per-node library selection. Replacement preserves capability/error/cancellation/accounting/lifecycle contracts, not a promise that every library supports identical transports. Start with one default backend per protocol; do not maintain speculative alternatives.
+
+| Layer | Responsibility | Boundary |
+|---|---|---|
+| Rillane contracts | Targets, channels, capabilities, errors, events and lifecycle | External types/config/errors must not reach Router/SessionExecutor |
+| Protocol adapter | Options, library calls, error translation, cancellation/close and observation | No duplicate routing, budgets or authoritative business counters |
+| External library | Framing, authentication/crypto, handshakes and owned connection state | Internal mechanisms are not automatically observable Rillane stages |
+
+Use `protocols/<name>/backend.rs` initially; split `backends/` only for actual alternatives. Keep validation/registration in the protocol module. Share TLS/transports where injection permits; do not forcibly dismantle native QUIC ownership. Isolate heavy dependencies using features or crates; small builds exclude disabled backends from their dependency graph.
+
+Factories inject narrow dial/bypass, cancellation, secret and observation services. Evaluate platforms/architectures, public APIs, maintenance, licensing/redistribution, UDP/transports, injectable dialing/packet IO and build resources before choosing dependencies; these criteria do not certify an unevaluated library.
+
+Library-owned sockets must support required bypass, such as mobile VPN protect. Reject unsupported platform combinations when safe injection/loop prevention cannot be established. Libraries owning relay must expose equivalent business accounting/lifecycle hooks; unavailable timing/transport details stay unknown. Coordinate library retries with executor fallback to avoid duplicate replay.
+
+For other languages assess a stable C ABI/FFI first, then managed subprocesses if justified. Both require explicit threading, buffers, cancellation, crashes and packaging; neither is equivalent to a Rust trait adapter. Subprocesses are not the default architecture and MCP gains no generic execution tool.
+
+Adapt existing working backends before selectively replacing them. Validate equivalent protocol inputs, success/failure, UDP, partial IO, cancellation, release, bypass and accounting. Upstream protocol support does not establish Rillane integration acceptance. Track this through RIL-097/099/100/103.
