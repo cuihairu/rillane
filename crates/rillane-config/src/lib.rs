@@ -9,15 +9,21 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub mod contract;
+pub mod generations;
 pub mod source;
 
 pub use contract::{
     CapabilitySet, ConfigError, ConfigVersion, CODE_UNKNOWN_VERSION, CODE_UNSUPPORTED_COMBINATION,
 };
+pub use generations::{
+    digest_parts, GenerationEdge, GenerationError, GenerationObject, GenerationStore,
+    RuntimeGeneration, CODE_GENERATION_CYCLE, CODE_GENERATION_DANGLING, CODE_GENERATION_DUPLICATE,
+    CODE_GENERATION_ID_MISMATCH,
+};
 pub use source::{
-    CompatibilityDiagnostic, ObjectCatalog, ObjectId, ObjectKind, ObjectRenamed, SourceContractError,
-    SourceId, SourceLocation, SourceObject, SourceSnapshot, SnapshotDiff, CODE_COMPAT_LOSSY,
-    CODE_COMPAT_UNSUPPORTED, CODE_SOURCE_ID_INVALID, CODE_SOURCE_MISMATCH, derive_local_id,
+    derive_local_id, CompatibilityDiagnostic, ObjectCatalog, ObjectId, ObjectKind, ObjectRenamed,
+    SnapshotDiff, SourceContractError, SourceId, SourceLocation, SourceObject, SourceSnapshot,
+    CODE_COMPAT_LOSSY, CODE_COMPAT_UNSUPPORTED, CODE_SOURCE_ID_INVALID, CODE_SOURCE_MISMATCH,
 };
 
 /// 场景预设（P2-3 scenario-profiles.md §3）：配置期展开为既有块缺省填充
