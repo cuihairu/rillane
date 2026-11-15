@@ -301,6 +301,28 @@ impl ProposalStore {
             ProposalRead::Rejected { code } => Err(code),
         }
     }
+
+    /// 事务内窥视（RIL-076 消费）：只做所有者与存活性守卫（unknown →
+    /// foreign → expired），不比 `base_hash`——版本前置检查由消费方
+    /// 自办（apply 以独立稳定码区分代际冲突与内容冲突，见
+    /// `apply.base.conflict` / `apply.hash.conflict`）。
+    pub fn peek(
+        &self,
+        id: &str,
+        owner: &str,
+        now_ms: u64,
+    ) -> Result<&ConfigProposal, &'static str> {
+        let Some(proposal) = self.entries.get(id) else {
+            return Err(CODE_PROPOSAL_UNKNOWN);
+        };
+        if proposal.owner != owner {
+            return Err(CODE_PROPOSAL_FOREIGN);
+        }
+        if now_ms >= proposal.expires_ms {
+            return Err(CODE_PROPOSAL_EXPIRED);
+        }
+        Ok(proposal)
+    }
 }
 
 fn validate_label(field: &str, max_chars: usize) -> Result<(), &'static str> {
@@ -700,6 +722,32 @@ mod proposal_tests {
             store
                 .covers(&p.id, "cli:local", p.expires_ms, &hash, "routing")
                 .unwrap_err(),
+            CODE_PROPOSAL_EXPIRED
+        );
+    }
+
+    /// 事务内窥视（RIL-076 消费）：不比哈希——版本前置检查归消费方；
+    /// unknown → foreign → expired 守卫序与 read 一致。
+    #[test]
+    fn peek_guards_owner_and_expiry_without_hash() {
+        let mut store = ProposalStore::new();
+        let p = store.create(new_proposal_id(), input(), 0).expect("登记");
+
+        // 有效：哈希不匹配也照常返回本体（前置检查归 apply 面）
+        let peeked = store.peek(&p.id, "cli:local", 1).expect("应窥视到本体");
+        assert_eq!(peeked.base_hash, digest_parts(&["config-v1"]));
+        assert_eq!(peeked.owner, "cli:local");
+
+        assert_eq!(
+            store.peek("missing", "cli:local", 1).unwrap_err(),
+            CODE_PROPOSAL_UNKNOWN
+        );
+        assert_eq!(
+            store.peek(&p.id, "attacker", 1).unwrap_err(),
+            CODE_PROPOSAL_FOREIGN
+        );
+        assert_eq!(
+            store.peek(&p.id, "cli:local", p.expires_ms).unwrap_err(),
             CODE_PROPOSAL_EXPIRED
         );
     }

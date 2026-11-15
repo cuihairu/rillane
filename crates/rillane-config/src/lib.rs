@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub mod approval;
+pub mod apply;
 pub mod contract;
 pub mod generations;
 pub mod preview;
@@ -21,6 +22,12 @@ pub use approval::{
     CODE_APPROVAL_POLICY_EXHAUSTED, CODE_APPROVAL_REPLAYED, CODE_APPROVAL_REQUIRED,
     CODE_APPROVAL_SCOPE_EXCEEDED, CODE_APPROVAL_SCOPE_INVALID, CODE_APPROVAL_STALE,
     CODE_APPROVAL_UNKNOWN, APPROVAL_STORE_CAP, PREAUTH_GRANT_CAP,
+};
+pub use apply::{
+    ApplyError, ApplyLedger, ApplyReceipt, ApplyReconcile, ApplyRequest, ApplyResult, ApplyStatus,
+    ExecutionOutcome, APPLY_LABEL_MAX_CHARS, APPLY_RECEIPT_CAP, CODE_APPLY_BASE_CONFLICT,
+    CODE_APPLY_CAPACITY, CODE_APPLY_EXECUTE_FAILED, CODE_APPLY_HASH_CONFLICT,
+    CODE_APPLY_INPUT_INVALID, CODE_APPLY_KEY_MISMATCH,
 };
 pub use contract::{
     CapabilitySet, ConfigError, ConfigVersion, CODE_UNKNOWN_VERSION, CODE_UNSUPPORTED_COMBINATION,
