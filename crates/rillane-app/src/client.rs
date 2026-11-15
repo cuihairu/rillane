@@ -42,7 +42,14 @@ impl BlockingApp {
         let mut url = format!("{}{}", self.base, req.path);
         if !req.query.is_empty() {
             url.push('?');
-            let pairs: Vec<String> = req.query.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            // 值面百分号编码（键是 &'static str 常量——无注入面）：值经
+            // ops 层 sanitize_untrusted（控制字符→U+FFFD）后再编码保留
+            // 字符（&?# 空格等）——数据变不成第二条指令或额外参数
+            let pairs: Vec<String> = req
+                .query
+                .iter()
+                .map(|(k, v)| format!("{k}={}", encode_query_value(v)))
+                .collect();
             url.push_str(&pairs.join("&"));
         }
         url
@@ -91,6 +98,23 @@ impl BlockingApp {
             text,
         })
     }
+}
+
+/// 查询串值面百分号编码：保留字符集（RFC 3986 unreserved + 惯用的
+/// `:`）之外逐字节转 %XX——`&`/`#`/`?`/空格/`%`/控制字节都变不进
+/// 参数分隔符或新请求行。输入恒为 ops 层消毒后的原始值（未预编码）
+/// ——不存在二次编码面。
+fn encode_query_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for b in v.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b':' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -170,6 +194,43 @@ mod tests {
             .expect_err("error");
         assert_eq!(err.status, Some(404));
         assert_eq!(err.code, "collector.flow.expired");
+    }
+
+    #[test]
+    fn query_values_are_percent_encoded_before_transport() {
+        // 值面编码（RIL-072）：保留字符（空格 & # ? %）与控制字节变不进
+        // 参数分隔符或新请求行——数据变不成第二条指令或额外查询参数；
+        // 普通值无编码痕迹（同输入同输出）
+        let (base, seen) =
+            one_shot_server("HTTP/1.1 200 OK", r#"{"schema_version":1,"found":false}"#);
+        let app = BlockingApp::new(&base, None).expect("app");
+        let reply = app
+            .execute(AppOperation::FlowTrace {
+                id: "f 1&x=2#f?g%1\r\nGET /admin HTTP/1.1".to_string(),
+            })
+            .expect("reply");
+        assert_eq!(reply.found(), Some(false));
+        let request = seen.lock().expect("lock").clone().expect("request seen");
+        let first = request.lines().next().expect("request line");
+        // 空格 %20、& %26、# %23、? %3F、% %25、CRLF→sanitize 的
+        // U+FFFD %EF%BF%BD——单请求行，注入文本整体编码在值内
+        assert!(first.starts_with("GET /trace/flow?id=f%20"), "{first}");
+        assert!(first.contains("%26x%3D2"), "{first}");
+        assert!(first.contains("%23f%3Fg%251"), "{first}");
+        assert!(first.contains("%EF%BF%BD"), "{first}");
+        assert!(!request.contains("\r\nGET /admin"), "{request}");
+        let plain = one_shot_server("HTTP/1.1 200 OK", r#"{"schema_version":1}"#);
+        BlockingApp::new(&plain.0, None)
+            .expect("app")
+            .execute(AppOperation::FlowTrace {
+                id: "f-1".to_string(),
+            })
+            .expect("reply");
+        let plain_request = plain.1.lock().expect("lock").clone().expect("seen");
+        assert!(
+            plain_request.starts_with("GET /trace/flow?id=f-1 HTTP/1.1"),
+            "普通值原样: {plain_request}"
+        );
     }
 
     #[test]
