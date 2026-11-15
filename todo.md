@@ -291,8 +291,13 @@
   ⑤ 来源删除显式（source_deletion_is_explicit_not_silent）：本地 LOCAL-PROXY 组（Group 对象注册在场）跨源引用订阅节点；只删 sub-b 对象留引用 → `GenerationError::DanglingReference` 且 `code()==CODE_GENERATION_DANGLING`（关键策略不静默断链）；连本地引用边一并清理 → 删除完成、对象离场、他源对象不受累、恰少一个对象。
   ⑥ 本地覆盖（nodes_only_import_keeps_local_policy_ownership）：`ImportMode::NodesOnly` 经 `SubscriptionConverter::with_options`+`auto_convert` 只收 2 节点，组/规则为空、剥离经 warnings 显式登记（含 "nodes-only"）；节点凭证照常进 IR（只收节点≠剥凭证）；刷新合并模拟：本地 egress 面被订阅节点替换、本地 2 条规则原样不被覆盖；存量 FullPolicy 对照组/规则整份照收且无剥离登记。
   外部真实网络（订阅拉取/geoip 库在线加载）不在本回归面：转换器输入以脱敏内联 YAML 为准（RFC 5737/占位凭证，同 RIL-007 样本纪律），拉取面由 rillane-subscription 自有契约覆盖。
-- [ ] **RIL-088｜P1｜事务与故障注入验收**；依赖：RIL-019、RIL-023。
+- [x] **RIL-088｜P1｜事务与故障注入验收**；依赖：RIL-019、RIL-023。
   交付：逐阶段失败、磁盘错误、崩溃、网络失联和多客户端并发。验收：旧版本保留/补偿/重启恢复行为可重放，未补偿问题不能用成功回执掩盖。
+  完成（2026-11-16）：`crates/rillane-runtime/tests/transaction_fault_acceptance.rs` 4 测试（新增文件，不触并发Actor 脏面），10× 重复全绿，`cargo clippy -p rillane-runtime --all-targets --all-features -- -D warnings` 干净（顺带移除 runtime 死依赖 `notify`——crate 级 unused-dep 告警阻断 -D warnings 门禁），rillane-runtime 全量 187 lib + 4 验收绿；逐验收条款映射如下。
+  ① 逐阶段失败 + 补偿重放（phase_failures_preserve_state_and_replay）：prepare 段暂存路径被占位 → `JournalCorrupt`（detail 含「暂存失败」）、旧代际保留、重开无挂起残留；故障排除后同候选重放成功。apply 段失败（网络失联面：出口规则下发 "network unreachable"）→ `ApplyFailed` 原因透传、旧代际保留、失败候选暂存清掉、网络恢复后重放成功；同代际空转提交 `CODE_GENERATION_UNCHANGED` 拒绝。
+  ② 真实崩溃可重放（commit_point_crash_replay_subprocess）：子进程（current_exe + 测试名过滤 + 注入环境）在提交点前 Prepared / Applied 两档 SIGABRT 定格磁盘（暂存目录 + pending journal 原子写后 `process::abort`）；父进程重开裁决：两档一律回滚挂起、旧代际保持有效、暂存目录清掉；`recover()` 幂等（二次恢复零动作）；两档注入后现役仍是 g1（发布面未被崩溃污染）。
+  ③ 磁盘错误 + 未补偿可见（disk_faults_reopen_consistent_and_uncompensated_visible）：journal 临时写路径被目录占位 → 落盘段 `JournalCorrupt`（detail 含「落盘失败」）、journal 正本无损、prepare 半途遗留目录重开对账以**孤儿可见**（不被静默吸收）、修复后收敛 + 重放成功。提交点后 / retained 记账前的崩溃窗口：`effective` 成功回执保留（不回滚）、漏账旧代际以孤儿可见（**不用成功回执掩盖**）、`reclaim` 收敛且不回滚回执。排空先于回收（RIL-023 对账）：retained 面驱动 `LeaseGuard::drain("generation retired")+close`（无 InUse 幸存者）完成后 `reclaim` 才回收旧代际目录、现役不动。
+  ④ 多客户端并发（concurrent_readers_never_observe_torn_journal）：单写者连续 16 次提交 × 3 读者线程并发重开（>100 次观察窗）：读者永不见撕裂 journal（原子 rename 提交点）、effective 恒属已知代际集或初始空、镜像账面自洽（挂起候选 ∈ 已知集且 ≠ 现役）；终态 = 最后一次提交、retained 全账 15 条、无孤儿。
 - [ ] **RIL-089｜P1｜并行负载性能对照**；依赖：RIL-025、RIL-027、RIL-031、RIL-064。
   交付：先提供 Linux 同节点/线路/负载对照，其他平台随适配追加；连接池优化单独对照，不阻断核心策略测量。验收：p50/p95、抖动、有效丢包样本、TTFB、吞吐、CPU/RSS 与重复次数完整；同时报告回退和无收益条件。
 - [ ] **RIL-090｜P1｜MCP 客户端互操作验收**；依赖：RIL-072、RIL-081、RIL-083。
