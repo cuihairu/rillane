@@ -179,6 +179,42 @@ armv7-ohos 桩）在对应小节如实记录。
 - **复用**：无预热组合；UDP 面（TLS + network=tcp）同节点配置
 - UDP：仅 TLS + network=tcp。
 
+## anytls
+
+- **结论**：选库 `anytls`（ssrlive/anytls-rs）——客户端/服务端双面库；
+  备选 anytls-rs（jxo-me，同名不同仓）评估在案：0.5.4 后自 2025-11 未再
+  发版，维护弱于前者——取活跃维护者。角色边界：出口客户端本项装配（RIL-106）；
+  服务端面库内可用（Session::new_server + run + accept_stream + read_auth），
+  rillane 入站面未编目 AnyTLS 监听——真实对端验收即以库自带服务端面承载
+- **版本**：要求 `0.5`，lock 实测 0.5.4（2026-11-11 发版；2026-04 首版
+  以来 36 个版本，活跃维护）
+- **许可**：MIT
+- **平台**：全平台（纯 Rust，tokio/rustls 栈，edition 2024）
+- **公开 API**：`Client::new(dialer, padding, idle_timeout, max_session_age)`
+  + `create_stream()`（内建 idle 会话池）；`StreamIo`（AsyncRead/AsyncWrite
+  适配）；`write_auth_with_client_id`（会话认证）；UoT 面
+  `uot_sentinel_destination`/`UotRequest`/`uot_encode_packet`/
+  `uot_get_packet_from_stream`；包装为 `AnytlsConnector`/`AnytlsUdpConnector`
+  （crates/rillane-protocols/src/outbound/anytls.rs）；测试对端用服务端面
+  `Session::new_server`/`run`/`accept_stream` + `read_auth_with_client_id`
+- **旁路**：库不拥有拨号与 TLS——`Dialer` 闭包由调用方供给，本仓经
+  TlsConnectorFactory 组合（skip_cert_verify/sni 可控）；会话帧/多路复用/
+  填充在库内（不旁路，如实记录）
+- **取消**：`Client::shutdown`；库导出 tokio-util CancellationToken；流
+  drop → FIN 关闭；会话认证读写无超时参数——建连取消在任务丢弃层
+  （如实记录）
+- **统计**：库面无统计观测点（traffic_status 是库自带 CLI 应用面，不入
+  库 API）——失败以 io::Error 形态透出（observed 口径）；流量统计沿用
+  FlowReport 上/下行字节（copy_bidirectional 口径）
+- **复用**：会话复用是协议本体——Client 内建 idle 会话池（idle_timeout/
+  max_session_age 参数化），`create_stream` 优先复用空闲会话开新流，
+  无需外接连接池
+- UDP：库 uot 特性（UDP-over-TCP，按库实际能力交付）——上行
+  `uot_encode_packet(UotMode::Datagram, dest, payload)`、下行
+  `uot_get_packet_from_stream`，会话流首写 sentinel destination +
+  UotRequest 声明数据报模式；目录 udp=true。订阅侧 alpn/
+  client-fingerprint 不入 IR（转换报告点名损失，宁缺毋滥）。
+
 ## hysteria
 
 **未准入**——无已评审后端。配置 schema 与订阅字段存在不代表连接器

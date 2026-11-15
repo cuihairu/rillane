@@ -44,6 +44,9 @@ shadowsocks.workspace = true
 # Hysteria2
 hysteria2.workspace = true
 
+# AnyTLS（RIL-106）
+anytls.workspace = true
+
 # android 不编 wireguard（defguard_boringtun 无平台支撑，见 outbound/wireguard_stub.rs）；
 # armv7-ohos 同因剥离（boringtun epoll.rs 的 libc::timespec 字面量撞 32 位 ohos libc
 # 私有 __pad0 字段，E0451；aarch64/x86_64-ohos 上 boringtun 实测可编，不回退，见
@@ -54,3 +57,5 @@ defguard_wireguard_rs.workspace = true
 [dev-dependencies]
 # §8.2 mock TLS 服务端（自签证书）
 rcgen.workspace = true
+# RIL-106 真实对端：库自带 AnyTLS 服务端面（Session::new_server/accept_stream）
+anytls = { workspace = true, features = ["server"] }

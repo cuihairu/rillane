@@ -1948,6 +1948,18 @@ pub enum EgressConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         tls_fingerprint: Option<String>,
     },
+    /// AnyTLS 出口（RIL-106）：TLS 承载的会话复用代理（缓解 TLS-in-TLS
+    /// 指纹）。TLS 拨号在本仓（skip_cert_verify/sni 可组合），会话帧/
+    /// 多路复用/填充由 anytls 库承载；UDP 为 UDP-over-TCP（UoT）面。
+    Anytls {
+        server: String,
+        port: u16,
+        password: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sni: Option<String>,
+        #[serde(default)]
+        skip_cert_verify: bool,
+    },
     Hysteria {
         server: String,
         port: u16,

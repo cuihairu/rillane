@@ -336,6 +336,108 @@ fn socks5_subscription_fields_convert_both_ways() {
     }
 }
 
+// ---------- RIL-106：AnyTLS 出站——订阅字段双向转换样本 ----------
+
+#[test]
+fn anytls_subscription_fields_convert_both_ways() {
+    // 正向：clash 订阅 → IR（字段逐项断言；不入 IR 的字段点名降级）
+    let (config, report) = loose("anytls_node.yaml");
+    let names: Vec<&str> = config.egress.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["sample-anytls-full", "sample-anytls-min"]);
+    let specs: Vec<rillane_config::EgressConfig> =
+        config.egress.iter().map(|e| e.spec.clone()).collect();
+    assert_eq!(
+        specs[0],
+        rillane_config::EgressConfig::Anytls {
+            server: "anytls.example.com".into(),
+            port: 443,
+            password: "REDACTED-SAMPLE".into(),
+            sni: Some("sni.example.com".into()),
+            skip_cert_verify: true,
+        }
+    );
+    assert_eq!(
+        specs[1],
+        rillane_config::EgressConfig::Anytls {
+            server: "203.0.113.41".into(),
+            port: 8443,
+            password: "REDACTED-SAMPLE".into(),
+            sni: None,
+            skip_cert_verify: false,
+        }
+    );
+    // 损失点名：alpn/fingerprint/client-fingerprint 不入 IR——节点保留，
+    // 降级可见（degraded_nodes，RIL-015 同口径），不伪装无损
+    assert!(
+        report.dropped_nodes.is_empty(),
+        "AnyTLS 节点必须保留，不丢弃: {:?}",
+        report.dropped_nodes
+    );
+    assert_eq!(
+        report.degraded_nodes.len(),
+        1,
+        "仅全功能节点降级: {:?}",
+        report.degraded_nodes
+    );
+    let (name, reason) = &report.degraded_nodes[0];
+    assert_eq!(name, "sample-anytls-full");
+    assert!(reason.contains("alpn"), "点名 alpn: {reason}");
+    assert!(
+        reason.contains("client-fingerprint"),
+        "点名 client-fingerprint: {reason}"
+    );
+
+    // 反向 1：IR → serde → IR（序列化不丢字段，往返逐字段一致）
+    for spec in &specs {
+        let json = serde_json::to_string(spec).expect("IR 序列化");
+        let back: rillane_config::EgressConfig = serde_json::from_str(&json).expect("IR 反序列化");
+        assert_eq!(&back, spec, "serde 往返必须逐字段一致");
+    }
+
+    // 反向 2：IR → clash 导出 → 导入侧回读再转 IR（真往返证据）
+    let mut project: rillane_config::RillaneConfig = serde_yaml::from_str(
+        "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+    )
+    .expect("基底配置");
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-anytls-full".into(),
+        spec: specs[0].clone(),
+    });
+    let (yaml, export_report) = rillane_subscription::ClashExporter
+        .export(&project)
+        .unwrap();
+    assert_eq!(
+        export_report.exported_proxies,
+        vec!["sample-anytls-full"],
+        "AnyTLS 应可导出"
+    );
+    assert!(yaml.contains("type: anytls"), "{yaml}");
+    assert!(yaml.contains("sni: sni.example.com"), "{yaml}");
+    assert!(yaml.contains("skip-cert-verify: true"), "{yaml}");
+    assert!(yaml.contains("REDACTED-SAMPLE"), "{yaml}");
+    // 回读：sni 别名保证往返不丢 SNI（自签/私有 CA 场景直连面）
+    let reparsed = ClashConverter::new()
+        .parse(&yaml)
+        .expect("导出必须可被导入侧解析");
+    let (back_config, back_report) = ClashConverter::new()
+        .convert_to_rillane_with_report(&reparsed)
+        .expect("回读转换");
+    assert!(
+        back_report.dropped_nodes.is_empty(),
+        "回读不丢节点: {:?}",
+        back_report.dropped_nodes
+    );
+    assert!(
+        back_report.degraded_nodes.is_empty(),
+        "回读零损失（导出面不含不入 IR 的字段）: {:?}",
+        back_report.degraded_nodes
+    );
+    assert_eq!(
+        back_config.egress[0].spec, specs[0],
+        "导出→回读必须逐字段还原 AnyTLS 节点"
+    );
+}
+
 // ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
 // ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
 

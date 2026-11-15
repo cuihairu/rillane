@@ -165,6 +165,19 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "anytls",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#anytls",
+        },
+        // RIL-106：UoT（UDP-over-TCP）面随客户端特性交付（按库实际能力）
+        udp: true,
+        backend: Backend::Library {
+            crate_name: "anytls",
+            version_req: "0.5",
+            license: "MIT",
+        },
+    },
+    CatalogEntry {
         kind: "hysteria",
         registration: Registration::NotAdmitted {
             reason: "hysteria v1 无已评审后端（RIL-109 选库前置未完成；UDP 载具 quinn 未决）——无实现证据不得自写，装配期拒绝",
@@ -237,6 +250,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Vmess { .. } => "vmess",
         EgressConfig::Vless { .. } => "vless",
         EgressConfig::Trojan { .. } => "trojan",
+        EgressConfig::Anytls { .. } => "anytls",
         EgressConfig::Hysteria { .. } => "hysteria",
         EgressConfig::Hysteria2 { .. } => "hysteria2",
         EgressConfig::Wireguard { .. } => "wireguard",
@@ -324,6 +338,13 @@ mod tests {
                 sni: None,
                 alpn: None,
                 tls_fingerprint: None,
+            },
+            EgressConfig::Anytls {
+                server: "203.0.113.11".into(),
+                port: 443,
+                password: "pw".into(),
+                sni: None,
+                skip_cert_verify: false,
             },
             EgressConfig::Hysteria {
                 server: "203.0.113.7".into(),
@@ -419,7 +440,7 @@ mod tests {
     /// UDP 能力列与构建期扫描口径一致（§3.1 支持集）。
     #[test]
     fn admitted_requires_evidence_and_backend() {
-        const UDP_SUPPORTED: [&str; 8] = [
+        const UDP_SUPPORTED: [&str; 9] = [
             "direct",
             "shadowsocks",
             "wireguard",
@@ -428,6 +449,7 @@ mod tests {
             "vless",
             "trojan",
             "socks5",
+            "anytls",
         ];
         for e in CATALOG {
             match e.registration {

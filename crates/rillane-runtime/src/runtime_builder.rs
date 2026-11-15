@@ -52,7 +52,8 @@ use std::net::IpAddr;
 #[cfg(target_os = "linux")]
 use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use rillane_protocols::{
-    DirectConnector, HttpConnector, HttpIngress, Hysteria2Connector, MixedIngress,
+    AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
+    Hysteria2Connector, MixedIngress,
     ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress,
     Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool,
     TrojanConnector, TrojanUdpConnector, VlessConnector, VlessUdpConnector, VmessConnector,
@@ -2722,6 +2723,7 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::Vmess { server, .. }
         | EgressConfig::Vless { server, .. }
         | EgressConfig::Trojan { server, .. }
+        | EgressConfig::Anytls { server, .. }
         | EgressConfig::Hysteria { server, .. }
         | EgressConfig::Hysteria2 { server, .. } => Some(server),
         EgressConfig::Wireguard { endpoint, .. } => Some(endpoint),
@@ -2769,6 +2771,24 @@ fn build_udp_connectors(
                 let conn =
                     Socks5Connector::new(server.clone(), *port, username.clone(), password.clone());
                 Some(Arc::new(Socks5UdpConnector::from_connector(&conn)))
+            }
+            EgressConfig::Anytls {
+                server,
+                port,
+                password,
+                sni,
+                skip_cert_verify,
+            } => {
+                // 出站 UoT 数据报面（RIL-106）：与 TCP 面同一节点配置
+                // （地址/凭据两侧一致）；UDP 能力声明留在目录与扫描面
+                let conn = AnytlsConnector::new(
+                    server.clone(),
+                    *port,
+                    password.clone(),
+                    sni.clone(),
+                    *skip_cert_verify,
+                );
+                Some(Arc::new(AnytlsUdpConnector::from_connector(&conn)))
             }
             EgressConfig::Shadowsocks {
                 server,
@@ -3404,6 +3424,30 @@ fn build_egress_outputs(
                     grpc_service_name.clone(),
                     transport_pool.clone(),
                     tls_factory.clone(),
+                ));
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Anytls {
+                server,
+                port,
+                password,
+                sni,
+                skip_cert_verify,
+            } => {
+                // AnyTLS（RIL-106）：恒叠 TLS（协议本体），仅 tcp 面；会话
+                // 复用/填充由库承载，TLS 拨号经本仓 TlsConnectorFactory
+                // （旁路面：库不拥有拨号，见 protocol-backends.md#anytls）
+                let connector: Arc<dyn EgressConnector> = Arc::new(AnytlsConnector::new(
+                    server.clone(),
+                    *port,
+                    password.clone(),
+                    sni.clone(),
+                    *skip_cert_verify,
                 ));
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),

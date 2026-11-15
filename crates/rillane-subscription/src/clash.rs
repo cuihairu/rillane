@@ -89,6 +89,7 @@ pub enum ClashProxyType {
     Vmess,
     Vless,
     Trojan,
+    Anytls,
     Http,
     Https,
     #[serde(rename = "socks5")]
@@ -184,12 +185,21 @@ pub struct ClashProxy {
     /// Alpn
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alpn: Vec<String>,
-    /// Servername
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Servername（Clash 规范键为 `sni`，servername 为旧写法——clash_export
+    /// 反向导出写 `sni:`，无别名则往返丢 SNI，自签/私有 CA 场景直连失败）
+    #[serde(default, alias = "sni", skip_serializing_if = "Option::is_none")]
     pub servername: Option<String>,
     /// Fingerprint
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// Client fingerprint（Clash 规范键 `client-fingerprint`，uTLS 指纹——
+    /// 与证书指纹 `fingerprint` 是两个不同字段，不得合并）
+    #[serde(
+        default,
+        rename = "client-fingerprint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub client_fingerprint: Option<String>,
     /// Private key (for WireGuard)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key: Option<String>,
@@ -1199,6 +1209,10 @@ fn default_log_level() -> String {
 pub struct ConversionReport {
     /// 被丢弃的节点（节点名, 原因）：未通过有效性校验或类型暂不支持
     pub dropped_nodes: Vec<(String, String)>,
+    /// 语义被降级的节点（节点名, 降级说明）（RIL-106）：节点保留可导，
+    /// 但字段损失显式可见（AnyTLS 的 alpn/fingerprint/client-fingerprint
+    /// 不入 IR），与 degraded_rules/providers 同口径——不伪装无损
+    pub degraded_nodes: Vec<(String, String)>,
     /// 语义被降级的组（组名, 降级说明）：relay 组直接拒绝不落此清单；
     /// load-balance 的 sticky-sessions/未知子键降级进此清单（RIL-013）
     pub degraded_groups: Vec<(String, String)>,
@@ -1222,6 +1236,7 @@ impl ConversionReport {
     /// 是否没有任何丢弃或降级
     pub fn is_empty(&self) -> bool {
         self.dropped_nodes.is_empty()
+            && self.degraded_nodes.is_empty()
             && self.degraded_groups.is_empty()
             && self.dropped_rules.is_empty()
             && self.degraded_rules.is_empty()
@@ -1240,6 +1255,14 @@ impl ConversionReport {
             lines.push(format!("丢弃节点 {} 个:", self.dropped_nodes.len()));
             lines.extend(
                 self.dropped_nodes
+                    .iter()
+                    .map(|(name, reason)| format!("  节点 {name}: {reason}")),
+            );
+        }
+        if !self.degraded_nodes.is_empty() {
+            lines.push(format!("降级节点 {} 个:", self.degraded_nodes.len()));
+            lines.extend(
+                self.degraded_nodes
                     .iter()
                     .map(|(name, reason)| format!("  节点 {name}: {reason}")),
             );
@@ -1304,6 +1327,15 @@ impl ConversionReport {
             diagnostics.push(CompatibilityDiagnostic::unsupported(
                 Some(id),
                 SourceLocation::new(source.clone(), format!("proxies/{name}")),
+                reason.clone(),
+            ));
+        }
+        for (name, reason) in &self.degraded_nodes {
+            let id = ObjectId::new(source.clone(), name.clone());
+            diagnostics.push(CompatibilityDiagnostic::lossy(
+                Some(id),
+                SourceLocation::new(source.clone(), format!("proxies/{name}")),
+                None,
                 reason.clone(),
             ));
         }
@@ -1629,7 +1661,7 @@ impl ClashConverter {
             }
 
             let name = format!("{}{}", self.node_prefix, proxy.name);
-            let egress_config = match self.convert_proxy_to_egress_config(proxy) {
+            let egress_config = match self.convert_proxy_to_egress_config(proxy, report) {
                 Ok(spec) => spec,
                 Err(err) => {
                     // 类型级不支持（如 Snell）：宽松丢弃并报告、严格记入清单
@@ -1654,7 +1686,11 @@ impl ClashConverter {
     }
 
     /// 转换单个代理为出口配置
-    fn convert_proxy_to_egress_config(&self, proxy: &ClashProxy) -> Result<EgressConfig> {
+    fn convert_proxy_to_egress_config(
+        &self,
+        proxy: &ClashProxy,
+        report: &mut ConversionReport,
+    ) -> Result<EgressConfig> {
         match proxy.proxy_type {
             ClashProxyType::Http => Ok(EgressConfig::Http {
                 server: proxy.server.clone(),
@@ -1816,6 +1852,38 @@ impl ClashConverter {
                         Some(proxy.alpn.clone())
                     },
                     tls_fingerprint: None,
+                })
+            }
+            ClashProxyType::Anytls => {
+                let password = proxy
+                    .password
+                    .clone()
+                    .ok_or_else(|| anyhow!("AnyTLS 缺少密码"))?;
+                // alpn/client-fingerprint 不入 IR（RIL-106 目录边界）：节点
+                // 保留可用（anytls 无 alpn 协商约束），但损失显式可见——降级
+                // 进损失清单（与 RIL-015「降级必须显式可见」同口径），不伪装无损
+                let mut lost = Vec::new();
+                if !proxy.alpn.is_empty() {
+                    lost.push("alpn");
+                }
+                if proxy.client_fingerprint.is_some() {
+                    lost.push("client-fingerprint");
+                }
+                if proxy.fingerprint.is_some() {
+                    lost.push("fingerprint");
+                }
+                if !lost.is_empty() {
+                    report.degraded_nodes.push((
+                        proxy.name.clone(),
+                        format!("AnyTLS {} 不入 IR，转换期丢弃", lost.join("/")),
+                    ));
+                }
+                Ok(EgressConfig::Anytls {
+                    server: proxy.server.clone(),
+                    port: proxy.port,
+                    password,
+                    sni: proxy.servername.clone(),
+                    skip_cert_verify: proxy.skip_cert_verify,
                 })
             }
             ClashProxyType::Hysteria => {
@@ -2262,7 +2330,7 @@ impl ClashConverter {
             ClashProxyType::Socks5 => true,
             ClashProxyType::Ss => proxy.cipher.is_some() && proxy.password.is_some(),
             ClashProxyType::Vmess | ClashProxyType::Vless => proxy.uuid.is_some(),
-            ClashProxyType::Trojan => proxy.password.is_some(),
+            ClashProxyType::Trojan | ClashProxyType::Anytls => proxy.password.is_some(),
             ClashProxyType::Hysteria | ClashProxyType::Hysteria2 => proxy.password.is_some(),
             ClashProxyType::Snell => proxy.password.is_some(),
             ClashProxyType::Wireguard => {
@@ -2281,6 +2349,7 @@ impl ClashConverter {
             ClashProxyType::Vmess => "VMess",
             ClashProxyType::Vless => "VLESS",
             ClashProxyType::Trojan => "Trojan",
+            ClashProxyType::Anytls => "AnyTLS",
             ClashProxyType::Http => "HTTP",
             ClashProxyType::Https => "HTTPS",
             ClashProxyType::Socks5 => "SOCKS5",

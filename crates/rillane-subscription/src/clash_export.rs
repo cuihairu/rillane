@@ -438,6 +438,25 @@ fn proxy_mapping(
             );
             Some(m)
         }
+        EgressConfig::Anytls {
+            server,
+            port,
+            password,
+            sni,
+            skip_cert_verify,
+        } => {
+            ins(&mut m, "type", "anytls");
+            ins(&mut m, "server", server);
+            ins(&mut m, "port", *port as u64);
+            ins(&mut m, "password", password);
+            if let Some(s) = sni {
+                ins(&mut m, "sni", s);
+            }
+            if *skip_cert_verify {
+                ins(&mut m, "skip-cert-verify", true);
+            }
+            Some(m)
+        }
         EgressConfig::Hysteria {
             server,
             port,

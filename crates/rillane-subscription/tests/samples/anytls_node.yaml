@@ -1,0 +1,24 @@
+# RIL-106 订阅兼容样本：AnyTLS 出站节点（已脱敏）
+# 凭据为占位值（REDACTED-SAMPLE），地址用 RFC 5737/2606 文档段。
+# 预期：节点保留可用；alpn/fingerprint/client-fingerprint 不入 IR——
+# 损失进 degraded_nodes 点名（不伪装无损）；sni/skip-cert-verify 入 IR。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-anytls-full
+    type: anytls
+    server: anytls.example.com
+    port: 443
+    password: "REDACTED-SAMPLE"
+    sni: sni.example.com
+    skip-cert-verify: true
+    alpn: [h2, http/1.1]
+    client-fingerprint: chrome
+  - name: sample-anytls-min
+    type: anytls
+    server: 203.0.113.41
+    port: 8443
+    password: "REDACTED-SAMPLE"
+proxy-groups: []
+rules: []

@@ -2,6 +2,7 @@
 //!
 //! 提供各种出口协议的客户端连接器实现。
 
+mod anytls;
 mod direct;
 mod grpc;
 mod h2;
@@ -27,6 +28,7 @@ mod wireguard;
 ))]
 mod wireguard_stub;
 
+pub use anytls::{AnytlsConnector, AnytlsUdpConnector};
 pub use direct::DirectConnector;
 pub use http::HttpConnector;
 pub use hysteria2::Hysteria2Connector;

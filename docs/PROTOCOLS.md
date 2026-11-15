@@ -17,6 +17,7 @@ This page records existing boundaries. Future work follows [v1 design](design/ar
 |---|---|---|
 | direct | TCP/UDP | Bypass required; TCP fwmark does not prove every UDP dial avoids loops |
 | SOCKS5 | TCP tunnels + outbound UDP ASSOCIATE (RFC 1928 §6/§7, source verification + FRAG≠0 drop) | HTTP CONNECT remains TCP-tunnel only |
+| AnyTLS | TCP over TLS with session reuse; UDP-over-TCP (UoT) | Subscription alpn/client-fingerprint do not enter the IR (named in the report) |
 | Shadowsocks | TCP/UDP; SIP003 bridge for TCP | Plugin mode has no UDP; methods follow dependency/runtime validation |
 | Trojan | TCP/TLS and supported transports | No promise of UDP/all upstream extensions |
 | VLESS / VMess | TCP, WebSocket, gRPC, HTTP/2 | Validate transports/encryption; no UDP; VMess requires AEAD/alter_id=0 |

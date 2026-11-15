@@ -17,6 +17,7 @@
 |---|---|---|
 | direct | TCP、UDP | 需正确设置旁路；TCP socket 的 fwmark 不代表所有 UDP 拨号都已防环 |
 | SOCKS5 | TCP 隧道 + 出站 UDP ASSOCIATE（RFC 1928 §6/§7，来源验证 + FRAG≠0 丢弃） | HTTP CONNECT 仅 TCP 隧道 |
+| AnyTLS | TCP（TLS 承载，会话复用）；UDP-over-TCP（UoT） | 订阅 alpn/client-fingerprint 不入 IR（转换报告点名） |
 | Shadowsocks | TCP、UDP；TCP 可用 SIP003 插件桥 | 插件模式不承载 UDP；算法以实际依赖/校验为准 |
 | Trojan | TCP/TLS，可叠加支持的传输 | 不据此承诺 UDP 或所有上游扩展 |
 | VLESS / VMess | TCP、WebSocket、gRPC、HTTP/2 传输 | 传输/加密配置需通过构建校验；UDP 承载未实现，VMess 限 AEAD/alter_id=0 |

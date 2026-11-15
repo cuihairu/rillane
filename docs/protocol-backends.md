@@ -132,6 +132,19 @@ Every admitted section carries these fields (the contract test checks each one; 
 - **Reuse**: no prewarm composition; the UDP face (TLS + network=tcp) reuses the node config
 - UDP: TLS + network=tcp only.
 
+## anytls
+
+- **Conclusion**: selected library `anytls` (ssrlive/anytls-rs) — a dual client/server library; the alternative anytls-rs (jxo-me, same name different repo) was also evaluated: no release since 2025-11 after 0.5.4, weaker maintenance than the former — the actively maintained one wins. Role boundary: the egress client is wired in this item (RIL-106); the server face is available in the library (Session::new_server + run + accept_stream + read_auth) but rillane's ingress face does not catalog an AnyTLS listener — the real-peer acceptance uses the library's own server face
+- **Version**: requirement `0.5`, lock-resolved 0.5.4 (released 2026-11-11; 36 versions since first release 2026-04, actively maintained)
+- **License**: MIT
+- **Platforms**: all platforms (pure Rust, tokio/rustls stack, edition 2024)
+- **Public API**: `Client::new(dialer, padding, idle_timeout, max_session_age)` + `create_stream()` (built-in idle session pool); `StreamIo` (AsyncRead/AsyncWrite adapter); `write_auth_with_client_id` (session auth); UoT face `uot_sentinel_destination`/`UotRequest`/`uot_encode_packet`/`uot_get_packet_from_stream`; wrapped as `AnytlsConnector`/`AnytlsUdpConnector` (crates/rillane-protocols/src/outbound/anytls.rs); the test peer uses the server face `Session::new_server`/`run`/`accept_stream` + `read_auth_with_client_id`
+- **Bypass**: the library owns neither dialing nor TLS — the `Dialer` closure is caller-supplied; this repo composes it via TlsConnectorFactory (skip_cert_verify/sni controllable); session framing/multiplexing/padding stay in-library (not bypassed, recorded honestly)
+- **Cancel**: `Client::shutdown`; the library re-exports tokio-util CancellationToken; stream drop → FIN close; session auth reads/writes take no timeout — connection-phase cancellation lives at the task-drop layer (recorded honestly)
+- **Stats**: the library face has no observation points (traffic_status is the library's own CLI-app face, not part of the library API) — failures surface as io::Error (observed semantics); traffic accounting reuses FlowReport up/down bytes (copy_bidirectional semantics)
+- **Reuse**: session reuse is the protocol itself — Client has a built-in idle session pool (idle_timeout/max_session_age parameterized); `create_stream` prefers opening a new stream on an idle session; no external pool needed
+- UDP: the library's uot feature (UDP-over-TCP, delivered per actual library capability) — upstream `uot_encode_packet(UotMode::Datagram, dest, payload)`, downstream `uot_get_packet_from_stream`, with the session stream pre-writing the sentinel destination + UotRequest declaring datagram mode; catalog udp=true. Subscription-side alpn/client-fingerprint do not enter the IR (the conversion report names the loss; prefer omission over guessing).
+
 ## hysteria
 
 **Not admitted** — no reviewed backend. A config schema and subscription fields are not a connector (same wording as PROTOCOLS.md): assembly refuses with the stable code `config.egress.not_admitted` and never silently falls back to direct.

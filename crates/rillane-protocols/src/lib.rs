@@ -25,7 +25,8 @@ pub use fingerprint::TlsFingerprint;
 pub use inbound::{HttpIngress, MixedIngress, Socks5Ingress};
 pub use middleware::LatencyProbe;
 pub use outbound::{
-    DirectConnector, HttpConnector, Hysteria2Connector, ShadowsocksConnector,
+    AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, Hysteria2Connector,
+    ShadowsocksConnector,
     ShadowsocksUdpConnector, Socks5Connector, Socks5UdpConnector, TrojanConnector,
     TrojanUdpConnector, VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity,
     VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
