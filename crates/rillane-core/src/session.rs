@@ -695,8 +695,12 @@ async fn pump_association(
         if control.is_closed() {
             return settle!(true, false, false);
         }
+        // biased 检测序：客户端上行先于出口下行、出口先于取消轮询——
+        // 内核泵不引入随机源（tokio 非 biased select 逐次随机洗牌分支，
+        // 同输入不同服务序不可重放；显式定序让计数/回收时序可离线重放，
+        // 慢分支无饥饿面——数据报到达是事件驱动的，非持续就绪）
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(CANCEL_POLL_MS)) => continue,
+            biased;
             r = client_relay.recv() => match r {
                 Ok(Some((target, payload))) => {
                     if payload.len() > max_datagram_len {
@@ -753,6 +757,9 @@ async fn pump_association(
                     return Err(transfer_err(TransferDirection::EgressToClient, e, c2e, e2c));
                 }
             },
+            // 取消轮询殿后（biased 序末位）：有报文先服务报文；闲时
+            // 靠它唤醒再做循环顶取消检查
+            _ = tokio::time::sleep(Duration::from_millis(CANCEL_POLL_MS)) => continue,
         }
     }
 }
