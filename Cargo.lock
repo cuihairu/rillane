@@ -3328,6 +3328,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rillane-mcp"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rillane-app",
+ "rillane-config",
+ "rillane-routing",
+ "serde_json",
+]
+
+[[package]]
 name = "rillane-mesh"
 version = "0.1.0"
 dependencies = [

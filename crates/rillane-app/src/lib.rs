@@ -20,6 +20,7 @@
 //! 内核（rillane-core）不依赖本 crate、不依赖任何 MCP SDK——边界是
 //! 单向的：表面消费内核契约，内核对面无感知。
 
+pub mod dispatch;
 pub mod mcp;
 pub mod ops;
 pub mod reply;

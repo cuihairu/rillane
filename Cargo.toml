@@ -10,6 +10,7 @@ members = [
     "crates/rillane-runtime",
     "apps/rillaned",
     "apps/rillanectl",
+    "apps/rillane-mcp",
     "crates/rillane-mesh",
     "crates/rillane-subscription",
     "crates/rillane-ffi",

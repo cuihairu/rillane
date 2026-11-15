@@ -1,0 +1,12 @@
+[package]
+name = "rillane-mcp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rillane-app = { path = "../../crates/rillane-app", features = ["client-blocking"] }
+rillane-config = { path = "../../crates/rillane-config" }
+rillane-routing = { path = "../../crates/rillane-routing" }
+clap = { workspace = true }
+serde_json = { workspace = true }

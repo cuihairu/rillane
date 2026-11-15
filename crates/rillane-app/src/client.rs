@@ -7,6 +7,9 @@
 use crate::ops::{AppOperation, Method};
 use crate::reply::{AppError, AppReply};
 
+/// 单次执行限时（秒）：整请求（连接+发送+等待答复）有界
+pub const EXECUTE_TIMEOUT_SECS: u64 = 30;
+
 /// 阻塞式应用服务客户端（单一执行入口——无通用请求面）
 pub struct BlockingApp {
     base: String,
@@ -15,16 +18,22 @@ pub struct BlockingApp {
 }
 
 impl BlockingApp {
-    /// 构造：base URL 非空校验（空白拒绝——同 CLI 旧口径），token 可选
+    /// 构造：base URL 非空校验（空白拒绝——同 CLI 旧口径），token 可选。
+    /// 单次执行限时 [`EXECUTE_TIMEOUT_SECS`] 秒——调用有界（卡死的
+    /// 控制面不会无限占住调用方；RIL-067 stdio 装配依赖此保证）。
     pub fn new(base: &str, token: Option<&str>) -> Result<Self, AppError> {
         let trimmed = base.trim().trim_end_matches('/').to_string();
         if trimmed.is_empty() {
             return Err(AppError::param("control.base.invalid", "base url is empty"));
         }
+        let http = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(EXECUTE_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| AppError::transport(format!("client build: {e}")))?;
         Ok(Self {
             base: trimmed,
             token: token.map(String::from),
-            http: reqwest::blocking::Client::new(),
+            http,
         })
     }
 
