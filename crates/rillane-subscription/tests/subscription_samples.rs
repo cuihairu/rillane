@@ -80,13 +80,13 @@ fn negative_lossy_reports_every_expected_loss() {
         "snell 类型节点必须进清单: {dropped:?}"
     );
 
-    // 降级组：RIL-012 起 fallback 同语义直映不再降级，仅 relay→ConsistentHash
+    // 组面零损失（RIL-012/013）：fallback 同语义直映、无 relay/LB 降级
     let degraded: Vec<&str> = report
         .degraded_groups
         .iter()
         .map(|(name, _)| name.as_str())
         .collect();
-    assert_eq!(degraded, vec!["relay-group"], "仅 relay 降级: {degraded:?}");
+    assert!(degraded.is_empty(), "组面零损失: {degraded:?}");
     // fb-group 保真：Strategy::Fallback + 探测参数随行
     let fb = config
         .routing
@@ -138,11 +138,6 @@ fn negative_lossy_reports_every_expected_loss() {
         node_diagnostic.object.as_ref().unwrap().local_id,
         "bad-port-node"
     );
-    let group_diagnostic = diagnostics
-        .iter()
-        .find(|d| d.location.pointer == "proxy-groups/relay-group")
-        .expect("降级组定位到 proxy-groups/<名>");
-    assert_eq!(group_diagnostic.code, CODE_COMPAT_LOSSY);
     let rule_diagnostic = diagnostics
         .iter()
         .find(|d| d.location.pointer == "rules/rule-2")
@@ -168,7 +163,6 @@ fn negative_lossy_strict_rejects_with_full_list() {
     for expected in [
         "bad-port-node",
         "sample-snell",
-        "relay-group",
         "rule-1",
         "rule-2",
     ] {

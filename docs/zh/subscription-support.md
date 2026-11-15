@@ -36,8 +36,8 @@
 | select | ✅ | 成员顺序保持；用户选择跨更新持久（`routing.selections`，RIL-011）：仍存在的点选即使不健康也生效，已被删除的点选回落首健康成员且恢复原因进决策原因，reload 保留新配置未携带的选择。嵌套组引用构建期校验——循环与悬空引用点名拒绝 |
 | url-test | ✅ | `url` 映射；**`interval` 单位是秒**（官方缺省 300；`0`/缺省→300，RIL-092）；导出侧同样按秒产出 |
 | fallback | ✅ | RIL-012 起保真：映射 `Strategy::Fallback`——恒取声明序里首个健康成员（故障沿顺序回退，恢复即回首首位，绝不随机替代）。组上的 `url`/`interval` 随行注入探测参数（`UrlTestConfig`，interval 单位秒），导入后按原节奏探活成员 |
-| relay | ⚠️ | 降级 ConsistentHash，点名进损失清单；链式保真归 RIL-013 决策 |
-| load-balance | ✅ | 分配算法审计归 RIL-013 |
+| relay | ❌ | RIL-013 起两种模式都明确拒绝：relay 是链式转发（流量依次经成员链），rillane v1 无同语义配置面——映射 ConsistentHash 只会伪装成功（成员被当链终点，流量根本不过链）。导入报错点名组 |
+| load-balance | ✅ | RIL-013 审计：`strategy` 子键分派——`consistent-hashing`（及缺省，Clash 口径）→ `consistent_hash`（同目标恒落同成员，会话可重现）、`round-robin` → `round_robin`；旧实现一律映射加权随机（不可重现）属伪装。`sticky-sessions` 以 `consistent_hash` 近似并点名登记（粘滞键不同：源会话 vs 目标）；未知子键按缺省处理并在报告里留原文 |
 | 嵌套组引用 / `use:` | ✅ | provider 引用在求值期按 `routing.provider_nodes` 展开（引用策略，RIL-009）；库为空或缺省时成员集为空，失效 provider 不提供任何新流候选——不伪装成有成员。无载荷的声明按引擎降级报告 |
 
 ## L3 规则

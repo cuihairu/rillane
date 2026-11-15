@@ -1199,7 +1199,8 @@ fn default_log_level() -> String {
 pub struct ConversionReport {
     /// 被丢弃的节点（节点名, 原因）：未通过有效性校验或类型暂不支持
     pub dropped_nodes: Vec<(String, String)>,
-    /// 语义被降级的组（组名, 降级说明）：relay 无同语义策略
+    /// 语义被降级的组（组名, 降级说明）：relay 组直接拒绝不落此清单；
+    /// load-balance 的 sticky-sessions/未知子键降级进此清单（RIL-013）
     pub degraded_groups: Vec<(String, String)>,
     /// 被跳过的规则（规则名, 原因）：暂不支持的规则类型
     pub dropped_rules: Vec<(String, String)>,
@@ -1904,21 +1905,50 @@ impl ClashConverter {
 
         for group in proxy_groups {
             let name = format!("{}{}", self.group_prefix, group.name);
-            let strategy = match self.convert_group_type_to_strategy(group.group_type) {
-                Ok(strategy) => strategy,
-                Err(err) => {
-                    // relay 语义当前无法无损表达：宽松降级+报告，严格记入
-                    // 清单最终统一拒绝（链式保真归 RIL-013 决策）。fallback
-                    // 自 RIL-012 起同语义直映 Strategy::Fallback，不再降级
-                    let degraded = match group.group_type {
-                        ClashProxyGroupType::Relay => Strategy::ConsistentHash,
-                        // 理论不可达：convert_group_type_to_strategy 只对
-                        // relay 报错
-                        _ => return Err(err),
-                    };
-                    report.degraded_groups.push((name.clone(), err.to_string()));
-                    degraded
+            // RIL-013 分配算法审计：load-balance 按声明子键分派——缺省按
+            // Clash 口径 consistent-hashing（目标键一致哈希，会话选择可
+            // 重现）；round-robin 直映轮询（序列可重现）。旧实现一律映射
+            // Weighted（加权随机，不可重现）属伪装成功。sticky-sessions
+            // 粘滞键是「源会话」而非「目标」，v1 以目标一致性哈希近似但
+            // 必须点名登记（降级可见，不静默）；未知子键按缺省处理并登记。
+            // relay 明确拒绝（两种模式都拒绝，RIL-013 验收）：链式转发
+            // 流量依次经成员链转发，Rillane v1 无同语义配置面——映射成
+            // ConsistentHash 只会伪装成功（成员被当出口链终点，流量根本
+            // 不过链），拒绝比伪装诚实。
+            let strategy = match group.group_type {
+                ClashProxyGroupType::Relay => {
+                    return Err(anyhow!(
+                        "组 {}: relay 组语义是链式转发（流量依次经成员链转发），Rillane v1 无同语义配置面，明确拒绝导入（不能映射成一致性哈希伪装）",
+                        group.name
+                    ));
                 }
+                ClashProxyGroupType::LoadBalance => {
+                    let (strategy, note): (Strategy, Option<String>) =
+                        match group.strategy.as_deref().map(str::trim) {
+                            None | Some("consistent-hashing") => (Strategy::ConsistentHash, None),
+                            Some("round-robin") => (Strategy::RoundRobin, None),
+                            Some("sticky-sessions") => (
+                                Strategy::ConsistentHash,
+                                Some(
+                                    "sticky-sessions 粘滞键是源会话，v1 以目标一致性哈希近似（会话可重现但粘滞键不同）"
+                                        .to_string(),
+                                ),
+                            ),
+                            Some(other) => (
+                                Strategy::ConsistentHash,
+                                Some(format!(
+                                    "未知 load-balance strategy {other:?}，按缺省 consistent-hashing 处理"
+                                )),
+                            ),
+                        };
+                    if let Some(note) = note {
+                        report
+                            .degraded_groups
+                            .push((name.clone(), format!("组 {}: {note}", group.name)));
+                    }
+                    strategy
+                }
+                other_type => self.convert_group_type_to_strategy(other_type)?,
             };
             // RIL-009：`use:` 引用按已声明 proxy-provider 追踪——未声明
             // 引用是导入链 bug（悬空引用会让组静默少成员），显式进损失
@@ -1976,20 +2006,18 @@ impl ClashConverter {
         Ok(groups)
     }
 
-    /// 转换代理组类型为策略。relay 在 Rillane v1 尚无同语义策略
-    /// （relay=链式转发）：映射成 ConsistentHash 属有损转换——Err 携带说明，
-    /// 调用方决定降级（宽松+报告）或拒绝（严格），不再静默映射伪装成功
-    /// （RIL-093；链式保真归 RIL-013 决策）。fallback 自 RIL-012 起同语义
-    /// 直映 Strategy::Fallback（恒取声明序首健康成员），不再降级
+    /// 转换代理组类型为策略。relay 与 load-balance 子键分派在调用方
+    /// 处理（RIL-013：relay 明确拒绝、LB 按子键分派）；此处只收四类
+    /// 同语义直映——fallback 自 RIL-012 起直映 Strategy::Fallback
+    /// （恒取声明序首健康成员），不再降级伪装
     fn convert_group_type_to_strategy(&self, group_type: ClashProxyGroupType) -> Result<Strategy> {
         match group_type {
             ClashProxyGroupType::Select => Ok(Strategy::Fixed),
             ClashProxyGroupType::UrlTest => Ok(Strategy::Latency),
-            ClashProxyGroupType::LoadBalance => Ok(Strategy::Weighted),
             ClashProxyGroupType::Fallback => Ok(Strategy::Fallback),
-            ClashProxyGroupType::Relay => Err(anyhow!(
-                "relay 组语义是链式转发，映射成一致性哈希会伪装成功"
-            )),
+            ClashProxyGroupType::LoadBalance | ClashProxyGroupType::Relay => {
+                Err(anyhow!("load-balance/relay 由调用方按声明子键分派处理（RIL-013）"))
+            }
         }
     }
 
@@ -3126,11 +3154,16 @@ rules: []
                 .unwrap(),
             Strategy::Latency
         );
-        assert_eq!(
+        // RIL-013：LB/relay 子键分派在调用方，这里直接报错不再给 Weighted
+        assert!(
             converter
                 .convert_group_type_to_strategy(ClashProxyGroupType::LoadBalance)
-                .unwrap(),
-            Strategy::Weighted
+                .is_err()
+        );
+        assert!(
+            converter
+                .convert_group_type_to_strategy(ClashProxyGroupType::Relay)
+                .is_err()
         );
     }
 

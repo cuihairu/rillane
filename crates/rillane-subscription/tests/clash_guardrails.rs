@@ -27,25 +27,35 @@ fn with_rules(rules: &str) -> String {
     CLEAN.replace("rules: []", rules)
 }
 
-// ---------- 组：relay 不再伪装成功；fallback 自 RIL-012 同语义直映 ----------
+// ---------- 组：relay 两种模式都明确拒绝；fallback/LB 子键同语义直映 ----------
 
 #[test]
-fn strict_rejects_relay_group_and_accepts_fallback() {
-    // relay：严格模式点名拒绝
-    let yaml = with_groups("proxy-groups:\n  - name: g1\n    type: relay\n    proxies: [n1]");
-    let converter = ClashConverter::new().with_strict(true);
-    let clash = converter.parse(&yaml).unwrap();
-    let err = converter
-        .convert_to_rillane(&clash)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("relay") && err.contains("g1"),
-        "严格模式应点名 relay 组 g1，实际: {err}"
-    );
+fn relay_group_rejected_in_both_modes() {
+    for strict in [true, false] {
+        let yaml = with_groups("proxy-groups:\n  - name: g1\n    type: relay\n    proxies: [n1]");
+        let converter = if strict {
+            ClashConverter::new().with_strict(true)
+        } else {
+            ClashConverter::new()
+        };
+        let clash = converter.parse(&yaml).unwrap();
+        let err = converter
+            .convert_to_rillane(&clash)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("relay") && err.contains("g1"),
+            "relay 须点名拒绝（strict={strict}），实际: {err}"
+        );
+        assert!(
+            err.contains("链式转发"),
+            "拒绝理由须说明链式转发语义（strict={strict}），实际: {err}"
+        );
+    }
 
     // RIL-012：fallback 同语义直映 Strategy::Fallback，严格模式也不再拒绝
     let yaml = with_groups("proxy-groups:\n  - name: g1\n    type: fallback\n    proxies: [n1]");
+    let converter = ClashConverter::new().with_strict(true);
     let clash = converter.parse(&yaml).unwrap();
     let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
     assert_eq!(config.routing.groups[0].strategy, Strategy::Fallback);
@@ -56,22 +66,63 @@ fn strict_rejects_relay_group_and_accepts_fallback() {
     );
 }
 
+// ---------- RIL-013：load-balance 分配算法按声明子键分派 ----------
+
 #[test]
-fn lenient_degrades_and_reports_relay_only() {
-    // relay：宽松照常产出但降级必须报告
-    let yaml = with_groups("proxy-groups:\n  - name: g1\n    type: relay\n    proxies: [n1]");
+fn load_balance_strategy_subkey_dispatch() {
+    // 缺省 = Clash 口径 consistent-hashing（会话选择可重现），不再 Weighted
+    for (subkey, expected) in [
+        (None, Strategy::ConsistentHash),
+        (Some("consistent-hashing"), Strategy::ConsistentHash),
+        (Some("round-robin"), Strategy::RoundRobin),
+    ] {
+        let strategy_line = subkey
+            .map(|k| format!("\n    strategy: {k}"))
+            .unwrap_or_default();
+        let yaml = with_groups(&format!(
+            "proxy-groups:\n  - name: lb\n    type: load-balance\n    proxies: [n1]{strategy_line}"
+        ));
+        let converter = ClashConverter::new();
+        let clash = converter.parse(&yaml).unwrap();
+        let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+        assert_eq!(
+            config.routing.groups[0].strategy, expected,
+            "子键 {subkey:?} 应映射 {expected:?}"
+        );
+        assert!(
+            !report.degraded_groups.iter().any(|(n, _)| n == "lb"),
+            "同语义子键不得降级: {:?}",
+            report.degraded_groups
+        );
+    }
+
+    // sticky-sessions：粘滞键不同（源会话 vs 目标），近似映射必须点名登记
+    let yaml = with_groups(
+        "proxy-groups:\n  - name: lb\n    type: load-balance\n    proxies: [n1]\n    strategy: sticky-sessions",
+    );
     let converter = ClashConverter::new();
     let clash = converter.parse(&yaml).unwrap();
     let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
     assert_eq!(config.routing.groups[0].strategy, Strategy::ConsistentHash);
-    assert_eq!(report.degraded_groups.len(), 1);
-    assert_eq!(report.degraded_groups[0].0, "g1");
+    assert_eq!(report.degraded_groups.len(), 1, "sticky-sessions 须进降级清单");
     assert!(
-        report.degraded_groups[0].1.contains("relay"),
-        "降级说明应点名 relay，实际: {:?}",
+        report.degraded_groups[0].1.contains("sticky-sessions"),
+        "降级说明须点名子键: {:?}",
         report.degraded_groups[0].1
     );
-    assert!(!report.is_empty());
+
+    // 未知子键：按缺省处理并登记原文
+    let yaml = with_groups(
+        "proxy-groups:\n  - name: lb\n    type: load-balance\n    proxies: [n1]\n    strategy: least-ping",
+    );
+    let clash = converter.parse(&yaml).unwrap();
+    let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
+    assert_eq!(config.routing.groups[0].strategy, Strategy::ConsistentHash);
+    assert!(
+        report.degraded_groups[0].1.contains("least-ping"),
+        "未知子键原文须进降级说明: {:?}",
+        report.degraded_groups[0].1
+    );
 }
 
 // ---------- RIL-012：fallback 导入保真（策略 + 探测参数 + 秒单位） ----------
@@ -258,8 +309,12 @@ rules:
 
 #[test]
 fn report_summary_renders_counts_and_names() {
-    let yaml = with_groups("proxy-groups:\n  - name: g1\n    type: relay\n    proxies: [n1]")
-        .replace("rules: []", "rules:\n  - PROCESS-NAME,game.exe,n1");
+    // RIL-013：relay 直接拒绝不再可作宽松降级样本；sticky-sessions LB 组
+    // 转换成功但点名降级，作降级清单渲染样本
+    let yaml = with_groups(
+        "proxy-groups:\n  - name: g1\n    type: load-balance\n    proxies: [n1]\n    strategy: sticky-sessions",
+    )
+    .replace("rules: []", "rules:\n  - PROCESS-NAME,game.exe,n1");
     let converter = ClashConverter::new();
     let clash = converter.parse(&yaml).unwrap();
     let (_, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
@@ -279,7 +334,11 @@ fn report_summary_renders_counts_and_names() {
 
 #[tokio::test]
 async fn strict_import_option_propagates_to_pipeline() {
-    let yaml = with_groups("proxy-groups:\n  - name: fb\n    type: relay\n    proxies: [n1]");
+    // RIL-013：relay 两模式都拒绝，管线样本改 sticky-sessions LB 组
+    // （宽松转换成功带降级，严格整体拒绝）
+    let yaml = with_groups(
+        "proxy-groups:\n  - name: fb\n    type: load-balance\n    proxies: [n1]\n    strategy: sticky-sessions",
+    );
 
     let sub = Subscription {
         name: "test".to_string(),
