@@ -45,10 +45,12 @@
 | `http` | `bind`（必填）、`auth`?、`bearer_tokens`? |
 | `mixed` | `bind`（必填）、`auth`?、`udp_enabled`?、`bearer_tokens`?（仅 http 分支） |
 | `shadowsocks` | `bind`（必填）、`method`（必填）、`password`（必填）、`udp_enabled`? |
+| `trojan` | `bind`（必填）、`password`（必填）、`cert`（必填）、`cert_key`（必填）、`udp_enabled`? |
 
 - `auth`：`[{username, password}]` 凭据表**非空即强制**（socks5 走 RFC 1929、http 走 `Proxy-Authorization: Basic` 407 挑战）；缺省/空表 = 匿名放行。
 - `bearer_tokens`：`[token]` 明文比对（`Proxy-Authorization: Bearer`），与 `auth` 并列任一通过即放行；缺省不启用。
-- `udp_enabled`：入口级 UDP 覆盖（SOCKS5 ASSOCIATE / mixed socks5 分支 / Shadowsocks 数据报面）；缺省继承 `udp.enabled`，显式 `true/false` 覆盖该入口（显式 true 且全局关时构建期 WARN）。
+- `udp_enabled`：入口级 UDP 覆盖（SOCKS5 ASSOCIATE / mixed socks5 分支 / Shadowsocks 数据报面 / Trojan UDP 关联）；缺省继承 `udp.enabled`，显式 `true/false` 覆盖该入口（显式 true 且全局关时构建期 WARN）。
+- `trojan` `cert`/`cert_key`：证书与私钥为内联 PEM 字符串，装配期解析（垃圾材料在监听前报错）；口令为明文字符串，线上以 SHA224 十六进制哈希呈现。
 
 ## egress[]（`type` 标签，12 变体）
 

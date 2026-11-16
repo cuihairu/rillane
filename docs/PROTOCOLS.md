@@ -10,6 +10,7 @@ This page records existing boundaries. Future work follows [v1 design](design/ar
 | HTTP | CONNECT, Basic/Bearer authentication | No complete non-CONNECT HTTP forwarding, cache or MITM |
 | mixed | SOCKS5/HTTP detection on one port | Inherits protocol limits |
 | Shadowsocks | TCP streams + UDP datagrams on one port; method/password validated at build time (same rules as egress) | SIP003 plugin server face not delivered; UDP requires `udp.enabled` and ingress permission |
+| Trojan | TCP streams over TLS with SHA224 constant-time password hash; UDP association rides the same TLS stream (no separate UDP socket) | Cert/key inline PEM parsed at assembly; UDP requires `udp.enabled` and ingress permission |
 | TUN | Shared Linux TCP/UDP data plane | Other platforms need complete integration and runtime evidence |
 
 ## Outbounds
