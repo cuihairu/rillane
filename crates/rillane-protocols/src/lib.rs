@@ -31,7 +31,8 @@ pub use middleware::LatencyProbe;
 pub use outbound::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, Hysteria2Connector,
     Hysteria2UdpConnector, Hysteria2UdpRelay, HysteriaConnector, HysteriaUdpConnector,
-    HysteriaUdpRelay, ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector,
+    HysteriaUdpRelay, ShadowsocksConnector, ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector,
+    Socks5Connector,
     Socks5UdpConnector, TrojanConnector, TrojanUdpConnector, TuicConnector, TuicStream,
     TuicUdpConnector, TuicUdpRelay, VlessConnector, VlessUdpConnector, VmessConnector,
     VmessSecurity, VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
