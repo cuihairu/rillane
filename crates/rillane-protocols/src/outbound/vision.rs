@@ -799,6 +799,67 @@ mod tests {
             VisionWriteAction::PlainTls(_)
         ));
     }
+
+    /// 面级 EOF 收束：对端握手后直接丢弃连接（不发 close_notify）——
+    /// read_tls_into 须在时限内返回 Ok(0)（对端 EOF 口径）；此前实现
+    /// 在「TCP 已 EOF、rustls 恒 WouldBlock」态下 wake 自旋烧 CPU 悬挂。
+    #[tokio::test]
+    async fn face_surfaces_eof_when_peer_closes_without_close_notify() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::CertificateDer;
+
+        use crate::fingerprint::TlsFingerprint;
+        use crate::outbound::reality::handshake;
+        use crate::tls::{profile_client_config, tls_crypto_provider};
+
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("自签");
+        let certs: Vec<CertificateDer<'static>> =
+            rustls::pki_types::CertificateDer::pem_slice_iter(certified.cert.pem().as_bytes())
+                .collect::<Result<_, _>>()
+                .expect("证书 PEM");
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(
+            certified.key_pair.serialize_pem().as_bytes(),
+        )
+        .expect("私钥");
+        let server_config = rustls::ServerConfig::builder_with_provider(tls_crypto_provider())
+            .with_safe_default_protocol_versions()
+            .expect("版本")
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("服务端装配");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().unwrap();
+        // 服务端：握手完成后立即丢弃（无 close_notify——TCP FIN 直接收束）
+        tokio::spawn(async move {
+            if let Ok((tcp, _)) = listener.accept().await {
+                let conn = rustls::ServerConnection::new(std::sync::Arc::new(server_config))
+                    .expect("服务端连接");
+                let _tls = handshake(tcp, conn).await;
+                // drop：不发 close_notify
+            }
+        });
+
+        let tcp = TcpStream::connect(addr).await.expect("dial");
+        let config = profile_client_config(true, None, TlsFingerprint::None).expect("客户端装配");
+        let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("SNI");
+        let conn = rustls::ClientConnection::new(config, server_name).expect("客户端连接");
+        let (tcp, conn) = handshake(tcp, conn).await.expect("TLS 握手").into_parts();
+        let mut face = VisionTlsFace::new(tcp, conn);
+
+        let mut buf = [0u8; 16];
+        let n = timeout(Duration::from_secs(2), face.read_tls_into(&mut buf))
+            .await
+            .expect("面读须收束（不得 WouldBlock 自旋悬挂）")
+            .expect("面读不报错");
+        assert_eq!(n, 0, "对端 EOF 面须以 0 字节呈现");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -950,6 +1011,12 @@ impl VisionTlsFace {
             // Ok(空) = 干净关闭面（close_notify 已处理）——上层按 EOF 口径
             Ok(data) => Poll::Ready(Ok(data)),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if self.eof {
+                    // TCP 已 EOF 但对端未发 close_notify：明文已排空，面级收束
+                    // 即 EOF 口径（返回空明文，上层读 0 字节按对端 EOF 处理；
+                    // 否则 rustls 恒 WouldBlock，本分支 wake 自旋烧 CPU）
+                    return Poll::Ready(Ok(&[][..]));
+                }
                 if !io_pending {
                     cx.waker().wake_by_ref();
                 }
