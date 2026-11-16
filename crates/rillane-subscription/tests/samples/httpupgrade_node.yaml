@@ -1,0 +1,34 @@
+# RIL-130 订阅兼容样本：HTTPUpgrade 传输出站节点（已脱敏）
+# 凭据为占位值（全零 UUID），地址用 RFC 5737/2606 文档段。预期：
+# network=httpupgrade 时 path/host 随块键 httpupgrade-opts 双向不丢
+# （host 走 headers.Host 伪装位——与 ws-opts 同构口径）。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-httpupgrade-vmess
+    type: vmess
+    server: hu1.example.com
+    port: 443
+    uuid: "00000000-0000-0000-0000-000000000000"
+    alterId: 0
+    cipher: auto
+    network: httpupgrade
+    tls: true
+    servername: sni.example.com
+    httpupgrade-opts:
+      path: /hu1
+      headers:
+        Host: cdn1.example.com
+  - name: sample-httpupgrade-vless
+    type: vless
+    server: 203.0.113.72
+    port: 8443
+    uuid: "00000000-0000-0000-0000-000000000000"
+    network: httpupgrade
+    tls: true
+    skip-cert-verify: true
+    httpupgrade-opts:
+      path: /hu2
+proxy-groups: []
+rules: []

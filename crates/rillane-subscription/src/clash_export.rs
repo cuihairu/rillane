@@ -318,6 +318,7 @@ fn proxy_mapping(
             }
             ws_opts(&mut m, network, path.as_deref(), host.as_deref());
             h2_opts(&mut m, network, path.as_deref(), host.as_deref());
+            httpupgrade_opts(&mut m, network, path.as_deref(), host.as_deref());
             if network == "grpc" {
                 if let Some(svc) = grpc_service_name {
                     let mut gopts = Mapping::new();
@@ -380,6 +381,7 @@ fn proxy_mapping(
             }
             ws_opts(&mut m, network, path.as_deref(), host.as_deref());
             h2_opts(&mut m, network, path.as_deref(), host.as_deref());
+            httpupgrade_opts(&mut m, network, path.as_deref(), host.as_deref());
             if network == "grpc" {
                 if let Some(svc) = grpc_service_name {
                     let mut gopts = Mapping::new();
@@ -682,6 +684,29 @@ fn h2_opts(m: &mut Mapping, network: &str, path: Option<&str>, host: Option<&[St
         }
     }
     ins(m, "h2-opts", h);
+}
+
+/// httpupgrade 传输导出（vmess/vless）：`network: httpupgrade` +
+/// `httpupgrade-opts` 块（path + headers.Host 伪装位——与导入侧
+/// ClashHttpUpgradeOpts 同形，即 ws-opts 同构口径）。trojan 无
+/// httpupgrade 传输（白名单外），不调用本助手。
+fn httpupgrade_opts(m: &mut Mapping, network: &str, path: Option<&str>, host: Option<&[String]>) {
+    if network != "httpupgrade" {
+        return;
+    }
+    ins(m, "network", "httpupgrade");
+    let mut h = Mapping::new();
+    if let Some(p) = path {
+        ins(&mut h, "path", p);
+    }
+    if let Some(hosts) = host {
+        if let Some(first) = hosts.first() {
+            let mut headers = Mapping::new();
+            ins(&mut headers, "Host", first);
+            ins(&mut h, "headers", headers);
+        }
+    }
+    ins(m, "httpupgrade-opts", h);
 }
 
 fn condition_to_rules(

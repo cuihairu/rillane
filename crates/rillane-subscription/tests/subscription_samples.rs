@@ -1170,6 +1170,135 @@ fn xhttp_subscription_fields_convert_both_ways() {
     );
 }
 
+// ---------- RIL-130：HTTPUpgrade——订阅字段双向转换样本 ----------
+
+#[test]
+fn httpupgrade_subscription_fields_convert_both_ways() {
+    // 正向：clash 订阅 → IR（vmess+host 节点与 vless 仅 path 节点各一）
+    let (config, report) = loose("httpupgrade_node.yaml");
+    let names: Vec<&str> = config.egress.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["sample-httpupgrade-vmess", "sample-httpupgrade-vless"]
+    );
+    let specs: Vec<rillane_config::EgressConfig> =
+        config.egress.iter().map(|e| e.spec.clone()).collect();
+    assert_eq!(
+        specs[0],
+        rillane_config::EgressConfig::Vmess {
+            server: "hu1.example.com".into(),
+            port: 443,
+            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            alter_id: 0,
+            security: "auto".into(),
+            network: "httpupgrade".into(),
+            path: Some("/hu1".into()),
+            host: Some(vec!["cdn1.example.com".into()]),
+            grpc_service_name: None,
+            tls: true,
+            skip_cert_verify: false,
+            sni: Some("sni.example.com".into()),
+            alpn: None,
+            tls_fingerprint: None,
+        }
+    );
+    assert_eq!(
+        specs[1],
+        rillane_config::EgressConfig::Vless {
+            server: "203.0.113.72".into(),
+            port: 8443,
+            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            flow: None,
+            reality: None,
+            network: "httpupgrade".into(),
+            path: Some("/hu2".into()),
+            host: None,
+            grpc_service_name: None,
+            xhttp_mode: None,
+            tls: true,
+            skip_cert_verify: true,
+            sni: None,
+            alpn: None,
+            tls_fingerprint: None,
+        }
+    );
+    assert!(
+        report.dropped_nodes.is_empty(),
+        "HTTPUpgrade 节点必须保留，不丢弃: {:?}",
+        report.dropped_nodes
+    );
+    assert!(
+        report.degraded_nodes.is_empty(),
+        "network/path/host 全字段入 IR，无降级: {:?}",
+        report.degraded_nodes
+    );
+
+    // 反向 1：IR → serde → IR（序列化不丢字段，往返逐字段一致）
+    for spec in &specs {
+        let json = serde_json::to_string(spec).expect("IR 序列化");
+        let back: rillane_config::EgressConfig = serde_json::from_str(&json).expect("IR 反序列化");
+        assert_eq!(&back, spec, "serde 往返必须逐字段一致");
+    }
+
+    // 反向 2：IR → clash 导出（network: httpupgrade + httpupgrade-opts 块键）
+    // → 回读再转 IR
+    let mut project: rillane_config::RillaneConfig = serde_yaml::from_str(
+        "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+    )
+    .expect("基底配置");
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-httpupgrade-vmess".into(),
+        spec: specs[0].clone(),
+    });
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-httpupgrade-vless".into(),
+        spec: specs[1].clone(),
+    });
+    let (yaml, export_report) = rillane_subscription::ClashExporter
+        .export(&project)
+        .unwrap();
+    assert_eq!(
+        export_report.exported_proxies,
+        vec!["sample-httpupgrade-vmess", "sample-httpupgrade-vless"],
+        "HTTPUpgrade 节点应可导出"
+    );
+    assert!(yaml.contains("network: httpupgrade"), "{yaml}");
+    assert!(yaml.contains("type: vmess"), "{yaml}");
+    assert!(yaml.contains("type: vless"), "{yaml}");
+    assert!(
+        yaml.contains("httpupgrade-opts:"),
+        "导出必须携带 httpupgrade-opts 块键: {yaml}"
+    );
+    assert!(yaml.contains("path: /hu1"), "{yaml}");
+    assert!(yaml.contains("path: /hu2"), "{yaml}");
+    assert!(yaml.contains("Host: cdn1.example.com"), "{yaml}");
+    // 回读：httpupgrade-opts 键位保证往返不丢字段
+    let reparsed = ClashConverter::new()
+        .parse(&yaml)
+        .expect("导出必须可被导入侧解析");
+    let (back_config, back_report) = ClashConverter::new()
+        .convert_to_rillane_with_report(&reparsed)
+        .expect("回读转换");
+    assert!(
+        back_report.dropped_nodes.is_empty(),
+        "回读不丢节点: {:?}",
+        back_report.dropped_nodes
+    );
+    assert!(
+        back_report.degraded_nodes.is_empty(),
+        "回读零损失: {:?}",
+        back_report.degraded_nodes
+    );
+    assert_eq!(
+        back_config.egress[0].spec, specs[0],
+        "导出→回读必须逐字段还原 vmess+host 节点"
+    );
+    assert_eq!(
+        back_config.egress[1].spec, specs[1],
+        "vless 仅 path 节点同样逐字段还原"
+    );
+}
+
 // ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
 
 #[test]
