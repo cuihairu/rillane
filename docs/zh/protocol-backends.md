@@ -464,3 +464,56 @@ armv7-ohos 桩）在对应小节如实记录。
 
 传输组合（TLS/WS/gRPC/H2/HTTPUpgrade）是协议字段的正交面，单独验收；
 本页不逐协议重复其结论。
+
+## 公共传输与复用矩阵（RIL-130）
+
+- **结论**：盘点 + 三处实际缺口补齐——httpupgrade 订阅导出面、vless UDP 包编码
+  （raw/xudp/packetaddr）、gRPC gun 流复用；不引入新外部后端（新增全部自写，
+  真源对照逐字节核验）。评估扫查（2026-11-16）。
+- **现状矩阵（代码面，构建期白名单 + 拨号期具名拒绝已覆盖）**：vless =
+  tcp/ws/grpc/h2/httpupgrade/xhttp（RIL-129）；vmess = tcp/ws/grpc/h2/httpupgrade；
+  trojan = tcp/ws/grpc（恒叠 TLS）；shadowsocks = tcp（SIP003 插件桥）；
+  anytls/tuic/hysteria2 = 原生面（TLS/QUIC 内建，无 network 字段）。
+- **UoT（UDP-over-TCP）**：已交付，无缺口——anytls 出站 UDP 面（RIL-106）由
+  anytls crate UoT 模块承载（uot_sentinel_destination/UotRequest/
+  uot_encode_packet/uot_get_packet_from_stream，仓内已 pin）；mihomo 出站 schema
+  中 vless/vmess 无 uot 传输字段（其 SupportUOT() 是 UDP 面能力声明而非配置面）。
+- **XUDP / packetaddr（vless UDP 包编码）**：无库后端——crates.io 无
+  xudp/packetaddr 独立库；Xray-core 内嵌非库面；sing-vmess 为 Go 库。按真源自写：
+  - 编码判定 = mihomo adapter/outbound/vless.go（2026-11-16 读源）：`packet-encoding:
+    packetaddr|packet` → packetaddr，其余缺省 xudp（`packet-addr`/`xudp` 遗留布尔
+    兼容）。仓内语义取：缺省 raw（Xray 原生 UDP 面，既有验收在测）、显式
+    `xudp`/`packetaddr` 启用对应编码——mihomo「缺省 xudp」不镜像（文档记边界）。
+  - xudp 帧 = sing-vmess v0.2.4 xudp.go 逐行（mihomo go.mod pin v0.2.5 同构）：
+    首报 `[2B BE 元长][0x00 0x00][0x01 New][0x01 opt-data][0x02 NetworkUDP][地址]
+    [8B GlobalID（零则省）][2B BE 载荷长][载荷]`；后续报 `[2B BE 元长][0x00 0x00]
+    [0x02 Keep][0x01][0x02][地址][2B][载荷]`；下行同构（元长==4 时目标即会话目标；
+    3=End→EOF、4=KeepAlive 忽略——sing 与 xray 在 3/4 语义上互换，客户端按
+    「2=数据、3/4=会话收束」容忍面收束；opt 位 0x01 有载荷、0x02 对端故障）。
+  - 地址序列化 = sing-vmess protocol.go AddressSerializer（port-first：
+    `[2B BE port][0x01 v4 | 0x02 域名(1B 长+串) | 0x03 v6][地址]`，与 Xray
+    PortThenAddress 同）。
+  - vless 载具头 = mihomo transport/vless/conn.go：Mux 分支写命令 0x03 且**不带
+    目标地址**（版本+uuid+addons 长+addons+0x03），目标只在首帧 New 里。
+  - packetaddr 帧 = sing-vmess packetaddr/conn.go：报文 =
+    `[0x01 v4 | 0x02 v6][地址][2B BE port][载荷]`（family-first、无域名面——
+    ErrFqdnUnsupported）；vless 载具头 = 命令 0x02 + magic 地址
+    `sp.packet-addr.v2fly.arpa`:443（packetaddr.SeqPacketMagicAddress）；上下行同构。
+  - vmess 载具不自写：sing-vmess mux/chunk 流（AEAD 面）与仓内 vmess UDP 面
+    （raw 单目标）不同构——vmess 非 raw 包编码构建期具名拒绝。
+- **多路复用**：mihomo 出站复用面 = gRPC gun 流复用（grpc-opts
+  `{max-connections, min-streams, max-streams}`——连接数上限 × 每连接流上下限）；
+  smux/yamux **不在 mihomo 出站 schema**（vless/vmess/trojan 三个 Option 结构体均
+  无 smux 字段；wiki 样例页残留 `smux:` 键位为无效装饰）。Rust smux 候选评估
+  （2026-11-16 crates.io）：`smux` 0.2.0（iberryful，MIT，2025-07，edition 2024，
+  「compatible with the Go smux protocol」）、`tokio_smux` 0.2.0（oyyd，MIT，
+  2024-01）、`async_smux` 0.4.0（black-binary，MIT，2026-09）——均不引入：schema
+  无 smux 面，引入即无对端。gun 流复用按 gun 语义自写（h2 0.4.19 已在仓，
+  pool.rs `TransportReuse::Multiplexed` 契约位已留迄今仅测试引用），订阅
+  grpc-opts 补 max-connections/min-streams/max-streams 三键位。
+- **httpupgrade**：已自写交付（vless/vmess，G2-15/G3-16 回环在测）——缺口在
+  订阅导出面：clash_export 无 httpupgrade 分支（network=httpupgrade 节点导出既无
+  network 键也无 httpupgrade-opts，回读退化为 tcp），且 config.md/PROTOCOLS.md
+  未记载。本项补齐导出分支与两语文档。
+- **交付边界（点名拒绝）**：vmess 非 raw 包编码（载具未交付）；vless
+  packet-encoding 白名单外取值；grpc-opts 流键位出现在非 grpc 传输（构建期拒绝）。
