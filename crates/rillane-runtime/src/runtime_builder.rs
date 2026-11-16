@@ -4416,6 +4416,18 @@ mod tests {
             .err()
             .expect("非法 network 必须报错");
         assert!(err.to_string().contains("network"), "实际：{err}");
+
+        // xhttp 载具仅 vless 交付（RIL-129）——vmess+xhttp 白名单外，
+        // 构建期具名拒绝（不静默当 tcp 用）
+        let mut bad_xhttp = vmess_spec();
+        if let EgressConfig::Vmess { network, .. } = &mut bad_xhttp {
+            *network = "xhttp".to_string();
+        }
+        let egress = vec![node("vm-xhttp", bad_xhttp)];
+        let err = build_egress_outputs(&egress, None, None)
+            .err()
+            .expect("vmess+xhttp 必须报错");
+        assert!(err.to_string().contains("xhttp"), "拒绝须点名 xhttp: {err}");
     }
 
     #[test]

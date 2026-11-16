@@ -89,12 +89,19 @@ fn request_target(base: &str, session: &str, seq: Option<u64>) -> String {
 struct Poison {
     failed: AtomicBool,
     message: Mutex<Option<String>>,
+    /// 读半泊位唤醒槽：读侧泊于下行 data() 时登记 waker，上行失败面毒化
+    /// 即唤醒重查（poison 先置位后取票、读侧先存票后复查——无错票窗口）
+    waker: Mutex<Option<std::task::Waker>>,
 }
 
 impl Poison {
     fn poison(&self, message: String) {
         self.message.lock().unwrap().get_or_insert(message);
         self.failed.store(true, Ordering::SeqCst);
+        let waker = self.waker.lock().unwrap().take();
+        if let Some(w) = waker {
+            w.wake();
+        }
     }
 
     fn check(&self) -> std::io::Result<()> {
@@ -140,6 +147,9 @@ impl AsyncRead for XhttpReader {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         if let Some(poison) = &self.poison {
+            // 先存唤醒票再复查毒化位（与 poison 面的先置位后取票配对——
+            // 读侧泊位期间上行失败面能即时唤醒，无错票窗口）
+            *poison.waker.lock().unwrap() = Some(cx.waker().clone());
             poison.check()?;
         }
         loop {
@@ -165,7 +175,15 @@ impl AsyncRead for XhttpReader {
                     self.pending = Some(data);
                 }
                 Some(Err(e)) => {
-                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)))
+                    // 上行失败面优先具名（403 毒化与下行流复位竞速——毒化
+                    // 已置位时以命名错误收束而非底层 h2 流错误）
+                    if let Some(poison) = &self.poison {
+                        poison.check()?;
+                    }
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        e,
+                    )));
                 }
                 // 响应体耗尽 = 服务端关流（对目标侧收尾）
                 None => return Poll::Ready(Ok(())),
