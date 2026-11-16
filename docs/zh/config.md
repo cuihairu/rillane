@@ -48,13 +48,15 @@
 | `trojan` | `bind`（必填）、`password`（必填）、`cert`（必填）、`cert_key`（必填）、`udp_enabled`? |
 | `vless` | `bind`（必填）、`uuid`（必填）、`cert`（必填）、`cert_key`（必填）、`udp_enabled`? |
 | `vmess` | `bind`（必填）、`uuid`（必填）、`udp_enabled`? |
+| `hysteria2` | `bind`（必填）、`password`（必填）、`cert`（必填）、`cert_key`（必填）、`udp_enabled`? |
 
 - `auth`：`[{username, password}]` 凭据表**非空即强制**（socks5 走 RFC 1929、http 走 `Proxy-Authorization: Basic` 407 挑战）；缺省/空表 = 匿名放行。
 - `bearer_tokens`：`[token]` 明文比对（`Proxy-Authorization: Bearer`），与 `auth` 并列任一通过即放行；缺省不启用。
-- `udp_enabled`：入口级 UDP 覆盖（SOCKS5 ASSOCIATE / mixed socks5 分支 / Shadowsocks 数据报面 / Trojan、VLESS、VMess UDP 关联）；缺省继承 `udp.enabled`，显式 `true/false` 覆盖该入口（显式 true 且全局关时构建期 WARN）。
+- `udp_enabled`：入口级 UDP 覆盖（SOCKS5 ASSOCIATE / mixed socks5 分支 / Shadowsocks 数据报面 / Trojan、VLESS、VMess、Hysteria2 UDP 关联）；缺省继承 `udp.enabled`，显式 `true/false` 覆盖该入口（显式 true 且全局关时构建期 WARN）。
 - `trojan` `cert`/`cert_key`：证书与私钥为内联 PEM 字符串，装配期解析（垃圾材料在监听前报错）；口令为明文字符串，线上以 SHA224 十六进制哈希呈现。
 - `vless` `uuid`：标准形 UUID，装配期解析（垃圾在监听前报错），线上以 16 字节恒时比对认证；`cert`/`cert_key` 同 trojan（内联 PEM 装配期解析）。服务端面仅普通 TLS + UUID 认证——Vision/REALITY 服务端组合另验，不设配置字段。
 - `vmess` `uuid`：标准形 UUID，装配期解析（垃圾在监听前报错）；线上认证键为 `cmdKey = MD5(uuid ‖ 常量)` 派生，AEAD 封头即认证面——服务端不设 TLS 字段（裸 TCP 承载）也不设 security 旋钮（客户端逐连接自选 AES-128-GCM / ChaCha20-Poly1305；仅 AEAD 口径，`alter_id: 0`）。
+- `hysteria2` `password`：HTTP/3 `/auth` 认证门恒时比对（233 放行 + `Hysteria-UDP` 声明）；QUIC 端点即监听面——`cert`/`cert_key` 为内联 PEM 装配期解析，ALPN 恒 `h3`。obfs/masquerade/ACME/Brutal 不交付不留字段。
 
 ## egress[]（`type` 标签，12 变体）
 
