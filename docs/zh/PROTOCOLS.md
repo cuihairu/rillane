@@ -20,7 +20,7 @@
 | AnyTLS | TCP（TLS 承载，会话复用）；UDP-over-TCP（UoT） | 订阅 alpn/client-fingerprint 不入 IR（转换报告点名） |
 | Shadowsocks | TCP、UDP；TCP 可用 SIP003 插件桥 | 插件模式不承载 UDP；算法以实际依赖/校验为准 |
 | Trojan | TCP/TLS，可叠加支持的传输 | 不据此承诺 UDP 或所有上游扩展 |
-| VLESS / VMess | TCP、WebSocket、gRPC、HTTP/2 传输；REALITY（TCP 承载，客户端面）；XTLS Vision 分帧（tcp+TLS/REALITY 承载，镜像对端验收） | 传输/加密配置需通过构建校验；REALITY 须 `network: tcp` 并按其口径处置 TLS；Vision 须 `flow: xtls-rprx-vision`、`network: tcp` 且外层为 TLS1.3，其余 flow 取值拨号期点名拒绝；UDP 承载未实现，VMess 限 AEAD/alter_id=0 |
+| VLESS / VMess | TCP、WebSocket、gRPC、HTTP/2 传输；XHTTP 传输（**仅 VLESS**，TLS1.3/H2 承载，packet-up/stream-one 两模式，镜像对端验收）；REALITY（TCP 承载，客户端面）；XTLS Vision 分帧（tcp+TLS/REALITY 承载，镜像对端验收） | 传输/加密配置需通过构建校验；XHTTP 须 `network: xhttp` 且恒叠 TLS，`xhttp_mode` 限 `auto | packet-up | stream-one`（其余拨号期点名拒绝，stream-up/H3/H1.1 载具未交付）；REALITY 须 `network: tcp` 并按其口径处置 TLS；Vision 须 `flow: xtls-rprx-vision`、`network: tcp` 且外层为 TLS1.3，其余 flow 取值拨号期点名拒绝；UDP 承载未实现，VMess 限 AEAD/alter_id=0 |
 | Hysteria2 | QUIC 上的 TCP stream；UDP 数据报面（官方 UDPMessage over QUIC 不可靠数据报，镜像对端验收） | obfs（salamander）不支持——TCP/UDP 面均判负；服务端未声明 UDP 支持时点名拒绝（Hysteria-UDP 声明校验）；不等价于网页 QUIC 透传 |
 | TUIC | QUIC 上的 TCP stream（v5 Connect 走双向流，token 认证经 TLS keying-material exporter）；UDP 数据报面（v5 Packet over QUIC 不可靠数据报，按 assoc 独立服务端 socket，客户端分片/重组，镜像对端验收） | 仅 v5——v4 线格式无代码路径，按名拒绝；`congestion-controller` 非 `cubic` 拨号期点名拒绝（不静默降级）；无错误响应面——拒绝以流/QUIC 收束呈现 |
 | WireGuard | TCP、UDP 的用户态承载 | 部分平台目标是拒绝桩，交叉编译不能证明可用 |

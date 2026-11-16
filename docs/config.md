@@ -68,7 +68,7 @@ This page describes current configuration, not completed v1 fields. Definitions 
 
 Transport and build-time constraints:
 
-- `network` values: vless/vmess = `tcp | ws | grpc | h2`; trojan = `tcp | ws | grpc` (**no h2 scope**, anything outside the whitelist errors at build time). `grpc` requires `grpc_service_name` (online path `/{name}/Tun`), and grpc/h2 always layer TLS (`tls: false` is refused at build time); `ws`/`h2` use `path`/`host` (host is a string array).
+- `network` values: vless = `tcp | ws | grpc | h2 | xhttp`, vmess = `tcp | ws | grpc | h2`; trojan = `tcp | ws | grpc` (**no h2 scope**, anything outside the whitelist errors at build time). `grpc` requires `grpc_service_name` (online path `/{name}/Tun`), and grpc/h2 always layer TLS (`tls: false` is refused at build time); `ws`/`h2` use `path`/`host` (host is a string array); `xhttp` (vless only, RIL-129) always layers TLS (`tls: false` refused at build time), `path`/`host` follow the ws shape, and `xhttp_mode` is limited to `auto | packet-up | stream-one` (default auto; outside the whitelist refused at build time, undelivered carriers refused by name at dial time).
 - `security` (vmess): `auto | aes-128-gcm | chacha20-poly1305`; `alter_id > 0` and non-AEAD security are refused at build time.
 - `flow` (vless): dial-time validation — exactly `xtls-rprx-vision` accepted (Vision framing; requires `network: tcp` + `tls: true`/REALITY, UDP refused), any other value refused at dial time and names the node.
 - `method` (shadowsocks): free-form string, invalid values error at build time (the set is whatever the shadowsocks crate 1.25 AEAD methods support); `plugin` goes through the SIP003 bridge (TCP plane via the plugin process, UDP plane judged negative in plugin mode).
