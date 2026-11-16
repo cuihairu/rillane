@@ -1,0 +1,31 @@
+# RIL-107 订阅兼容样本：VLESS+REALITY 出站节点（已脱敏）
+# 凭据为占位值（REDACTED-SAMPLE），地址用 RFC 5737/2606 文档段；公钥为
+# RFC 递增占位十六进制（非真实密钥）。预期：节点保留可用；reality-opts
+# （public-key/short-id，kebab 口径）逐字段入 IR；network=tcp + tls 恒叠。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-reality-full
+    type: vless
+    server: reality.example.com
+    port: 443
+    uuid: "00000000-0000-0000-0000-000000000000"
+    network: tcp
+    tls: true
+    servername: sni.example.com
+    skip-cert-verify: false
+    reality-opts:
+      public-key: "REDACTED-SAMPLE-public-key-0123456789abcdef0123456789abcdef"
+      short-id: "0102030405060708"
+  - name: sample-reality-min
+    type: vless
+    server: 203.0.113.42
+    port: 443
+    uuid: "00000000-0000-0000-0000-000000000000"
+    network: tcp
+    tls: true
+    reality-opts:
+      public-key: "REDACTED-SAMPLE-public-key-fedcba9876543210fedcba9876543210"
+proxy-groups: []
+rules: []

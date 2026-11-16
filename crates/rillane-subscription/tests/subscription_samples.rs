@@ -438,6 +438,136 @@ fn anytls_subscription_fields_convert_both_ways() {
     );
 }
 
+// ---------- RIL-107：VLESS+REALITY 出站——订阅字段双向转换样本 ----------
+
+#[test]
+fn reality_subscription_fields_convert_both_ways() {
+    // 正向：clash 订阅 → IR（reality-opts 逐字段入 IR，节点零损失）
+    let (config, report) = loose("reality_node.yaml");
+    let names: Vec<&str> = config.egress.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["sample-reality-full", "sample-reality-min"]);
+    let specs: Vec<rillane_config::EgressConfig> =
+        config.egress.iter().map(|e| e.spec.clone()).collect();
+    assert_eq!(
+        specs[0],
+        rillane_config::EgressConfig::Vless {
+            server: "reality.example.com".into(),
+            port: 443,
+            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            flow: None,
+            reality: Some(rillane_config::RealityConfig {
+                public_key: "REDACTED-SAMPLE-public-key-0123456789abcdef0123456789abcdef".into(),
+                short_id: Some("0102030405060708".into()),
+            }),
+            network: "tcp".into(),
+            path: None,
+            host: None,
+            grpc_service_name: None,
+            tls: true,
+            skip_cert_verify: false,
+            sni: Some("sni.example.com".into()),
+            alpn: None,
+            tls_fingerprint: None,
+        }
+    );
+    assert_eq!(
+        specs[1],
+        rillane_config::EgressConfig::Vless {
+            server: "203.0.113.42".into(),
+            port: 443,
+            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            flow: None,
+            reality: Some(rillane_config::RealityConfig {
+                public_key: "REDACTED-SAMPLE-public-key-fedcba9876543210fedcba9876543210".into(),
+                short_id: None,
+            }),
+            network: "tcp".into(),
+            path: None,
+            host: None,
+            grpc_service_name: None,
+            tls: true,
+            skip_cert_verify: false,
+            sni: None,
+            alpn: None,
+            tls_fingerprint: None,
+        }
+    );
+    assert!(
+        report.dropped_nodes.is_empty(),
+        "REALITY 节点必须保留，不丢弃: {:?}",
+        report.dropped_nodes
+    );
+    assert!(
+        report.degraded_nodes.is_empty(),
+        "reality-opts 全字段入 IR，无降级: {:?}",
+        report.degraded_nodes
+    );
+
+    // 反向 1：IR → serde → IR（序列化不丢字段，往返逐字段一致）
+    for spec in &specs {
+        let json = serde_json::to_string(spec).expect("IR 序列化");
+        let back: rillane_config::EgressConfig = serde_json::from_str(&json).expect("IR 反序列化");
+        assert_eq!(&back, spec, "serde 往返必须逐字段一致");
+    }
+
+    // 反向 2：IR → clash 导出（reality-opts 键位）→ 导入侧回读再转 IR
+    let mut project: rillane_config::RillaneConfig = serde_yaml::from_str(
+        "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+    )
+    .expect("基底配置");
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-reality-full".into(),
+        spec: specs[0].clone(),
+    });
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-reality-min".into(),
+        spec: specs[1].clone(),
+    });
+    let (yaml, export_report) = rillane_subscription::ClashExporter
+        .export(&project)
+        .unwrap();
+    assert_eq!(
+        export_report.exported_proxies,
+        vec!["sample-reality-full", "sample-reality-min"],
+        "REALITY 节点应可导出"
+    );
+    assert!(yaml.contains("type: vless"), "{yaml}");
+    assert!(yaml.contains("reality-opts:"), "{yaml}");
+    assert!(
+        yaml.contains("public-key: REDACTED-SAMPLE-public-key-0123456789abcdef0123456789abcdef"),
+        "{yaml}"
+    );
+    // short-id 全数字串，serde_yaml_ng 导出带引号——键位与值都在即可
+    assert!(yaml.contains("short-id:"), "{yaml}");
+    assert!(yaml.contains("0102030405060708"), "{yaml}");
+    assert!(yaml.contains("tls: true"), "{yaml}");
+    // 回读：reality-opts kebab 键位保证往返不丢 REALITY 配置
+    let reparsed = ClashConverter::new()
+        .parse(&yaml)
+        .expect("导出必须可被导入侧解析");
+    let (back_config, back_report) = ClashConverter::new()
+        .convert_to_rillane_with_report(&reparsed)
+        .expect("回读转换");
+    assert!(
+        back_report.dropped_nodes.is_empty(),
+        "回读不丢节点: {:?}",
+        back_report.dropped_nodes
+    );
+    assert!(
+        back_report.degraded_nodes.is_empty(),
+        "回读零损失（导出面含 reality-opts 全字段）: {:?}",
+        back_report.degraded_nodes
+    );
+    assert_eq!(
+        back_config.egress[0].spec, specs[0],
+        "导出→回读必须逐字段还原 REALITY 节点"
+    );
+    assert_eq!(
+        back_config.egress[1].spec, specs[1],
+        "min 节点（short_id 缺席）同样逐字段还原"
+    );
+}
+
 // ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
 // ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
 
