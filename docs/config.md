@@ -44,10 +44,11 @@ This page describes current configuration, not completed v1 fields. Definitions 
 | `socks5` | `bind` (required), `auth`?, `udp_enabled`? |
 | `http` | `bind` (required), `auth`?, `bearer_tokens`? |
 | `mixed` | `bind` (required), `auth`?, `udp_enabled`?, `bearer_tokens`? (http branch only) |
+| `shadowsocks` | `bind` (required), `method` (required), `password` (required), `udp_enabled`? |
 
 - `auth`: an `[{username, password}]` credential table -- **non-empty means enforced** (socks5 via RFC 1929, http via a `Proxy-Authorization: Basic` 407 challenge); absent/empty table = anonymous passthrough.
 - `bearer_tokens`: a `[token]` list compared in plaintext (`Proxy-Authorization: Bearer`), in parallel with `auth`; either passing is enough; disabled by default.
-- `udp_enabled`: ingress-level UDP ASSOCIATE override; defaults to inheriting `udp.enabled`, and an explicit `true`/`false` overrides it for that ingress (explicit true while the global switch is off is a build-time WARN).
+- `udp_enabled`: ingress-level UDP override (SOCKS5 ASSOCIATE, mixed socks5 branch, Shadowsocks datagram face); defaults to inheriting `udp.enabled`, and an explicit `true`/`false` overrides it for that ingress (explicit true while the global switch is off is a build-time WARN).
 
 ## egress[] (`type` tags, 12 variants)
 

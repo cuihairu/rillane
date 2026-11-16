@@ -9,6 +9,7 @@
 | SOCKS5 | CONNECT、用户名/密码、UDP ASSOCIATE | UDP 需启用 `udp.enabled`；入口还可单独关闭 UDP |
 | HTTP | CONNECT、Basic / Bearer 认证 | 普通非 CONNECT 请求不提供完整 HTTP 转发；不是缓存或 MITM |
 | mixed | 同端口识别 SOCKS5 / HTTP | 继承对应协议的限制 |
+| Shadowsocks | TCP 流 + 同端口 UDP 数据报；method/password 构建期校验（与出站同口径） | SIP003 插件服务端面未交付；UDP 需启用 `udp.enabled`；入口还可单独关闭 UDP |
 | TUN | Linux TCP/UDP 共享数据面 | 其他平台完整接管仍需实现/验收 |
 
 ## 出站
