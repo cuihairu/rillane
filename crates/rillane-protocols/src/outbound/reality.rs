@@ -32,9 +32,9 @@ use rustls::reality::ClientHooks;
 use rustls::{ClientConfig, ClientConnection, ConnectionCommon, Error, NamedGroup, SideData};
 use sha2::{Sha256, Sha512};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use x509_parser::prelude::FromDer;
 use tokio::net::TcpStream;
 use x25519_dalek::{PublicKey, StaticSecret};
+use x509_parser::prelude::FromDer;
 
 use hmac::{Hmac, Mac};
 use subtle::ConstantTimeEq;
@@ -182,7 +182,10 @@ pub fn seal_session_id(
         .encrypt(Nonce::from_slice(nonce_12), Payload { msg: &pt, aad })
         .map_err(gcm_err)?;
     let sealed: [u8; 32] = ct.as_slice().try_into().map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "REALITY session-id 密文应为 32 字节")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "REALITY session-id 密文应为 32 字节",
+        )
     })?;
     Ok(sealed)
 }
@@ -377,7 +380,8 @@ struct RealityCertVerifier {
 
 impl std::fmt::Debug for RealityCertVerifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RealityCertVerifier").finish_non_exhaustive()
+        f.debug_struct("RealityCertVerifier")
+            .finish_non_exhaustive()
     }
 }
 
@@ -398,9 +402,8 @@ impl ServerCertVerifier for RealityCertVerifier {
             .ok()
             .and_then(|st| st.auth_key)
             .ok_or_else(|| Error::General("REALITY: auth key 未就绪".into()))?;
-        verify_hmac_cert(end_entity.as_ref(), &auth_key).map_err(|e| {
-            Error::General(format!("REALITY: 服务端证书认证失败: {e}"))
-        })?;
+        verify_hmac_cert(end_entity.as_ref(), &auth_key)
+            .map_err(|e| Error::General(format!("REALITY: 服务端证书认证失败: {e}")))?;
         Ok(ServerCertVerified::assertion())
     }
 
@@ -426,13 +429,17 @@ impl ServerCertVerifier for RealityCertVerifier {
         let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(cert.as_ref())
             .map_err(|e| Error::General(format!("REALITY: 证书解析失败: {e}")))?;
         let pub_bytes: &[u8] = &parsed.public_key().subject_public_key.data;
-        let key = ed25519_dalek::VerifyingKey::from_bytes(pub_bytes.try_into().map_err(|_| {
-            Error::General("REALITY: 证书公钥须为 32 字节 ed25519".into())
-        })?)
+        let key = ed25519_dalek::VerifyingKey::from_bytes(
+            pub_bytes
+                .try_into()
+                .map_err(|_| Error::General("REALITY: 证书公钥须为 32 字节 ed25519".into()))?,
+        )
         .map_err(|e| Error::General(format!("REALITY: 公钥非法: {e}")))?;
-        let sig = ed25519_dalek::Signature::from_bytes(dss.signature().try_into().map_err(
-            |_| Error::General("REALITY: 签名须为 64 字节".into()),
-        )?);
+        let sig = ed25519_dalek::Signature::from_bytes(
+            dss.signature()
+                .try_into()
+                .map_err(|_| Error::General("REALITY: 签名须为 64 字节".into()))?,
+        );
         key.verify_strict(message, &sig)
             .map_err(|e| Error::General(format!("REALITY: CertificateVerify 验签失败: {e}")))?;
         Ok(HandshakeSignatureValid::assertion())
@@ -507,13 +514,19 @@ impl RealityDial {
     /// public_key：节点静态公钥（64 位 hex）；short_id：可选 ≤8 字节 hex
     pub fn new(public_key_hex: &str, short_id_hex: Option<&str>) -> io::Result<Self> {
         let pk = hex_decode_32(public_key_hex).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("REALITY 公钥无效: {e}"))
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("REALITY 公钥无效: {e}"),
+            )
         })?;
         let short_id = match short_id_hex {
             None | Some("") => [0u8; 8],
             Some(hex) => {
                 let bytes = decode_hex(hex).map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidInput, format!("REALITY short-id 无效: {e}"))
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("REALITY short-id 无效: {e}"),
+                    )
                 })?;
                 if bytes.len() > 8 {
                     return Err(io::Error::new(
@@ -560,12 +573,8 @@ impl RealityDial {
             .with_no_client_auth();
         let mut config = config;
         config.alpn_protocols = self.alpn.clone();
-        let conn = ClientConnection::new_reality(
-            Arc::new(config),
-            server_name,
-            Box::new(hooks),
-        )
-        .map_err(reality_err)?;
+        let conn = ClientConnection::new_reality(Arc::new(config), server_name, Box::new(hooks))
+            .map_err(reality_err)?;
         handshake(tcp, conn).await
     }
 }
@@ -576,8 +585,11 @@ fn reality_err(e: Error) -> io::Error {
 
 fn decode_hex(s: &str) -> io::Result<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "hex 长度须为偶数"));
+    if !s.len().is_multiple_of(2) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "hex 长度须为偶数",
+        ));
     }
     (0..s.len())
         .step_by(2)
@@ -620,6 +632,14 @@ impl RustlsConn for ClientConnection {
     }
 }
 
+impl RustlsConn for rustls::ServerConnection {
+    type Side = rustls::server::ServerConnectionData;
+
+    fn as_conn(&mut self) -> &mut ConnectionCommon<Self::Side> {
+        self
+    }
+}
+
 /// 单条 rustls 连接的 tokio 传输适配器（客户端/服务端面通用——服务端真实
 /// 对端测试用同一实现）。
 pub struct TlsAdapter<C: RustlsConn> {
@@ -633,7 +653,11 @@ pub type RealityStream = TlsAdapter<ClientConnection>;
 
 impl<C: RustlsConn> TlsAdapter<C> {
     pub fn new(tcp: TcpStream, conn: C) -> Self {
-        Self { tcp, conn, eof: false }
+        Self {
+            tcp,
+            conn,
+            eof: false,
+        }
     }
 
     pub fn into_tcp(self) -> TcpStream {
@@ -642,7 +666,10 @@ impl<C: RustlsConn> TlsAdapter<C> {
 
     /// 写出 rustls 队列中的 TLS 记录
     fn write_io(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
-        let mut adapter = SyncWriteAdapter { io: &mut self.tcp, cx };
+        let mut adapter = SyncWriteAdapter {
+            io: &mut self.tcp,
+            cx,
+        };
         match self.conn.as_conn().write_tls(&mut adapter) {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
             result => Poll::Ready(result),
@@ -651,14 +678,20 @@ impl<C: RustlsConn> TlsAdapter<C> {
 
     /// 读取 TCP 字节喂入 rustls 并解包
     fn read_io(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
-        let mut adapter = SyncReadAdapter { io: &mut self.tcp, cx };
+        let mut adapter = SyncReadAdapter {
+            io: &mut self.tcp,
+            cx,
+        };
         let n = match self.conn.as_conn().read_tls(&mut adapter) {
             Ok(n) => n,
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
             Err(e) => return Poll::Ready(Err(e)),
         };
         self.conn.as_conn().process_new_packets().map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("REALITY 记录处理失败: {e}"))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("REALITY 记录处理失败: {e}"),
+            )
         })?;
         Poll::Ready(Ok(n))
     }
@@ -747,7 +780,11 @@ impl<C: RustlsConn> AsyncWrite for TlsAdapter<C> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        this.conn.as_conn().writer().flush().map_err(io::Error::other)?;
+        this.conn
+            .as_conn()
+            .writer()
+            .flush()
+            .map_err(io::Error::other)?;
         while this.conn.as_conn().wants_write() {
             if std::task::ready!(this.write_io(cx))? == 0 {
                 return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
@@ -816,7 +853,10 @@ pub async fn handshake<C: RustlsConn>(tcp: TcpStream, mut conn: C) -> io::Result
     loop {
         while conn.as_conn().wants_write() {
             buf.clear();
-            let n = conn.as_conn().write_tls(&mut buf).map_err(io::Error::other)?;
+            let n = conn
+                .as_conn()
+                .write_tls(&mut buf)
+                .map_err(io::Error::other)?;
             if n == 0 {
                 break;
             }
@@ -833,8 +873,11 @@ pub async fn handshake<C: RustlsConn>(tcp: TcpStream, mut conn: C) -> io::Result
                 "REALITY 握手期对端关闭连接",
             ));
         }
-        conn.as_conn().read_tls(&mut &chunk[..n]).map_err(io::Error::other)?;
-        conn.as_conn().process_new_packets()
+        conn.as_conn()
+            .read_tls(&mut &chunk[..n])
+            .map_err(io::Error::other)?;
+        conn.as_conn()
+            .process_new_packets()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("REALITY: {e}")))?;
     }
     Ok(TlsAdapter::new(tcp, conn))
@@ -928,14 +971,22 @@ mod tests {
         let auth_key = derive_auth_key(shared.as_bytes(), &[7u8; 20]);
 
         let aad = b"client-hello-bytes-with-zeroed-slot";
-        let sealed = seal_session_id(&auth_key, &[9u8; 12], CORE_VERSION, 1_700_000_000, &[
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-        ], aad)
+        let sealed = seal_session_id(
+            &auth_key,
+            &[9u8; 12],
+            CORE_VERSION,
+            1_700_000_000,
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            aad,
+        )
         .expect("seal");
         let opened = open_session_id(&auth_key, &[9u8; 12], &sealed, aad).expect("open");
         assert_eq!(opened.version, CORE_VERSION);
         assert_eq!(opened.timestamp, 1_700_000_000);
-        assert_eq!(opened.short_id, [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        assert_eq!(
+            opened.short_id,
+            [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        );
     }
 
     /// 短 short_id 零填充到 8 字节（服务器可开局比对）
@@ -947,8 +998,15 @@ mod tests {
             client_secret.diffie_hellman(&server_pub).as_bytes(),
             &[1u8; 20],
         );
-        let sealed = seal_session_id(&auth_key, &[2u8; 12], CORE_VERSION, 5, &[0xab, 0xcd], b"aad")
-            .expect("seal");
+        let sealed = seal_session_id(
+            &auth_key,
+            &[2u8; 12],
+            CORE_VERSION,
+            5,
+            &[0xab, 0xcd],
+            b"aad",
+        )
+        .expect("seal");
         let opened = open_session_id(&auth_key, &[2u8; 12], &sealed, b"aad").expect("open");
         assert_eq!(&opened.short_id[..2], &[0xab, 0xcd]);
         assert!(opened.short_id[2..].iter().all(|b| *b == 0));
@@ -963,15 +1021,17 @@ mod tests {
             client_secret.diffie_hellman(&server_pub).as_bytes(),
             &[3u8; 20],
         );
-        let sealed = seal_session_id(&auth_key, &[4u8; 12], CORE_VERSION, 6, &[0xaa], b"aad")
-            .expect("seal");
+        let sealed =
+            seal_session_id(&auth_key, &[4u8; 12], CORE_VERSION, 6, &[0xaa], b"aad").expect("seal");
         let other = StaticSecret::random_from_rng(rand::rngs::OsRng);
         let other_key = derive_auth_key(
-            client_secret.diffie_hellman(&PublicKey::from(&other)).as_bytes(),
+            client_secret
+                .diffie_hellman(&PublicKey::from(&other))
+                .as_bytes(),
             &[3u8; 20],
         );
-        let err = open_session_id(&other_key, &[4u8; 12], &sealed, b"aad")
-            .expect_err("错误静钥必须失败");
+        let err =
+            open_session_id(&other_key, &[4u8; 12], &sealed, b"aad").expect_err("错误静钥必须失败");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     }
 
@@ -990,11 +1050,11 @@ mod tests {
             client_secret.diffie_hellman(&server_pub).as_bytes(),
             &[5u8; 20],
         );
-        let sealed = seal_session_id(&auth_key, &[6u8; 12], CORE_VERSION, 7, &[0xbb], &aad)
-            .expect("seal");
+        let sealed =
+            seal_session_id(&auth_key, &[6u8; 12], CORE_VERSION, 7, &[0xbb], &aad).expect("seal");
         // 不同 AAD（未被置零的 hello）→ 认证失败
-        let err = open_session_id(&auth_key, &[6u8; 12], &sealed, &hello)
-            .expect_err("AAD 不符必须失败");
+        let err =
+            open_session_id(&auth_key, &[6u8; 12], &sealed, &hello).expect_err("AAD 不符必须失败");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         // 相同 AAD → 成功
         open_session_id(&auth_key, &[6u8; 12], &sealed, &aad).expect("open");
@@ -1079,7 +1139,9 @@ mod tests {
                 .expect("服务端装配"),
         ));
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
@@ -1111,8 +1173,8 @@ mod tests {
     /// 关闭——对端 2s 内见连接结束（资源释放）
     #[tokio::test]
     async fn tls_adapter_cancel_releases_connection() {
-        use tokio_rustls::TlsAcceptor;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_rustls::TlsAcceptor;
 
         let certified =
             rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("自签");
@@ -1135,7 +1197,9 @@ mod tests {
         ));
         let finished = Arc::new(AtomicUsize::new(0));
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().unwrap();
         let fin = finished.clone();
         tokio::spawn(async move {

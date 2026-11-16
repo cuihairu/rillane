@@ -34,8 +34,9 @@ pub use direct::DirectConnector;
 pub use http::HttpConnector;
 pub use hysteria2::Hysteria2Connector;
 pub use reality::{
-    RealityAuthSession, RealityDial, RealityStream, TlsAdapter, CORE_VERSION, derive_auth_key,
+    derive_auth_key, extract_client_random, extract_session_id, extract_x25519_key_share,
     handshake, hmac_cert_tag, open_session_id, seal_session_id, zero_session_id_slot,
+    RealityAuthSession, RealityDial, RealityStream, TlsAdapter, CORE_VERSION,
 };
 pub use shadowsocks::{ShadowsocksConnector, ShadowsocksUdpConnector};
 pub use socks5::{Socks5Connector, Socks5UdpConnector};
