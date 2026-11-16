@@ -86,10 +86,9 @@ shadowsocks = { version = "1.25", default-features = false, features = ["aead-ci
 httparse = "1.9"
 http = "1.1"
 pin-project-lite = "0.2"
-hysteria2 = "0.1.6"
 # Hysteria2 UDP 中继面（RIL-133）：官方 UDPMessage 数据报协议自写——hysteria2
-# crate 无数据报公开 API（仅 connect/DuplexStream TCP 面），结论留证
-# protocol-backends.md#hysteria2；载具与 crate 同源（quinn/h3/h3-quinn 单版本入锁）
+# crate 已出依赖（RIL-138 起 TCP 面亦自写，其 connect() 端点句柄缺陷见
+# protocol-backends.md#hysteria2）；载具单版本入锁
 quinn = "0.11.9"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"

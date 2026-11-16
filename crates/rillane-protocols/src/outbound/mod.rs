@@ -8,6 +8,7 @@ mod grpc;
 mod h2;
 mod http;
 mod httpupgrade;
+pub(crate) mod hysteria;
 pub(crate) mod hysteria2;
 mod reality;
 mod shadowsocks;
@@ -36,6 +37,7 @@ mod wireguard_stub;
 pub use anytls::{AnytlsConnector, AnytlsUdpConnector};
 pub use direct::DirectConnector;
 pub use http::HttpConnector;
+pub use hysteria::{HysteriaConnector, HysteriaUdpConnector, HysteriaUdpRelay, HysteriaUdpStats};
 pub use hysteria2::{
     Hysteria2Connector, Hysteria2UdpConnector, Hysteria2UdpRelay, UdpSessionStats,
 };

@@ -35,11 +35,11 @@ use tokio::sync::{mpsc, Mutex};
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// 保活的 QUIC 连接 + 端点句柄（端点绝不可先于连接 Drop——quinn Endpoint
-/// 全句柄收束即关闭其上全部连接）
+/// 全句柄收束即关闭其上全部连接；v1 面 RIL-109 共用此形）
 pub(crate) struct RetainedConn {
     pub conn: quinn::Connection,
     #[allow(dead_code)]
-    endpoint: quinn::Endpoint,
+    pub(crate) endpoint: quinn::Endpoint,
 }
 
 /// Hysteria2 出口连接器
