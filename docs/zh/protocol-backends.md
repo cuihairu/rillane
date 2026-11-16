@@ -166,6 +166,7 @@ armv7-ohos 桩）在对应小节如实记录。
 - **统计**：security/network 白名单构建期校验；握手错误经统一面
 - **复用**：无预热组合；UDP 面（仅 network=tcp）复用同一节点配置
 - UDP：仅 network=tcp（ws/grpc/h2 的 UDP 面未实现，构建期扫描判负）。
+- **服务端面（RIL-136）**：评估扫查（2026-11-16，crates.io API 检索 `vless`/`xtls` + 仓库/tarball 核验）——不存在轻量 VLESS 服务端库 crate。xray-rs（abc15018045126）1.0.3（2026-10-05 发布；MIT）实为完整 1:1 Xray-core 移植——RIL-107 记录的「仅加密原语」只描述其 REALITY 传输面——且其 `proxy/vless/inbound` Handler 确有可组合形状的面（`handle_connection(BoxStream, SocketAddr) -> InboundResult{stream, session}`：请求头解码 + UUID 校验 + 响应头写出；CMD 0x02 原样交回流，长度前缀数据报中继留在调用侧）。不采纳：该 crate 为单包无特性门（无 `[features]` 段，已发布 1192 文件）——引入即拖整个内核进工作区（两套 TUN 栈 `tun`+`tun-rs`、`ipstack`、Windows `wintun`、`tokio-tungstenite`、prost/pb 机器、clap），只为换一副本仓客户端面已逐字节实现、并经真实 Xray 对端校验（RIL-107，含 ATYP=3=IPv6 纠偏）的线格式镜像。备选留证：meow-proxy 0.29.0（MIT）仅出口面（「Outbound proxy protocol implementations ... for the meow-rs kernel」）；jets 0.4.3（Apache-2.0，clash-rs 族）只有 `inbound-http`/`inbound-tun`——无 VLESS 入站；corduit 0.3.8 许可为非标准；shoes 0.3.2（MIT）为应用面且模块私有。结论=自写，与仓内已验收客户端面（outbound/vless.rs）镜像互源：请求 `[0x00][UUID 16B][OptLen][addons][CMD 0x01 TCP / 0x02 UDP][Port BE][ATYP addr]`（ATYP 1=v4 / 2=域名 / 3=v6，xray 口径），UUID 16 字节等值认证（恒时比对），中继前写响应头 `[Version][OptLen][Opt]`，UDP 单连接单目标、双向 `[2B BE len][payload]` 帧；Vision/REALITY 服务端组合另验（RIL-136 另验口径）。入库角色：`VlessIngress`；UDP 会话归 `UdpSessionTable`。
 
 ## vless
 
