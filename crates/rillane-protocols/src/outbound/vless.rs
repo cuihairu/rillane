@@ -17,9 +17,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use super::grpc::grpc_tunnel;
-use super::reality::RealityDial;
 use super::h2::h2_tunnel;
 use super::httpupgrade::httpupgrade_client_handshake;
+use super::reality::RealityDial;
 use super::ws::{ws_client_handshake, WsClient};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
@@ -28,11 +28,7 @@ use crate::tls::{create_tls_connector_with_profile, TlsConnectorFactory};
 /// REALITY 传输合法性门（TCP/UDP 面共用，RIL-107）：非法组合拨号期点名拒绝
 /// ——ws/grpc/h2/httpupgrade 叠加面未交付（宁缺毋滥），明文组合非法
 /// （REALITY 即 TLS 握手面）；拒绝静默降级。
-fn gate_reality_transport(
-    reality: &Option<RealityConfig>,
-    network: &str,
-    tls: bool,
-) -> Result<()> {
+fn gate_reality_transport(reality: &Option<RealityConfig>, network: &str, tls: bool) -> Result<()> {
     if reality.is_none() {
         return Ok(());
     }
@@ -62,6 +58,9 @@ fn gate_vless_flow(flow: &Option<String>) -> Result<()> {
 
 /// 请求头字节（TCP/UDP 共用，G0-4）：Version(0x00) + UUID + OptLen(0) +
 /// Command（0x01 TCP / 0x02 UDP，xray RequestCommand）+ Port(BE) + Address。
+/// AddressType 用 xray 值（common/net/destination.go）：1=IPv4 2=域名 3=IPv6
+/// （RIL-107 合约对端实测纠偏：此前沿用 Trojan/SOCKS5 的 3=域名 4=IPv6 口径，
+/// 对真实 Xray 服务端域名目标必然串流）。
 fn build_vless_request_bytes(
     uuid: [u8; 16],
     target_host: &str,
@@ -89,7 +88,7 @@ fn build_vless_request_bytes(
                 out.extend_from_slice(&v4.octets());
             }
             IpAddr::V6(v6) => {
-                out.push(0x04);
+                out.push(0x03);
                 out.extend_from_slice(&v6.octets());
             }
         }
@@ -98,7 +97,7 @@ fn build_vless_request_bytes(
         if host_bytes.len() > 255 {
             return Err(anyhow!("目标域名过长（>255）"));
         }
-        out.push(0x03);
+        out.push(0x02);
         out.push(host_bytes.len() as u8);
         out.extend_from_slice(host_bytes);
     }
@@ -1113,6 +1112,26 @@ mod tests {
 
     const TEST_UUID: &str = "b831381d-6324-4d2a-b1e7-1bf75a1db7b3";
 
+    /// AddressType 字节口径（xray common/net/destination.go）：域名=2、IPv6=3
+    #[test]
+    fn vless_request_address_type_bytes() {
+        let uuid = [0xa7u8; 16];
+        let domain =
+            build_vless_request_bytes(uuid, "echo.example", 443, 0x01).expect("domain 请求");
+        assert_eq!(
+            &domain[18..23],
+            &[0x01, 0x01, 0xbb, 0x02, 12],
+            "cmd+port+atype=2+len"
+        );
+        assert_eq!(&domain[23..], b"echo.example");
+        let v6 = build_vless_request_bytes(uuid, "::1", 443, 0x01).expect("v6 请求");
+        assert_eq!(v6[21], 0x03, "IPv6 atype 应为 3");
+        assert_eq!(v6.len(), 38, "IPv6 请求长度");
+        let v4 = build_vless_request_bytes(uuid, "127.0.0.1", 443, 0x01).expect("v4 请求");
+        assert_eq!(v4[21], 0x01, "IPv4 atype 应为 1");
+        assert_eq!(v4.len(), 26, "IPv4 请求长度");
+    }
+
     fn test_connector(port: u16) -> VlessConnector {
         VlessConnector::new(
             "127.0.0.1".to_string(),
@@ -1175,12 +1194,12 @@ mod tests {
                 stream.read_exact(&mut b).await?;
                 std::net::Ipv4Addr::from(b).to_string()
             }
-            0x04 => {
+            0x03 => {
                 let mut b = [0u8; 16];
                 stream.read_exact(&mut b).await?;
                 std::net::Ipv6Addr::from(b).to_string()
             }
-            0x03 => {
+            0x02 => {
                 let mut l = [0u8; 1];
                 stream.read_exact(&mut l).await?;
                 let mut h = vec![0u8; l[0] as usize];
