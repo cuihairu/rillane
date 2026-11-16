@@ -70,7 +70,7 @@ Transport and build-time constraints:
 - `security` (vmess): `auto | aes-128-gcm | chacha20-poly1305`; `alter_id > 0` and non-AEAD security are refused at build time.
 - `flow` (vless): dial-time validation — exactly `xtls-rprx-vision` accepted (Vision framing; requires `network: tcp` + `tls: true`/REALITY, UDP refused), any other value refused at dial time and names the node.
 - `method` (shadowsocks): free-form string, invalid values error at build time (the set is whatever the shadowsocks crate 1.25 AEAD methods support); `plugin` goes through the SIP003 bridge (TCP plane via the plugin process, UDP plane judged negative in plugin mode).
-- `hysteria` (v1): schema/subscription conversion is supported, but **the egress connector is missing** -- RuntimeBuilder errors at build time; `hysteria2` UDP underlay is deferred to V2 (the TCP plane is usable).
+- `hysteria` (v1): schema/subscription conversion is supported, but **the egress connector is missing** -- RuntimeBuilder errors at build time; `hysteria2` TCP and the UDP datagram plane are available (UDP limited to the obfs-free combination; servers without declared UDP support are refused by name).
 - `tls_fingerprint`: `none | chrome | ios | safari` (comparison table: `rillanectl tls-fingerprint`); emulation is off by default.
 - `address` (wireguard): comma-separated multiple CIDRs (e.g. `10.0.0.2/32,fd00::2/128`); `listen_port: 0` = automatic.
 
