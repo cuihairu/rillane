@@ -1,13 +1,15 @@
 //! Hysteria2 出口连接器实现
 //!
-//! TCP 面：hysteria2 crate（connect/DuplexStream）。
-//! UDP 面（RIL-133）：官方 UDPMessage 数据报协议自写——crate 无数据报公开
-//! API（结论留证 protocol-backends.md#hysteria2），认证沿用官方 HTTP/3
-//! /auth 面（状态码 233 + Hysteria-UDP），数据报格式见 docs/PROTOCOLS 溯源
-//! （apernet/hysteria PROTOCOL.md §UDP：[u32 session][u16 packet][u8 frag_id]
-//! [u8 frag_count][varint addr_len][addr][payload]，双向同构）。
+//! TCP/UDP 两面皆自写（RIL-138 起统一）：QUIC 链路建立 + 官方 HTTP/3 /auth
+//! 认证面（状态码 233 + Hysteria-UDP 声明）+ 线格式镜像——TCPRequest/
+//! TCPResponse（vendored hysteria2 crate 与官方 Go 服务端互验的客户端线
+//! 格式）、UDPMessage（apernet/hysteria PROTOCOL.md §UDP，留证
+//! protocol-backends.md#hysteria2）。vendored crate 的 connect() 不回持
+//! Endpoint（HysteriaClient 仅持 Connection，endpoint 局部变量随 connect
+//! 返回 Drop → quinn Endpoint 收束连带全部连接），其 TCP 面端到端即死——
+//! 自写面以 RetainedConn 保活端点句柄规避。
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use rillane_core::udp::{EgressUdpConnector, UdpRelay};
@@ -16,31 +18,45 @@ use rillane_core::{
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex as StdMutex,
 };
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::sync::{mpsc, Mutex};
 
 /// 连接建立（DNS 解析 + QUIC 握手 + HTTP/3 认证）超时上限（P2 深审
-/// 2026-11-03）。`get_or_connect_client` 有意 single-flight（防连接风暴），
-/// 但无超时则挂起拨号会永久钉住全部该出站流；此上限令挂起握手在超时后
-/// 失败释放互斥，后续调用可重试。
+/// 2026-11-03）。连接缓存有意 single-flight（防连接风暴），但无超时则挂起
+/// 拨号会永久钉住全部该出站流；此上限令挂起握手在超时后失败释放互斥，
+/// 后续调用可重试。
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// 保活的 QUIC 连接 + 端点句柄（端点绝不可先于连接 Drop——quinn Endpoint
+/// 全句柄收束即关闭其上全部连接）
+pub(crate) struct RetainedConn {
+    pub conn: quinn::Connection,
+    #[allow(dead_code)]
+    endpoint: quinn::Endpoint,
+}
 
 /// Hysteria2 出口连接器
 pub struct Hysteria2Connector {
     server: String,
     port: u16,
     password: String,
+    /// 端口跳跃区间（语义同 UDP 面：接受不消费——端口跳跃归 crate 面已死，
+    /// 自写面不交付；字段保形使 API/订阅映射零改动）
+    #[allow(dead_code)]
     mport: Option<String>,
     obfs: Option<String>,
     obfs_param: Option<String>,
     server_name: Option<String>,
     skip_cert_verify: bool,
     alpn: Option<Vec<String>>,
-    client: Mutex<Option<std::sync::Arc<hysteria2::HysteriaClient>>>,
+    conn: Mutex<Option<RetainedConn>>,
 }
 
 impl Hysteria2Connector {
@@ -67,14 +83,14 @@ impl Hysteria2Connector {
             server_name,
             skip_cert_verify,
             alpn,
-            client: Mutex::new(None),
+            conn: Mutex::new(None),
         }
     }
 
     fn validate_config(&self) -> Result<()> {
         if self.obfs.is_some() || self.obfs_param.is_some() {
             return Err(anyhow!(
-                "Hysteria2 暂不支持 obfs/obfs_param（当前 connector 基于 hysteria2 crate 的基础能力）"
+                "Hysteria2 暂不支持 obfs/obfs_param（自写面与 salamander 不组合）"
             ));
         }
         if let Some(alpn) = &self.alpn {
@@ -86,77 +102,242 @@ impl Hysteria2Connector {
         Ok(())
     }
 
-    fn parse_port_range(range_str: &str) -> Result<(u16, u16)> {
-        if let Some((start_str, end_str)) = range_str.split_once('-') {
-            let start: u16 = start_str
-                .trim()
-                .parse()
-                .with_context(|| format!("无效的 mport 起始端口: {}", start_str.trim()))?;
-            let end: u16 = end_str
-                .trim()
-                .parse()
-                .with_context(|| format!("无效的 mport 结束端口: {}", end_str.trim()))?;
-            if start > end {
-                return Err(anyhow!("无效的 mport 范围: start > end"));
-            }
-            Ok((start, end))
-        } else {
-            let port: u16 = range_str
-                .trim()
-                .parse()
-                .with_context(|| format!("无效的 mport 端口: {}", range_str.trim()))?;
-            Ok((port, port))
-        }
-    }
-
-    fn build_client_config(&self) -> Result<hysteria2::config::Config> {
-        let server_name = self
-            .server_name
-            .clone()
-            .unwrap_or_else(|| self.server.clone());
-
-        let port_hopping_range = match self.mport.as_deref() {
-            Some(s) => Some(Self::parse_port_range(s)?),
-            None => None,
-        };
-
-        Ok(hysteria2::config::Config {
-            auth: self.password.clone(),
-            server_addr: format!("{}:{}", self.server, self.port),
-            server_name,
-            insecure: self.skip_cert_verify,
-            port_hopping_range,
+    async fn connect_conn(&self) -> Result<RetainedConn> {
+        self.validate_config()?;
+        let link = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            establish_quic_link(
+                &self.server,
+                self.port,
+                &self.password,
+                self.server_name.as_deref(),
+                self.skip_cert_verify,
+                false,
+            ),
+        )
+        .await
+        .map_err(|_| anyhow!("Hysteria2 连接建立超时（{}s）", CONNECT_TIMEOUT.as_secs()))??;
+        Ok(RetainedConn {
+            conn: link.conn,
+            endpoint: link.endpoint,
         })
     }
 
-    async fn connect_client(&self) -> Result<std::sync::Arc<hysteria2::HysteriaClient>> {
+    async fn get_or_connect_conn(&self) -> Result<RetainedConn> {
         self.validate_config()?;
-        let cfg = self.build_client_config()?;
-        let client = hysteria2::connect(&cfg)
-            .await
-            .map_err(|e| anyhow!("Hysteria2 连接失败: {e}"))?;
-        Ok(std::sync::Arc::new(client))
-    }
-
-    async fn get_or_connect_client(&self) -> Result<std::sync::Arc<hysteria2::HysteriaClient>> {
-        self.validate_config()?;
-        let mut guard = self.client.lock().await;
-        if let Some(client) = guard.as_ref() {
-            return Ok(client.clone());
+        let mut guard = self.conn.lock().await;
+        if let Some(retained) = guard.as_ref() {
+            return Ok(RetainedConn {
+                conn: retained.conn.clone(),
+                endpoint: retained.endpoint.clone(),
+            });
         }
 
         // 持锁跨握手（single-flight 语义），但加显式超时：超时则释放互斥、
         // 不缓存半成品（fail-closed），后续调用可重新尝试。
-        let client = tokio::time::timeout(CONNECT_TIMEOUT, self.connect_client())
-            .await
-            .map_err(|_| anyhow!("Hysteria2 连接建立超时（{}s）", CONNECT_TIMEOUT.as_secs()))??;
-        *guard = Some(client.clone());
-        Ok(client)
+        let retained = self.connect_conn().await?;
+        *guard = Some(RetainedConn {
+            conn: retained.conn.clone(),
+            endpoint: retained.endpoint.clone(),
+        });
+        Ok(retained)
     }
 
-    async fn invalidate_client(&self) {
-        let mut guard = self.client.lock().await;
+    async fn invalidate_conn(&self) {
+        let mut guard = self.conn.lock().await;
         *guard = None;
+    }
+}
+
+/// 建立 QUIC 链路并完成 HTTP/3 认证（TCP/UDP 两面共用的链路面；端点句柄
+/// 由调用方 RetainedConn/Hysteria2UdpRelay 保活）。`require_udp`：UDP 中继
+/// 面须服务端显式声明 Hysteria-UDP: true 才可用；TCP 面与此声明无关
+/// （官方客户端 TCP 通路不看该声明）。
+pub(crate) async fn establish_quic_link(
+    server: &str,
+    port: u16,
+    password: &str,
+    server_name: Option<&str>,
+    skip_cert_verify: bool,
+    require_udp: bool,
+) -> Result<RetainedConn> {
+    let server_name = server_name.unwrap_or(server);
+    let server_addr: SocketAddr = tokio::net::lookup_host((server, port))
+        .await
+        .with_context(|| format!("Hysteria2 服务器地址解析失败: {server}"))?
+        .next()
+        .ok_or_else(|| anyhow!("Hysteria2 服务器地址解析为空: {server}"))?;
+
+    // QUIC 端点：ALPN h3（认证面 HTTP/3），证书校验口径两面一致
+    let provider = crate::tls::tls_crypto_provider();
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?;
+    let mut crypto = if skip_cert_verify {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(crate::tls::NoVerifier))
+            .with_no_client_auth()
+    } else {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        builder.with_root_certificates(roots).with_no_client_auth()
+    };
+    crypto.alpn_protocols = vec![b"h3".to_vec()];
+
+    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse::<SocketAddr>()?)
+        .context("Hysteria2 QUIC 端点创建失败")?;
+    let quinn_cfg = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
+            .map_err(|e| anyhow!("Hysteria2 QUIC TLS 配置失败: {e}"))?,
+    ));
+    endpoint.set_default_client_config(quinn_cfg);
+
+    let connecting = endpoint
+        .connect(server_addr, server_name)
+        .context("Hysteria2 QUIC 连接发起失败")?;
+    let conn = tokio::time::timeout(UDP_CONNECT_TIMEOUT, connecting)
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "Hysteria2 QUIC 握手超时（{}s）",
+                UDP_CONNECT_TIMEOUT.as_secs()
+            )
+        })?
+        .context("Hysteria2 QUIC 连接失败")?;
+
+    tokio::time::timeout(UDP_CONNECT_TIMEOUT, h3_auth(&conn, password, require_udp))
+        .await
+        .map_err(|_| anyhow!("Hysteria2 认证超时（{}s）", UDP_CONNECT_TIMEOUT.as_secs()))?
+        .context("Hysteria2 认证失败")?;
+
+    Ok(RetainedConn { conn, endpoint })
+}
+
+// ===== TCPRequest/TCPResponse 线格式（vendored crate 互验的客户端面，自写） =====
+
+/// TCPRequest：[varint 0x401][varint addr_len][addr][varint pad_len（恒 0）]
+/// （vendored protocol/tcp_request.rs 口径；padding 语义仅混淆，客户端恒 0）
+pub(crate) fn tcp_request_wire(address: &str) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(address.len() + 8);
+    put_varint(&mut wire, 0x401);
+    put_varint(&mut wire, address.len() as u64);
+    wire.extend_from_slice(address.as_bytes());
+    put_varint(&mut wire, 0);
+    wire
+}
+
+/// QUIC 流上读 varint（入站面共用；vendored protocol/varint.rs 口径：
+/// 首字节高 2 位定长档，余字节大端）
+pub(crate) async fn read_varint_stream<R: AsyncRead + Unpin>(reader: &mut R) -> Result<u64> {
+    let mut first = [0u8; 1];
+    reader
+        .read_exact(&mut first)
+        .await
+        .context("varint 首字节读取失败")?;
+    let len = 1usize << (first[0] >> 6);
+    let mut rest = [0u8; 7];
+    reader
+        .read_exact(&mut rest[..len - 1])
+        .await
+        .context("varint 余字节读取失败")?;
+    let mut value = (first[0] & 0x3f) as u64;
+    for byte in &rest[..len - 1] {
+        value = (value << 8) | *byte as u64;
+    }
+    Ok(value)
+}
+
+/// TCPResponse：[u8 status][varint msg_len][msg][varint pad_len][pad 丢弃]
+/// （vendored protocol/read_tcp_response.rs 口径；status 0 = OK）
+pub(crate) async fn read_tcp_response_stream<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<(u8, String)> {
+    let mut status = [0u8; 1];
+    reader
+        .read_exact(&mut status)
+        .await
+        .context("TCP 响应状态字节读取失败")?;
+    let msg_len = read_varint_stream(reader).await?;
+    if msg_len > u16::MAX as u64 {
+        bail!("TCP 响应错误消息超长: {msg_len}");
+    }
+    let mut msg = vec![0u8; msg_len as usize];
+    reader
+        .read_exact(&mut msg)
+        .await
+        .context("TCP 响应错误消息读取失败")?;
+    let pad_len = read_varint_stream(reader).await?;
+    const PAD_SCRATCH: usize = 4096;
+    let mut scratch = [0u8; PAD_SCRATCH];
+    let mut remaining = pad_len;
+    while remaining > 0 {
+        let take = remaining.min(PAD_SCRATCH as u64) as usize;
+        reader
+            .read_exact(&mut scratch[..take])
+            .await
+            .context("TCP 响应 padding 读取失败")?;
+        remaining -= take as u64;
+    }
+    Ok((status[0], String::from_utf8_lossy(&msg).into_owned()))
+}
+
+/// 在已认证 QUIC 连接上开一条 TCP 双工流（发送 TCPRequest 后读 TCPResponse，
+/// 发送侧不 finish——双工面，vendored hysteria_client.rs 同口径）
+async fn open_tcp_stream(
+    conn: &quinn::Connection,
+    address: &str,
+) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+    let (mut send, mut recv) = conn.open_bi().await.context("Hysteria2 QUIC 流打开失败")?;
+    send.write_all(&tcp_request_wire(address))
+        .await
+        .context("Hysteria2 TCP 请求发送失败")?;
+    let (status, msg) = read_tcp_response_stream(&mut recv)
+        .await
+        .context("Hysteria2 TCP 响应读取失败")?;
+    if status != 0 {
+        return Err(anyhow!("Hysteria2 服务端拒绝 TCP 请求: {msg}"));
+    }
+    Ok((send, recv))
+}
+
+/// quinn 双工流桥接 tokio AsyncRead/AsyncWrite（入站面共用——QUIC 流搬运
+/// 归 copy_bidirectional 的统一桥）
+pub(crate) struct QuicDuplex {
+    pub(crate) send: quinn::SendStream,
+    pub(crate) recv: quinn::RecvStream,
+}
+
+impl AsyncRead for QuicDuplex {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        // quinn RecvStream 固有 poll_read_buf 与 tokio 惯例同构（ReadError → io::Error）
+        std::task::ready!(self.get_mut().recv.poll_read_buf(cx, buf))
+            .map_err(std::io::Error::from)?;
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for QuicDuplex {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        // quinn SendStream 固有 poll_write（WriteError → io::Error）遮蔽 trait 同名
+        Pin::new(&mut self.get_mut().send)
+            .poll_write(cx, buf)
+            .map_err(std::io::Error::from)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(self.get_mut().send.finish().map_err(std::io::Error::from))
     }
 }
 
@@ -185,9 +366,9 @@ impl EgressConnector for Hysteria2Connector {
             "通过 Hysteria2 连接"
         );
 
-        let client = self.get_or_connect_client().await?;
-        let mut outbound = match client.tcp_connect(&target).await {
-            Ok(s) => s,
+        let retained = self.get_or_connect_conn().await?;
+        let mut outbound = match open_tcp_stream(&retained.conn, &target).await {
+            Ok((send, recv)) => QuicDuplex { send, recv },
             Err(err) => {
                 tracing::warn!(
                     target: "rillane::hysteria2",
@@ -198,12 +379,12 @@ impl EgressConnector for Hysteria2Connector {
                     "Hysteria2 tcp_connect 失败，尝试重连并重试"
                 );
 
-                self.invalidate_client().await;
-                let client = self.get_or_connect_client().await?;
-                client
-                    .tcp_connect(&target)
+                self.invalidate_conn().await;
+                let retained = self.get_or_connect_conn().await?;
+                let (send, recv) = open_tcp_stream(&retained.conn, &target)
                     .await
-                    .with_context(|| format!("Hysteria2 tcp_connect 失败: {}", target))?
+                    .with_context(|| format!("Hysteria2 tcp_connect 失败: {}", target))?;
+                QuicDuplex { send, recv }
             }
         };
 
@@ -279,67 +460,23 @@ impl Hysteria2UdpConnector {
     /// 静默丢弃，绝不建立哑管道）
     async fn connect_and_auth(&self) -> Result<(quinn::Endpoint, quinn::Connection)> {
         self.validate_config()?;
-
-        let server_name = self
-            .server_name
-            .clone()
-            .unwrap_or_else(|| self.server.clone());
-        let server_addr: SocketAddr = tokio::net::lookup_host((self.server.as_str(), self.port))
-            .await
-            .with_context(|| format!("Hysteria2 服务器地址解析失败: {}", self.server))?
-            .next()
-            .ok_or_else(|| anyhow!("Hysteria2 服务器地址解析为空: {}", self.server))?;
-
-        // QUIC 端点：ALPN h3（认证面 HTTP/3），证书校验口径与 TCP 面一致
-        let provider = crate::tls::tls_crypto_provider();
-        let builder = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()?;
-        let mut crypto = if self.skip_cert_verify {
-            builder
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(crate::tls::NoVerifier))
-                .with_no_client_auth()
-        } else {
-            let mut roots = rustls::RootCertStore::empty();
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            builder.with_root_certificates(roots).with_no_client_auth()
-        };
-        crypto.alpn_protocols = vec![b"h3".to_vec()];
-
-        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse::<SocketAddr>()?)
-            .context("Hysteria2 QUIC 端点创建失败")?;
-        let quinn_cfg = quinn::ClientConfig::new(Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
-                .map_err(|e| anyhow!("Hysteria2 QUIC TLS 配置失败: {e}"))?,
-        ));
-        endpoint.set_default_client_config(quinn_cfg);
-
-        let connecting = endpoint
-            .connect(server_addr, &server_name)
-            .context("Hysteria2 QUIC 连接发起失败")?;
-        let conn = tokio::time::timeout(UDP_CONNECT_TIMEOUT, connecting)
-            .await
-            .map_err(|_| {
-                anyhow!(
-                    "Hysteria2 QUIC 握手超时（{}s）",
-                    UDP_CONNECT_TIMEOUT.as_secs()
-                )
-            })?
-            .context("Hysteria2 QUIC 连接失败")?;
-
-        tokio::time::timeout(UDP_CONNECT_TIMEOUT, h3_auth(&conn, &self.password))
-            .await
-            .map_err(|_| anyhow!("Hysteria2 认证超时（{}s）", UDP_CONNECT_TIMEOUT.as_secs()))?
-            .context("Hysteria2 认证失败")?;
-
-        Ok((endpoint, conn))
+        let link = establish_quic_link(
+            &self.server,
+            self.port,
+            &self.password,
+            self.server_name.as_deref(),
+            self.skip_cert_verify,
+            true,
+        )
+        .await?;
+        Ok((link.endpoint, link.conn))
     }
 }
 
 /// 官方认证面：h3 POST https://hysteria/auth（Hysteria-Auth/CC-RX/Padding），
-/// 状态码 233 放行；Hysteria-UDP 须显式 true（官方服务器不声明 UDP 支持时
-/// 会静默丢弃数据报，前置点名而非建立哑管道）
-async fn h3_auth(conn: &quinn::Connection, password: &str) -> Result<()> {
+/// 状态码 233 放行；`require_udp` 时 Hysteria-UDP 须显式 true（官方服务器
+/// 不声明 UDP 支持时会静默丢弃数据报，前置点名而非建立哑管道）
+async fn h3_auth(conn: &quinn::Connection, password: &str, require_udp: bool) -> Result<()> {
     let (mut h3_conn, mut request_stream) =
         h3::client::new(h3_quinn::Connection::new(conn.clone()))
             .await
@@ -386,7 +523,7 @@ async fn h3_auth(conn: &quinn::Connection, password: &str) -> Result<()> {
         .get("Hysteria-UDP")
         .and_then(|v| v.to_str().ok())
         == Some("true");
-    if !udp_declared {
+    if require_udp && !udp_declared {
         return Err(anyhow!(
             "Hysteria2 服务端未声明 UDP 支持（Hysteria-UDP != true）——该节点不可用 UDP 中继"
         ));

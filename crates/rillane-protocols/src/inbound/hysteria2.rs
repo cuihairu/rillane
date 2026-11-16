@@ -27,12 +27,10 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex as StdMutex, Once,
     },
-    task::{Context as TaskContext, Poll},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -40,7 +38,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use http::{Method, StatusCode};
 use rustls::pki_types::pem::PemObject as _;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
 
 use rillane_core::udp::{
@@ -53,8 +51,8 @@ use rillane_core::{
 };
 
 use crate::outbound::hysteria2::{
-    encode_udp_message, flow_target_of_addr, parse_udp_message, put_varint, Reassembler,
-    UdpSessionStats, DGRAM_SEND_TIMEOUT,
+    encode_udp_message, flow_target_of_addr, parse_udp_message, put_varint, read_varint_stream,
+    QuicDuplex, Reassembler, UdpSessionStats, DGRAM_SEND_TIMEOUT,
 };
 use crate::tls::tls_crypto_provider;
 
@@ -211,26 +209,19 @@ impl Hysteria2Ingress {
             Err(e) => bail!("hysteria2 HTTP/3 接受失败: {e}"),
         }
 
-        // ---- h3 控制环保活（认证后移交后台：后续 h3 请求一律 404——
-        // masquerade 不交付；连接收束即退出。h3 连接 Drop 会关闭自身控制流，
-        // 对端按 H3_CLOSED_CRITICAL_STREAM 断链，故须持至连接终结） ----
-        tokio::spawn(async move {
-            // Ok(None) 连接收束 / Err 协议错——两态即任务终结
-            while let Ok(Some(resolver)) = h3_conn.accept().await {
-                let Ok((_req, mut stream)) = resolver.resolve_request().await else {
-                    break;
-                };
-                let _ = stream
-                    .send_response(
-                        http::Response::builder()
-                            .status(StatusCode::NOT_FOUND)
-                            .body(())
-                            .expect("固定 404 响应构建"),
-                    )
-                    .await;
-                let _ = stream.finish().await;
-            }
-        });
+        // ---- h3 连接保活（认证后仅持有、不轮询 accept）：h3 若继续轮询
+        // accept，其内部流接受环与下方 accept_bi 竞争同一 QUIC 连接的客户端
+        // 双向流——TCPRequest 线格式会被 h3 当未知帧吞占，TCP 面整面饿死
+        // （契约测试实证）。保留连接对象（Drop 会关闭自身控制流，对端按
+        // H3_CLOSED_CRITICAL_STREAM 断链），持至连接终结（closed 在连接
+        // 收束/丢失时完成，对象随后 Drop——对端已死，无影响） ----
+        {
+            let conn_keeper = conn.clone();
+            tokio::spawn(async move {
+                let _keeper = h3_conn;
+                let _ = conn_keeper.closed().await;
+            });
+        }
 
         // ---- TCP 面：accept_bi 环（认证通过后才取流——流在 QUIC 层排队） ----
         {
@@ -368,78 +359,15 @@ impl Hysteria2Ingress {
     }
 }
 
-/// QUINN 流 halves 合体（BoxedIo 形）：读走 recv、写走 send；shutdown =
-/// finish（半关闭传播——客户端收束上行即服务端流 EOF，与 hysteria2 crate
-/// 客户端 DuplexStream 同构镜像）
-struct QuinnDuplex {
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
-}
-
-impl AsyncRead for QuinnDuplex {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        // quinn 固有 poll_read 与 trait 同名（签名异形，不可直调 trait 面）——
-        // 沿 poll_read_buf 委托（quinn 自身 tokio impl 同口径）
-        std::task::ready!(self.recv.poll_read_buf(cx, buf)).map_err(std::io::Error::from)?;
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl AsyncWrite for QuinnDuplex {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        // quinn 固有 poll_write 优先于 trait 同名——映射 WriteError → io::Error
-        Pin::new(&mut self.send)
-            .poll_write(cx, buf)
-            .map_err(std::io::Error::from)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-        // quinn 写路径本身排队（无用户侧 flush 语义）
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-        // finish = 干净半关闭（客户端收束上行即对端流 EOF——资源释放面）
-        Poll::Ready(self.get_mut().send.finish().map_err(std::io::Error::from))
-    }
-}
-
-/// QUIC 流上读 varint（RFC 9000 §16：首字节高 2 位前缀判长；流式 read_exact）
-async fn read_varint<R: AsyncRead + Unpin>(r: &mut R) -> Result<u64> {
-    let mut first = [0u8; 1];
-    r.read_exact(&mut first)
-        .await
-        .context("Hysteria2 varint 首字节读取失败")?;
-    let extra = 1usize << (first[0] >> 6);
-    let mut v = (first[0] & 0x3F) as u64;
-    if extra > 1 {
-        let mut rest = [0u8; 7];
-        r.read_exact(&mut rest[..extra - 1])
-            .await
-            .context("Hysteria2 varint 余段读取失败")?;
-        for b in &rest[..extra - 1] {
-            v = (v << 8) | *b as u64;
-        }
-    }
-    Ok(v)
-}
-
 /// 读 TCP 请求（官方形）：`[varint 0x401][varint addr_len][addr]
 /// [varint pad_len][padding 丢弃]`。其余请求类型/越界长度点名拒绝。
+/// varint 面 = 出站共享的 `read_varint_stream`（RFC 9000 §16）。
 async fn read_tcp_request<R: AsyncRead + Unpin>(r: &mut R) -> Result<String> {
-    let id = read_varint(r).await?;
+    let id = read_varint_stream(r).await?;
     if id != TCP_REQUEST_ID {
         bail!("Hysteria2 TCP 请求类型不支持（仅 0x401）: 0x{id:X}");
     }
-    let addr_len = read_varint(r).await? as usize;
+    let addr_len = read_varint_stream(r).await? as usize;
     if addr_len == 0 || addr_len > MAX_ADDR_LEN {
         bail!("Hysteria2 TCP 请求地址长度非法: {addr_len}");
     }
@@ -448,7 +376,7 @@ async fn read_tcp_request<R: AsyncRead + Unpin>(r: &mut R) -> Result<String> {
         .await
         .context("Hysteria2 TCP 请求地址读取失败")?;
     let addr = String::from_utf8(addr_bytes).context("Hysteria2 TCP 请求地址非 UTF-8")?;
-    let pad_len = read_varint(r).await? as usize;
+    let pad_len = read_varint_stream(r).await? as usize;
     if pad_len > MAX_PADDING_LEN {
         bail!("Hysteria2 TCP 请求 padding 越限: {pad_len}");
     }
@@ -562,7 +490,7 @@ async fn handle_tcp_stream(
             port,
             proto: TargetProto::Tcp,
         },
-        io: Box::new(QuinnDuplex { send, recv }) as BoxedIo,
+        io: Box::new(QuicDuplex { send, recv }) as BoxedIo,
         metadata,
     };
     output
