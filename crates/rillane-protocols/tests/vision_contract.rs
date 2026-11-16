@@ -308,6 +308,7 @@ fn vision_tls_connector(addr: std::net::SocketAddr) -> VlessConnector {
         None,
         None,
         None,
+        None,
         true,
         true, // 环回自签证书
         None,
@@ -503,6 +504,7 @@ async fn vision_udp_associate_named_refusal() {
         Some("xtls-rprx-vision".to_string()),
         None,
         "tcp".to_string(),
+        None,
         None,
         None,
         None,
@@ -829,6 +831,7 @@ async fn vision_reality_combo_direct_switch_roundtrip() {
             short_id: Some(SHORT_ID_HEX.to_string()),
         }),
         "tcp".to_string(),
+        None,
         None,
         None,
         None,

@@ -16,6 +16,7 @@ mod trojan;
 mod tuic;
 mod vision;
 mod vless;
+mod vless_packet;
 mod vmess;
 mod ws;
 mod xhttp;

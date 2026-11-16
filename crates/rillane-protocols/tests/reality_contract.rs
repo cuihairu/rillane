@@ -363,6 +363,7 @@ fn reality_connector(
         None,
         None,
         None,
+        None,
         true,  // reality 恒叠 TLS（门要求）
         false, // skip_cert_verify 与 REALITY 面无关（认证走 HMAC 绑定）
         None,  // sni 缺省 = server 地址（IP 形 ServerName 合法）

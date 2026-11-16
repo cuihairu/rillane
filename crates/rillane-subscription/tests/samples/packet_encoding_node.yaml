@@ -1,0 +1,34 @@
+# 脱敏样本（RIL-130）：vless UDP 包编码（packet-encoding）双向转换——
+# xudp / packetaddr / 显式 raw 各一。全零 UUID、占位域名（RFC 2606 保留段）
+# 与 RFC 5737/1986 保留地址，不含任何真实凭据。
+proxies:
+  - name: "sample-packet-xudp"
+    type: vless
+    server: pk1.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    network: tcp
+    tls: true
+    servername: sni.example.com
+    packet-encoding: xudp
+  - name: "sample-packet-addr"
+    type: vless
+    server: 203.0.113.81
+    port: 8443
+    uuid: 00000000-0000-0000-0000-000000000000
+    network: tcp
+    tls: true
+    skip-cert-verify: true
+    packet-encoding: packetaddr
+  - name: "sample-packet-raw"
+    type: vless
+    server: 203.0.113.82
+    port: 8443
+    uuid: 00000000-0000-0000-0000-000000000000
+    network: tcp
+    tls: true
+    skip-cert-verify: true
+    packet-encoding: raw
+
+proxy-groups: []
+rules: []

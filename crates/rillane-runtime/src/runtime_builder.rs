@@ -2878,6 +2878,7 @@ fn build_udp_connectors(
                 host,
                 grpc_service_name,
                 xhttp_mode,
+                packet_encoding,
                 tls,
                 skip_cert_verify,
                 sni,
@@ -2898,6 +2899,7 @@ fn build_udp_connectors(
                     host.clone(),
                     grpc_service_name.clone(),
                     xhttp_mode.clone(),
+                    packet_encoding.clone(),
                     *tls,
                     *skip_cert_verify,
                     sni.clone(),
@@ -3590,6 +3592,7 @@ fn build_egress_outputs(
                 host,
                 grpc_service_name,
                 xhttp_mode,
+                packet_encoding,
                 tls,
                 skip_cert_verify,
                 sni,
@@ -3639,6 +3642,17 @@ fn build_egress_outputs(
                         ));
                     }
                 }
+                // RIL-130：UDP 包编码白名单（raw 缺省/xudp/packetaddr），越界
+                // 构建期具名拒绝（同 xhttp mode 口径）
+                let encoding = packet_encoding.as_deref().map(str::trim).filter(|e| !e.is_empty());
+                if let Some(enc) = encoding {
+                    if !matches!(enc, "raw" | "xudp" | "packetaddr") {
+                        return Err(anyhow!(
+                            "VLESS packet-encoding 仅支持 raw/xudp/packetaddr（缺省 raw），当前: {enc} (egress={})",
+                            desc.name
+                        ));
+                    }
+                }
                 let connector: Arc<dyn EgressConnector> = Arc::new(VlessConnector::new(
                     server.clone(),
                     *port,
@@ -3650,6 +3664,7 @@ fn build_egress_outputs(
                     host.clone(),
                     grpc_service_name.clone(),
                     xhttp_mode.clone(),
+                    packet_encoding.clone(),
                     *tls,
                     *skip_cert_verify,
                     sni.clone(),
@@ -6121,6 +6136,7 @@ routing:
             host: None,
             grpc_service_name: None,
             xhttp_mode: None,
+            packet_encoding: None,
             tls: false,
             skip_cert_verify: false,
             sni: None,
@@ -6878,6 +6894,7 @@ routing:
                     host: Some(vec!["cdn.example".to_string()]),
                     grpc_service_name: None,
                     xhttp_mode: None,
+                    packet_encoding: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,

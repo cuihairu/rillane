@@ -345,6 +345,7 @@ fn proxy_mapping(
             host,
             grpc_service_name,
             xhttp_mode,
+            packet_encoding,
             tls,
             skip_cert_verify,
             sni,
@@ -406,6 +407,11 @@ fn proxy_mapping(
                     }
                 }
                 ins(&mut m, "xhttp-opts", xopts);
+            }
+            // RIL-130：UDP 包编码导出为 packet-encoding（mihomo 键位）；缺省
+            // raw（None）不写键——Clash 缺省即原始编码
+            if let Some(enc) = packet_encoding {
+                ins(&mut m, "packet-encoding", enc.as_str());
             }
             degrade(
                 report,

@@ -317,6 +317,11 @@ pub struct ClashProxy {
     /// 端期望 Vision 分帧）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<String>,
+    /// vless UDP 包编码（RIL-130，mihomo 键位 `packet-encoding`）：raw（缺省，
+    /// Xray 原生）/ xudp / packetaddr；白名单外构建期具名拒绝。Clash 规范键
+    /// 为 kebab-case，别名面同 skip_cert_verify 口径
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "packet-encoding")]
+    pub packet_encoding: Option<String>,
     /// REALITY 选项块（`reality-opts.public-key`/`short-id`；G1-6）。捕获随
     /// 节点保留（拨号期点名拒绝）——静默降级为普通 TLS VLESS 后，服务端按
     /// 非 REALITY 握手回落伪装站点，流量不走向代理且无任何报错。
@@ -567,6 +572,12 @@ impl ClashProxy {
             .as_ref()
             .and_then(|x| x.mode.clone())
             .filter(|m| !m.is_empty())
+    }
+
+    /// vless UDP 包编码（RIL-130）：平铺 `packet-encoding` 键位；空串按
+    /// 缺省处理（raw——Xray 原生 UDP 面）
+    pub fn packet_encoding(&self) -> Option<String> {
+        self.packet_encoding.clone().filter(|e| !e.is_empty())
     }
 }
 
@@ -1820,6 +1831,16 @@ impl ClashConverter {
                 // httpupgrade-opts 口径（mihomo 规范）；其余 network 不消费两字段
                 let is_h2 = network == "h2";
                 let is_httpupgrade = network == "httpupgrade";
+                // RIL-130：vmess UDP 包编码不交付（sing-vmess mux/chunk 流与
+                // 仓内 raw 单目标 UDP 面不同构）——非 raw 具名拒绝（G1-6：已
+                // 支持类型的配置级错误保持硬错误，不静默降级成 raw）
+                if let Some(enc) = proxy.packet_encoding() {
+                    if enc != "raw" {
+                        return Err(anyhow!(
+                            "VMess packet-encoding 仅 raw 可交付（xudp/packetaddr 载具未交付），当前: {enc}"
+                        ));
+                    }
+                }
                 let (path, host) = if is_h2 {
                     (proxy.h2_path(), proxy.h2_hosts())
                 } else if is_httpupgrade {
@@ -1891,6 +1912,7 @@ impl ClashConverter {
                     host,
                     grpc_service_name: proxy.grpc_service(),
                     xhttp_mode: proxy.xhttp_mode(),
+                    packet_encoding: proxy.packet_encoding(),
                     tls: proxy.tls,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),
@@ -3172,6 +3194,47 @@ rules: []
 
         assert_eq!(grab("vm-grpc"), ("grpc".into(), Some("GunService".into())));
         assert_eq!(grab("tr-grpc"), ("grpc".into(), Some("TrSvc".into())));
+    }
+
+    #[test]
+    fn vmess_packet_encoding_non_raw_refused_by_name() {
+        // RIL-130：vmess 非 raw 包编码不交付（sing-vmess mux/chunk 载具未自
+        // 写）——G1-6 口径：已支持类型的配置级错误点名硬错误，不静默降级
+        // 成 raw、不静默丢节点；raw 取值放行（随 vless 面同键进模型）
+        let yaml_content = r#"
+proxies:
+  - name: "vm-xudp"
+    type: vmess
+    server: 127.0.0.1
+    port: 8443
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    cipher: auto
+    packet-encoding: xudp
+proxy-groups: []
+rules: []
+        "#;
+        let converter = ClashConverter::new();
+        let clash = converter.parse(yaml_content).unwrap();
+        let err = converter
+            .convert_to_rillane(&clash)
+            .expect_err("vmess 非 raw 包编码必须点名拒绝");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("VMess packet-encoding"), "{msg}");
+        assert!(msg.contains("仅 raw 可交付"), "{msg}");
+        assert!(msg.contains("xudp"), "点名当前取值: {msg}");
+
+        // raw 取值放行且入 vless 面同形键位（vmess IR 无此字段——raw 即仓
+        // 内 UDP 面，不携带也不降级）
+        let raw_yaml = yaml_content.replace("packet-encoding: xudp", "packet-encoding: raw")
+            .replace("type: vmess", "type: vless");
+        let clash = converter.parse(&raw_yaml).unwrap();
+        let rillane = converter.convert_to_rillane(&clash).unwrap();
+        match &rillane.egress[0].spec {
+            EgressConfig::Vless { packet_encoding, .. } => {
+                assert_eq!(packet_encoding.as_deref(), Some("raw"), "raw 应入 IR");
+            }
+            other => panic!("unexpected egress config: {other:?}"),
+        }
     }
 
     #[test]

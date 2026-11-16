@@ -1917,6 +1917,12 @@ pub enum EgressConfig {
         /// packet-up）/ `packet-up` / `stream-one`；其余取值拨号期具名拒绝
         #[serde(default, skip_serializing_if = "Option::is_none")]
         xhttp_mode: Option<String>,
+        /// vless UDP 包编码（RIL-130，UDP 面）：缺省 raw（Xray 原生
+        /// [2B 长度] 分帧、命令 0x02 单目标）；`xudp`（命令 0x03 + XUDP 帧，
+        /// 逐报寻址）/ `packetaddr`（命令 0x02 + magic 地址，逐报寻址）；
+        /// 其余取值构建期具名拒绝
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        packet_encoding: Option<String>,
         #[serde(default)]
         tls: bool,
         #[serde(default)]

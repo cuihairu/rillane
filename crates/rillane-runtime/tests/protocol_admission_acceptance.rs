@@ -188,3 +188,55 @@ fn catalog_udp_column_matches_build_scan() {
         .build()
         .expect("目录 UDP 列为真的类型装配成功");
 }
+
+/// vless 节点（RIL-130：packet-encoding 白名单构建期校验面；tcp 平文——
+/// 包编码仅 UDP 面，与 TLS 无关）
+fn vless_packet_node(encoding: Option<&str>) -> EgressDescriptor {
+    EgressDescriptor {
+        name: "vl-packet".to_string(),
+        spec: EgressConfig::Vless {
+            server: "127.0.0.1".to_string(),
+            port: 443,
+            uuid: "00000000-0000-0000-0000-000000000000".to_string(),
+            flow: None,
+            reality: None,
+            network: "tcp".to_string(),
+            path: None,
+            host: None,
+            grpc_service_name: None,
+            xhttp_mode: None,
+            packet_encoding: encoding.map(str::to_string),
+            tls: false,
+            skip_cert_verify: false,
+            sni: None,
+            alpn: None,
+            tls_fingerprint: None,
+        },
+    }
+}
+
+#[test]
+fn vless_packet_encoding_whitelist_enforced_at_build() {
+    // 反面：白名单外取值构建期点名拒绝（同 xhttp mode 口径）
+    let cfg = shell(
+        vec![direct_node(), vless_packet_node(Some("smux"))],
+        "direct-out",
+        false,
+    );
+    let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+        panic!("白名单外包编码须在构建期拒绝");
+    };
+    let rendered = format!("{err:#}");
+    assert!(rendered.contains("raw/xudp/packetaddr"), "{rendered}");
+    assert!(rendered.contains("smux"), "点名当前取值: {rendered}");
+    assert!(rendered.contains("vl-packet"), "点名出口: {rendered}");
+
+    // 正面：白名单内取值（raw/xudp/packetaddr）与缺席均可装配
+    for enc in [None, Some("raw"), Some("xudp"), Some("packetaddr")] {
+        let cfg = shell(vec![direct_node(), vless_packet_node(enc)], "direct-out", false);
+        RuntimeBuilder::new(cfg)
+            .with_runtime_config(opts())
+            .build()
+            .unwrap_or_else(|err| panic!("白名单内取值 {enc:?} 必须可装配: {err:#}"));
+    }
+}

@@ -335,6 +335,7 @@ mod tests {
                 host: None,
                 grpc_service_name: None,
                 xhttp_mode: None,
+                packet_encoding: None,
                 tls: true,
                 skip_cert_verify: false,
                 sni: None,

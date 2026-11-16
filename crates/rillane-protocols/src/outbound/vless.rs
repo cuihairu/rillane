@@ -23,6 +23,10 @@ use super::reality::{self, RealityDial};
 use super::vision::{vision_flow_addons, VisionTlsFace, FLOW_VISION};
 use super::ws::{ws_client_handshake, WsClient};
 use super::xhttp::{xhttp_tunnel, XhttpMode};
+use super::vless_packet::{
+    build_vless_mux_request, PacketAddrRelay, PacketEncoding, XudpRelay, PACKETADDR_MAGIC_HOST,
+    PACKETADDR_MAGIC_PORT,
+};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
 use crate::tls::{create_tls_connector_with_profile, profile_client_config, TlsConnectorFactory};
@@ -139,6 +143,9 @@ pub struct VlessConnector {
     grpc_service_name: Option<String>,
     /// XHTTP 模式（RIL-129，network=xhttp 时有效；None/auto = packet-up）
     xhttp_mode: Option<String>,
+    /// UDP 包编码（RIL-130，UDP 面；None = raw）。白名单构建期由
+    /// runtime_builder 校验，此处拨号期 parse 兜底具名拒绝
+    packet_encoding: Option<String>,
     tls: bool,
     skip_cert_verify: bool,
     sni: Option<String>,
@@ -166,6 +173,7 @@ impl VlessConnector {
         host: Option<Vec<String>>,
         grpc_service_name: Option<String>,
         xhttp_mode: Option<String>,
+        packet_encoding: Option<String>,
         tls: bool,
         skip_cert_verify: bool,
         sni: Option<String>,
@@ -185,6 +193,7 @@ impl VlessConnector {
             host,
             grpc_service_name,
             xhttp_mode,
+            packet_encoding,
             tls,
             skip_cert_verify,
             sni,
@@ -1009,6 +1018,8 @@ pub struct VlessUdpConnector {
     uuid: String,
     flow: Option<String>,
     reality: Option<RealityConfig>,
+    /// UDP 包编码（RIL-130；None = raw）
+    packet_encoding: Option<String>,
     tls: bool,
     skip_cert_verify: bool,
     sni: Option<String>,
@@ -1026,6 +1037,7 @@ impl VlessUdpConnector {
             uuid: conn.uuid.clone(),
             flow: conn.flow.clone(),
             reality: conn.reality.clone(),
+            packet_encoding: conn.packet_encoding.clone(),
             tls: conn.tls,
             skip_cert_verify: conn.skip_cert_verify,
             sni: conn.sni.clone(),
@@ -1099,16 +1111,36 @@ impl EgressUdpConnector for VlessUdpConnector {
             ));
         }
         let mut stream = self.open_transport().await?;
-        let req = self.build_vless_udp_request(&ctx.target.host, ctx.target.port)?;
+        // RIL-130：编码分派——raw = 原生命令 0x02 单目标（vless.rs G0-4）；
+        // packetaddr = 命令 0x02 + magic 地址 `sp.packet-addr.v2fly.arpa`:443
+        // （mihomo adapter 口径）；xudp = 命令 0x03 头不带地址段（mihomo
+        // transport/vless/conn.go Mux 分支）。下行帧逐报携源地址（xudp/
+        // packetaddr 均 family/port 序见 vless_packet.rs 真源注）
+        let encoding = PacketEncoding::parse(self.packet_encoding.as_deref())?;
+        let req = match encoding {
+            PacketEncoding::Raw => self.build_vless_udp_request(&ctx.target.host, ctx.target.port)?,
+            PacketEncoding::Packetaddr => build_vless_request_bytes(
+                self.uuid_bytes()?,
+                PACKETADDR_MAGIC_HOST,
+                PACKETADDR_MAGIC_PORT,
+                0x02,
+                &[],
+            )?,
+            PacketEncoding::Xudp => build_vless_mux_request(self.uuid_bytes()?),
+        };
         stream.write_all(&req).await?;
         stream.flush().await?;
         let (mut rr, ww) = tokio::io::split(stream);
         VlessConnector::read_vless_response_header(&mut rr).await?;
-        Ok(Arc::new(VlessUdpRelay {
-            reader: AsyncMutex::new(rr),
-            writer: AsyncMutex::new(ww),
-            target: ctx.target,
-        }))
+        match encoding {
+            PacketEncoding::Raw => Ok(Arc::new(VlessUdpRelay {
+                reader: AsyncMutex::new(rr),
+                writer: AsyncMutex::new(ww),
+                target: ctx.target,
+            })),
+            PacketEncoding::Packetaddr => Ok(Arc::new(PacketAddrRelay::new(rr, ww, ctx.target))),
+            PacketEncoding::Xudp => Ok(Arc::new(XudpRelay::new(rr, ww, ctx.target))),
+        }
     }
 }
 
@@ -1405,6 +1437,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false, // tls
             false,
             None,
@@ -1624,6 +1657,7 @@ mod tests {
             Some(vec!["h.test".to_string()]),
             None,
             None,
+            None,
             false, // tls
             false,
             None,
@@ -1693,6 +1727,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             true,
             true, // skip_cert_verify 亦不绕过门
             None,
@@ -1739,6 +1774,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false, // tls=false：门必拦
             true,
             None,
@@ -1777,6 +1813,7 @@ mod tests {
                 flow.map(str::to_string),
                 None,
                 network.to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -1853,6 +1890,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             true,
             true,
             None,
@@ -1895,6 +1933,7 @@ mod tests {
                 short_id: None,
             }),
             "tcp".to_string(),
+            None,
             None,
             None,
             None,
