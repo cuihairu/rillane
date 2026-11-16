@@ -669,6 +669,12 @@ impl<C: RustlsConn> TlsAdapter<C> {
         (self.tcp, self.conn)
     }
 
+    /// 借得裸 TCP（Vision Direct 后的裸传驱动面：外层 TLS 记录态之外的
+    /// 字节通道，验收服务端镜像同口径）
+    pub fn tcp_mut(&mut self) -> &mut TcpStream {
+        &mut self.tcp
+    }
+
     /// 写出 rustls 队列中的 TLS 记录
     fn write_io(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
         let mut adapter = SyncWriteAdapter {
