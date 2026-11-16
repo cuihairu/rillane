@@ -385,8 +385,9 @@ armv7-ohos 桩）在对应小节如实记录。
 - **许可**：仓库许可（自写）
 - **平台**：以目标平台 QUIC（quinn 生态）支持为准——与 hysteria2 同面
 - **公开 API**（规划）：`HysteriaConnector`/`HysteriaUdpConnector` +
-  `HysteriaIngress`——认证握手走控制流（版本字节 + 官方 `struc` 形状的
-  小端结构：clientHello{Rate SendBPS/RecvBPS u64, AuthLen u16, Auth} →
+  `HysteriaIngress`（规划路径 crates/rillane-protocols/src/outbound/hysteria.rs +
+  inbound/hysteria.rs）——认证握手走控制流（版本字节 + 官方 `struc` 形状的
+  大端结构（该库默认大端打包，v1 线结构不带端序标签）：clientHello{Rate SendBPS/RecvBPS u64, AuthLen u16, Auth} →
   serverHello{OK, Rate, Message}；`OK=false` → QUIC 应用错误码 2 auth
   error）；TCP = 逐流 clientRequest{UDP=false, HostLen u16, Host, Port u16}
   → serverResponse{OK, UDPSessionID u32, Message}；UDP =
