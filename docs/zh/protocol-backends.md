@@ -366,13 +366,52 @@ armv7-ohos 桩）在对应小节如实记录。
 
 ## hysteria
 
-**未准入**——无已评审后端。配置 schema 与订阅字段存在不代表连接器
-（PROTOCOLS.md 同口径）：装配期以稳定原因码 `config.egress.not_admitted`
-拒绝，不静默当 direct。
-
-- 前置：RIL-109 选库评估（版本/许可/平台/公开 API/旁路/取消/统计/复用
-  逐项留证）；UDP 载具 quinn 未决。
-- 恢复路径：评估记录补齐 → 目录条目改准入 → 连接器接线 → 真实对端验收。
+- **结论**：自写（RIL-109）——无可用后端。评估扫查（2026-11-17，crates.io
+  API + GitHub 源核验）：crates.io 不存在名为 `hysteria` 的 crate（404），
+  注册表 "hysteria" 查询只出 Hysteria **2** 产物（仓内在用 `hysteria2`
+  0.1.6 v2 客户端、`rsteria2` 0.1.1 v2 客户端与无关工具）——无任何 v1。
+  GitHub 扫查同样全为 v2：协议相关命中皆是 Hysteria2 客户端/服务端重写
+  （`xray-rust` MPL-2.0 且不在 crates.io——按 VLESS 评估口径以许可证 +
+  供应链判负；`rusteria` v2 服务端、无 license 字段；`crapthings/hysteria-rust`
+  v2 已在 RIL-138 判负；`differs/RUST-HYSTERIA`、`Ashrafty/miro`——0-1 star、
+  无 license 字段、无发布已死、不在 crates.io）。维护中的上游
+  （apernet/hysteria）为 Go、MIT——无任何可从 Rust 链接之物。结论=自写，
+  以官方 v1 源码为线格式地面真值（apernet/hysteria tag `v1.3.5` 浅读
+  2026-11-17：`core/cs/protocol.go` + `core/cs/client.go`/`server.go` +
+  `core/pktconns/obfs/obfs.go` + `app/cmd/client.go`）。
+- **版本**：仓内实现（零第三方协议依赖）；线版本字节 `0x03`（v1.3.5
+  `protocolVersion`，控制流首字节）；载具 quinn 0.11.9 / rustls fork
+  0.23.46 已由 RIL-133/RIL-107 全工作区钉版
+- **许可**：仓库许可（自写）
+- **平台**：以目标平台 QUIC（quinn 生态）支持为准——与 hysteria2 同面
+- **公开 API**（规划）：`HysteriaConnector`/`HysteriaUdpConnector` +
+  `HysteriaIngress`——认证握手走控制流（版本字节 + 官方 `struc` 形状的
+  小端结构：clientHello{Rate SendBPS/RecvBPS u64, AuthLen u16, Auth} →
+  serverHello{OK, Rate, Message}；`OK=false` → QUIC 应用错误码 2 auth
+  error）；TCP = 逐流 clientRequest{UDP=false, HostLen u16, Host, Port u16}
+  → serverResponse{OK, UDPSessionID u32, Message}；UDP =
+  `udpMessage{SessionID u32, HostLen u16, Host, Port u16, MsgID u16,
+  FragID u8, FragCount u8, DataLen u16, Data}` 走 QUIC 不可靠数据报，
+  按 MsgID 重装配（v1 `defragger` 语义）；QUIC 应用错误码 0 generic /
+  1 protocol / 2 auth
+- **旁路**：连接器自持 QUIC 会话（quinn）——不做底 socket 旁路；UDP
+  数据报按包在协议头携带真源地址（与 hysteria2 同面）
+- **取消**：开启前检查 + 显式拨号超时（15s，single-flight 持锁与
+  hysteria2 同口径）；v1 协议无具名会话收束——TCP 收搬运流、UDP 收
+  QUIC 连接即释放面
+- **统计**：官方 v1 无逐包观测点——仅会话计数（外来会话丢弃/分片丢弃），
+  与 hysteria2 同口径
+- **复用**：单条 QUIC 连接承载控制流 + 全部 TCP 请求流 + 全部 UDP 数据报
+  （single-flight 建连 + 复用、出错失效重连——与 hysteria2/TUIC 同形）；
+  无预热组合
+- **交付边界（构建/拨号期点名拒绝）**：传输面 = 原生 UDP 上的 QUIC——
+  v1 的可插拔包传输（`obfs` XPlus sha256(key‖salt) XOR 载荷、`wechat`、
+  `faketcp`）不交付（换整个 QUIC 载荷——与 hysteria2 salamander 同判负
+  族）；Brutal 拥塞控制不交付（用 QUIC 缺省 CC；hello Rate 字段如实
+  携带，不伪装带宽协商）；端口跳跃接受不消费（与 hysteria2 mport 同）；
+  ACL 路由、ACME、流量统计 API 不交付。ALPN 在 v1 是配置旋钮（客户端
+  `NextProtos: []string{config.ALPN}`，TLS 最低 1.3，`app/cmd/client.go`）
+  ——仓内面钉缺省 `hysteria` 且要求 TLS 1.3。
 
 ## hysteria2
 
