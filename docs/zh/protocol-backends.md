@@ -207,6 +207,46 @@ armv7-ohos 桩）在对应小节如实记录。
 - UDP：仅 network=tcp（ws/grpc/h2 的 UDP 面未实现，构建期扫描判负）；
   vless+reality 的 UDP 面走 VLESS UDP 面（RIL-107 放开 gate）。
 
+## vless-xtls-vision
+
+- **结论**：分帧自写（RIL-108）——无可用后端。评估清扫（2026-11-16，
+  crates.io API 查询 `xtls`/`vision`/`xray` + GitHub 核实）：crates.io
+  无任何 crate 以可复用库面交付 XTLS Vision（xtls-rprx-vision）分帧；
+  XTLS-Fork/Rust 为死占位（1 commit、0 star、仅 README）；xray-wasm
+  （xrayTun）以纯 Rust 重写 VLESS+Vision+REALITY 但交付形为 wasm32-wasip2
+  组件（wasmtime 下运行），非进程内原生库面；xray-rust（aimalygin）有
+  Vision 但 MPL-2.0 且不在 crates.io（与 RIL-107 评估同款阻碍——记为参考
+  不取）；xray-rs（abc15018045126）1.0.3 仅密码原语无分帧（RIL-107 已在
+  案）；jets 为 Java 实现。分帧因此在 rillane-protocols 自写，语义以
+  Xray-core 源码为准（2026-11-16 浅克隆精读：`proxy/proxy.go`
+  TrafficState/VisionReader/VisionWriter/XtlsFilterTls/XtlsPadding/
+  XtlsUnpadding，`proxy/vless/encoding/{encoding,addons}.go`，
+  `proxy/vless/outbound/outbound.go`），符合"无可用后端结论留证后才
+  允许自写"；cfal/rustls fork 不动（Vision 在 TLS 之上，无需 TLS 层
+  配合——direct 直传切换只要求持有外层 TLS 之下的裸 TCP socket，
+  rillane 本就持有）。
+- **线规格**（源码核实）：请求 addons 以 protobuf `Addons{Flow=1}`
+  携带 flow 串（`0x0A 0x10 "xtls-rprx-vision"`，OptLen=18；其余 flow
+  维持 OptLen=0）。填充帧：每方向首帧前置一次 16 字节用户 UUID，随后
+  `[command(1) contentLen(2 BE) paddingLen(2 BE)] + content + padding`。
+  命令：Continue=0x00（后续还有帧）、End=0x01（填充结束，流量留在
+  外层 TLS 之内）、Direct=0x02（双侧停帧并切到外层 TLS 之下的裸 TCP
+  socket）。填充预算（testseed 缺省 `[900, 500, 900, 256]`）：content
+  < 900 且长填充 → `rand(0..500) + 900 - content`，否则 `rand(0..256)`；
+  上限 `2048 - 21 - content`。
+- **状态机**：上行写侧在过滤窗（8 包）内边填充边嗅探应用流量的内层
+  TLS 记录；ServerHello 携带 TLS1.3 supported_versions 扩展即置位
+  EnableXtls；首个完整内层 ApplicationData 记录（`17 03 03`、长度
+  自洽）随后发出 Direct 并切到裸 TCP 直写。内层非 TLS 或 TLS1.2 的
+  流量在过滤窗后以 End 收束填充，全程留在外层 TLS 之内。下行读侧
+  镜像：UUID 门控逐帧解析，Continue 继续，End 回归普通 TLS 读，
+  Direct 切裸读。
+- **角色边界**：仅出站客户端，flow 精确等于 `xtls-rprx-vision`
+  （其余取值照旧点名拒绝）；须 network=tcp 且叠加 TLS/REALITY 面
+  （外层 TLS 须 TLS1.3——握手后校验，与 xray 同口径）；vision 下
+  UDP 命令拒绝；不入池（仅 inline 路径——直传切换与池借出语义不
+  相容）。
+
 ## trojan
 
 - **结论**：自写（协议面小、传输组合需求高）
