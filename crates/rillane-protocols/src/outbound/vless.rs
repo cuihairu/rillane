@@ -19,11 +19,12 @@ use uuid::Uuid;
 use super::grpc::grpc_tunnel;
 use super::h2::h2_tunnel;
 use super::httpupgrade::httpupgrade_client_handshake;
-use super::reality::RealityDial;
+use super::reality::{self, RealityDial};
+use super::vision::{vision_flow_addons, VisionTlsFace, FLOW_VISION};
 use super::ws::{ws_client_handshake, WsClient};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
-use crate::tls::{create_tls_connector_with_profile, TlsConnectorFactory};
+use crate::tls::{create_tls_connector_with_profile, profile_client_config, TlsConnectorFactory};
 
 /// REALITY 传输合法性门（TCP/UDP 面共用，RIL-107）：非法组合拨号期点名拒绝
 /// ——ws/grpc/h2/httpupgrade 叠加面未交付（宁缺毋滥），明文组合非法
@@ -45,12 +46,27 @@ fn gate_reality_transport(reality: &Option<RealityConfig>, network: &str, tls: b
     Ok(())
 }
 
-/// Vision 流控门（G1-6 保留面，RIL-108 前置）：flow 拨号期点名拒绝——
-/// 静默降级为普通 VLESS 连不上期望 Vision 分帧的服务端且无报错。
-fn gate_vless_flow(flow: &Option<String>) -> Result<()> {
-    if let Some(f) = flow {
+/// Vision 流控门（RIL-108）：flow 仅接受精确 `xtls-rprx-vision`，且须
+/// network=tcp + 叠 TLS/REALITY（外层 TLS1.3 握手后再校验，xray 同口径）；
+/// 其余取值照旧点名拒绝——静默降级为普通 VLESS 连不上期望 Vision 分帧
+/// 的服务端且无报错。
+fn gate_vless_flow(flow: &Option<String>, tls: bool, network: &str) -> Result<()> {
+    let Some(f) = flow else {
+        return Ok(());
+    };
+    if f != FLOW_VISION {
         return Err(anyhow!(
-            "VLESS flow {f}（XTLS-Vision 等流控）分帧未实现（G1-6 M3）；拒绝静默降级为普通 VLESS——服务端期望 Vision 分帧，连接将失败且无报错"
+            "VLESS flow {f} 未知（仅支持 {FLOW_VISION}）：拒绝静默降级——服务端期望对应分帧语义，连接将失败且无报错"
+        ));
+    }
+    if network != "tcp" {
+        return Err(anyhow!(
+            "VLESS flow={FLOW_VISION} 仅支持 network=tcp（ws/grpc/h2/httpupgrade 叠加面不承载分帧）：拒绝静默降级"
+        ));
+    }
+    if !tls {
+        return Err(anyhow!(
+            "VLESS flow={FLOW_VISION} 需叠 TLS/REALITY（分帧语义在外层 TLS 之上）：拒绝静默降级为明文 VLESS"
         ));
     }
     Ok(())
@@ -66,6 +82,7 @@ fn build_vless_request_bytes(
     target_host: &str,
     target_port: u16,
     command: u8,
+    addons: &[u8],
 ) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(64 + target_host.len());
 
@@ -73,8 +90,10 @@ fn build_vless_request_bytes(
     out.push(0x00);
     // UUID
     out.extend_from_slice(&uuid);
-    // OptLen = 0
-    out.push(0x00);
+    // OptLen = addons.len()（Vision 请求携 flow addons，xray Addons
+    // protobuf；其余流/无流 = 0）
+    out.push(addons.len() as u8);
+    out.extend_from_slice(addons);
     // Command: 0x01 TCP / 0x02 UDP
     out.push(command);
     // Port (BE)
@@ -180,7 +199,12 @@ impl VlessConnector {
     /// 普通 VLESS 连不上期望 Vision 分帧的服务端且无报错）。
     fn gate_reality_and_flow(&self) -> Result<()> {
         gate_reality_transport(&self.reality, &self.network, self.tls)?;
-        gate_vless_flow(&self.flow)
+        gate_vless_flow(&self.flow, self.tls, &self.network)
+    }
+
+    /// Vision 精确流（flow == xtls-rprx-vision）
+    fn is_vision(&self) -> bool {
+        self.flow.as_deref() == Some(FLOW_VISION)
     }
 
     /// 传输键（§4.2）：TLS 走五元组键（sni = 实际握手 SNI，tcp/ws 分支各异），
@@ -235,7 +259,38 @@ impl VlessConnector {
     }
 
     fn build_vless_tcp_request(&self, target_host: &str, target_port: u16) -> Result<Vec<u8>> {
-        build_vless_request_bytes(self.uuid_bytes()?, target_host, target_port, 0x01)
+        build_vless_request_bytes(self.uuid_bytes()?, target_host, target_port, 0x01, &[])
+    }
+
+    /// Vision 请求头：Opt 携 flow addons（`0x0A 0x10 "xtls-rprx-vision"`，
+    /// xray Addons protobuf 口径）
+    fn build_vless_vision_request(&self, target_host: &str, target_port: u16) -> Result<Vec<u8>> {
+        let addons = vision_flow_addons(Some(FLOW_VISION))?;
+        build_vless_request_bytes(self.uuid_bytes()?, target_host, target_port, 0x01, &addons)
+    }
+
+    /// Vision 面读 VLESS 响应头（外层 TLS 明文通道，跨记录边界拼齐）
+    async fn read_vless_response_header_face(face: &mut VisionTlsFace) -> Result<()> {
+        let mut hdr = [0u8; 2];
+        Self::read_exact_tls(face, &mut hdr).await?;
+        let opt_len = hdr[1] as usize;
+        if opt_len > 0 {
+            let mut opt = vec![0u8; opt_len];
+            Self::read_exact_tls(face, &mut opt).await?;
+        }
+        Ok(())
+    }
+
+    async fn read_exact_tls(face: &mut VisionTlsFace, buf: &mut [u8]) -> Result<()> {
+        let mut pos = 0;
+        while pos < buf.len() {
+            let n = face.read_tls_into(&mut buf[pos..]).await?;
+            if n == 0 {
+                return Err(anyhow!("读取 VLESS 响应头失败：对端 EOF"));
+            }
+            pos += n;
+        }
+        Ok(())
     }
 
     async fn read_vless_response_header<S: AsyncRead + Unpin + ?Sized>(
@@ -268,8 +323,12 @@ impl EgressConnector for VlessConnector {
     async fn forward(&self, flow: Flow) -> Result<FlowReport> {
         match &self.pool {
             // REALITY 每连接一次完整握手、fork 侧禁 resumption——不进传输池
-            //（RIL-107；per-connection 握手是 REALITY 认证面 essence）
-            Some(pool) if self.reality.is_none() => self.forward_pooled(flow, pool).await,
+            //（RIL-107；per-connection 握手是 REALITY 认证面 essence）；
+            // Vision 同走内联——Direct 直传切换（交出裸 TCP）与池借出语义
+            // 不相容（protocol-backends.md vless-xtls-vision 角色边界）
+            Some(pool) if self.reality.is_none() && !self.is_vision() => {
+                self.forward_pooled(flow, pool).await
+            }
             _ => self.forward_inline(flow).await,
         }
     }
@@ -499,6 +558,81 @@ impl VlessConnector {
         }
     }
 
+    /// Vision 路径（flow=xtls-rprx-vision，RIL-108）：外层 REALITY/普通 TLS
+    /// 握手 → 外层 TLS1.3 校验（xray 同口径，命名错误拒绝）→ 请求（带 flow
+    /// addons）/响应头（外层 TLS 明文通道）→ Vision 分帧双向中继（上行 8 包
+    /// 过滤窗内边填充边嗅探内层 TLS；TLS1.3 内层记录完整即发 Direct 切裸
+    /// TCP 直传，TLS1.2/非 TLS 以 End 收束留在外层 TLS 之内）。
+    ///
+    /// TLS 面经逐记录精确喂入（VisionTlsFace）：rustls 只见记录边界，
+    /// Direct 切换时把裸 TCP 原样交出、零字节损失（xray 以
+    /// `AccessTLSBuffers` 排干内部缓冲解决同一问题）。
+    async fn forward_vision(&self, flow: Flow, tcp: tokio::net::TcpStream) -> Result<FlowReport> {
+        let uuid = self.uuid_bytes()?;
+
+        // 外层面：REALITY（fork ClientConnection）或普通 TLS（共享/形态配置），
+        // 握手完成后拆出裸 TCP + rustls 连接交 VisionTlsFace
+        let (tcp, conn) = match &self.reality {
+            Some(reality) => {
+                let dial = RealityDial::new(&reality.public_key, reality.short_id.as_deref())
+                    .context("REALITY 配置无效")?;
+                let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
+                let server_name =
+                    rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+                let stream = dial
+                    .connect(tcp, server_name)
+                    .await
+                    .context("VLESS Vision REALITY 握手失败")?;
+                stream.into_parts()
+            }
+            None => {
+                let sni = self.sni.clone().unwrap_or_else(|| self.server.clone());
+                let config = match &self.factory {
+                    Some(factory) => factory.shared_config(
+                        self.skip_cert_verify,
+                        self.alpn.as_deref().unwrap_or(&[]),
+                        self.fingerprint,
+                    )?,
+                    None => profile_client_config(
+                        self.skip_cert_verify,
+                        self.alpn.as_deref(),
+                        self.fingerprint,
+                    )?,
+                };
+                let server_name =
+                    rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+                let conn = rustls::ClientConnection::new(Arc::clone(&config), server_name)
+                    .map_err(|e| anyhow!("TLS 客户端连接构造失败: {e}"))?;
+                reality::handshake(tcp, conn)
+                    .await
+                    .context("VLESS Vision TLS 握手失败")?
+                    .into_parts()
+            }
+        };
+        let mut face = VisionTlsFace::new(tcp, conn);
+
+        // 外层 TLS 须 TLS1.3（xray 同口径：握手后校验，命名错误不静默）
+        if face.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3) {
+            return Err(anyhow!(
+                "VLESS Vision 需外层 TLS1.3（实测 {:?}）：拒绝静默降级",
+                face.protocol_version()
+            ));
+        }
+
+        // 请求（Opt 携 flow addons）→ 响应头——均在外层 TLS 明文通道内
+        let req = self.build_vless_vision_request(&flow.target.host, flow.target.port)?;
+        face.write_tls_all(&req).await?;
+        face.flush_tls().await?;
+        Self::read_vless_response_header_face(&mut face).await?;
+
+        // 分帧双向中继直至双向收束（统计 = 应用内容字节，不含填充与分帧头）
+        let stats = super::vision::relay(flow.io, face, uuid).await?;
+        Ok(FlowReport {
+            upstream: stats.upstream,
+            downstream: stats.downstream,
+        })
+    }
+
     /// 内联路径（pool=None）：与既有实现逐 IO 序列同构（D-9）；factory=Some
     /// 且 tls 时 TLS 连接器改取共享 ClientConfig（tls_resumption 独立于池生效）。
     async fn forward_inline(&self, mut flow: Flow) -> Result<FlowReport> {
@@ -529,6 +663,12 @@ impl VlessConnector {
 
         match self.network.as_str() {
             "tcp" => {
+                // RIL-108：Vision 分帧路径（flow=xtls-rprx-vision；门已拦
+                // 非 tcp/未叠 TLS 组合）——外层 REALITY/TLS 握手后 Vision
+                // 分帧双向中继，Direct 时切裸 TCP 直传
+                if self.is_vision() {
+                    return self.forward_vision(flow, tcp).await;
+                }
                 if let Some(reality) = &self.reality {
                     // RIL-107：REALITY 传输面（rustls fork pin，认证面自装配）：
                     // x25519 认证 ECDH + session-id seal/open + HMAC 证书绑定，
@@ -836,7 +976,18 @@ impl EgressUdpConnector for VlessUdpConnector {
         _decision: &RouteDecision,
     ) -> Result<Arc<dyn UdpRelay>> {
         gate_reality_transport(&self.reality, "tcp", self.tls)?;
-        gate_vless_flow(&self.flow)?;
+        // Vision 分帧仅 TCP 承载：UDP 命令拒绝（xray 同口径）；其余 flow
+        // 照旧点名拒绝
+        if let Some(f) = &self.flow {
+            if f == FLOW_VISION {
+                return Err(anyhow!(
+                    "VLESS flow={FLOW_VISION} 仅 TCP 承载（UDP 命令拒绝，xray 同口径）"
+                ));
+            }
+            return Err(anyhow!(
+                "VLESS flow {f} 未知（仅支持 {FLOW_VISION}）：拒绝静默降级"
+            ));
+        }
         let mut stream = self.open_transport().await?;
         let req = self.build_vless_udp_request(&ctx.target.host, ctx.target.port)?;
         stream.write_all(&req).await?;
@@ -854,7 +1005,7 @@ impl EgressUdpConnector for VlessUdpConnector {
 impl VlessUdpConnector {
     /// UDP 请求（G0-4）：command 0x02（xray vless RequestCommandUDP）
     fn build_vless_udp_request(&self, target_host: &str, target_port: u16) -> Result<Vec<u8>> {
-        build_vless_request_bytes(self.uuid_bytes()?, target_host, target_port, 0x02)
+        build_vless_request_bytes(self.uuid_bytes()?, target_host, target_port, 0x02, &[])
     }
 
     fn uuid_bytes(&self) -> Result<[u8; 16]> {
@@ -1117,17 +1268,17 @@ mod tests {
     fn vless_request_address_type_bytes() {
         let uuid = [0xa7u8; 16];
         let domain =
-            build_vless_request_bytes(uuid, "echo.example", 443, 0x01).expect("domain 请求");
+            build_vless_request_bytes(uuid, "echo.example", 443, 0x01, &[]).expect("domain 请求");
         assert_eq!(
             &domain[18..23],
             &[0x01, 0x01, 0xbb, 0x02, 12],
             "cmd+port+atype=2+len"
         );
         assert_eq!(&domain[23..], b"echo.example");
-        let v6 = build_vless_request_bytes(uuid, "::1", 443, 0x01).expect("v6 请求");
+        let v6 = build_vless_request_bytes(uuid, "::1", 443, 0x01, &[]).expect("v6 请求");
         assert_eq!(v6[21], 0x03, "IPv6 atype 应为 3");
         assert_eq!(v6.len(), 38, "IPv6 请求长度");
-        let v4 = build_vless_request_bytes(uuid, "127.0.0.1", 443, 0x01).expect("v4 请求");
+        let v4 = build_vless_request_bytes(uuid, "127.0.0.1", 443, 0x01, &[]).expect("v4 请求");
         assert_eq!(v4[21], 0x01, "IPv4 atype 应为 1");
         assert_eq!(v4.len(), 26, "IPv4 请求长度");
     }
@@ -1502,9 +1653,83 @@ mod tests {
     /// 静默降级为普通 VLESS 连不上期望 Vision 分帧的服务端且无报错。
     #[tokio::test]
     async fn forward_rejects_flow_named_before_io() {
+        // RIL-108 门矩阵：Vision 仅 network=tcp + 叠 TLS 合法；非法组合
+        // 拨号期点名拒绝（不可达端口——门未先拦时必然是连接失败而非点名）
+        let mk = |flow: Option<&str>, network: &str, tls: bool| {
+            VlessConnector::new(
+                "127.0.0.1".to_string(),
+                1,
+                TEST_UUID.to_string(),
+                flow.map(str::to_string),
+                None,
+                network.to_string(),
+                None,
+                None,
+                None,
+                tls,
+                true,
+                None,
+                None,
+                TlsFingerprint::None,
+                None,
+                None,
+            )
+        };
+        let mk_flow = || {
+            let (client, _peer) = tokio::io::duplex(64);
+            Flow {
+                id: FlowId::new(),
+                target: FlowTarget {
+                    host: "example.com".to_string(),
+                    port: 443,
+                    proto: TargetProto::Tcp,
+                },
+                io: Box::new(client),
+                metadata: FlowMetadata::default(),
+            }
+        };
+
+        // Vision + ws → 点名拒绝（ws 叠加面不承载分帧）
+        let err = mk(Some("xtls-rprx-vision"), "ws", true)
+            .forward(mk_flow())
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("xtls-rprx-vision") && msg.contains("network=tcp"),
+            "Vision+ws 应点名拒绝: {msg}"
+        );
+
+        // Vision + 明文 → 点名拒绝（分帧语义在外层 TLS 之上）
+        let err = mk(Some("xtls-rprx-vision"), "tcp", false)
+            .forward(mk_flow())
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("xtls-rprx-vision") && msg.contains("TLS"),
+            "Vision 明文应点名拒绝: {msg}"
+        );
+
+        // 未知 flow → 点名拒绝
+        let err = mk(Some("some-other-flow"), "tcp", true)
+            .forward(mk_flow())
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("some-other-flow") && msg.contains("未知"),
+            "未知 flow 应点名拒绝: {msg}"
+        );
+    }
+
+    /// RIL-108：Vision 合法组合（flow+tcp+tls）过门后进入拨号（不可达端口
+    /// = 连接失败而非点名 flow）——分帧本体由合约测试真实对端覆盖。
+    #[tokio::test]
+    async fn forward_vision_legal_combo_passes_gate_to_dial() {
         let connector = VlessConnector::new(
             "127.0.0.1".to_string(),
-            1, // 不可达端口：门未先拦时必然是连接失败而非点名 flow
+            1, // 不可达端口
             TEST_UUID.to_string(),
             Some("xtls-rprx-vision".to_string()),
             None,
@@ -1533,7 +1758,10 @@ mod tests {
         };
         let err = connector.forward(flow).await.unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("xtls-rprx-vision"), "应点名 flow 值: {msg}");
+        assert!(
+            msg.contains("Connection refused") || msg.contains("连接 VLESS 服务器失败"),
+            "Vision 合法组合应走到拨号（连接失败）而非点名 flow: {msg}"
+        );
     }
 
     /// RIL-107 UDP 关联门：reality+tls=false 非法组合在 associate 期点名拒绝

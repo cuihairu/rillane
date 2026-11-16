@@ -664,6 +664,11 @@ impl<C: RustlsConn> TlsAdapter<C> {
         self.tcp
     }
 
+    /// 拆出裸 TCP 与 rustls 连接（Vision 面：握手后转逐记录精确喂入）
+    pub fn into_parts(self) -> (TcpStream, C) {
+        (self.tcp, self.conn)
+    }
+
     /// 写出 rustls 队列中的 TLS 记录
     fn write_io(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
         let mut adapter = SyncWriteAdapter {
@@ -807,9 +812,9 @@ impl<C: RustlsConn> AsyncWrite for TlsAdapter<C> {
 }
 
 /// Async IO 上的 std Read 面（Pending → WouldBlock，喂 read_tls）
-struct SyncReadAdapter<'a, 'b, IO> {
-    io: &'a mut IO,
-    cx: &'a mut Context<'b>,
+pub(crate) struct SyncReadAdapter<'a, 'b, IO> {
+    pub(super) io: &'a mut IO,
+    pub(super) cx: &'a mut Context<'b>,
 }
 
 impl<IO: AsyncRead + Unpin> io::Read for SyncReadAdapter<'_, '_, IO> {
@@ -824,9 +829,9 @@ impl<IO: AsyncRead + Unpin> io::Read for SyncReadAdapter<'_, '_, IO> {
 }
 
 /// Async IO 上的 std Write 面（Pending → WouldBlock，供 write_tls）
-struct SyncWriteAdapter<'a, 'b, IO> {
-    io: &'a mut IO,
-    cx: &'a mut Context<'b>,
+pub(crate) struct SyncWriteAdapter<'a, 'b, IO> {
+    pub(super) io: &'a mut IO,
+    pub(super) cx: &'a mut Context<'b>,
 }
 
 impl<IO: AsyncWrite + Unpin> io::Write for SyncWriteAdapter<'_, '_, IO> {

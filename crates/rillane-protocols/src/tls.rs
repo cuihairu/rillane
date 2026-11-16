@@ -28,6 +28,18 @@ pub fn create_tls_connector_with_profile(
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
+/// 按形态构造共享 ClientConfig（Vision 面：需自驱 rustls 连接以做
+/// 逐记录精确喂入，不走 tokio-rustls 适配）。单漏斗同口径。
+pub fn profile_client_config(
+    skip_cert_verify: bool,
+    alpn: Option<&[String]>,
+    profile: TlsFingerprint,
+) -> Result<Arc<ClientConfig>> {
+    let alpn_protos = alpn.map(filter_alpn);
+    let config = build_client_config(skip_cert_verify, alpn_protos.unwrap_or_default(), profile)?;
+    Ok(Arc::new(config))
+}
+
 /// ALPN 列表规整（trim + 滤空；对齐既有行为：全空则不设 ALPN）
 fn filter_alpn(alpn: &[String]) -> Vec<Vec<u8>> {
     let mut protos = Vec::new();

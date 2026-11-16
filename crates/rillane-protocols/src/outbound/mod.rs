@@ -13,6 +13,7 @@ mod reality;
 mod shadowsocks;
 mod socks5;
 mod trojan;
+mod vision;
 mod vless;
 mod vmess;
 mod ws;
@@ -41,6 +42,12 @@ pub use reality::{
 pub use shadowsocks::{ShadowsocksConnector, ShadowsocksUdpConnector};
 pub use socks5::{Socks5Connector, Socks5UdpConnector};
 pub use trojan::{TrojanConnector, TrojanUdpConnector};
+pub use vision::{
+    is_complete_tls_record, padding_len, relay, vision_flow_addons, FrameBuilder, FrameDecoder,
+    InnerTlsFilter, VisionRelayStats, VisionSignal, VisionTlsFace, VisionWriteAction,
+    VisionWritePolicy, COMMAND_PADDING_CONTINUE, COMMAND_PADDING_DIRECT, COMMAND_PADDING_END,
+    DEFAULT_TESTSEED, FLOW_VISION,
+};
 pub use vless::{VlessConnector, VlessUdpConnector};
 pub use vmess::{VmessConnector, VmessSecurity, VmessUdpConnector};
 #[cfg(not(any(
