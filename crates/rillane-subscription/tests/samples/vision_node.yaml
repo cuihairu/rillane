@@ -1,0 +1,31 @@
+# RIL-108 订阅兼容样本：VLESS+XTLS Vision 出站节点（已脱敏）
+# 凭据为占位值（全零 UUID），地址用 RFC 5737/2606 文档段；公钥为 RFC
+# 递增占位十六进制（非真实密钥）。预期：flow=xtls-rprx-vision 随节点
+# 保留（拨号期校验合法组合 tcp + TLS/REALITY）；network=tcp + tls 恒叠。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-vision-tls
+    type: vless
+    server: vision.example.com
+    port: 443
+    uuid: "00000000-0000-0000-0000-000000000000"
+    network: tcp
+    tls: true
+    servername: sni.example.com
+    skip-cert-verify: false
+    flow: xtls-rprx-vision
+  - name: sample-vision-reality
+    type: vless
+    server: 203.0.113.44
+    port: 443
+    uuid: "00000000-0000-0000-0000-000000000000"
+    network: tcp
+    tls: true
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: "REDACTED-SAMPLE-public-key-0123456789abcdef0123456789abcdef"
+      short-id: "0102030405060708"
+proxy-groups: []
+rules: []
