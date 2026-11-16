@@ -4465,6 +4465,7 @@ mod tests {
                     path: None,
                     host: None,
                     grpc_service_name: None,
+                    grpc_reuse: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,

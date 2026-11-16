@@ -8,43 +8,29 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub mod approval;
 pub mod apply;
+pub mod approval;
 pub mod contract;
 pub mod generations;
 pub mod preview;
-pub mod protocol_catalog;
 pub mod proposal;
+pub mod protocol_catalog;
 pub mod rollback;
 pub mod source;
 pub mod watchdog;
 
-pub use approval::{
-    proposal_digest, ApprovalAuthority, ApprovalError, PreauthorizedGrant, ProposalApproval,
-    CODE_APPROVAL_CAPACITY, CODE_APPROVAL_EXPIRED, CODE_APPROVAL_FOREIGN,
-    CODE_APPROVAL_POLICY_EXHAUSTED, CODE_APPROVAL_REPLAYED, CODE_APPROVAL_REQUIRED,
-    CODE_APPROVAL_SCOPE_EXCEEDED, CODE_APPROVAL_SCOPE_INVALID, CODE_APPROVAL_STALE,
-    CODE_APPROVAL_UNKNOWN, APPROVAL_STORE_CAP, PREAUTH_GRANT_CAP,
-};
 pub use apply::{
     ApplyError, ApplyLedger, ApplyReceipt, ApplyReconcile, ApplyRequest, ApplyResult, ApplyStatus,
     ExecutionOutcome, APPLY_LABEL_MAX_CHARS, APPLY_RECEIPT_CAP, CODE_APPLY_BASE_CONFLICT,
     CODE_APPLY_CAPACITY, CODE_APPLY_EXECUTE_FAILED, CODE_APPLY_HASH_CONFLICT,
     CODE_APPLY_INPUT_INVALID, CODE_APPLY_KEY_MISMATCH,
 };
-pub use rollback::{
-    rollback_apply, ConnectionTruth, DrainPlan, RollbackError, RollbackExecution, RollbackReport,
-    RollbackRequest, CODE_ROLLBACK_CANDIDATE_MISMATCH, CODE_ROLLBACK_INPUT_INVALID,
-    CODE_ROLLBACK_LIVE_MOVED, CODE_ROLLBACK_TARGET_FOREIGN, CODE_ROLLBACK_TARGET_NOT_APPLIED,
-    CODE_ROLLBACK_TARGET_UNKNOWN, CONNECTION_TRUTH_STATEMENT,
-};
-pub use watchdog::{
-    assess_management_risk, repair_guidance, ManagementAssessment, ManagementRisk,
-    ManagementRiskKind, RecoveryPlan, ResumeOutcome, Watchdog, WatchdogError, WatchdogSnapshot,
-    WatchdogVerdict, WATCHDOG_DEFAULT_WINDOW_MS, WATCHDOG_MAX_WINDOW_MS,
-    CODE_WATCHDOG_GENERATION_MISMATCH, CODE_WATCHDOG_INPUT_INVALID, CODE_WATCHDOG_LIVE_MOVED,
-    CODE_WATCHDOG_NOT_DUE, CODE_WATCHDOG_TARGET_GONE, CODE_WATCHDOG_TARGET_UNKNOWN,
-    CODE_WATCHDOG_VERIFY_MISMATCH, CODE_WATCHDOG_WINDOW_EXPIRED, CODE_WATCHDOG_WINDOW_INVALID,
+pub use approval::{
+    proposal_digest, ApprovalAuthority, ApprovalError, PreauthorizedGrant, ProposalApproval,
+    APPROVAL_STORE_CAP, CODE_APPROVAL_CAPACITY, CODE_APPROVAL_EXPIRED, CODE_APPROVAL_FOREIGN,
+    CODE_APPROVAL_POLICY_EXHAUSTED, CODE_APPROVAL_REPLAYED, CODE_APPROVAL_REQUIRED,
+    CODE_APPROVAL_SCOPE_EXCEEDED, CODE_APPROVAL_SCOPE_INVALID, CODE_APPROVAL_STALE,
+    CODE_APPROVAL_UNKNOWN, PREAUTH_GRANT_CAP,
 };
 pub use contract::{
     CapabilitySet, ConfigError, ConfigVersion, CODE_UNKNOWN_VERSION, CODE_UNSUPPORTED_COMBINATION,
@@ -54,6 +40,10 @@ pub use generations::{
     RuntimeGeneration, CODE_GENERATION_CYCLE, CODE_GENERATION_DANGLING, CODE_GENERATION_DUPLICATE,
     CODE_GENERATION_ID_MISMATCH,
 };
+pub use preview::{
+    merge_patch, preview_config_patch, AffectedCategory, ConfigPreview, DiffEntry, DiffOp,
+    PreviewDiagnostic, SideEffectHint, CODE_PREVIEW_CONFIG_INVALID, CODE_PREVIEW_PATCH_INVALID,
+};
 pub use proposal::{
     new_proposal_id, ConfigProposal, ProposalInput, ProposalRead, ProposalStore,
     ProposalStoreError, CODE_PROPOSAL_BASE_CHANGED, CODE_PROPOSAL_CAPACITY, CODE_PROPOSAL_EXPIRED,
@@ -61,14 +51,24 @@ pub use proposal::{
     CODE_PROPOSAL_SCOPE_INVALID, CODE_PROPOSAL_TTL_INVALID, CODE_PROPOSAL_UNKNOWN,
     PROPOSAL_MAX_TTL_MS, PROPOSAL_STORE_CAP,
 };
-pub use preview::{
-    merge_patch, preview_config_patch, AffectedCategory, ConfigPreview, DiffEntry, DiffOp,
-    PreviewDiagnostic, SideEffectHint, CODE_PREVIEW_CONFIG_INVALID, CODE_PREVIEW_PATCH_INVALID,
+pub use rollback::{
+    rollback_apply, ConnectionTruth, DrainPlan, RollbackError, RollbackExecution, RollbackReport,
+    RollbackRequest, CODE_ROLLBACK_CANDIDATE_MISMATCH, CODE_ROLLBACK_INPUT_INVALID,
+    CODE_ROLLBACK_LIVE_MOVED, CODE_ROLLBACK_TARGET_FOREIGN, CODE_ROLLBACK_TARGET_NOT_APPLIED,
+    CODE_ROLLBACK_TARGET_UNKNOWN, CONNECTION_TRUTH_STATEMENT,
 };
 pub use source::{
     derive_local_id, CompatibilityDiagnostic, ObjectCatalog, ObjectId, ObjectKind, ObjectRenamed,
     SnapshotDiff, SourceContractError, SourceId, SourceLocation, SourceObject, SourceSnapshot,
     CODE_COMPAT_LOSSY, CODE_COMPAT_UNSUPPORTED, CODE_SOURCE_ID_INVALID, CODE_SOURCE_MISMATCH,
+};
+pub use watchdog::{
+    assess_management_risk, repair_guidance, ManagementAssessment, ManagementRisk,
+    ManagementRiskKind, RecoveryPlan, ResumeOutcome, Watchdog, WatchdogError, WatchdogSnapshot,
+    WatchdogVerdict, CODE_WATCHDOG_GENERATION_MISMATCH, CODE_WATCHDOG_INPUT_INVALID,
+    CODE_WATCHDOG_LIVE_MOVED, CODE_WATCHDOG_NOT_DUE, CODE_WATCHDOG_TARGET_GONE,
+    CODE_WATCHDOG_TARGET_UNKNOWN, CODE_WATCHDOG_VERIFY_MISMATCH, CODE_WATCHDOG_WINDOW_EXPIRED,
+    CODE_WATCHDOG_WINDOW_INVALID, WATCHDOG_DEFAULT_WINDOW_MS, WATCHDOG_MAX_WINDOW_MS,
 };
 
 /// 场景预设（P2-3 scenario-profiles.md §3）：配置期展开为既有块缺省填充
@@ -1449,10 +1449,7 @@ impl RillaneConfig {
     /// 迁移提示（迁移到 `scenarios` 并列面——game/web 可同时声明）；
     /// 两面同时声明解析期拒绝（迁移未完成，二选一）。`from_str` 丢弃
     /// 诊断保持兼容；`load_from_path` 会把诊断打到 tracing warn。
-    pub fn from_str_with_diagnostics(
-        raw: &str,
-        hint: Option<&str>,
-    ) -> Result<(Self, Vec<String>)> {
+    pub fn from_str_with_diagnostics(raw: &str, hint: Option<&str>) -> Result<(Self, Vec<String>)> {
         let mut config = Self::from_str_without_profile(raw, hint)?;
         let mut diagnostics = Vec::new();
         if config.profile.is_some() && !config.scenarios.is_empty() {
@@ -1614,11 +1611,7 @@ impl RillaneConfig {
             ProfileKind::Proxy => ("auto", None),
             ProfileKind::Web => ("web-auto", None),
         };
-        let group_absent = !self
-            .routing
-            .groups
-            .iter()
-            .any(|g| g.name == group_name);
+        let group_absent = !self.routing.groups.iter().any(|g| g.name == group_name);
         if group_absent {
             self.routing.groups.push(PolicyGroup {
                 name: group_name.to_string(),
@@ -1631,12 +1624,7 @@ impl RillaneConfig {
             });
             // 规则模板与组模板同生共死：组是本次新建且同名 target 规则
             // 缺席才填（多场景各自带自己的规则集，target 各指各组）
-            if !self
-                .routing
-                .rules
-                .iter()
-                .any(|r| r.target == group_name)
-            {
+            if !self.routing.rules.iter().any(|r| r.target == group_name) {
                 let template_rules = match kind {
                     ProfileKind::Game => GAME_DOMAIN_SUFFIXES
                         .iter()
@@ -1822,6 +1810,22 @@ pub struct RealityConfig {
     pub short_id: Option<String>,
 }
 
+/// gRPC gun 流复用旋钮（RIL-130，订阅 grpc-opts 键位 max-connections/
+/// min-streams/max-streams；mihomo gun.NewClient 口径）：三键全缺 = 单
+/// 连接全复用（复用恒开——gun 线格式不变，每流仍是 POST /{service}/Tun）；
+/// max-connections>0 = 连接数上限（每连接先填到 min-streams 再另开）；
+/// max-connections 缺席且 max-streams>0 = 单连接流数上限。仅 network=grpc
+/// 消费——其余传输面携带即构建期具名拒绝
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GrpcReuseConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_streams: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_streams: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EgressConfig {
@@ -1883,6 +1887,9 @@ pub enum EgressConfig {
         /// gRPC 服务名（network=grpc 时必填；线上路径 = /{name}/Tun）
         #[serde(skip_serializing_if = "Option::is_none")]
         grpc_service_name: Option<String>,
+        /// gRPC gun 流复用旋钮（RIL-130；仅 network=grpc 消费）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grpc_reuse: Option<GrpcReuseConfig>,
         #[serde(default)]
         tls: bool,
         #[serde(default)]
@@ -1913,6 +1920,9 @@ pub enum EgressConfig {
         /// gRPC 服务名（network=grpc 时必填；线上路径 = /{name}/Tun）
         #[serde(skip_serializing_if = "Option::is_none")]
         grpc_service_name: Option<String>,
+        /// gRPC gun 流复用旋钮（RIL-130；仅 network=grpc 消费）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grpc_reuse: Option<GrpcReuseConfig>,
         /// XHTTP 模式（RIL-129，network=xhttp 时有效）：`auto`（缺省，判为
         /// packet-up）/ `packet-up` / `stream-one`；其余取值拨号期具名拒绝
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1947,6 +1957,9 @@ pub enum EgressConfig {
         /// gRPC 服务名（network=grpc 时必填；线上路径 = /{name}/Tun）
         #[serde(skip_serializing_if = "Option::is_none")]
         grpc_service_name: Option<String>,
+        /// gRPC gun 流复用旋钮（RIL-130；仅 network=grpc 消费）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grpc_reuse: Option<GrpcReuseConfig>,
         #[serde(default = "default_tls_true")]
         tls: bool,
         #[serde(default)]
@@ -2270,8 +2283,7 @@ impl RoutingConfig {
             // gray 邻居 = 回边 = 环，报错带完整环路径。
             const GRAY: u8 = 0;
             const BLACK: u8 = 1;
-            let mut color: std::collections::HashMap<&str, u8> =
-                std::collections::HashMap::new();
+            let mut color: std::collections::HashMap<&str, u8> = std::collections::HashMap::new();
             let mut path: Vec<&str> = Vec::new();
             for root in refs.keys() {
                 if color.contains_key(root) {
@@ -2294,8 +2306,7 @@ impl RoutingConfig {
                         match color.get(next) {
                             Some(&GRAY) => {
                                 // 回边：路径上从 next 到栈顶即环（闭合回 next）
-                                let start =
-                                    path.iter().position(|n| n == next).unwrap_or(0);
+                                let start = path.iter().position(|n| n == next).unwrap_or(0);
                                 let cycle = path[start..].join(" → ");
                                 anyhow::bail!("组循环: {cycle} → {next}");
                             }
@@ -2342,10 +2353,7 @@ impl RoutingConfig {
         // 不得吞成默认路由）。target 是否已声明组不拒绝——直连节点名是
         // 合法 target（与规则面同口径），组存在性由求值面处理。
         for scenario in &self.scenarios {
-            anyhow::ensure!(
-                !scenario.name.trim().is_empty(),
-                "场景名不得为空"
-            );
+            anyhow::ensure!(!scenario.name.trim().is_empty(), "场景名不得为空");
             anyhow::ensure!(
                 !scenario.target.trim().is_empty(),
                 "场景 {} 的 target 不得为空",
@@ -2515,7 +2523,9 @@ provider_nodes:
         let text = serde_yaml::to_string(&cfg).expect("序列化");
         let back: RoutingConfig = serde_yaml::from_str(&text).expect("往返解析");
         assert_eq!(
-            back.proxy_providers.get("remote").and_then(|d| d.interval_secs),
+            back.proxy_providers
+                .get("remote")
+                .and_then(|d| d.interval_secs),
             Some(3600),
             "声明 interval 往返语义不变"
         );
@@ -2536,11 +2546,9 @@ provider_nodes:
         assert!(err.contains("remote"), "悬空引用须点名: {err}");
 
         // 空面不落盘
-        let empty_text =
-            serde_yaml::to_string(&RoutingConfig::default()).expect("序列化");
+        let empty_text = serde_yaml::to_string(&RoutingConfig::default()).expect("序列化");
         assert!(
-            !empty_text.contains("proxy_providers:")
-                && !empty_text.contains("provider_nodes:"),
+            !empty_text.contains("proxy_providers:") && !empty_text.contains("provider_nodes:"),
             "空面不落盘: {empty_text}"
         );
     }
@@ -2570,7 +2578,10 @@ rules: []
         .expect("应解析");
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("组循环"), "{err}");
-        assert!(err.contains('a') && err.contains('b'), "环路径须点名: {err}");
+        assert!(
+            err.contains('a') && err.contains('b'),
+            "环路径须点名: {err}"
+        );
 
         // 自环
         let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
@@ -2662,8 +2673,7 @@ selections:
         );
 
         // 空面不落盘
-        let empty_text =
-            serde_yaml::to_string(&RoutingConfig::default()).expect("序列化");
+        let empty_text = serde_yaml::to_string(&RoutingConfig::default()).expect("序列化");
         assert!(
             !empty_text.contains("selections:"),
             "空选择面不落盘: {empty_text}"
@@ -3177,7 +3187,8 @@ impl ProviderNodeLibrary {
 
     /// 装入/替换一个 provider 的节点集（调用方持有载荷解析职责）
     pub fn insert(&mut self, name: impl Into<String>, nodes: Vec<String>) {
-        self.providers.insert(name.into(), ProviderNodeEntry { nodes });
+        self.providers
+            .insert(name.into(), ProviderNodeEntry { nodes });
     }
 
     /// 查询 provider 当前节点集；无此名 = 未装入，返回 None
@@ -3187,7 +3198,10 @@ impl ProviderNodeLibrary {
 
     /// provider 当前提供的节点名；缺席或载荷为空均为空集
     pub fn nodes(&self, name: &str) -> Vec<String> {
-        self.providers.get(name).map(|e| e.nodes.clone()).unwrap_or_default()
+        self.providers
+            .get(name)
+            .map(|e| e.nodes.clone())
+            .unwrap_or_default()
     }
 
     /// 已装入的 provider 数量
