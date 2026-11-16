@@ -53,7 +53,8 @@ use std::net::IpAddr;
 use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
-    Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts, MixedIngress,
+    Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts,
+    HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MixedIngress,
     ShadowsocksConnector, ShadowsocksIngress, ShadowsocksUdpConnector, ShadowsocksUdpParts,
     Socks5Connector, Socks5Ingress, Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint,
     TransportKey, TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector,
@@ -480,6 +481,9 @@ impl RuntimeBuilder {
                         udp_enabled: Some(true),
                         ..
                     } | IngressConfig::Hysteria2 {
+                        udp_enabled: Some(true),
+                        ..
+                    } | IngressConfig::Hysteria {
                         udp_enabled: Some(true),
                         ..
                     }
@@ -2675,6 +2679,7 @@ fn build_ingress_endpoints(
             IngressConfig::Vless { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Vmess { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Hysteria2 { udp_enabled, .. } => *udp_enabled,
+            IngressConfig::Hysteria { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Http { .. } => None,
         };
         if per_ingress == Some(true) && !udp_enabled_global {
@@ -2861,6 +2866,39 @@ fn build_ingress_endpoints(
                     fake_ip.clone(),
                 )?)
             }
+            IngressConfig::Hysteria {
+                bind,
+                password,
+                cert,
+                cert_key,
+                up_mbps,
+                down_mbps,
+                udp_enabled,
+            } => {
+                // Hysteria v1（RIL-109）UDP 关联面同用进程级会话表 + 连接器族
+                //（udp 门与 socks5/hysteria2 同口径）；TLS 材料/口令/速率上限
+                // 解析拒绝落在装配期（QUIC 端点即监听面，ALPN 恒 "hysteria"）
+                let hy_udp = match udp.as_ref() {
+                    Some(svc) if resolve_udp_enabled(udp_enabled_global, *udp_enabled) => {
+                        Some(HysteriaUdpParts {
+                            table: svc.table().clone(),
+                            connector: svc.connector().clone(),
+                        })
+                    }
+                    _ => None,
+                };
+                Arc::new(HysteriaIngress::new(
+                    desc.name.clone(),
+                    bind.clone(),
+                    password,
+                    cert,
+                    cert_key,
+                    *up_mbps,
+                    *down_mbps,
+                    hy_udp,
+                    fake_ip.clone(),
+                )?)
+            }
         };
         map.insert(desc.name.clone(), endpoint);
     }
@@ -2905,9 +2943,10 @@ fn udp_session_config(cfg: &UdpConfig) -> rillane_core::udp::UdpSessionConfig {
 
 /// UDP 出站连接器表（udp-relay-path.md §3.1 能力表）：
 /// direct / shadowsocks / wireguard / reject / vmess / vless / trojan / anytls /
-/// socks5 / hysteria2 → 有能力（reject 为静默丢弃，审核发现 2026-11-04；
-/// hysteria2 为 RIL-133 数据报自写面，obfs 判负）；其余类型 → 判负
-/// （由 `scan_udp_capability` 在构建期报错，hy2 v1 归 RIL-109 未评审）。
+/// socks5 / hysteria / hysteria2 → 有能力（reject 为静默丢弃，审核发现
+/// 2026-11-04；hysteria 为 RIL-109 数据报自写面，包层传输判负；hysteria2 为
+/// RIL-133 数据报自写面，obfs 判负）；其余类型 → 判负
+/// （由 `scan_udp_capability` 在构建期报错）。
 ///
 /// vmess/vless/trojan 仅 network=tcp 注册（ws/grpc 的 UDP 面未实现，由
 /// scan_udp_capability 判负）；UDP 面复用 TCP 面连接器的构建期校验
@@ -3164,6 +3203,43 @@ fn build_udp_connectors(
                     alpn.clone(),
                 );
                 Some(Arc::new(TuicUdpConnector::from_connector(&conn)))
+            }
+            EgressConfig::Hysteria {
+                server,
+                port,
+                password,
+                protocol,
+                up_mbps,
+                down_mbps,
+                auth,
+                auth_str,
+                obfs,
+                obfs_param,
+                server_name,
+                skip_cert_verify,
+                alpn,
+            } => {
+                // Hysteria v1 UDP 中继面（RIL-109）：官方 udpMessage 数据报协议
+                // 自写（v1 无任何可用库，结论留证 protocol-backends.md#hysteria）。
+                // 载具 = 原生 UDP 上的 QUIC——obfs/wechat/faketcp 包层传输与
+                // TCP 面同口径判负（换整个 QUIC 载荷）；速率解析拒绝落在
+                // 连接器拨号期（resolve_rates 具名拒绝 Some(0)）
+                let conn = HysteriaConnector::new(
+                    server.clone(),
+                    *port,
+                    password.clone(),
+                    Some(protocol.clone()),
+                    *up_mbps,
+                    *down_mbps,
+                    auth.clone(),
+                    auth_str.clone(),
+                    obfs.clone(),
+                    obfs_param.clone(),
+                    server_name.clone(),
+                    *skip_cert_verify,
+                    alpn.clone(),
+                );
+                Some(Arc::new(HysteriaUdpConnector::from_connector(&conn)))
             }
             _ => None,
         };
@@ -3726,6 +3802,47 @@ fn build_egress_outputs(
                 outputs.insert(desc.name.clone(), flow_output);
                 connectors.insert(desc.name.clone(), connector);
             }
+            EgressConfig::Hysteria {
+                server,
+                port,
+                password,
+                protocol,
+                up_mbps,
+                down_mbps,
+                auth,
+                auth_str,
+                obfs,
+                obfs_param,
+                server_name,
+                skip_cert_verify,
+                alpn,
+            } => {
+                // Hysteria v1（RIL-109）：控制流认证 + TCP 请求流 + UDP 数据报
+                // 全自写（v1 无任何可用库，结论留证 protocol-backends.md#hysteria）；
+                // 速率/载具校验归拨号期（resolve_rates Some(0) 具名拒绝、
+                // 非 "udp" 载具与 obfs 包层传输点名拒绝，节点级失败不拖垮整份订阅）
+                let connector: Arc<dyn EgressConnector> = Arc::new(HysteriaConnector::new(
+                    server.clone(),
+                    *port,
+                    password.clone(),
+                    Some(protocol.clone()),
+                    *up_mbps,
+                    *down_mbps,
+                    auth.clone(),
+                    auth_str.clone(),
+                    obfs.clone(),
+                    obfs_param.clone(),
+                    server_name.clone(),
+                    *skip_cert_verify,
+                    alpn.clone(),
+                ));
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
             EgressConfig::Tuic {
                 server,
                 port,
@@ -3996,15 +4113,9 @@ fn build_egress_outputs(
                 outputs.insert(desc.name.clone(), flow_output);
                 connectors.insert(desc.name.clone(), connector);
             }
-            _ => {
-                // 防御面：目录准入已先行（循环顶部），编目内类型都应落上
-                // 方工厂臂——落到此处说明目录与装配工厂失同步，点名稳定码。
-                return Err(anyhow!(
-                    "{CODE_EGRESS_NOT_ADMITTED}: 出口类型 {} 未接入后端工厂（节点 {}）",
-                    egress_kind(&desc.spec),
-                    desc.name
-                ));
-            }
+            // 防御面已由编译期穷尽性接管（RIL-109 接入 hysteria 后本 match
+            // 覆盖全部 IR 变体）：目录与装配工厂失同步在编译期即报错，
+            // 「编目内类型无工厂臂」不再可能到运行期。
         }
     }
 
