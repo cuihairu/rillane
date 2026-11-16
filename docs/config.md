@@ -49,7 +49,7 @@ This page describes current configuration, not completed v1 fields. Definitions 
 - `bearer_tokens`: a `[token]` list compared in plaintext (`Proxy-Authorization: Bearer`), in parallel with `auth`; either passing is enough; disabled by default.
 - `udp_enabled`: ingress-level UDP ASSOCIATE override; defaults to inheriting `udp.enabled`, and an explicit `true`/`false` overrides it for that ingress (explicit true while the global switch is off is a build-time WARN).
 
-## egress[] (`type` tags, 10 variants)
+## egress[] (`type` tags, 12 variants)
 
 | type | Fields (yes = required) | Default |
 |------|----------------|------|
@@ -62,6 +62,8 @@ This page describes current configuration, not completed v1 fields. Definitions 
 | `trojan` | `server`yes `port`yes `password`yes `network` `path`? `host`? `grpc_service_name`? `tls` `skip_cert_verify` `sni`? `alpn`? `tls_fingerprint`? | `network: tcp`, **`tls: true`** |
 | `hysteria` | `server`yes `port`yes `password`yes `protocol` `up_mbps`? `down_mbps`? `auth`? `auth_str`? `obfs`? `obfs_param`? `server_name`? `skip_cert_verify` `alpn`? | `protocol: udp` |
 | `hysteria2` | `server`yes `port`yes `password`yes `mport`? `obfs`? `obfs_param`? `server_name`? `skip_cert_verify` `alpn`? | — |
+| `anytls` | `server`yes `port`yes `password`yes `sni`? `skip_cert_verify` | — |
+| `tuic` | `server`yes `port`yes `uuid`yes `password`yes `congestion_controller`? `server_name`? `skip_cert_verify` `alpn`? | `congestion_controller`: cubic |
 | `wireguard` | `endpoint`yes `private_key`yes `public_key`yes `address`yes `allowed_ips`? `preshared_key`? `persistent_keepalive`? `listen_port`? `mtu`? `dns`? | — |
 
 Transport and build-time constraints:
@@ -71,6 +73,7 @@ Transport and build-time constraints:
 - `flow` (vless): dial-time validation — exactly `xtls-rprx-vision` accepted (Vision framing; requires `network: tcp` + `tls: true`/REALITY, UDP refused), any other value refused at dial time and names the node.
 - `method` (shadowsocks): free-form string, invalid values error at build time (the set is whatever the shadowsocks crate 1.25 AEAD methods support); `plugin` goes through the SIP003 bridge (TCP plane via the plugin process, UDP plane judged negative in plugin mode).
 - `hysteria` (v1): schema/subscription conversion is supported, but **the egress connector is missing** -- RuntimeBuilder errors at build time; `hysteria2` TCP and the UDP datagram plane are available (UDP limited to the obfs-free combination; servers without declared UDP support are refused by name).
+- `tuic` (v5): TCP streams and the UDP datagram plane are available -- v5 only (no v4 code path; v4 wire shapes refused by name); `congestion_controller` other than `cubic` is refused by name at dial time (no silent downgrade); auth has no response face -- refusals arrive as stream/QUIC teardown.
 - `tls_fingerprint`: `none | chrome | ios | safari` (comparison table: `rillanectl tls-fingerprint`); emulation is off by default.
 - `address` (wireguard): comma-separated multiple CIDRs (e.g. `10.0.0.2/32,fd00::2/128`); `listen_port: 0` = automatic.
 

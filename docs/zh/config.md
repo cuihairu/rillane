@@ -49,7 +49,7 @@
 - `bearer_tokens`：`[token]` 明文比对（`Proxy-Authorization: Bearer`），与 `auth` 并列任一通过即放行；缺省不启用。
 - `udp_enabled`：入口级 UDP ASSOCIATE 覆盖；缺省继承 `udp.enabled`，显式 `true/false` 覆盖该入口（显式 true 且全局关时构建期 WARN）。
 
-## egress[]（`type` 标签，10 变体）
+## egress[]（`type` 标签，12 变体）
 
 | type | 字段（✓=必填） | 缺省 |
 |------|----------------|------|
@@ -62,6 +62,8 @@
 | `trojan` | `server`✓ `port`✓ `password`✓ `network` `path`? `host`? `grpc_service_name`? `tls` `skip_cert_verify` `sni`? `alpn`? `tls_fingerprint`? | `network: tcp`、**`tls: true`** |
 | `hysteria` | `server`✓ `port`✓ `password`✓ `protocol` `up_mbps`? `down_mbps`? `auth`? `auth_str`? `obfs`? `obfs_param`? `server_name`? `skip_cert_verify` `alpn`? | `protocol: udp` |
 | `hysteria2` | `server`✓ `port`✓ `password`✓ `mport`? `obfs`? `obfs_param`? `server_name`? `skip_cert_verify` `alpn`? | — |
+| `anytls` | `server`✓ `port`✓ `password`✓ `sni`? `skip_cert_verify` | — |
+| `tuic` | `server`✓ `port`✓ `uuid`✓ `password`✓ `congestion_controller`? `server_name`? `skip_cert_verify` `alpn`? | `congestion_controller`：cubic |
 | `wireguard` | `endpoint`✓ `private_key`✓ `public_key`✓ `address`✓ `allowed_ips`? `preshared_key`? `persistent_keepalive`? `listen_port`? `mtu`? `dns`? | — |
 
 传输与构建期约束：
@@ -71,6 +73,7 @@
 - `flow`（vless）：拨号期校验——精确接受 `xtls-rprx-vision`（Vision 分帧；须 `network: tcp` + `tls: true`/REALITY，UDP 拒绝），其余取值拨号期拒绝（报错含节点名）。
 - `method`（shadowsocks）：自由字符串，非法值构建期报错（以 shadowsocks crate 1.25 AEAD 方法集为准）；`plugin` 走 SIP003 桥（TCP 面经插件进程，UDP 面 plugin 模式判负）。
 - `hysteria`（v1）：schema/订阅转换支持，**出站连接器缺**——RuntimeBuilder 构建期报错；`hysteria2` TCP 与 UDP 数据报面可用（UDP 限无 obfs 组合，服务端未声明 UDP 支持时点名拒绝）。
+- `tuic`（v5）：TCP 流与 UDP 数据报面可用——仅 v5（v4 无代码路径，v4 线格式按名拒绝）；`congestion_controller` 非 `cubic` 拨号期点名拒绝（不静默降级）；认证无响应面——拒绝以流/QUIC 收束呈现。
 - `tls_fingerprint`：`none | chrome | ios | safari`（对照表：`rillanectl tls-fingerprint`）；缺省不模拟。
 - `address`（wireguard）：逗号分隔多 CIDR（如 `10.0.0.2/32,fd00::2/128`）；`listen_port: 0` = 自动。
 
