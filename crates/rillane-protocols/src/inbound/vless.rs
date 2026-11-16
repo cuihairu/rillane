@@ -486,9 +486,13 @@ async fn downlink_loop(
     }
 }
 
-/// 请求地址段读取（xray 口径：ATYP 1=IPv4 2=域名 3=IPv6；与 outbound/
-/// vless.rs build_vless_request_bytes 编码镜像互源；请求侧 EOF 即错误）
+/// 请求地址段读取（xray 线序：`[Port BE][ATYP][ADDR]`——Command 后端口
+/// 在地址之前，与 outbound/vless.rs build_vless_request_bytes 编码镜像
+/// 互源；ATYP 1=IPv4 2=域名 3=IPv6；请求侧 EOF 即错误）
 async fn read_xray_addr(rr: &mut (impl AsyncRead + Unpin)) -> Result<(String, u16)> {
+    let mut port_b = [0u8; 2];
+    rr.read_exact(&mut port_b).await?;
+    let port = u16::from_be_bytes(port_b);
     let mut atyp = [0u8; 1];
     rr.read_exact(&mut atyp).await?;
     let host = match atyp[0] {
@@ -511,9 +515,7 @@ async fn read_xray_addr(rr: &mut (impl AsyncRead + Unpin)) -> Result<(String, u1
         }
         other => bail!("vless 请求地址类型未知: {other}"),
     };
-    let mut port_b = [0u8; 2];
-    rr.read_exact(&mut port_b).await?;
-    Ok((host, u16::from_be_bytes(port_b)))
+    Ok((host, port))
 }
 
 #[cfg(test)]
@@ -573,30 +575,31 @@ mod tests {
         refuse_vision_addons(b"\x08\x01").expect("非 vision addons 放行");
     }
 
-    /// 请求地址段解码三形态：v4/域名/v6（ATYP 1/2/3，xray 口径——与
-    /// 客户端 build_vless_request_bytes 编码镜像互源）
+    /// 请求地址段解码三形态：v4/域名/v6（线序 `[Port BE][ATYP][ADDR]`，
+    /// xray 口径——与客户端 build_vless_request_bytes 编码镜像互源）
     #[tokio::test]
     async fn xray_addr_decode_ip_and_domain() {
-        // v4: ATYP 1 + 4B + port BE
-        let v4 = [0x01, 203, 0, 113, 9, 0x1F, 0x90];
+        // v4: port BE + ATYP 1 + 4B
+        let v4 = [0x1F, 0x90, 0x01, 203, 0, 113, 9];
         let (host, port) = read_xray_addr(&mut std::io::Cursor::new(v4))
             .await
             .expect("v4 解码");
         assert_eq!((host.as_str(), port), ("203.0.113.9", 8080));
 
-        // 域名: ATYP 2 + len + bytes + port
-        let mut domain = vec![0x02u8, 9];
+        // 域名: port BE + ATYP 2 + len + bytes
+        let mut domain = 53u16.to_be_bytes().to_vec();
+        domain.push(0x02);
+        domain.push(9);
         domain.extend_from_slice(b"echo.test");
-        domain.extend_from_slice(&53u16.to_be_bytes());
         let (host, port) = read_xray_addr(&mut std::io::Cursor::new(domain))
             .await
             .expect("域名解码");
         assert_eq!((host.as_str(), port), ("echo.test", 53));
 
-        // v6: ATYP 3 + 16B + port（xray 口径 3=v6）
-        let mut v6 = vec![0x03u8];
+        // v6: port BE + ATYP 3 + 16B（xray 口径 3=v6）
+        let mut v6 = 443u16.to_be_bytes().to_vec();
+        v6.push(0x03);
         v6.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]);
-        v6.extend_from_slice(&443u16.to_be_bytes());
         let (host, port) = read_xray_addr(&mut std::io::Cursor::new(v6))
             .await
             .expect("v6 解码");
@@ -604,7 +607,7 @@ mod tests {
         assert_eq!(port, 443);
 
         // 未知 ATYP 点名拒绝
-        let bad = [0x09, 0, 0];
+        let bad = [0x00, 0x35, 0x09, 0x00];
         let err = read_xray_addr(&mut std::io::Cursor::new(bad))
             .await
             .expect_err("未知 ATYP 必须拒绝");
