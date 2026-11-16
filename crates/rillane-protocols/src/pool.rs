@@ -319,6 +319,12 @@ impl LeaseGuard {
             metrics: metrics.clone(),
         }
     }
+
+    /// 测试面：无池语境的独立租借记账（gun 客户端复用面单测用，RIL-130）
+    #[cfg(test)]
+    pub(crate) fn lease_for_tests() -> Self {
+        Self::new(&Arc::new(PoolMetrics::default()))
+    }
 }
 
 impl Drop for LeaseGuard {

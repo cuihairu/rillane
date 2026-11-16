@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::BytesMut;
-use rillane_config::RealityConfig;
+use rillane_config::{GrpcReuseConfig, RealityConfig};
 use rillane_core::udp::{EgressUdpConnector, UdpRelay};
 use rillane_core::{
     BoxedIo, EgressConnector, Flow, FlowContext, FlowReport, FlowTarget, RouteDecision, TargetProto,
@@ -16,17 +16,17 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use super::grpc::grpc_tunnel;
+use super::grpc::{grpc_tunnel, GunClient};
 use super::h2::h2_tunnel;
 use super::httpupgrade::httpupgrade_client_handshake;
 use super::reality::{self, RealityDial};
 use super::vision::{vision_flow_addons, VisionTlsFace, FLOW_VISION};
-use super::ws::{ws_client_handshake, WsClient};
-use super::xhttp::{xhttp_tunnel, XhttpMode};
 use super::vless_packet::{
     build_vless_mux_request, PacketAddrRelay, PacketEncoding, XudpRelay, PACKETADDR_MAGIC_HOST,
     PACKETADDR_MAGIC_PORT,
 };
+use super::ws::{ws_client_handshake, WsClient};
+use super::xhttp::{xhttp_tunnel, XhttpMode};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
 use crate::tls::{create_tls_connector_with_profile, profile_client_config, TlsConnectorFactory};
@@ -157,6 +157,9 @@ pub struct VlessConnector {
     /// 共享 ClientConfig 工厂：pool=None 且 tls 时使 TLS 会话恢复独立于池
     /// 生效（§3.1「块存在即生效」；None = 既有每流 ClientConfig）
     factory: Option<Arc<TlsConnectorFactory>>,
+    /// gun 客户端（RIL-130）：本节点级 h2 连接复用面（池面；内联面仍
+    /// 逐流隧道，mihomo gun 客户端同位）
+    gun: Arc<GunClient>,
 }
 
 impl VlessConnector {
@@ -172,6 +175,7 @@ impl VlessConnector {
         path: Option<String>,
         host: Option<Vec<String>>,
         grpc_service_name: Option<String>,
+        grpc_reuse: Option<GrpcReuseConfig>,
         xhttp_mode: Option<String>,
         packet_encoding: Option<String>,
         tls: bool,
@@ -182,6 +186,19 @@ impl VlessConnector {
         pool: Option<Arc<TransportPool>>,
         factory: Option<Arc<TlsConnectorFactory>>,
     ) -> Self {
+        // gun 客户端（RIL-130，mihomo gun.NewClient 口径）：旋钮缺省 = 单
+        // 连接全复用；authority = sni ∥ server（grpc 分支同源回退链）
+        let gun_authority = sni.clone().unwrap_or_else(|| server.clone());
+        let gun_service = grpc_service_name.clone().unwrap_or_default();
+        let (mc, ms, mx) = match &grpc_reuse {
+            Some(r) => (
+                r.max_connections.unwrap_or(0),
+                r.min_streams.unwrap_or(0),
+                r.max_streams.unwrap_or(0),
+            ),
+            None => (0, 0, 0),
+        };
+        let gun = Arc::new(GunClient::new(gun_authority, gun_service, mc, ms, mx));
         Self {
             server,
             port,
@@ -201,6 +218,7 @@ impl VlessConnector {
             fingerprint,
             pool,
             factory,
+            gun,
         }
     }
 
@@ -475,7 +493,8 @@ impl VlessConnector {
                 })
             }
             "grpc" => {
-                let service = self.grpc_service_name()?;
+                // 服务名运行期兜底校验（gun 面服务名由客户端构造期持有）
+                self.grpc_service_name()?;
                 // grpc 恒叠 TLS + ALPN h2（gRPC over TLS 语义），SNI 回退 server
                 if !self.tls {
                     return Err(anyhow!("VLESS network=grpc 需叠 TLS（gRPC over TLS 语义）"));
@@ -491,23 +510,44 @@ impl VlessConnector {
                     self.fingerprint,
                 );
 
-                // 借出传输层（TLS 已由池侧建立）；gRPC 隧道借出后进行（§4.2）
-                let (boxed, first_lease) = pool
-                    .acquire(&key)
+                // gun 流复用面（RIL-130）：流级复用现役 h2 连接（每流仍是
+                // POST /{service}/Tun），无可复用面才经池借出新拨——连接
+                // 生命周期内持租借记账（§4.2 多路复用 = 共享资源）。池面
+                // stale 一次性重拨（D-11）口径保留：客户端握手失败 →
+                // note_stale + acquire_fresh 重试一次。
+                let tunnel = match self
+                    .gun
+                    .connect({
+                        let pool = pool.clone();
+                        let key = key.clone();
+                        let server_addr = server_addr.clone();
+                        move || {
+                            let pool = pool.clone();
+                            let key = key.clone();
+                            let server_addr = server_addr.clone();
+                            async move {
+                                pool.acquire(&key).await.with_context(|| {
+                                    format!("连接 VLESS 服务器失败: {server_addr}")
+                                })
+                            }
+                        }
+                    })
                     .await
-                    .with_context(|| format!("连接 VLESS 服务器失败: {server_addr}"))?;
-                let tunnel = grpc_tunnel(boxed, &sni_actual, &service).await;
-                let (tunnel, _lease) = match tunnel {
-                    Ok(t) => (t, first_lease),
+                {
+                    Ok(t) => t,
                     Err(_) => {
-                        // 隧道握手失败 → stale 一次性重拨（D-11）
-                        drop(first_lease);
                         pool.note_stale(&key);
-                        let (boxed, lease) = pool.acquire_fresh(&key).await?;
-                        let t = grpc_tunnel(boxed, &sni_actual, &service)
+                        self.gun
+                            .connect({
+                                let pool = pool.clone();
+                                move || {
+                                    let pool = pool.clone();
+                                    let key = key.clone();
+                                    async move { pool.acquire_fresh(&key).await }
+                                }
+                            })
                             .await
-                            .with_context(|| "VLESS over gRPC 隧道握手失败")?;
-                        (t, lease)
+                            .with_context(|| "VLESS over gRPC 隧道握手失败")?
                     }
                 };
                 self.relay_vless_over_grpc(flow, tunnel).await
@@ -1118,7 +1158,9 @@ impl EgressUdpConnector for VlessUdpConnector {
         // packetaddr 均 family/port 序见 vless_packet.rs 真源注）
         let encoding = PacketEncoding::parse(self.packet_encoding.as_deref())?;
         let req = match encoding {
-            PacketEncoding::Raw => self.build_vless_udp_request(&ctx.target.host, ctx.target.port)?,
+            PacketEncoding::Raw => {
+                self.build_vless_udp_request(&ctx.target.host, ctx.target.port)?
+            }
             PacketEncoding::Packetaddr => build_vless_request_bytes(
                 self.uuid_bytes()?,
                 PACKETADDR_MAGIC_HOST,
@@ -1438,6 +1480,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false, // tls
             false,
             None,
@@ -1658,6 +1701,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false, // tls
             false,
             None,
@@ -1728,6 +1772,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             true,
             true, // skip_cert_verify 亦不绕过门
             None,
@@ -1775,6 +1820,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false, // tls=false：门必拦
             true,
             None,
@@ -1813,6 +1859,7 @@ mod tests {
                 flow.map(str::to_string),
                 None,
                 network.to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -1891,6 +1938,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             true,
             true,
             None,
@@ -1933,6 +1981,7 @@ mod tests {
                 short_id: None,
             }),
             "tcp".to_string(),
+            None,
             None,
             None,
             None,

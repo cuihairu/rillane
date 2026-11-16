@@ -2839,6 +2839,7 @@ fn build_udp_connectors(
                 path,
                 host,
                 grpc_service_name,
+                grpc_reuse: _,
                 tls,
                 skip_cert_verify,
                 sni,
@@ -2857,6 +2858,7 @@ fn build_udp_connectors(
                     path.clone(),
                     host.clone(),
                     grpc_service_name.clone(),
+                    None,
                     *tls,
                     *skip_cert_verify,
                     sni.clone(),
@@ -2877,6 +2879,7 @@ fn build_udp_connectors(
                 path,
                 host,
                 grpc_service_name,
+                grpc_reuse: _,
                 xhttp_mode,
                 packet_encoding,
                 tls,
@@ -2898,6 +2901,7 @@ fn build_udp_connectors(
                     path.clone(),
                     host.clone(),
                     grpc_service_name.clone(),
+                    None,
                     xhttp_mode.clone(),
                     packet_encoding.clone(),
                     *tls,
@@ -2918,6 +2922,7 @@ fn build_udp_connectors(
                 path,
                 host,
                 grpc_service_name,
+                grpc_reuse: _,
                 tls,
                 skip_cert_verify,
                 sni,
@@ -2936,6 +2941,7 @@ fn build_udp_connectors(
                     path.clone(),
                     host.clone(),
                     grpc_service_name.clone(),
+                    None,
                     transport_pool.clone(),
                     tls_factory.clone(),
                 );
@@ -3443,13 +3449,16 @@ fn build_egress_outputs(
                 path,
                 host,
                 grpc_service_name,
+                grpc_reuse,
                 tls,
                 skip_cert_verify,
                 sni,
                 tls_fingerprint,
                 ..
             } => {
-                // 传输层白名单 tcp/ws/grpc（ws/grpc 恒叠 TLS；grpc 需服务名）
+                // 传输层白名单 tcp/ws/grpc（ws/grpc 恒叠 TLS；grpc 需服务名；
+                // gun 流复用旋钮仅 network=grpc 消费——其余传输面携带即拒绝，
+                // RIL-130 交付边界）
                 match network.as_str() {
                     "tcp" | "ws" | "websocket" => {}
                     "grpc" => {
@@ -3469,6 +3478,12 @@ fn build_egress_outputs(
                         ));
                     }
                 }
+                if grpc_reuse.is_some() && network != "grpc" {
+                    return Err(anyhow!(
+                        "Trojan grpc-opts 流复用旋钮仅 network=grpc 可携带，当前 network={network} (egress={})",
+                        desc.name
+                    ));
+                }
                 if !*tls {
                     return Err(anyhow!(
                         "暂不支持的 Trojan 配置：tls=false (egress={})",
@@ -3487,6 +3502,7 @@ fn build_egress_outputs(
                     path.clone(),
                     host.clone(),
                     grpc_service_name.clone(),
+                    grpc_reuse.clone(),
                     transport_pool.clone(),
                     tls_factory.clone(),
                 ));
@@ -3591,6 +3607,7 @@ fn build_egress_outputs(
                 path,
                 host,
                 grpc_service_name,
+                grpc_reuse,
                 xhttp_mode,
                 packet_encoding,
                 tls,
@@ -3605,7 +3622,15 @@ fn build_egress_outputs(
                 // network=grpc 需非空服务名（恒叠 TLS，ALPN 固定 h2）；
                 // network=h2 恒叠 TLS（mihomo 口径 h2 仅 TLS）；
                 // network=xhttp 恒叠 TLS 且模式白名单（RIL-129——auto/
-                // packet-up/stream-one，越界构建期具名拒绝）
+                // packet-up/stream-one，越界构建期具名拒绝）；
+                // gun 流复用旋钮仅 network=grpc 消费，其余传输面携带即拒绝
+                // （RIL-130 交付边界）
+                if grpc_reuse.is_some() && network != "grpc" {
+                    return Err(anyhow!(
+                        "VLESS grpc-opts 流复用旋钮仅 network=grpc 可携带，当前 network={network} (egress={})",
+                        desc.name
+                    ));
+                }
                 if network == "grpc" {
                     let svc = grpc_service_name.as_deref().map(str::trim).unwrap_or("");
                     if svc.is_empty() {
@@ -3644,7 +3669,10 @@ fn build_egress_outputs(
                 }
                 // RIL-130：UDP 包编码白名单（raw 缺省/xudp/packetaddr），越界
                 // 构建期具名拒绝（同 xhttp mode 口径）
-                let encoding = packet_encoding.as_deref().map(str::trim).filter(|e| !e.is_empty());
+                let encoding = packet_encoding
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|e| !e.is_empty());
                 if let Some(enc) = encoding {
                     if !matches!(enc, "raw" | "xudp" | "packetaddr") {
                         return Err(anyhow!(
@@ -3663,6 +3691,7 @@ fn build_egress_outputs(
                     path.clone(),
                     host.clone(),
                     grpc_service_name.clone(),
+                    grpc_reuse.clone(),
                     xhttp_mode.clone(),
                     packet_encoding.clone(),
                     *tls,
@@ -3690,6 +3719,7 @@ fn build_egress_outputs(
                 path,
                 host,
                 grpc_service_name,
+                grpc_reuse,
                 tls,
                 skip_cert_verify,
                 sni,
@@ -3699,7 +3729,15 @@ fn build_egress_outputs(
                 // build-time validation: security parse, alter_id==0, network
                 // tcp/ws/httpupgrade/grpc/h2（clash 侧 network 只产
                 // tcp/ws/h2/httpupgrade，见 clash.rs convert 方；"websocket"
-                // 长形与 vless 口径一致予以兼容；grpc 需服务名）
+                // 长形与 vless 口径一致予以兼容；grpc 需服务名；gun 流复用
+                // 旋钮仅 network=grpc 消费——其余传输面携带即拒绝，RIL-130
+                // 交付边界）
+                if grpc_reuse.is_some() && network != "grpc" {
+                    return Err(anyhow!(
+                        "VMess grpc-opts 流复用旋钮仅 network=grpc 可携带，当前 network={network} (egress={})",
+                        desc.name
+                    ));
+                }
                 let parsed_security = VmessSecurity::parse(security)?;
                 if *alter_id != 0 {
                     return Err(anyhow!(
@@ -3750,6 +3788,7 @@ fn build_egress_outputs(
                     path.clone(),
                     host.clone(),
                     grpc_service_name.clone(),
+                    grpc_reuse.clone(),
                     *tls,
                     *skip_cert_verify,
                     sni.clone(),
@@ -4460,6 +4499,7 @@ mod tests {
                     path: None,
                     host: None,
                     grpc_service_name: None,
+                    grpc_reuse: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: Some("sni.example".to_string()),
@@ -4479,6 +4519,7 @@ mod tests {
                     path: Some("/vm".to_string()),
                     host: Some(vec!["cdn.example".to_string()]),
                     grpc_service_name: None,
+                    grpc_reuse: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,
@@ -6099,6 +6140,7 @@ routing:
             path: None,
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
             tls: false,
             skip_cert_verify: false,
             sni: None,
@@ -6116,6 +6158,7 @@ routing:
             path: None,
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
             tls: true,
             skip_cert_verify: false,
             sni: None,
@@ -6135,6 +6178,7 @@ routing:
             path: None,
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
             xhttp_mode: None,
             packet_encoding: None,
             tls: false,
@@ -6376,6 +6420,7 @@ routing:
                     path: None,
                     host: None,
                     grpc_service_name: None,
+                    grpc_reuse: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,
@@ -6693,6 +6738,7 @@ routing:
                         path: None,
                         host: None,
                         grpc_service_name: None,
+                        grpc_reuse: None,
                         tls: true,
                         skip_cert_verify: false,
                         sni: Some("sni.example".to_string()),
@@ -6807,6 +6853,7 @@ routing:
                 path: None,
                 host: None,
                 grpc_service_name: None,
+                grpc_reuse: None,
                 tls: true,
                 skip_cert_verify: false,
                 sni: None,
@@ -6840,6 +6887,7 @@ routing:
                     path: None,
                     host: None,
                     grpc_service_name: None,
+                    grpc_reuse: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: Some("sni.example".to_string()),
@@ -6857,6 +6905,7 @@ routing:
                     path: None,
                     host: None,
                     grpc_service_name: None,
+                    grpc_reuse: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,
@@ -6874,6 +6923,7 @@ routing:
                     path: Some("/ray".to_string()),
                     host: Some(vec!["cdn.example".to_string()]),
                     grpc_service_name: None,
+                    grpc_reuse: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,
@@ -6893,6 +6943,7 @@ routing:
                     path: Some("/ws".to_string()),
                     host: Some(vec!["cdn.example".to_string()]),
                     grpc_service_name: None,
+                    grpc_reuse: None,
                     xhttp_mode: None,
                     packet_encoding: None,
                     tls: true,

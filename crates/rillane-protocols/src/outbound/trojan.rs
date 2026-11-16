@@ -13,7 +13,9 @@ use sha2::{Digest, Sha224};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::grpc::grpc_tunnel;
+use rillane_config::GrpcReuseConfig;
+
+use super::grpc::{grpc_tunnel, GunClient};
 use super::ws::{ws_client_handshake, WsClient};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
@@ -41,6 +43,9 @@ pub struct TrojanConnector {
     /// 共享 ClientConfig 工厂：pool=None 时使 TLS 会话恢复独立于池生效
     /// （§3.1「块存在即生效」；None = 既有每流 ClientConfig）
     factory: Option<Arc<TlsConnectorFactory>>,
+    /// gun 客户端（RIL-130）：本节点级 h2 连接复用面（池面；内联面仍
+    /// 逐流隧道，mihomo gun 客户端同位）
+    gun: Arc<GunClient>,
 }
 
 impl TrojanConnector {
@@ -56,9 +61,23 @@ impl TrojanConnector {
         path: Option<String>,
         host: Option<Vec<String>>,
         grpc_service_name: Option<String>,
+        grpc_reuse: Option<GrpcReuseConfig>,
         pool: Option<Arc<TransportPool>>,
         factory: Option<Arc<TlsConnectorFactory>>,
     ) -> Self {
+        // gun 客户端（RIL-130，mihomo gun.NewClient 口径）：旋钮缺省 = 单
+        // 连接全复用；authority = sni ∥ server（grpc 分支同源回退链）
+        let gun_authority = sni.clone().unwrap_or_else(|| server.clone());
+        let gun_service = grpc_service_name.clone().unwrap_or_default();
+        let (mc, ms, mx) = match &grpc_reuse {
+            Some(r) => (
+                r.max_connections.unwrap_or(0),
+                r.min_streams.unwrap_or(0),
+                r.max_streams.unwrap_or(0),
+            ),
+            None => (0, 0, 0),
+        };
+        let gun = Arc::new(GunClient::new(gun_authority, gun_service, mc, ms, mx));
         Self {
             server,
             port,
@@ -72,6 +91,7 @@ impl TrojanConnector {
             grpc_service_name,
             pool,
             factory,
+            gun,
         }
     }
 
@@ -242,24 +262,49 @@ impl TrojanConnector {
                 self.relay_trojan_over_ws(flow, ws).await
             }
             "grpc" => {
-                let service = self.grpc_service_name()?;
+                // 服务名运行期兜底校验（gun 面服务名由客户端构造期持有）
+                self.grpc_service_name()?;
                 let sni_actual = self.sni.clone().unwrap_or_else(|| self.server.clone());
                 let key = self.transport_key_alpn_h2(&sni_actual);
 
-                // 借出传输层（TLS 已由池侧建立）；gRPC 隧道借出后进行（§4.2）
-                let (boxed, first_lease) = pool
-                    .acquire(&key)
+                // gun 流复用面（RIL-130）：流级复用现役 h2 连接（每流仍是
+                // POST /{service}/Tun），无可复用面才经池借出新拨——连接
+                // 生命周期内持租借记账（§4.2 多路复用 = 共享资源）。池面
+                // stale 一次性重拨（D-11）口径保留：客户端握手失败 →
+                // note_stale + acquire_fresh 重试一次。
+                let tunnel = match self
+                    .gun
+                    .connect({
+                        let pool = pool.clone();
+                        let key = key.clone();
+                        let server_addr = server_addr.clone();
+                        move || {
+                            let pool = pool.clone();
+                            let key = key.clone();
+                            let server_addr = server_addr.clone();
+                            async move {
+                                pool.acquire(&key).await.with_context(|| {
+                                    format!("连接 Trojan 服务器失败: {server_addr}")
+                                })
+                            }
+                        }
+                    })
                     .await
-                    .with_context(|| format!("连接 Trojan 服务器失败: {server_addr}"))?;
-                let tunnel = grpc_tunnel(boxed, &sni_actual, &service).await;
-                let tunnel = match tunnel {
+                {
                     Ok(t) => t,
                     Err(_) => {
-                        // 首写首读失败 → stale 一次性重拨（D-11）
-                        drop(first_lease);
                         pool.note_stale(&key);
-                        let (boxed, _lease) = pool.acquire_fresh(&key).await?;
-                        grpc_tunnel(boxed, &sni_actual, &service).await?
+                        self.gun
+                            .connect({
+                                let pool = pool.clone();
+                                move || {
+                                    let pool = pool.clone();
+                                    let key = key.clone();
+                                    async move { pool.acquire_fresh(&key).await }
+                                }
+                            })
+                            .await
+                            .with_context(|| "Trojan over gRPC 隧道握手失败")?
                     }
                 };
                 self.relay_trojan_over_grpc(flow, tunnel).await
@@ -804,6 +849,7 @@ mod tests {
             true, // skip_cert_verify：自签证书
             TlsFingerprint::None,
             "tcp".to_string(),
+            None,
             None,
             None,
             None,

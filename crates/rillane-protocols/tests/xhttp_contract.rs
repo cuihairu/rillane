@@ -466,7 +466,9 @@ fn xhttp_connector(addr: std::net::SocketAddr, mode: Option<&str>, tls: bool) ->
         "xhttp".to_string(),
         Some(BASE_PATH.to_string()),
         None, // host
-        None, // grpc_service_name
+        None,
+        None,
+        // grpc_service_name
         mode.map(str::to_string),
         None, // packet_encoding（raw——非本测面）
         tls,

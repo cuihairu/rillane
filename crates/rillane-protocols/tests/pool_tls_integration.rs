@@ -225,6 +225,7 @@ async fn trojan_tls_pooled_serial_reuse_and_resumption() {
         None,
         None,
         None,
+        None,
         Some(pool.clone()),
         Some(factory.clone()),
     ));
@@ -513,6 +514,7 @@ async fn trojan_ws_inline_roundtrip_request_in_first_frame() {
         Some(vec!["ws.example.com".to_string()]),
         None,
         None,
+        None,
         Some(factory),
     );
 
@@ -551,6 +553,7 @@ async fn trojan_ws_pooled_borrow_then_upgrade_roundtrip() {
         "ws".to_string(),
         Some("/ray".to_string()),
         Some(vec!["ws.example.com".to_string()]),
+        None,
         None,
         Some(pool.clone()),
         Some(factory),
@@ -610,6 +613,7 @@ async fn trojan_ws_pooled_stale_redial_recovers_from_dead_idle() {
         "ws".to_string(),
         None, // 缺省路径 → "/"
         Some(vec!["ws.example.com".to_string()]),
+        None,
         None,
         Some(pool.clone()),
         Some(factory),
@@ -815,6 +819,7 @@ async fn trojan_grpc_inline_roundtrip_request_in_first_message() {
         None,
         Some("grpc-echo".to_string()),
         None,
+        None,
         Some(factory),
     );
 
@@ -974,6 +979,7 @@ async fn vless_h2_inline_roundtrip_raw_stream() {
         None,
         "h2".to_string(),
         Some("/h2-echo".to_string()),
+        None,
         None,
         None,
         None,

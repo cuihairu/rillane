@@ -54,6 +54,7 @@ fn udp_connector(addr: SocketAddr, encoding: Option<&str>) -> VlessUdpConnector 
         None,
         None,
         None,
+        None,
         encoding.map(str::to_string),
         false,
         false,

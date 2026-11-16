@@ -57,7 +57,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use super::grpc::grpc_tunnel;
+use rillane_config::GrpcReuseConfig;
+
+use super::grpc::{grpc_tunnel, GunClient};
 use super::h2::h2_tunnel;
 use super::httpupgrade::httpupgrade_client_handshake;
 use super::ws::{ws_client_handshake, WsReader, WsWriter};
@@ -831,6 +833,9 @@ pub struct VmessConnector {
     pool: Option<Arc<TransportPool>>,
     /// 共享 ClientConfig 工厂：pool=None 且 tls 时使 TLS 会话恢复独立于池生效
     factory: Option<Arc<TlsConnectorFactory>>,
+    /// gun 客户端（RIL-130）：本节点级 h2 连接复用面（池面；内联面仍
+    /// 逐流隧道，mihomo gun 客户端同位）
+    gun: Arc<GunClient>,
 }
 
 impl VmessConnector {
@@ -847,6 +852,7 @@ impl VmessConnector {
         path: Option<String>,
         host: Option<Vec<String>>,
         grpc_service_name: Option<String>,
+        grpc_reuse: Option<GrpcReuseConfig>,
         tls: bool,
         skip_cert_verify: bool,
         sni: Option<String>,
@@ -855,6 +861,19 @@ impl VmessConnector {
         pool: Option<Arc<TransportPool>>,
         factory: Option<Arc<TlsConnectorFactory>>,
     ) -> Self {
+        // gun 客户端（RIL-130，mihomo gun.NewClient 口径）：旋钮缺省 = 单
+        // 连接全复用；authority = sni ∥ server（grpc 分支同源回退链）
+        let gun_authority = sni.clone().unwrap_or_else(|| server.clone());
+        let gun_service = grpc_service_name.clone().unwrap_or_default();
+        let (mc, ms, mx) = match &grpc_reuse {
+            Some(r) => (
+                r.max_connections.unwrap_or(0),
+                r.min_streams.unwrap_or(0),
+                r.max_streams.unwrap_or(0),
+            ),
+            None => (0, 0, 0),
+        };
+        let gun = Arc::new(GunClient::new(gun_authority, gun_service, mc, ms, mx));
         Self {
             server,
             port,
@@ -872,6 +891,7 @@ impl VmessConnector {
             fingerprint,
             pool,
             factory,
+            gun,
         }
     }
 
@@ -1074,7 +1094,8 @@ impl VmessConnector {
                 self.relay_session_over_httpupgrade(flow, stream).await
             }
             "grpc" => {
-                let service = self.grpc_service_name()?;
+                // 服务名运行期兜底校验（gun 面服务名由客户端构造期持有）
+                self.grpc_service_name()?;
                 // grpc 恒叠 TLS + ALPN h2（gRPC over TLS 语义），SNI 回退 server
                 if !self.tls {
                     return Err(anyhow!("VMess network=grpc 需叠 TLS（gRPC over TLS 语义）"));
@@ -1091,23 +1112,44 @@ impl VmessConnector {
                 );
                 let mut session = self.session(&flow.target.host, flow.target.port)?;
 
-                // 借出传输层（TLS 已由池侧建立）；gRPC 隧道借出后进行（§4.2）
-                let (boxed, first_lease) = pool
-                    .acquire(&key)
+                // gun 流复用面（RIL-130）：流级复用现役 h2 连接（每流仍是
+                // POST /{service}/Tun），无可复用面才经池借出新拨——连接
+                // 生命周期内持租借记账（§4.2 多路复用 = 共享资源）。池面
+                // stale 一次性重拨（D-11）口径保留：客户端握手失败 →
+                // note_stale + acquire_fresh 重试一次。
+                let tunnel = match self
+                    .gun
+                    .connect({
+                        let pool = pool.clone();
+                        let key = key.clone();
+                        let server_addr = server_addr.clone();
+                        move || {
+                            let pool = pool.clone();
+                            let key = key.clone();
+                            let server_addr = server_addr.clone();
+                            async move {
+                                pool.acquire(&key).await.with_context(|| {
+                                    format!("连接 VMess 服务器失败: {server_addr}")
+                                })
+                            }
+                        }
+                    })
                     .await
-                    .with_context(|| format!("连接 VMess 服务器失败: {server_addr}"))?;
-                let tunnel = grpc_tunnel(boxed, &sni_actual, &service).await;
-                let (tunnel, _lease) = match tunnel {
-                    Ok(t) => (t, first_lease),
+                {
+                    Ok(t) => t,
                     Err(_) => {
-                        // 隧道握手失败 → stale 一次性重拨（D-11）
-                        drop(first_lease);
                         pool.note_stale(&key);
-                        let (boxed, lease) = pool.acquire_fresh(&key).await?;
-                        let t = grpc_tunnel(boxed, &sni_actual, &service)
+                        self.gun
+                            .connect({
+                                let pool = pool.clone();
+                                move || {
+                                    let pool = pool.clone();
+                                    let key = key.clone();
+                                    async move { pool.acquire_fresh(&key).await }
+                                }
+                            })
                             .await
-                            .with_context(|| "VMess over gRPC 隧道握手失败")?;
-                        (t, lease)
+                            .with_context(|| "VMess over gRPC 隧道握手失败")?
                     }
                 };
                 self.relay_session_over_grpc(flow, tunnel, &mut session)
@@ -2271,6 +2313,7 @@ mod tests {
             Some("/ws".to_string()),
             None,
             None,
+            None,
             false,
             false,
             None,
@@ -2502,6 +2545,7 @@ mod tests {
             64,
             VmessSecurity::Aes128Gcm,
             "tcp".to_string(),
+            None,
             None,
             None,
             None,
