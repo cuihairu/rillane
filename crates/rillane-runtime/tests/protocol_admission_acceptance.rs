@@ -134,25 +134,54 @@ fn not_admitted_protocol_refused_at_assembly() {
     );
 }
 
-/// 目录 UDP 能力列与构建期扫描一致：hysteria2 已准入（TCP 面）但目录
-/// udp=false——开 UDP 后同一节点被能力扫描点名判负；换成纯 direct 节点
-/// 同一外壳装配成功（扫描按能力判，不一刀切）。
+/// HTTP 代理节点（目录 udp=false——CONNECT 仅隧道面）
+fn http_node() -> EgressDescriptor {
+    EgressDescriptor {
+        name: "http-out".to_string(),
+        spec: EgressConfig::Http {
+            server: "203.0.113.10".to_string(),
+            port: 8080,
+            username: None,
+            password: None,
+            tls: false,
+            skip_cert_verify: false,
+            sni: None,
+            tls_fingerprint: None,
+        },
+    }
+}
+
+/// 目录 UDP 能力列与构建期扫描一致：hysteria2 已准入且 UDP 数据报面随
+/// RIL-133 交付（目录 udp=true）——基础组合（无 obfs）作为 default 装配
+/// 成功；开 UDP 后无 UDP 类型（http，目录 udp=false）仍被点名判负
+/// （扫描按能力判，不一刀切）。
 #[test]
 fn catalog_udp_column_matches_build_scan() {
     let entry = protocol_catalog::entry_for("hysteria2").expect("已编目");
-    assert!(!entry.udp, "hysteria2 无 UDP 出口（目录口径）");
+    assert!(
+        entry.udp,
+        "hysteria2 UDP 数据报面已承载（RIL-133 目录口径）"
+    );
 
+    // 正面：default=hy2-out（基础组合）→ 产 UDP 连接器，装配成功（仅装配，
+    // 不启动——无网络面依赖）
     let cfg = shell(vec![direct_node(), hysteria2_node()], "hy2-out", true);
+    let _ok_runtime = RuntimeBuilder::new(cfg)
+        .with_runtime_config(opts())
+        .build()
+        .expect("hysteria2 基础组合装配成功（RIL-133 数据报面）");
+
+    // 反面：UDP 开 + http（目录 udp=false）→ 能力扫描点名判负
+    let cfg = shell(vec![direct_node(), http_node()], "http-out", true);
     let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
         panic!("UDP 可达集内的无 UDP 节点须构建期判负");
     };
     let rendered = format!("{err:#}");
     assert!(rendered.contains("不支持 UDP"), "能力扫描点名: {rendered}");
-    assert!(rendered.contains("hy2-out"), "点名节点: {rendered}");
-    assert!(rendered.contains("hysteria2"), "点名类型: {rendered}");
+    assert!(rendered.contains("http-out"), "点名节点: {rendered}");
+    assert!(rendered.contains("http"), "点名类型: {rendered}");
 
-    // 正面控制：UDP 开 + 仅 direct（目录 udp=true）装配成功（仅装配，
-    // 不启动——无网络面依赖）
+    // 正面控制：UDP 开 + 仅 direct（目录 udp=true）装配成功
     let cfg = shell(vec![direct_node()], "direct-out", true);
     let _ok_runtime = RuntimeBuilder::new(cfg)
         .with_runtime_config(opts())
