@@ -361,7 +361,11 @@ async fn handle_control_stream(
     let result = control_face(&mut send, &mut recv, password, send_cap, recv_cap).await;
     match result {
         Err(ControlFailure::Auth) => {
-            // !OK serverHello 已回——连接按官方口径发认证错误收束
+            // !OK serverHello 已回——连接按官方口径发认证错误收束。
+            // quinn close 会丢弃发送队列未排空的数据（write_all 仅入队），
+            // 让出一小段让 !OK 帧落到对端，客户端认证面才能读到具名拒绝
+            //（一次性拒绝路径，非逐包面；官方 quic-go close 语义自带排空）
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             conn.close(quinn::VarInt::from_u32(QERR_AUTH), b"auth error");
             Err(anyhow!("hysteria 认证被拒（口令不符），连接收束"))
         }
