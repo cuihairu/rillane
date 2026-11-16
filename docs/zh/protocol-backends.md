@@ -344,6 +344,53 @@ armv7-ohos 桩）在对应小节如实记录。
   契约测试（成功往返/双向分片/认证拒绝/无 UDP 拒绝/取消释放/统计/协议头
   源地址）。
 
+## tuic
+
+- **结论**：自写（RIL-105）——无可用后端。评估扫描（2026-11-16，
+  crates.io API + GitHub 源码核验）：EAimTY `tuic` 家族（`tuic`、
+  `tuic-quinn`、`tuic-client`、`tuic-server`）**全部已发布版本均被
+  yanked**（最高 5.0.0；crates.io max_version 回落 0.0.0 占位——作者已
+  弃管该族），且整族 **GPL-3.0-or-later**——与本仓 Apache-2.0 工作区
+  链接不兼容，无论维护状态如何都不可选。crates.io 上无其它以库形态提供
+  TUIC 协议的 crate（"tuic" 查询 48 项，其余均为无关工具/占位）。维护中
+  的 MetaCubeX/tuic fork 同为 GPL 且交付的是 client/server 二进制而非
+  库。自写因此按官方 wire 规范进行（EAimTY/tuic master `SPEC.md`，与
+  MetaCubeX fork `tuic/src/marshal.rs`/`protocol/*.rs` 源码交叉核对）。
+- **版本**：仓库自写实现（无第三方协议依赖）；载具 quinn 0.11.9 /
+  rustls fork 0.23.46 已由 RIL-133/RIL-107 全仓锁定
+- **许可**：仓库许可（自写）
+- **平台**：以目标平台 QUIC（quinn 生态）支持为准——与 hysteria2 同面
+- **公开 API**：`TuicConnector`/`TuicUdpConnector`
+  （crates/rillane-protocols/src/outbound/tuic.rs；TCP Connect 流面 +
+  UDP Packet 数据报面，精确 TUIC v5）
+- **旁路**：连接器自持 QUIC 会话（quinn）——无底层 socket 旁路；UDP 面
+  协议头逐包携带真实源地址
+- **取消**：建立期检查 + 显式拨号超时（15s，single-flight 持锁与
+  hysteria2 同口径）；relay drop 发送 Dissociate（具名会话收束），会话
+  关闭即 QUIC 连接收束（对端可观释放，验收面计数）
+- **统计**：认证/流/数据报失败经统一 EgressConnector 面具名浮出；UDP 面
+  会话统计（外来会话丢弃/分片丢弃计数）；协议无错误响应面——Connect 目标
+  不可达由流收束形态承载（本仓镜像对端以流重置点名；对真实对端，干净
+  零字节收束如实报告为空隧道，绝不伪装成功）
+- **复用**：TUIC v5 天然多路复用——单条 QUIC 连接承载该节点全部
+  Connect/Packet 面（single-flight 连接 + 复用，出错失效重连与 hysteria2
+  同口径）；中继存续期 Heartbeat 数据报保活；无预热组合
+- 版本边界（v4/v5）：仅 v5。TUIC v4（EAimTY/tuic 的 impl-0.6..1.0 分支
+  线）是不同的 wire 协议——Authenticate 仅 32 字节 digest（无 UUID）、
+  assoc_id 为 u32、Packet 无 pkt_id/frag_total/frag_id 字段、存在
+  Response 命令；v5 帧为 UUID+TOKEN、u16 assoc_id、可分片 Packet、无
+  响应命令。两者绝不静默互换：客户端只发 VER=0x05，镜像对端对 VER≠0x05
+  具名拒绝，不存在 v4 代码路径。`congestion-controller` 非 `cubic`
+  （bbr/new_reno）拨号期具名拒绝——自写面乘 quinn 缺省 cubic，不静默
+  降级。
+- UDP（RIL-105）：数据报面随客户端交付——官方 v5 Packet 命令 over QUIC
+  不可靠数据报（native 模式；quic-stream 中继模式不承载），服务端按
+  assoc_id 建 socket（full-cone 回包回卷），客户端侧分片/重装配（首片
+  携带地址、后续片仅单字节 0xff None——经 marshal.rs 核验），Dissociate
+  收束、Heartbeat 保活。验收：镜像对端契约测试（认证成功/错误 token 具名
+  拒绝/v4 具名拒绝/TCP 往返/拨号失败收束/UDP 往返/分片/Dissociate 资源
+  释放/统计/取消）。
+
 ## wireguard
 
 - **结论**：选库 `defguard_wireguard_rs`（boringtun 内核）
