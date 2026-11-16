@@ -1,0 +1,28 @@
+# RIL-105 订阅兼容样本：TUIC 出站节点（已脱敏）
+# 凭据为占位值；地址用 RFC 5737/2606 文档段。预期：uuid/password/
+# congestion-controller/sni/skip-cert-verify/alpn 双向转换逐字段保留。
+# v5 数据报面（Packet/Dissociate）由 rillane-protocols tuic_contract
+# 与独立镜像对端验收；版本面仅 v5，v4 形状按名拒绝（docs#tuic 口径）。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-tuic-plain
+    type: tuic
+    server: tu1.example.com
+    port: 443
+    uuid: "00000000-0000-0000-0000-000000000000"
+    password: "REDACTED-SAMPLE-tuic-password"
+    sni: tu1.example.com
+    alpn:
+      - h3
+  - name: sample-tuic-congestion
+    type: tuic
+    server: 203.0.113.61
+    port: 8443
+    uuid: "00000000-0000-0000-0000-000000000000"
+    password: "REDACTED-SAMPLE-tuic-password-2"
+    congestion-controller: bbr
+    skip-cert-verify: true
+proxy-groups: []
+rules: []
