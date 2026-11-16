@@ -930,9 +930,10 @@ async fn spawn_vless_h2_tls_server() -> (
                                     let data: &[u8] = match hdr_skip.take() {
                                         Some(0) => {
                                             let hlen = match chunk[21] {
-                                                0x03 => 23 + chunk[22] as usize,
+                                                // atype 用 xray 值：1=IPv4 2=域名 3=IPv6
                                                 0x01 => 22 + 4,
-                                                0x04 => 22 + 16,
+                                                0x02 => 23 + chunk[22] as usize,
+                                                0x03 => 22 + 16,
                                                 other => panic!("未知 atyp: {other}"),
                                             };
                                             &chunk[hlen.min(chunk.len())..]

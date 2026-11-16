@@ -263,19 +263,26 @@ async fn spawn_vless_mock() -> std::net::SocketAddr {
                     return;
                 }
                 match head[21] {
+                    // atype 用 xray 值：1=IPv4 2=域名 3=IPv6
                     0x01 => {
                         let mut ip = [0u8; 4];
                         if sock.read_exact(&mut ip).await.is_err() {
                             return;
                         }
                     }
-                    0x03 => {
+                    0x02 => {
                         let mut l = [0u8; 1];
                         if sock.read_exact(&mut l).await.is_err() {
                             return;
                         }
                         let mut host = vec![0u8; l[0] as usize];
                         if sock.read_exact(&mut host).await.is_err() {
+                            return;
+                        }
+                    }
+                    0x03 => {
+                        let mut ip = [0u8; 16];
+                        if sock.read_exact(&mut ip).await.is_err() {
                             return;
                         }
                     }
