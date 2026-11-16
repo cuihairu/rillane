@@ -156,6 +156,7 @@ Every admitted section carries these fields (the contract test checks each one; 
 - **Stats**: tls=false refused at build time by name; handshake errors through the unified face
 - **Reuse**: no prewarm composition; the UDP face (TLS + network=tcp) reuses the node config
 - UDP: TLS + network=tcp only.
+- **Server face (RIL-135)**: no wireable backend — every Trojan protocol crate on crates.io is GPL-3.0-only (`trojan`/`trojan-rs` 0.6/0.18 whole family incl. `trojan-server`/`trojan-proto`/`trojan-auth`, `nsproxy-trojan-proto` 0.4), incompatible with this Apache-2.0 workspace; `trojan-server`'s face is additionally a monolithic `run(config)` listener loop, not composable into an `IngressEndpoint`. The "no usable library" conclusion is recorded here as the precondition for self-writing: TLS via tokio-rustls (self-signed rcgen fixtures in tests), password = SHA224 hex compared constant-time (core `constant_time_eq`), TCP request frame `[56-hex][CRLF][CMD][ATYP addr port][CRLF]` (CMD 0x01 CONNECT / 0x03 UDP ASSOCIATE — ASSOCIATE answers CRLF CRLF then UDP datagrams on the same port `[ATYP addr port][len][payload]`), framing mirrored from the in-tree client face (outbound/trojan.rs). Inbound role: `TrojanIngress`; UDP sessions in the `UdpSessionTable` (same machinery as the socks5 ASSOCIATE).
 
 ## anytls
 

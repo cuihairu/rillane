@@ -324,6 +324,7 @@ armv7-ohos 桩）在对应小节如实记录。
 - **统计**：tls=false 构建期点名拒绝；握手错误经统一面
 - **复用**：无预热组合；UDP 面（TLS + network=tcp）同节点配置
 - UDP：仅 TLS + network=tcp。
+- **服务端面（RIL-135）**：无可选可接线后端——crates.io 全部 Trojan 协议 crate 均 GPL-3.0-only（`trojan`/`trojan-rs` 0.6/0.18 全家族含 `trojan-server`/`trojan-proto`/`trojan-auth`、`nsproxy-trojan-proto` 0.4），与本仓 Apache-2.0 不兼容；且 `trojan-server` 面为整装 `run(config)` 监听循环，不可组合进 `IngressEndpoint`。「无可用库」结论留证于此，作为自写前置：TLS 走 tokio-rustls（测试 rcgen 自签夹具），口令 = SHA224 hex 恒时比对（core `constant_time_eq`），TCP 请求帧 `[56-hex][CRLF][CMD][ATYP addr port][CRLF]`（CMD 0x01 CONNECT / 0x03 UDP ASSOCIATE——ASSOCIATE 应答 CRLF CRLF 后同端口 UDP 数据报 `[ATYP addr port][len][payload]`），帧原语与仓内客户端面（outbound/trojan.rs）镜像互源。入库角色：`TrojanIngress`；UDP 会话归 `UdpSessionTable`（与 socks5 ASSOCIATE 同机制）。
 
 ## anytls
 
