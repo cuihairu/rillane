@@ -152,7 +152,7 @@ armv7-ohos 桩）在对应小节如实记录。
   base64 密钥形状）；UDP 会话生命周期归 `UdpSessionTable`（与 socks5
   ASSOCIATE 同机制：粘滞路由、空闲回收、链路失败吊销）。
 
-## shadow-tls
+## shadowsocks-shadow-tls
 
 - **结论**：自写载具（RIL-110）——无可用后端。评估扫描（2026-11-17，crates.io API + GitHub 源码核对）：官方 `shadow-tls` crate（ihciah/shadow-tls，registry 最高 0.2.20，MIT，最后发布 2023-04-18——三年半未更新）是唯一 registry 发布的 ShadowTLS 工件，且不可嵌入本仓：(1) lib 根带 `#![feature(impl_trait_in_assoc_type)]`——仅 nightly 可编译，本仓门禁跑在 stable 工具链上；(2) 底座是 monoio（thread-per-core io_uring）而非 tokio——本仓数据面端到端 tokio，且其公开 API 是监听转发二进制面（`ShadowTlsClient::new(listen_addr, target_addr, …)` + `serve()`），没有可包成 EgressConnector/IngressEndpoint 的流级 connect/accept API；(3) v3 另需 rustls 0.20 fork（`rustls-fork-shadow-tls 0.20.9-mod.2`）签 session_id——为载具引入第二套陈旧 TLS 栈与共享 rustls 0.23.46 面并存，代价失当。registry 检索其余命中的只是同一项目的 rustls/monoio fork——无其他 ShadowTLS 协议库。结论=自写，以官方协议文档与源码为线格式基准（ihciah/shadow-tls tag `v0.2.20` 浅读 2026-11-17：`docs/protocol-en.md`（v2 规格）+ `src/helper_v2.rs` + `src/server.rs` `relay_v2`/`copy_until_handshake_finished` + `src/client.rs` `relay_v2`/`connect_v2` + `src/util.rs` 封帧常量）。
 - **版本**：仓内实现（无第三方协议依赖）；ShadowTLS **仅 v2**。v1 点名拒绝——官方最后实现停在 v0.1.4，其握手后流量为无帧裸内层数据、无主动探测防御（官方设计文档以 v2 为其替代）。v3 点名拒绝——抗劫持机制不交付：4 字节 session_id HMAC、ServerRandom 提取 + 对每个握手服务器帧的 XOR SHA256(PreSharedKey+ServerRandom) 变换、双向 4 字节流 HMAC、muddled-request 回退、strict 模式仅 TLS1.3 握手中继。载具 rustls fork 0.23.46 / tokio 全仓已钉；客户端 v2 无需 TLS 库 fork（挑战经后握手写侧流包装注入，不改 rustls）。

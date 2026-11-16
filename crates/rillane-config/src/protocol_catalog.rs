@@ -135,6 +135,18 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "shadowsocks-shadow-tls",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#shadowsocks-shadow-tls",
+        },
+        // RIL-110：载具与内层 SS 组合均无 UDP 面（shadow-tls 仅 TCP 伪
+        // 记录中继）——节点判负 UDP 连接器
+        udp: false,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/shadowtls.rs",
+        },
+    },
+    CatalogEntry {
         kind: "vmess",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#vmess",
@@ -265,6 +277,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Socks5 { .. } => "socks5",
         EgressConfig::Http { .. } => "http",
         EgressConfig::Shadowsocks { .. } => "shadowsocks",
+        EgressConfig::ShadowsocksShadowTls { .. } => "shadowsocks-shadow-tls",
         EgressConfig::Vmess { .. } => "vmess",
         EgressConfig::Vless { .. } => "vless",
         EgressConfig::Trojan { .. } => "trojan",
@@ -311,6 +324,18 @@ mod tests {
                 password: "pw".into(),
                 plugin: None,
                 plugin_opts: None,
+            },
+            EgressConfig::ShadowsocksShadowTls {
+                server: "203.0.113.30".into(),
+                port: 8388,
+                method: "aes-256-gcm".into(),
+                password: "pw".into(),
+                shadow_tls: crate::ShadowTlsEgressConfig {
+                    host: "camo.example.test".into(),
+                    password: "carrier-pw".into(),
+                    version: None,
+                    skip_cert_verify: false,
+                },
             },
             EgressConfig::Vmess {
                 server: "203.0.113.4".into(),
@@ -436,7 +461,7 @@ mod tests {
         assert_eq!(kinds.len(), CATALOG.len(), "类型名唯一");
     }
 
-    /// 准入判定稳定：全目录十二条均已准入（RIL-109 flip 后无未准入条目；
+    /// 准入判定稳定：全目录条目均已准入（RIL-109 flip 后无未准入条目；
     /// 若再引入 NotAdmitted 条目，须同步在本测试与验收面登记拒绝样例）；
     /// 目录外类型 → Unknown（订阅/诊断面按 `config.egress.unknown` 点名）。
     #[test]

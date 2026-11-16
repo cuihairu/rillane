@@ -283,6 +283,31 @@ fn proxy_mapping(
             );
             Some(m)
         }
+        EgressConfig::ShadowsocksShadowTls {
+            server,
+            port,
+            method,
+            password,
+            shadow_tls,
+        } => {
+            // mihomo 同形：shadow-tls 即 SS 插件（TCP 面），载具参数走
+            // plugin-opts（host/password/version/skip-cert-verify）
+            ins(&mut m, "type", "ss");
+            ins(&mut m, "server", server);
+            ins(&mut m, "port", *port as u64);
+            ins(&mut m, "cipher", method);
+            ins(&mut m, "password", password);
+            ins(&mut m, "plugin", "shadow-tls");
+            let mut opts = Mapping::new();
+            ins(&mut opts, "host", &shadow_tls.host);
+            ins(&mut opts, "password", &shadow_tls.password);
+            ins(&mut opts, "version", shadow_tls.version.unwrap_or(2) as u64);
+            if shadow_tls.skip_cert_verify {
+                ins(&mut opts, "skip-cert-verify", true);
+            }
+            ins(&mut m, "plugin-opts", opts);
+            Some(m)
+        }
         EgressConfig::Vmess {
             server,
             port,

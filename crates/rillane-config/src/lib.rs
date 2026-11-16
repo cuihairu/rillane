@@ -1907,6 +1907,21 @@ pub enum IngressConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         udp_enabled: Option<bool>,
     },
+    /// ShadowTLS 入口载具（RIL-110）：伪装站点（handshake site）TLS 中继，
+    /// HMAC-SHA1 挑战响应切换与伪记录双向封帧；切换后的流原样交给
+    /// 数据服务器（内层协议入口，通常 Shadowsocks 入口 bind）。载具无
+    /// 寻址/UDP 面——router/output 不经手，仅 v2（评估见两语
+    /// protocol-backends.md shadow-tls 段；v1/v3 拒绝口径同源
+    /// ShadowTlsEgressConfig）。
+    ShadowTls {
+        bind: String,
+        /// 载具口令（HMAC-SHA1 键；客户端侧须一致；空串装配期拒绝）
+        password: String,
+        /// 伪装站点地址（TLS 中继与挑战应答都属它）
+        handshake_addr: String,
+        /// 数据服务器地址（内层协议入口 bind）
+        target_addr: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1942,6 +1957,43 @@ pub struct GrpcReuseConfig {
     pub min_streams: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_streams: Option<u32>,
+}
+
+/// shadow-tls 载具参数（RIL-110，仅 v2）：挂在 shadowsocks-shadow-tls
+/// 出站下的 TCP 载具面。host = 伪装站点（SNI）；password = 载具口令
+/// （HMAC-SHA1 键）。version 仅接受 None(=2)/2——v1/v3 点名拒绝（评估
+/// 见两语 protocol-backends.md shadow-tls 段）。载具无 UDP 面——组合
+/// 节点判负 UDP 连接器（scan_udp_capability 口径）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowTlsEgressConfig {
+    /// 伪装站点域（SNI；挑战应答与证书链都属它）
+    pub host: String,
+    /// 载具口令（客户端与入口载具侧须一致）
+    pub password: String,
+    /// ShadowTLS 版本；None = 2。非 2 装配期点名拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
+    /// 伪装站点证书校验跳过（与 vless/vmess 等 TLS 面同语义）
+    #[serde(default)]
+    pub skip_cert_verify: bool,
+}
+
+impl ShadowTlsEgressConfig {
+    /// 版本门（RIL-110 仅 v2）：v1 官方已死（裸内层流量、无主动探测
+    /// 防御），v3 劫持面 machinery 未交付（4 字节会话 HMAC + ServerRandom
+    /// 变换 + 双向流 HMAC）——点名拒绝，不静默降级。
+    pub fn validated(&self) -> anyhow::Result<()> {
+        match self.version {
+            None | Some(2) => Ok(()),
+            Some(1) => Err(anyhow::anyhow!(
+                "shadowtls v1 不交付（官方已死、无主动探测防御）：仅 v2"
+            )),
+            Some(3) => Err(anyhow::anyhow!(
+                "shadowtls v3 不交付（会话劫持面 machinery 未交付）：仅 v2"
+            )),
+            Some(v) => Err(anyhow::anyhow!("shadowtls 版本未知：{v}（仅 v2）")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2181,6 +2233,23 @@ pub enum EgressConfig {
         mtu: Option<u16>,
         #[serde(skip_serializing_if = "Option::is_none")]
         dns: Option<Vec<String>>,
+    },
+    /// SS over shadow-tls v2 组合出站（RIL-110）：内层 shadowsocks TCP 面
+    /// 架在 shadow-tls v2 载具上（mihomo 同形——shadow-tls 即 SS 插件）。
+    /// 载具无寻址面：目标寻址归内层 SS 协议；载具无 UDP 面：节点判负
+    /// UDP 连接器（构建期点名，不静默）。`plugin`（SIP003）不与本组合
+    /// 并存（组合面即独立变体，IR 无并置字段）。评估与交付边界见两语
+    /// protocol-backends.md shadow-tls 段。
+    #[serde(rename = "shadowsocks-shadow-tls")]
+    ShadowsocksShadowTls {
+        server: String,
+        port: u16,
+        /// SS 加密方法（与 shadowsocks 同口径校验）
+        method: String,
+        /// SS 预共享密码
+        password: String,
+        /// shadow-tls 载具参数（版本门在 `ShadowTlsEgressConfig::validated`）
+        shadow_tls: ShadowTlsEgressConfig,
     },
 }
 

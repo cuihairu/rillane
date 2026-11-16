@@ -55,12 +55,13 @@ use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
     Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts,
     HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MixedIngress,
-    ShadowsocksConnector, ShadowsocksIngress, ShadowsocksUdpConnector, ShadowsocksUdpParts,
-    Socks5Connector, Socks5Ingress, Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint,
-    TransportKey, TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector,
-    TrojanUdpParts, TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress,
-    VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity,
-    VmessUdpConnector, VmessUdpParts, WireguardConnector, WireguardUdpConnector,
+    ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress, ShadowsocksShadowTlsConnector,
+    ShadowsocksUdpConnector, ShadowsocksUdpParts, Socks5Connector, Socks5Ingress,
+    Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool,
+    TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts, TuicConnector,
+    TuicUdpConnector, VlessConnector, VlessIngress, VlessUdpConnector, VlessUdpParts,
+    VmessConnector, VmessIngress, VmessSecurity, VmessUdpConnector, VmessUdpParts,
+    WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -2670,7 +2671,7 @@ fn build_ingress_endpoints(
     let mut map = HashMap::new();
     for desc in descriptors {
         // P0-5 §1.3/§9-4：per-ingress 覆盖 ∪ 全局；服务实例仍全局共享单例
-        //（会话表/指标单点）。Http 无 UDP 面，恒 None。
+        //（会话表/指标单点）。Http/ShadowTls 无 UDP 面，恒 None。
         let per_ingress = match &desc.spec {
             IngressConfig::Socks5 { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Mixed { udp_enabled, .. } => *udp_enabled,
@@ -2681,6 +2682,7 @@ fn build_ingress_endpoints(
             IngressConfig::Hysteria2 { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Hysteria { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Http { .. } => None,
+            IngressConfig::ShadowTls { .. } => None,
         };
         if per_ingress == Some(true) && !udp_enabled_global {
             // §2.7 日志口径：构建期一次性结构性提示（非逐包路径）
@@ -2899,6 +2901,23 @@ fn build_ingress_endpoints(
                     fake_ip.clone(),
                 )?)
             }
+            IngressConfig::ShadowTls {
+                bind,
+                password,
+                handshake_addr,
+                target_addr,
+            } => {
+                // ShadowTLS 载具（RIL-110）：无寻址面入口——挑战命中切换后
+                // 的流原样交数据服务器（内层协议入口 bind），router/output
+                // 不经手；口令/地址校验拒绝落在装配期（构造即校验）
+                Arc::new(ShadowTlsIngress::new(
+                    desc.name.clone(),
+                    bind.clone(),
+                    password.clone(),
+                    handshake_addr.clone(),
+                    target_addr.clone(),
+                )?)
+            }
         };
         map.insert(desc.name.clone(), endpoint);
     }
@@ -2924,6 +2943,7 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::Anytls { server, .. }
         | EgressConfig::Hysteria { server, .. }
         | EgressConfig::Hysteria2 { server, .. }
+        | EgressConfig::ShadowsocksShadowTls { server, .. }
         | EgressConfig::Tuic { server, .. } => Some(server),
         EgressConfig::Wireguard { endpoint, .. } => Some(endpoint),
     }
@@ -2945,8 +2965,9 @@ fn udp_session_config(cfg: &UdpConfig) -> rillane_core::udp::UdpSessionConfig {
 /// direct / shadowsocks / wireguard / reject / vmess / vless / trojan / anytls /
 /// socks5 / hysteria / hysteria2 → 有能力（reject 为静默丢弃，审核发现
 /// 2026-11-04；hysteria 为 RIL-109 数据报自写面，包层传输判负；hysteria2 为
-/// RIL-133 数据报自写面，obfs 判负）；其余类型 → 判负
-/// （由 `scan_udp_capability` 在构建期报错）。
+/// RIL-133 数据报自写面，obfs 判负）；shadowsocks-shadow-tls 组合与其余
+/// 类型 → 判负（载具与内层 SS 组合均无 UDP 面；由 `scan_udp_capability`
+/// 在构建期报错）。
 ///
 /// vmess/vless/trojan 仅 network=tcp 注册（ws/grpc 的 UDP 面未实现，由
 /// scan_udp_capability 判负）；UDP 面复用 TCP 面连接器的构建期校验
@@ -3017,6 +3038,12 @@ fn build_udp_connectors(
                     .with_context(|| format!("节点 {} 的 shadowsocks 配置无效", desc.name))?;
                     Some(Arc::new(ShadowsocksUdpConnector::from_connector(&conn)))
                 }
+            }
+            EgressConfig::ShadowsocksShadowTls { .. } => {
+                // 组合节点 UDP 判负（RIL-110）：shadow-tls 载具仅 TCP 伪
+                // 记录中继、内层 SS 组合亦无 UDP 面——该节点 UDP 需求由
+                // scan_udp_capability 按既有口径构建期报错
+                None
             }
             EgressConfig::Wireguard {
                 allowed_ips, mtu, ..
@@ -3675,6 +3702,35 @@ fn build_egress_outputs(
                     plugin.clone(),
                     plugin_opts.clone(),
                 )?);
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::ShadowsocksShadowTls {
+                server,
+                port,
+                method,
+                password,
+                shadow_tls,
+            } => {
+                // SS over shadow-tls v2（RIL-110）：载具版本门先行（v1/v3
+                // 点名拒绝，不静默降级），再装配组合连接器（SS 口令与载具
+                // 口令两侧独立；加密方法/地址校验拒绝落在 new 内——配置
+                // 错误启动时暴露）
+                shadow_tls.validated()?;
+                let connector: Arc<dyn EgressConnector> =
+                    Arc::new(ShadowsocksShadowTlsConnector::new(
+                        server.clone(),
+                        *port,
+                        shadow_tls.host.clone(),
+                        shadow_tls.password.clone(),
+                        shadow_tls.skip_cert_verify,
+                        method.clone(),
+                        password.clone(),
+                    )?);
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
                     connector.clone(),
