@@ -204,6 +204,7 @@ fn vless_packet_node(encoding: Option<&str>) -> EgressDescriptor {
             path: None,
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
             xhttp_mode: None,
             packet_encoding: encoding.map(str::to_string),
             tls: false,
@@ -233,10 +234,150 @@ fn vless_packet_encoding_whitelist_enforced_at_build() {
 
     // 正面：白名单内取值（raw/xudp/packetaddr）与缺席均可装配
     for enc in [None, Some("raw"), Some("xudp"), Some("packetaddr")] {
-        let cfg = shell(vec![direct_node(), vless_packet_node(enc)], "direct-out", false);
+        let cfg = shell(
+            vec![direct_node(), vless_packet_node(enc)],
+            "direct-out",
+            false,
+        );
         RuntimeBuilder::new(cfg)
             .with_runtime_config(opts())
             .build()
             .unwrap_or_else(|err| panic!("白名单内取值 {enc:?} 必须可装配: {err:#}"));
+    }
+}
+
+// ---------- grpc-opts 流复用旋钮键位准入（RIL-130） ----------
+
+fn grpc_reuse_knobs() -> Option<rillane_config::GrpcReuseConfig> {
+    Some(rillane_config::GrpcReuseConfig {
+        max_connections: Some(2),
+        min_streams: Some(1),
+        max_streams: Some(4),
+    })
+}
+
+/// vmess/vless/trojan 三族 node：network 与 grpc_reuse 旋钮可参
+fn gun_knob_node(
+    proto: &str,
+    network: &str,
+    reuse: Option<rillane_config::GrpcReuseConfig>,
+) -> EgressDescriptor {
+    let name = format!("gr-{proto}");
+    let spec = match proto {
+        "vmess" => EgressConfig::Vmess {
+            server: "127.0.0.1".to_string(),
+            port: 443,
+            uuid: "00000000-0000-0000-0000-000000000000".to_string(),
+            alter_id: 0,
+            security: "auto".to_string(),
+            network: network.to_string(),
+            path: None,
+            host: None,
+            grpc_service_name: Some("gun-svc".to_string()),
+            grpc_reuse: reuse,
+            tls: true,
+            skip_cert_verify: false,
+            sni: Some("localhost".to_string()),
+            alpn: None,
+            tls_fingerprint: None,
+        },
+        "vless" => EgressConfig::Vless {
+            server: "127.0.0.1".to_string(),
+            port: 443,
+            uuid: "00000000-0000-0000-0000-000000000000".to_string(),
+            flow: None,
+            reality: None,
+            network: network.to_string(),
+            path: None,
+            host: None,
+            grpc_service_name: Some("gun-svc".to_string()),
+            grpc_reuse: reuse,
+            xhttp_mode: None,
+            packet_encoding: None,
+            tls: true,
+            skip_cert_verify: false,
+            sni: Some("localhost".to_string()),
+            alpn: None,
+            tls_fingerprint: None,
+        },
+        _ => EgressConfig::Trojan {
+            server: "127.0.0.1".to_string(),
+            port: 443,
+            password: "gr-acceptance".to_string(),
+            network: network.to_string(),
+            path: None,
+            host: None,
+            grpc_service_name: Some("gun-svc".to_string()),
+            grpc_reuse: reuse,
+            tls: true,
+            skip_cert_verify: false,
+            sni: Some("localhost".to_string()),
+            alpn: None,
+            tls_fingerprint: None,
+        },
+    };
+    EgressDescriptor { name, spec }
+}
+
+#[test]
+fn grpc_reuse_knobs_refused_on_non_grpc_network_at_build() {
+    // 反面：旋钮键位出现在非 grpc 传输 → 构建期点名拒绝（三族 × tcp/ws）
+    for proto in ["vmess", "vless", "trojan"] {
+        for network in ["tcp", "ws"] {
+            let cfg = shell(
+                vec![
+                    direct_node(),
+                    gun_knob_node(proto, network, grpc_reuse_knobs()),
+                ],
+                "direct-out",
+                false,
+            );
+            let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+                panic!("{proto}/{network} 携带流复用旋钮须在构建期拒绝");
+            };
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("仅 network=grpc 可携带"),
+                "{proto}/{network}: {rendered}"
+            );
+            assert!(rendered.contains(network), "点名当前传输: {rendered}");
+            assert!(
+                rendered.contains(&format!("gr-{proto}")),
+                "点名出口: {rendered}"
+            );
+        }
+    }
+
+    // 反面补充：旋钮缺席（None）时非 grpc 网络照常装配（不误伤）
+    for proto in ["vmess", "vless", "trojan"] {
+        let cfg = shell(
+            vec![direct_node(), gun_knob_node(proto, "tcp", None)],
+            "direct-out",
+            false,
+        );
+        RuntimeBuilder::new(cfg)
+            .with_runtime_config(opts())
+            .build()
+            .unwrap_or_else(|err| panic!("{proto}/tcp 无旋钮必须可装配: {err:#}"));
+    }
+}
+
+#[test]
+fn grpc_reuse_knobs_assemble_on_grpc_network() {
+    // 正面：network=grpc + 旋钮三族均可装配（构建期只做键位准入，
+    // 旋钮语义由连接器 gun 面消费——grpc_gun_contract 真对端覆盖）
+    for proto in ["vmess", "vless", "trojan"] {
+        let cfg = shell(
+            vec![
+                direct_node(),
+                gun_knob_node(proto, "grpc", grpc_reuse_knobs()),
+            ],
+            "direct-out",
+            false,
+        );
+        RuntimeBuilder::new(cfg)
+            .with_runtime_config(opts())
+            .build()
+            .unwrap_or_else(|err| panic!("{proto}/grpc + 旋钮必须可装配: {err:#}"));
     }
 }
