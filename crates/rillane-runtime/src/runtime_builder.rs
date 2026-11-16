@@ -54,10 +54,11 @@ use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
     Hysteria2Connector, Hysteria2UdpConnector, MixedIngress, ShadowsocksConnector,
-    ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress, Socks5UdpConnector,
-    TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool, TrojanConnector,
-    TrojanUdpConnector, TuicConnector, TuicUdpConnector, VlessConnector, VlessUdpConnector,
-    VmessConnector, VmessSecurity, VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
+    ShadowsocksIngress, ShadowsocksUdpConnector, ShadowsocksUdpParts, Socks5Connector,
+    Socks5Ingress, Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey,
+    TransportPool, TrojanConnector, TrojanUdpConnector, TuicConnector, TuicUdpConnector,
+    VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity, VmessUdpConnector,
+    WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -463,6 +464,9 @@ impl RuntimeBuilder {
                         udp_enabled: Some(true),
                         ..
                     } | IngressConfig::Mixed {
+                        udp_enabled: Some(true),
+                        ..
+                    } | IngressConfig::Shadowsocks {
                         udp_enabled: Some(true),
                         ..
                     }
@@ -2653,6 +2657,7 @@ fn build_ingress_endpoints(
         let per_ingress = match &desc.spec {
             IngressConfig::Socks5 { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Mixed { udp_enabled, .. } => *udp_enabled,
+            IngressConfig::Shadowsocks { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Http { .. } => None,
         };
         if per_ingress == Some(true) && !udp_enabled_global {
@@ -2701,6 +2706,34 @@ fn build_ingress_endpoints(
                 udp_here,
                 fake_ip.clone(),
             )),
+            IngressConfig::Shadowsocks {
+                bind,
+                method,
+                password,
+                udp_enabled,
+            } => {
+                // SS UDP 面装配件从进程级 ASSOCIATE 服务抽出同源共享件
+                //（会话表 + 出站连接器族；udp 门与 socks5 同口径）
+                let ss_udp = match udp.as_ref() {
+                    Some(svc) if resolve_udp_enabled(udp_enabled_global, *udp_enabled) => {
+                        Some(ShadowsocksUdpParts {
+                            table: svc.table().clone(),
+                            connector: svc.connector().clone(),
+                        })
+                    }
+                    _ => None,
+                };
+                // 构建期校验（method/password 形状）拒绝落在装配期——
+                // 与 egress ShadowsocksConnector::new 同口径
+                Arc::new(ShadowsocksIngress::new(
+                    desc.name.clone(),
+                    bind.clone(),
+                    method.clone(),
+                    password.clone(),
+                    ss_udp,
+                    fake_ip.clone(),
+                )?)
+            }
         };
         map.insert(desc.name.clone(), endpoint);
     }

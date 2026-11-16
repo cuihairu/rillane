@@ -162,3 +162,74 @@ fn version_serializes_into_config_output() {
     let back: RillaneConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(back.version, ConfigVersion::V1);
 }
+
+/// RIL-134：Shadowsocks 入口 IR 面——yaml 解析逐字段 + serde 双向往返
+/// （入口不涉订阅字段，双向面以配置 yaml↔IR↔yaml 承载；udp_enabled
+/// 缺省/显式两形态）
+#[test]
+fn shadowsocks_ingress_yaml_roundtrip() {
+    let yaml = r#"
+control:
+  api_bind: 127.0.0.1:9090
+telemetry:
+  log_level: info
+  enable_metrics: false
+  enable_tracing: false
+ingress:
+  - name: ss-in
+    type: shadowsocks
+    bind: 127.0.0.1:8388
+    method: aes-256-gcm
+    password: ss-sample-password
+    udp_enabled: true
+  - name: ss-in-min
+    type: shadowsocks
+    bind: 127.0.0.1:8389
+    method: 2022-blake3-aes-128-gcm
+    password: "REDACTED-SAMPLE-ss-in-key"
+egress:
+  - name: direct
+    type: direct
+routing:
+  default_node: direct
+  groups: []
+  rules: []
+"#;
+    let config = RillaneConfig::from_str(yaml, None).expect("SS 入口配置必须可解析");
+    assert_eq!(config.ingress.len(), 2);
+
+    // 逐字段断言（显式 udp_enabled 与缺省两形态）
+    match &config.ingress[0].spec {
+        rillane_config::IngressConfig::Shadowsocks {
+            bind,
+            method,
+            password,
+            udp_enabled,
+        } => {
+            assert_eq!(bind, "127.0.0.1:8388");
+            assert_eq!(method, "aes-256-gcm");
+            assert_eq!(password, "ss-sample-password");
+            assert_eq!(*udp_enabled, Some(true));
+        }
+        other => panic!("首入口应为 shadowsocks，实际 {other:?}"),
+    }
+    match &config.ingress[1].spec {
+        rillane_config::IngressConfig::Shadowsocks {
+            bind,
+            method,
+            password,
+            udp_enabled,
+        } => {
+            assert_eq!(bind, "127.0.0.1:8389");
+            assert_eq!(method, "2022-blake3-aes-128-gcm");
+            assert_eq!(*udp_enabled, None, "缺省继承全局");
+            assert_eq!(password, "REDACTED-SAMPLE-ss-in-key");
+        }
+        other => panic!("次入口应为 shadowsocks，实际 {other:?}"),
+    }
+
+    // serde 双向往返：序列化 → 回读逐字段一致（含 type 标签）
+    let json = serde_json::to_string(&config).expect("可序列化");
+    let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
+    assert_eq!(back.ingress, config.ingress, "往返后入口逐字段一致");
+}

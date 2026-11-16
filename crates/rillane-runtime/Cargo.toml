@@ -56,3 +56,5 @@ x509-parser.workspace = true
 wat = "1.261"
 # mesh mTLS 重载路径回归测试以 rcgen 自签证书为夹具。
 rcgen.workspace = true
+# RIL-134：SS2022 password 形状装配拒绝测试以 base64 编码密钥样本
+base64.workspace = true

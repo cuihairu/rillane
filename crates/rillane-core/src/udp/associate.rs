@@ -196,6 +196,12 @@ impl UdpAssociateService {
         &self.table
     }
 
+    /// 出站连接器族共享入口（RIL-134 shadowsocks 入口 UDP 面同用本进程
+    /// 唯一连接器族与会话表——与 ASSOCIATE/TUN 同源）
+    pub fn connector(&self) -> &Arc<dyn EgressUdpConnector> {
+        &self.connector
+    }
+
     pub fn metrics(&self) -> &Arc<UdpIngressMetrics> {
         &self.metrics
     }

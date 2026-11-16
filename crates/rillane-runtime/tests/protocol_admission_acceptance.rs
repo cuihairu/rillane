@@ -381,3 +381,92 @@ fn grpc_reuse_knobs_assemble_on_grpc_network() {
             .unwrap_or_else(|err| panic!("{proto}/grpc + 旋钮必须可装配: {err:#}"));
     }
 }
+
+// ---------- RIL-134：Shadowsocks 入口装配面 ----------
+
+fn ss_ingress_shell(
+    ingress: Vec<IngressDescriptor>,
+    default_node: &str,
+    udp_enabled: bool,
+) -> RillaneConfig {
+    let mut cfg = shell(vec![direct_node()], default_node, udp_enabled);
+    cfg.ingress = ingress;
+    cfg
+}
+
+fn ss_ingress_node(method: &str, password: &str, udp_enabled: Option<bool>) -> IngressDescriptor {
+    IngressDescriptor {
+        name: "ss-in".to_string(),
+        spec: IngressConfig::Shadowsocks {
+            bind: "127.0.0.1:0".to_string(),
+            method: method.to_string(),
+            password: password.to_string(),
+            udp_enabled,
+        },
+    }
+}
+
+/// 构建期点名拒绝（egress 同口径）：none 不放行、未编译面方法名拒绝、
+/// SS2022 password 形状（base64/精确密钥长）拒绝
+#[test]
+fn shadowsocks_ingress_refused_at_assembly_for_bad_method() {
+    let cases = [
+        ("none", "whatever", "none（无加密）不放行"),
+        ("rc4-md5", "whatever", "不支持的加密方法"),
+        ("2022-blake3-aes-128-gcm", "不是base64!!", "base64"),
+    ];
+    for (method, password, expect) in cases {
+        let cfg = ss_ingress_shell(
+            vec![ss_ingress_node(method, password, None)],
+            "direct-main",
+            true,
+        );
+        let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+            panic!("method={method} 坏形状必须装配期拒绝");
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(expect),
+            "method={method} 应含「{expect}」：{msg}"
+        );
+    }
+}
+
+/// SS2022 错长度（aes-128 需 16B，给 32B）装配期拒绝
+#[test]
+fn shadowsocks_ingress_refused_at_assembly_for_ss2022_key_length() {
+    use base64::Engine as _;
+    let long = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+    let cfg = ss_ingress_shell(
+        vec![ss_ingress_node("2022-blake3-aes-128-gcm", &long, None)],
+        "direct-main",
+        true,
+    );
+    let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+        panic!("SS2022 错长度必须装配期拒绝");
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("16 字节"), "应含密钥长点名：{msg}");
+}
+
+/// 正面控制：合法 method/password 装配成功——含 udp_enabled: Some(true)
+/// 且全局 udp.enabled=false 的 WARN 组合（入口级 UDP 门语义同 socks5）
+#[test]
+fn shadowsocks_ingress_assembles_with_valid_credentials() {
+    use base64::Engine as _;
+    let key = base64::engine::general_purpose::STANDARD.encode([9u8; 16]);
+    for (method, password) in [
+        ("aes-256-gcm", "valid-sample-password"),
+        ("2022-blake3-aes-128-gcm", key.as_str()),
+    ] {
+        let cfg = ss_ingress_shell(
+            vec![ss_ingress_node(method, password, Some(true))],
+            "direct-main",
+            false,
+        );
+        RuntimeBuilder::new(cfg)
+            .with_runtime_config(opts())
+            .build()
+            .unwrap_or_else(|e| panic!("method={method} 必须装配成功: {e}"));
+    }
+}

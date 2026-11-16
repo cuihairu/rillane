@@ -1789,6 +1789,23 @@ pub enum IngressConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bearer_tokens: Option<Vec<String>>,
     },
+    /// Shadowsocks 入口（RIL-134）：复用 shadowsocks crate server 面
+    /// （ProxyListener TCP + ProxySocket Server 数据报，见两语
+    /// protocol-backends.md shadowsocks 服务端面评估）。method/password
+    /// 校验与 egress 同口径（none/未编译面点名拒绝、SS2022 base64 密钥
+    /// 形状），拒绝落在装配期（RuntimeBuilder 构造 `ShadowsocksIngress`
+    /// 即校验）。SIP003 插件服务端面未交付——IR 不留字段。
+    Shadowsocks {
+        bind: String,
+        /// 加密方法（同 egress shadowsocks 编译面口径）
+        method: String,
+        /// 预共享密码（v1 AEAD 任意串；SS2022 为 base64 密钥）
+        password: String,
+        /// per-ingress UDP 覆盖（语义同 Socks5）：None 继承 `udp.enabled`，
+        /// Some 显式开/关该入口的 UDP 数据报面。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_enabled: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
