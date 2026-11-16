@@ -472,6 +472,7 @@ fn reality_subscription_fields_convert_both_ways() {
             path: None,
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
 
             xhttp_mode: None,
             packet_encoding: None,
@@ -497,6 +498,7 @@ fn reality_subscription_fields_convert_both_ways() {
             path: None,
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
 
             xhttp_mode: None,
             packet_encoding: None,
@@ -605,6 +607,7 @@ fn vision_flow_subscription_fields_convert_both_ways() {
             path: None,
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
 
             xhttp_mode: None,
             packet_encoding: None,
@@ -630,6 +633,7 @@ fn vision_flow_subscription_fields_convert_both_ways() {
             path: None,
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
 
             xhttp_mode: None,
             packet_encoding: None,
@@ -1069,6 +1073,7 @@ fn xhttp_subscription_fields_convert_both_ways() {
             path: Some("/xh1".into()),
             host: Some(vec!["cdn1.example.com".into()]),
             grpc_service_name: None,
+            grpc_reuse: None,
             xhttp_mode: Some("auto".into()),
             packet_encoding: None,
             tls: true,
@@ -1090,6 +1095,7 @@ fn xhttp_subscription_fields_convert_both_ways() {
             path: Some("/xh2".into()),
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
             xhttp_mode: Some("stream-one".into()),
             packet_encoding: None,
             tls: true,
@@ -1201,6 +1207,7 @@ fn httpupgrade_subscription_fields_convert_both_ways() {
             path: Some("/hu1".into()),
             host: Some(vec!["cdn1.example.com".into()]),
             grpc_service_name: None,
+            grpc_reuse: None,
             tls: true,
             skip_cert_verify: false,
             sni: Some("sni.example.com".into()),
@@ -1220,6 +1227,7 @@ fn httpupgrade_subscription_fields_convert_both_ways() {
             path: Some("/hu2".into()),
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
             xhttp_mode: None,
             packet_encoding: None,
             tls: true,
@@ -1315,7 +1323,11 @@ fn packet_encoding_subscription_fields_convert_both_ways() {
     let names: Vec<&str> = config.egress.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["sample-packet-xudp", "sample-packet-addr", "sample-packet-raw"]
+        vec![
+            "sample-packet-xudp",
+            "sample-packet-addr",
+            "sample-packet-raw"
+        ]
     );
     let specs: Vec<rillane_config::EgressConfig> =
         config.egress.iter().map(|e| e.spec.clone()).collect();
@@ -1331,6 +1343,7 @@ fn packet_encoding_subscription_fields_convert_both_ways() {
             path: None,
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
             xhttp_mode: None,
             packet_encoding: Some("xudp".into()),
             tls: true,
@@ -1352,6 +1365,7 @@ fn packet_encoding_subscription_fields_convert_both_ways() {
             path: None,
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
             xhttp_mode: None,
             packet_encoding: Some("packetaddr".into()),
             tls: true,
@@ -1373,6 +1387,7 @@ fn packet_encoding_subscription_fields_convert_both_ways() {
             path: None,
             host: None,
             grpc_service_name: None,
+            grpc_reuse: None,
             xhttp_mode: None,
             // 显式 raw 入 IR（缺省 = 键位缺席 = None，同义不同形，各随其源）
             packet_encoding: Some("raw".into()),
@@ -1406,9 +1421,13 @@ fn packet_encoding_subscription_fields_convert_both_ways() {
         "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
     )
     .expect("基底配置");
-    for (i, name) in ["sample-packet-xudp", "sample-packet-addr", "sample-packet-raw"]
-        .into_iter()
-        .enumerate()
+    for (i, name) in [
+        "sample-packet-xudp",
+        "sample-packet-addr",
+        "sample-packet-raw",
+    ]
+    .into_iter()
+    .enumerate()
     {
         project.egress.push(rillane_config::EgressDescriptor {
             name: name.into(),
@@ -1447,14 +1466,194 @@ fn packet_encoding_subscription_fields_convert_both_ways() {
         "回读零损失: {:?}",
         back_report.degraded_nodes
     );
-    for (i, name) in ["sample-packet-xudp", "sample-packet-addr", "sample-packet-raw"]
-        .into_iter()
-        .enumerate()
+    for (i, name) in [
+        "sample-packet-xudp",
+        "sample-packet-addr",
+        "sample-packet-raw",
+    ]
+    .into_iter()
+    .enumerate()
     {
+        assert_eq!(back_config.egress[i].name, name, "回读节点序保持");
         assert_eq!(
-            back_config.egress[i].name, name,
-            "回读节点序保持"
+            back_config.egress[i].spec, specs[i],
+            "导出→回读必须逐字段还原 {name}"
         );
+    }
+}
+
+// ---------- gRPC gun 流复用旋钮双向（RIL-130） ----------
+
+#[test]
+fn grpc_reuse_subscription_fields_convert_both_ways() {
+    // 正向：clash 订阅 → IR（三键全给 / 单键 / 三键全缺 各一，三族各一）
+    let (config, report) = loose("grpc_reuse_node.yaml");
+    let names: Vec<&str> = config.egress.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "sample-gun-full",
+            "sample-gun-partial",
+            "sample-gun-default"
+        ]
+    );
+    let uuid = "00000000-0000-0000-0000-000000000000".to_string();
+    let full = Some(rillane_config::GrpcReuseConfig {
+        max_connections: Some(2),
+        min_streams: Some(1),
+        max_streams: Some(4),
+    });
+    let partial = Some(rillane_config::GrpcReuseConfig {
+        max_connections: Some(1),
+        min_streams: None,
+        max_streams: None,
+    });
+
+    assert_eq!(
+        config.egress[0].spec,
+        rillane_config::EgressConfig::Vmess {
+            server: "gr1.example.com".into(),
+            port: 443,
+            uuid: uuid.clone(),
+            alter_id: 0,
+            security: "auto".into(),
+            network: "grpc".into(),
+            path: None,
+            host: None,
+            grpc_service_name: Some("gun-svc".into()),
+            grpc_reuse: full.clone(),
+            tls: true,
+            skip_cert_verify: false,
+            sni: Some("sni.example.com".into()),
+            alpn: None,
+            tls_fingerprint: None,
+        }
+    );
+    assert_eq!(
+        config.egress[1].spec,
+        rillane_config::EgressConfig::Vless {
+            server: "203.0.113.61".into(),
+            port: 8443,
+            uuid: uuid.clone(),
+            flow: None,
+            reality: None,
+            network: "grpc".into(),
+            path: None,
+            host: None,
+            grpc_service_name: Some("gun-svc".into()),
+            grpc_reuse: partial.clone(),
+            xhttp_mode: None,
+            packet_encoding: None,
+            tls: true,
+            skip_cert_verify: true,
+            sni: None,
+            alpn: None,
+            tls_fingerprint: None,
+        }
+    );
+    // 三键全缺 = 构建侧缺省（单连接全复用，mihomo NewClient 同口径）
+    assert_eq!(
+        config.egress[2].spec,
+        rillane_config::EgressConfig::Trojan {
+            server: "203.0.113.62".into(),
+            port: 8443,
+            password: "REDACTED-SAMPLE-gr-password".into(),
+            network: "grpc".into(),
+            path: None,
+            host: None,
+            grpc_service_name: Some("gun-svc".into()),
+            grpc_reuse: None,
+            tls: true,
+            skip_cert_verify: true,
+            sni: None,
+            alpn: None,
+            tls_fingerprint: None,
+        }
+    );
+    assert!(
+        report.dropped_nodes.is_empty(),
+        "gun 旋钮节点必须保留，不丢弃: {:?}",
+        report.dropped_nodes
+    );
+    assert!(
+        report.degraded_nodes.is_empty(),
+        "grpc-opts 旋钮全值入 IR，无降级: {:?}",
+        report.degraded_nodes
+    );
+
+    let specs: Vec<rillane_config::EgressConfig> =
+        config.egress.iter().map(|e| e.spec.clone()).collect();
+
+    // 反向 1：IR → serde → IR（序列化不丢字段，往返逐字段一致）
+    for spec in &specs {
+        let json = serde_json::to_string(spec).expect("IR 序列化");
+        let back: rillane_config::EgressConfig = serde_json::from_str(&json).expect("IR 反序列化");
+        assert_eq!(&back, spec, "serde 往返必须逐字段一致");
+    }
+
+    // 反向 2：IR → clash 导出（grpc-opts 三键）→ 回读再转 IR
+    let mut project: rillane_config::RillaneConfig = serde_yaml::from_str(
+        "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+    )
+    .expect("基底配置");
+    for (i, name) in [
+        "sample-gun-full",
+        "sample-gun-partial",
+        "sample-gun-default",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        project.egress.push(rillane_config::EgressDescriptor {
+            name: name.into(),
+            spec: specs[i].clone(),
+        });
+    }
+    let (yaml, export_report) = rillane_subscription::ClashExporter
+        .export(&project)
+        .unwrap();
+    assert_eq!(
+        export_report.exported_proxies,
+        vec![
+            "sample-gun-full",
+            "sample-gun-partial",
+            "sample-gun-default"
+        ],
+        "gun 旋钮节点应可导出"
+    );
+    assert!(
+        yaml.contains("grpc-opts:") && yaml.contains("grpc-service-name: gun-svc"),
+        "{yaml}"
+    );
+    assert!(yaml.contains("max-connections: 2"), "{yaml}");
+    assert!(yaml.contains("min-streams: 1"), "{yaml}");
+    assert!(yaml.contains("max-streams: 4"), "{yaml}");
+    // 回读：grpc-opts 键位保证往返不丢旋钮
+    let reparsed = ClashConverter::new()
+        .parse(&yaml)
+        .expect("导出必须可被导入侧解析");
+    let (back_config, back_report) = ClashConverter::new()
+        .convert_to_rillane_with_report(&reparsed)
+        .expect("回读转换");
+    assert!(
+        back_report.dropped_nodes.is_empty(),
+        "回读不丢节点: {:?}",
+        back_report.dropped_nodes
+    );
+    assert!(
+        back_report.degraded_nodes.is_empty(),
+        "回读零损失: {:?}",
+        back_report.degraded_nodes
+    );
+    for (i, name) in [
+        "sample-gun-full",
+        "sample-gun-partial",
+        "sample-gun-default",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(back_config.egress[i].name, name, "回读节点序保持");
         assert_eq!(
             back_config.egress[i].spec, specs[i],
             "导出→回读必须逐字段还原 {name}"

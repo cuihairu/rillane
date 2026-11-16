@@ -778,6 +778,9 @@ impl RillaneDslConverter {
                     path,
                     host,
                     grpc_service_name,
+                    // DSL TransportConfig 无 gun 复用键位：本面恒 None（旋钮
+                    // 由 clash/IR 面承载，RIL-130）
+                    grpc_reuse: None,
                     tls: tls_config.enabled,
                     skip_cert_verify: tls_config.skip_cert_verify,
                     sni: tls_config.server_name.clone(),
@@ -861,6 +864,9 @@ impl RillaneDslConverter {
                     // 本面恒 None（xhttp/包编码由 clash/IR 面承载，RIL-129/130）
                     xhttp_mode: None,
                     packet_encoding: None,
+                    // DSL TransportConfig 无 gun 复用键位：本面恒 None（旋钮
+                    // 由 clash/IR 面承载，RIL-130）
+                    grpc_reuse: None,
                     tls: tls_config.enabled,
                     skip_cert_verify: tls_config.skip_cert_verify,
                     sni: tls_config.server_name.clone(),
@@ -928,6 +934,9 @@ impl RillaneDslConverter {
                     path,
                     host,
                     grpc_service_name,
+                    // DSL TransportConfig 无 gun 复用键位：本面恒 None（旋钮
+                    // 由 clash/IR 面承载，RIL-130）
+                    grpc_reuse: None,
                     tls: tls_config.enabled,
                     skip_cert_verify: tls_config.skip_cert_verify,
                     sni: tls_config.server_name.clone(),

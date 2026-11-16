@@ -9,9 +9,9 @@ use serde_yaml::Value;
 use tracing::{debug, warn};
 
 use rillane_config::{
-    CompatibilityDiagnostic, EgressConfig, EgressDescriptor, GroupMember, MatchCondition, ObjectId,
-    PolicyGroup, RealityConfig, RouteRule, RoutingConfig, SourceId, SourceLocation, Strategy,
-    UrlTestConfig,
+    CompatibilityDiagnostic, EgressConfig, EgressDescriptor, GroupMember, GrpcReuseConfig,
+    MatchCondition, ObjectId, PolicyGroup, RealityConfig, RouteRule, RoutingConfig, SourceId,
+    SourceLocation, Strategy, UrlTestConfig,
 };
 
 /// reality-opts YAML 块 → `RealityConfig`（G1-6 配置保留面）：键 kebab/snake
@@ -320,7 +320,11 @@ pub struct ClashProxy {
     /// vless UDP 包编码（RIL-130，mihomo 键位 `packet-encoding`）：raw（缺省，
     /// Xray 原生）/ xudp / packetaddr；白名单外构建期具名拒绝。Clash 规范键
     /// 为 kebab-case，别名面同 skip_cert_verify 口径
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "packet-encoding")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "packet-encoding"
+    )]
     pub packet_encoding: Option<String>,
     /// REALITY 选项块（`reality-opts.public-key`/`short-id`；G1-6）。捕获随
     /// 节点保留（拨号期点名拒绝）——静默降级为普通 TLS VLESS 后，服务端按
@@ -371,6 +375,29 @@ pub struct ClashGrpcOpts {
         alias = "service-name"
     )]
     pub grpc_service_name: Option<String>,
+    /// gun 流复用旋钮（RIL-130；Clash/mihomo 口径键位）。缺省（三键全缺）
+    /// = 单连接全复用
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "max-connections",
+        alias = "max_connections"
+    )]
+    pub max_connections: Option<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "min-streams",
+        alias = "min_streams"
+    )]
+    pub min_streams: Option<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "max-streams",
+        alias = "max_streams"
+    )]
+    pub max_streams: Option<u32>,
 }
 
 /// Clash `h2-opts` 子块（vmess/vless 的 HTTP/2 传输）
@@ -492,6 +519,23 @@ impl ClashProxy {
             .as_ref()
             .and_then(|g| g.grpc_service_name.clone())
             .filter(|s| !s.is_empty())
+    }
+
+    /// gun 流复用旋钮（RIL-130）：`grpc-opts` 内 max-connections/
+    /// min-streams/max-streams → `GrpcReuseConfig`；三键全缺 = None（构建
+    /// 侧缺省单连接全复用，mihomo NewClient 同口径）。
+    pub fn grpc_reuse(&self) -> Option<GrpcReuseConfig> {
+        let g = self.grpc_opts.as_ref()?;
+        let reuse = GrpcReuseConfig {
+            max_connections: g.max_connections,
+            min_streams: g.min_streams,
+            max_streams: g.max_streams,
+        };
+        if reuse == GrpcReuseConfig::default() {
+            None
+        } else {
+            Some(reuse)
+        }
     }
 
     /// h2 请求路径：平铺 `path` 优先（少数变体口径），否则 `h2-opts.path`。
@@ -810,7 +854,12 @@ impl ClashRule {
         // 逻辑规则（RIL-014）：AND/OR/NOT 载荷内含嵌套逗号，不能走朴素
         // split——按头一个逗号前的 kind 提前分流到括号感知解析器。未知
         // 关键子条件在子解析里报错，整条规则显式拒绝（不得部分跳过）
-        let head = raw.split(',').next().unwrap_or("").trim().to_ascii_uppercase();
+        let head = raw
+            .split(',')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_uppercase();
         if matches!(head.as_str(), "AND" | "OR" | "NOT") {
             return Self::parse_logic_rule(&head, raw);
         }
@@ -917,7 +966,12 @@ impl ClashRule {
                 // 逻辑规则与双段普通子条件都缺尾段，解析失败按形态补占位
                 // target 重试，转换期忽略占位值
                 ClashRule::parse_rule_string(sub).or_else(|err| {
-                    let head = sub.split(',').next().unwrap_or("").trim().to_ascii_uppercase();
+                    let head = sub
+                        .split(',')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_uppercase();
                     let double_segment =
                         sub.split(',').filter(|p| !p.trim().is_empty()).count() == 2;
                     if matches!(head.as_str(), "AND" | "OR" | "NOT") || double_segment {
@@ -1377,8 +1431,7 @@ impl ConversionReport {
                 self.degraded_providers.len()
             ));
             lines.extend(
-                self
-                    .degraded_providers
+                self.degraded_providers
                     .iter()
                     .map(|(name, reason)| format!("  provider {name}: {reason}")),
             );
@@ -1862,6 +1915,7 @@ impl ClashConverter {
                     path,
                     host,
                     grpc_service_name: proxy.grpc_service(),
+                    grpc_reuse: proxy.grpc_reuse(),
                     tls: proxy.tls,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),
@@ -1911,6 +1965,7 @@ impl ClashConverter {
                     path,
                     host,
                     grpc_service_name: proxy.grpc_service(),
+                    grpc_reuse: proxy.grpc_reuse(),
                     xhttp_mode: proxy.xhttp_mode(),
                     packet_encoding: proxy.packet_encoding(),
                     tls: proxy.tls,
@@ -1938,6 +1993,7 @@ impl ClashConverter {
                     path: proxy.path.clone(),
                     host: proxy.host.clone().map(|h| vec![h]),
                     grpc_service_name: proxy.grpc_service(),
+                    grpc_reuse: proxy.grpc_reuse(),
                     tls: true,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),
@@ -2168,20 +2224,19 @@ impl ClashConverter {
             // Clash 用同一套成员探活参数判定「首位是否还活着」，原样注入
             // UrlTestConfig（interval 秒透传，RIL-092），导入后即按原节奏
             // 探活驱动按序回退
-            let url_test =
-                match group.group_type {
-                    ClashProxyGroupType::UrlTest | ClashProxyGroupType::Fallback => group
-                        .url
-                        .as_deref()
-                        .and_then(split_probe_url)
-                        .map(|(probe, path)| UrlTestConfig {
-                            probe,
-                            path,
-                            interval_secs: clash_interval_secs(group.interval),
-                            timeout_ms: 5000,
-                        }),
-                    _ => None,
-                };
+            let url_test = match group.group_type {
+                ClashProxyGroupType::UrlTest | ClashProxyGroupType::Fallback => group
+                    .url
+                    .as_deref()
+                    .and_then(split_probe_url)
+                    .map(|(probe, path)| UrlTestConfig {
+                        probe,
+                        path,
+                        interval_secs: clash_interval_secs(group.interval),
+                        timeout_ms: 5000,
+                    }),
+                _ => None,
+            };
 
             groups.push(PolicyGroup {
                 name,
@@ -2205,9 +2260,9 @@ impl ClashConverter {
             ClashProxyGroupType::Select => Ok(Strategy::Fixed),
             ClashProxyGroupType::UrlTest => Ok(Strategy::Latency),
             ClashProxyGroupType::Fallback => Ok(Strategy::Fallback),
-            ClashProxyGroupType::LoadBalance | ClashProxyGroupType::Relay => {
-                Err(anyhow!("load-balance/relay 由调用方按声明子键分派处理（RIL-013）"))
-            }
+            ClashProxyGroupType::LoadBalance | ClashProxyGroupType::Relay => Err(anyhow!(
+                "load-balance/relay 由调用方按声明子键分派处理（RIL-013）"
+            )),
         }
     }
 
@@ -2394,7 +2449,10 @@ impl ClashConverter {
             // RIL-014：逻辑 NOT——唯一子条件不命中即命中 → Not
             ClashRule::LogicNot { rules, target } => {
                 if rules.len() != 1 {
-                    return Err(anyhow!("NOT 逻辑规则只允许一个子条件，当前 {}", rules.len()));
+                    return Err(anyhow!(
+                        "NOT 逻辑规则只允许一个子条件，当前 {}",
+                        rules.len()
+                    ));
                 }
                 let conditions = self.convert_logic_subrules(rules, providers)?;
                 let matches = vec![MatchCondition::Not {
@@ -2649,7 +2707,11 @@ rules:
         let converter = ClashConverter::new();
         let config = converter.parse(yaml_content).unwrap();
         let groups = converter
-            .convert_proxy_groups_to_groups(&config.proxy_groups, &std::collections::HashMap::new(), &mut Default::default())
+            .convert_proxy_groups_to_groups(
+                &config.proxy_groups,
+                &std::collections::HashMap::new(),
+                &mut Default::default(),
+            )
             .unwrap();
         assert_eq!(groups.len(), 3);
 
@@ -2713,7 +2775,11 @@ rules:
         let converter = ClashConverter::new();
         let config = converter.parse(yaml_content).unwrap();
         let groups = converter
-            .convert_proxy_groups_to_groups(&config.proxy_groups, &std::collections::HashMap::new(), &mut Default::default())
+            .convert_proxy_groups_to_groups(
+                &config.proxy_groups,
+                &std::collections::HashMap::new(),
+                &mut Default::default(),
+            )
             .unwrap();
 
         let interval_of = |suffix: &str| -> u64 {
@@ -3225,12 +3291,15 @@ rules: []
 
         // raw 取值放行且入 vless 面同形键位（vmess IR 无此字段——raw 即仓
         // 内 UDP 面，不携带也不降级）
-        let raw_yaml = yaml_content.replace("packet-encoding: xudp", "packet-encoding: raw")
+        let raw_yaml = yaml_content
+            .replace("packet-encoding: xudp", "packet-encoding: raw")
             .replace("type: vmess", "type: vless");
         let clash = converter.parse(&raw_yaml).unwrap();
         let rillane = converter.convert_to_rillane(&clash).unwrap();
         match &rillane.egress[0].spec {
-            EgressConfig::Vless { packet_encoding, .. } => {
+            EgressConfig::Vless {
+                packet_encoding, ..
+            } => {
                 assert_eq!(packet_encoding.as_deref(), Some("raw"), "raw 应入 IR");
             }
             other => panic!("unexpected egress config: {other:?}"),
@@ -3389,16 +3458,12 @@ rules: []
             Strategy::Latency
         );
         // RIL-013：LB/relay 子键分派在调用方，这里直接报错不再给 Weighted
-        assert!(
-            converter
-                .convert_group_type_to_strategy(ClashProxyGroupType::LoadBalance)
-                .is_err()
-        );
-        assert!(
-            converter
-                .convert_group_type_to_strategy(ClashProxyGroupType::Relay)
-                .is_err()
-        );
+        assert!(converter
+            .convert_group_type_to_strategy(ClashProxyGroupType::LoadBalance)
+            .is_err());
+        assert!(converter
+            .convert_group_type_to_strategy(ClashProxyGroupType::Relay)
+            .is_err());
     }
 
     #[test]
@@ -3636,7 +3701,11 @@ rules:
         let converter = ClashConverter::new();
         let clash = converter.parse(yaml).unwrap();
         let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
-        assert!(report.is_empty(), "端口规则必须零损失: {}", report.summary());
+        assert!(
+            report.is_empty(),
+            "端口规则必须零损失: {}",
+            report.summary()
+        );
 
         let src = &config.routing.rules[0];
         assert_eq!(src.matches.len(), 1);
@@ -3650,9 +3719,7 @@ rules:
         let dst = &config.routing.rules[1];
         assert_eq!(
             dst.matches[0],
-            MatchCondition::Port {
-                values: vec![443]
-            },
+            MatchCondition::Port { values: vec![443] },
             "DST-PORT 落目标端口 Port"
         );
     }
@@ -3718,11 +3785,18 @@ rules:
         );
 
         // 声明面：url/path/interval（Clash interval 即秒）原样带入
-        let ads = config.routing.rule_providers.get("ads").expect("声明落配置");
+        let ads = config
+            .routing
+            .rule_providers
+            .get("ads")
+            .expect("声明落配置");
         assert_eq!(ads.provider_type, "http");
         assert_eq!(ads.behavior, "domain");
         assert_eq!(ads.format.as_deref(), Some("yaml"));
-        assert_eq!(ads.url.as_deref(), Some("https://example.invalid/rules/ads.yaml"));
+        assert_eq!(
+            ads.url.as_deref(),
+            Some("https://example.invalid/rules/ads.yaml")
+        );
         assert_eq!(ads.interval_secs, Some(86400), "Clash interval 口径即秒");
         let local = config
             .routing
@@ -3767,21 +3841,23 @@ rules:
         let converter = ClashConverter::new();
         let clash = converter.parse(yaml).unwrap();
         let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
-        assert!(report.is_empty(), "逻辑规则必须零损失: {}", report.summary());
+        assert!(
+            report.is_empty(),
+            "逻辑规则必须零损失: {}",
+            report.summary()
+        );
 
         // AND 平铺：matches 列表内即 AND，顺序保持
         let and = &config.routing.rules[0];
         assert_eq!(and.name, "rule-1");
         assert_eq!(and.matches.len(), 3);
-        assert_eq!(and.matches[0], MatchCondition::DomainSuffix {
-            values: vec!["internal.corp".to_string()]
-        });
         assert_eq!(
-            and.matches[1],
-            MatchCondition::Port {
-                values: vec![8443]
+            and.matches[0],
+            MatchCondition::DomainSuffix {
+                values: vec!["internal.corp".to_string()]
             }
         );
+        assert_eq!(and.matches[1], MatchCondition::Port { values: vec![8443] });
         assert_eq!(
             and.matches[2],
             MatchCondition::Proto {
@@ -3796,12 +3872,8 @@ rules:
             or.matches[0],
             MatchCondition::Any {
                 conditions: vec![
-                    MatchCondition::SrcPort {
-                        values: vec![9000]
-                    },
-                    MatchCondition::Port {
-                        values: vec![53]
-                    },
+                    MatchCondition::SrcPort { values: vec![9000] },
+                    MatchCondition::Port { values: vec![53] },
                 ]
             }
         );
@@ -3865,9 +3937,12 @@ rules:
         // 保留面不受损，顺序保持
         assert_eq!(config.routing.rules.len(), 1);
         assert_eq!(config.routing.rules[0].name, "rule-3");
-        assert_eq!(config.routing.rules[0].matches[0], MatchCondition::DomainSuffix {
-            values: vec!["kept.example".to_string()]
-        });
+        assert_eq!(
+            config.routing.rules[0].matches[0],
+            MatchCondition::DomainSuffix {
+                values: vec!["kept.example".to_string()]
+            }
+        );
 
         // 严格整体拒绝并点名两条
         let strict = ClashConverter::new().with_strict(true);
@@ -3947,12 +4022,18 @@ rules:
         // behavior 越域显式拒绝：domain 行进 ipcidr 库必须报错
         let err = parse_rule_provider_payload("ipcidr", "yaml", yaml_payload)
             .expect_err("domain 行进 ipcidr 库必须报错");
-        assert!(err.to_string().contains("behavior"), "越域点名 behavior: {err}");
+        assert!(
+            err.to_string().contains("behavior"),
+            "越域点名 behavior: {err}"
+        );
 
         // 未知类型点名
         let err = parse_rule_provider_payload("classical", "text", "FUTURE-TYPE,foo\n")
             .expect_err("未知类型必须报错");
-        assert!(err.to_string().contains("FUTURE-TYPE"), "点名未知类型: {err}");
+        assert!(
+            err.to_string().contains("FUTURE-TYPE"),
+            "点名未知类型: {err}"
+        );
     }
 
     /// RIL-015：进程名/路径规则转换到规范条件，并作为引擎降级显式报告。
@@ -3990,9 +4071,7 @@ rules:
         assert_eq!(
             config.routing.rules[1].matches,
             vec![MatchCondition::ProcessPath {
-                values: vec![
-                    "/Applications/Safari.app/Contents/MacOS/Safari".to_string()
-                ]
+                values: vec!["/Applications/Safari.app/Contents/MacOS/Safari".to_string()]
             }]
         );
         assert_eq!(report.dropped_rules.len(), 0);
@@ -4017,5 +4096,4 @@ rules:
             .iter()
             .any(|d| d.location.pointer == "rules/rule-1"));
     }
-
 }

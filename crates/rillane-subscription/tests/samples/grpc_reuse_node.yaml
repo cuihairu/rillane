@@ -1,0 +1,43 @@
+# 脱敏样本（RIL-130）：gRPC gun 流复用旋钮（grpc-opts 内 max-connections /
+# min-streams / max-streams）双向转换——三键全给 / 单键 / 三键全缺 各一，
+# 覆盖 vmess、vless、trojan 三族。全零 UUID、占位域名（RFC 2606 保留段）
+# 与 RFC 5737 保留地址，不含任何真实凭据。
+proxies:
+  - name: "sample-gun-full"
+    type: vmess
+    server: gr1.example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    security: auto
+    network: grpc
+    tls: true
+    servername: sni.example.com
+    grpc-opts:
+      grpc-service-name: gun-svc
+      max-connections: 2
+      min-streams: 1
+      max-streams: 4
+  - name: "sample-gun-partial"
+    type: vless
+    server: 203.0.113.61
+    port: 8443
+    uuid: 00000000-0000-0000-0000-000000000000
+    network: grpc
+    tls: true
+    skip-cert-verify: true
+    grpc-opts:
+      grpc-service-name: gun-svc
+      max-connections: 1
+  - name: "sample-gun-default"
+    type: trojan
+    server: 203.0.113.62
+    port: 8443
+    password: "REDACTED-SAMPLE-gr-password"
+    network: grpc
+    tls: true
+    skip-cert-verify: true
+    grpc-opts:
+      grpc-service-name: gun-svc
+
+proxy-groups: []
+rules: []

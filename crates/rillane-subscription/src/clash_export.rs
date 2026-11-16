@@ -22,7 +22,8 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use rillane_config::{
-    EgressConfig, GroupMember, MatchCondition, RillaneConfig as ProjectConfig, Strategy,
+    EgressConfig, GroupMember, GrpcReuseConfig, MatchCondition, RillaneConfig as ProjectConfig,
+    Strategy,
 };
 use serde::Serialize;
 use serde_yaml::{Mapping, Value};
@@ -292,6 +293,7 @@ fn proxy_mapping(
             path,
             host,
             grpc_service_name,
+            grpc_reuse,
             tls,
             skip_cert_verify,
             sni,
@@ -319,13 +321,12 @@ fn proxy_mapping(
             ws_opts(&mut m, network, path.as_deref(), host.as_deref());
             h2_opts(&mut m, network, path.as_deref(), host.as_deref());
             httpupgrade_opts(&mut m, network, path.as_deref(), host.as_deref());
-            if network == "grpc" {
-                if let Some(svc) = grpc_service_name {
-                    let mut gopts = Mapping::new();
-                    ins(&mut gopts, "grpc-service-name", svc.as_str());
-                    ins(&mut m, "grpc-opts", gopts);
-                }
-            }
+            grpc_opts(
+                &mut m,
+                network,
+                grpc_service_name.as_deref(),
+                grpc_reuse.as_ref(),
+            );
             degrade(
                 report,
                 name,
@@ -344,6 +345,7 @@ fn proxy_mapping(
             path,
             host,
             grpc_service_name,
+            grpc_reuse,
             xhttp_mode,
             packet_encoding,
             tls,
@@ -383,13 +385,12 @@ fn proxy_mapping(
             ws_opts(&mut m, network, path.as_deref(), host.as_deref());
             h2_opts(&mut m, network, path.as_deref(), host.as_deref());
             httpupgrade_opts(&mut m, network, path.as_deref(), host.as_deref());
-            if network == "grpc" {
-                if let Some(svc) = grpc_service_name {
-                    let mut gopts = Mapping::new();
-                    ins(&mut gopts, "grpc-service-name", svc.as_str());
-                    ins(&mut m, "grpc-opts", gopts);
-                }
-            }
+            grpc_opts(
+                &mut m,
+                network,
+                grpc_service_name.as_deref(),
+                grpc_reuse.as_ref(),
+            );
             // RIL-129：XHTTP 选项导出为 xhttp-opts（mihomo 键位），network
             // 键位 + mode/path/host 不丢（供 mihomo 回读还原载具与载具参数）
             if network == "xhttp" {
@@ -429,6 +430,7 @@ fn proxy_mapping(
             path,
             host,
             grpc_service_name,
+            grpc_reuse,
             tls: _,
             skip_cert_verify,
             sni,
@@ -450,13 +452,12 @@ fn proxy_mapping(
                 ins(&mut m, "alpn", a.clone());
             }
             ws_opts(&mut m, network, path.as_deref(), host.as_deref());
-            if network == "grpc" {
-                if let Some(svc) = grpc_service_name {
-                    let mut gopts = Mapping::new();
-                    ins(&mut gopts, "grpc-service-name", svc.as_str());
-                    ins(&mut m, "grpc-opts", gopts);
-                }
-            }
+            grpc_opts(
+                &mut m,
+                network,
+                grpc_service_name.as_deref(),
+                grpc_reuse.as_ref(),
+            );
             degrade(
                 report,
                 name,
@@ -713,6 +714,38 @@ fn httpupgrade_opts(m: &mut Mapping, network: &str, path: Option<&str>, host: Op
         }
     }
     ins(m, "httpupgrade-opts", h);
+}
+
+/// gRPC 传输导出（RIL-130）：`network` 键 + 服务名 + gun 流复用旋钮
+/// 一并写入（mihomo 键位 max-connections/min-streams/max-streams）；
+/// 旋钮缺省（None）不写键——Clash 缺省即单连接全复用。`network` 键必写：
+/// 导入侧缺省归 tcp，漏写会把 grpc 节点静默降级为 tcp（载具信息丢失）。
+fn grpc_opts(
+    m: &mut Mapping,
+    network: &str,
+    service: Option<&str>,
+    reuse: Option<&GrpcReuseConfig>,
+) {
+    if network != "grpc" {
+        return;
+    }
+    ins(m, "network", "grpc");
+    let mut g = Mapping::new();
+    if let Some(svc) = service {
+        ins(&mut g, "grpc-service-name", svc);
+    }
+    if let Some(r) = reuse {
+        if let Some(mc) = r.max_connections {
+            ins(&mut g, "max-connections", mc as u64);
+        }
+        if let Some(ms) = r.min_streams {
+            ins(&mut g, "min-streams", ms as u64);
+        }
+        if let Some(mx) = r.max_streams {
+            ins(&mut g, "max-streams", mx as u64);
+        }
+    }
+    ins(m, "grpc-opts", g);
 }
 
 fn condition_to_rules(
@@ -974,6 +1007,7 @@ mod tests {
                         path: Some("/ray".into()),
                         host: Some(vec!["cdn.example.com".into()]),
                         grpc_service_name: None,
+                        grpc_reuse: None,
                         tls: true,
                         skip_cert_verify: false,
                         sni: Some("sni.example.com".into()),
