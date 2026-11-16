@@ -181,11 +181,15 @@ pub const CATALOG: &[CatalogEntry] = &[
     },
     CatalogEntry {
         kind: "hysteria",
-        registration: Registration::NotAdmitted {
-            reason: "hysteria v1 无已评审后端（RIL-109 选库前置未完成；UDP 载具 quinn 未决）——无实现证据不得自写，装配期拒绝",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#hysteria",
         },
-        udp: false,
-        backend: Backend::None,
+        // RIL-109：官方 UDP 会话+数据报协议自写面（v1 无任何可用库——评估
+        // 留证后自写；obfs/wechat/faketcp 包层传输判负，载具 = 原生 UDP 上的 QUIC）
+        udp: true,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/hysteria.rs",
+        },
     },
     CatalogEntry {
         kind: "hysteria2",
@@ -432,7 +436,8 @@ mod tests {
         assert_eq!(kinds.len(), CATALOG.len(), "类型名唯一");
     }
 
-    /// 准入判定稳定：已准入十一条 + hysteria v1 未准入（点名 RIL-109 前置）；
+    /// 准入判定稳定：全目录十二条均已准入（RIL-109 flip 后无未准入条目；
+    /// 若再引入 NotAdmitted 条目，须同步在本测试与验收面登记拒绝样例）；
     /// 目录外类型 → Unknown（订阅/诊断面按 `config.egress.unknown` 点名）。
     #[test]
     fn admission_decisions_are_stable() {
@@ -447,12 +452,10 @@ mod tests {
                     );
                 }
                 Registration::NotAdmitted { reason } => {
-                    let Admission::NotAdmitted(got) = verdict else {
-                        panic!("{} 应未准入: {verdict:?}", e.kind);
-                    };
-                    assert_eq!(got.kind, "hysteria");
-                    assert!(reason.contains("RIL-109"), "原因点名前置: {reason}");
-                    assert_eq!(got.backend, Backend::None, "未准入即无后端");
+                    panic!(
+                        "编目出现未准入条目 {}（原因 {reason}）——准入决策面变更须同步登记拒绝样例",
+                        e.kind
+                    );
                 }
             }
         }
@@ -470,7 +473,7 @@ mod tests {
     /// UDP 能力列与构建期扫描口径一致（§3.1 支持集）。
     #[test]
     fn admitted_requires_evidence_and_backend() {
-        const UDP_SUPPORTED: [&str; 11] = [
+        const UDP_SUPPORTED: [&str; 12] = [
             "direct",
             "shadowsocks",
             "wireguard",
@@ -480,6 +483,7 @@ mod tests {
             "trojan",
             "socks5",
             "anytls",
+            "hysteria",
             "hysteria2",
             "tuic",
         ];
@@ -599,8 +603,5 @@ mod tests {
                 Backend::None => unreachable!("准入条目无 None 后端"),
             }
         }
-        // 未准入条目也有记录小节（留证「为什么不能进热路径」）
-        let zh_hy = section(&zh, "hysteria");
-        assert!(zh_hy.contains("未准入"), "hysteria 小节须写明未准入状态");
     }
 }
