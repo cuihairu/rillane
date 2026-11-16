@@ -87,6 +87,12 @@ httparse = "1.9"
 http = "1.1"
 pin-project-lite = "0.2"
 hysteria2 = "0.1.6"
+# Hysteria2 UDP 中继面（RIL-133）：官方 UDPMessage 数据报协议自写——hysteria2
+# crate 无数据报公开 API（仅 connect/DuplexStream TCP 面），结论留证
+# protocol-backends.md#hysteria2；载具与 crate 同源（quinn/h3/h3-quinn 单版本入锁）
+quinn = "0.11.9"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
 # AnyTLS（RIL-106）：会话复用代理——TLS 拨号/会话认证由调用方实现（Dialer
 # 闭包），库承载会话帧/多路复用/填充与 UoT；default-features=false 弃 CLI 面
 # （clap/env_logger/ctrlc2/ffi/panel-sync 均不入库）；server 特性仅测试对端用

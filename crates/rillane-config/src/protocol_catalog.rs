@@ -192,7 +192,7 @@ pub const CATALOG: &[CatalogEntry] = &[
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#hysteria2",
         },
-        udp: false, // 当前连接器仅 TCP stream over QUIC（载具 quinn 未决，归 V2）
+        udp: true, // RIL-133：官方 UDPMessage 数据报协议自写面（crate 无数据报 API，obfs 判负）
         backend: Backend::Library {
             crate_name: "hysteria2",
             version_req: "0.1.6",
@@ -442,7 +442,7 @@ mod tests {
     /// UDP 能力列与构建期扫描口径一致（§3.1 支持集）。
     #[test]
     fn admitted_requires_evidence_and_backend() {
-        const UDP_SUPPORTED: [&str; 9] = [
+        const UDP_SUPPORTED: [&str; 10] = [
             "direct",
             "shadowsocks",
             "wireguard",
@@ -452,6 +452,7 @@ mod tests {
             "trojan",
             "socks5",
             "anytls",
+            "hysteria2",
         ];
         for e in CATALOG {
             match e.registration {

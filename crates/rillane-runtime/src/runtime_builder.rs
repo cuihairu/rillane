@@ -53,7 +53,7 @@ use std::net::IpAddr;
 use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
-    Hysteria2Connector, MixedIngress,
+    Hysteria2Connector, Hysteria2UdpConnector, MixedIngress,
     ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress,
     Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool,
     TrojanConnector, TrojanUdpConnector, VlessConnector, VlessUdpConnector, VmessConnector,
@@ -2743,9 +2743,10 @@ fn udp_session_config(cfg: &UdpConfig) -> rillane_core::udp::UdpSessionConfig {
 }
 
 /// UDP 出站连接器表（udp-relay-path.md §3.1 能力表）：
-/// direct / shadowsocks / wireguard / reject / vmess / vless / trojan →
-/// 有能力（reject 为静默丢弃，审核发现 2026-11-04）；其余类型 → 判负
-/// （由 `scan_udp_capability` 在构建期报错，hy2 的 V1 结论见该文档 §3.4/§6）。
+/// direct / shadowsocks / wireguard / reject / vmess / vless / trojan / anytls /
+/// socks5 / hysteria2 → 有能力（reject 为静默丢弃，审核发现 2026-11-04；
+/// hysteria2 为 RIL-133 数据报自写面，obfs 判负）；其余类型 → 判负
+/// （由 `scan_udp_capability` 在构建期报错，hy2 v1 归 RIL-109 未评审）。
 ///
 /// vmess/vless/trojan 仅 network=tcp 注册（ws/grpc 的 UDP 面未实现，由
 /// scan_udp_capability 判负）；UDP 面复用 TCP 面连接器的构建期校验
@@ -2935,6 +2936,38 @@ fn build_udp_connectors(
                 );
                 Some(Arc::new(TrojanUdpConnector::from_connector(&conn)))
             }
+            EgressConfig::Hysteria2 {
+                server,
+                port,
+                password,
+                mport,
+                obfs,
+                obfs_param,
+                server_name,
+                skip_cert_verify,
+                alpn,
+            } => {
+                // Hysteria2 UDP 中继面（RIL-133）：官方 UDPMessage 数据报协议
+                // 自写（crate 无数据报公开 API，结论留证 protocol-backends.md）。
+                // obfs 与 TCP 面同口径判负（salamander 换整个 QUIC 载荷）；
+                // mport（端口跳跃）为 TCP 面重连策略，UDP 面不适用
+                if obfs.is_some() || obfs_param.is_some() {
+                    None
+                } else {
+                    let conn = Hysteria2Connector::new(
+                        server.clone(),
+                        *port,
+                        password.clone(),
+                        mport.clone(),
+                        obfs.clone(),
+                        obfs_param.clone(),
+                        server_name.clone(),
+                        *skip_cert_verify,
+                        alpn.clone(),
+                    );
+                    Some(Arc::new(Hysteria2UdpConnector::from_connector(&conn)))
+                }
+            }
             _ => None,
         };
         if let Some(c) = connector {
@@ -3015,7 +3048,7 @@ fn scan_udp_capability(
         anyhow::bail!(
             "udp.enabled 但以下出站节点不支持 UDP 转发（udp-relay-path.md §3.1 能力表）:\n\
              {detail}\n\
-             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard / reject / vmess / vless / trojan / socks5（vmess/vless/trojan 仅 network=tcp；hysteria2 归 V2，载具 quinn 未决）\n\
+             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard / reject / vmess / vless / trojan / socks5 / hysteria2（vmess/vless/trojan/hysteria2 仅基础组合：vmess/vless/trojan 限 network=tcp，hysteria2 限无 obfs）\n\
              请更换这些节点的出站类型，或将 udp.enabled 关闭并移除 UDP 相关规则"
         );
     }

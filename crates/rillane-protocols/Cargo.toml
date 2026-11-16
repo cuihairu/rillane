@@ -43,6 +43,10 @@ shadowsocks.workspace = true
 
 # Hysteria2
 hysteria2.workspace = true
+# Hysteria2 UDP 中继面（RIL-133）：QUIC 数据报道具 + HTTP/3 认证
+quinn.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true
 
 # AnyTLS（RIL-106）
 anytls.workspace = true
