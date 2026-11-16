@@ -1,0 +1,34 @@
+# RIL-129 订阅兼容样本：VLESS+XHTTP 出站节点（已脱敏）
+# 凭据为占位值（全零 UUID），地址用 RFC 5737/2606 文档段。预期：
+# network=xhttp 恒叠 TLS；path/host/mode 随块键 xhttp-opts 双向不丢
+# （mode 缺省 auto——IR None/auto 同判 packet-up）。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-xhttp-auto
+    type: vless
+    server: xh1.example.com
+    port: 443
+    uuid: "00000000-0000-0000-0000-000000000000"
+    network: xhttp
+    tls: true
+    servername: sni.example.com
+    skip-cert-verify: false
+    xhttp-opts:
+      path: /xh1
+      host: cdn1.example.com
+      mode: auto
+  - name: sample-xhttp-stream-one
+    type: vless
+    server: 203.0.113.71
+    port: 8443
+    uuid: "00000000-0000-0000-0000-000000000000"
+    network: xhttp
+    tls: true
+    skip-cert-verify: true
+    xhttp-opts:
+      path: /xh2
+      mode: stream-one
+proxy-groups: []
+rules: []

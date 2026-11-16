@@ -1043,6 +1043,133 @@ fn tuic_subscription_fields_convert_both_ways() {
     );
 }
 
+// ---------- RIL-129：XHTTP——订阅字段双向转换样本 ----------
+
+#[test]
+fn xhttp_subscription_fields_convert_both_ways() {
+    // 正向：clash 订阅 → IR（auto+host 节点与 stream-one 节点各一）
+    let (config, report) = loose("xhttp_node.yaml");
+    let names: Vec<&str> = config.egress.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["sample-xhttp-auto", "sample-xhttp-stream-one"]);
+    let specs: Vec<rillane_config::EgressConfig> =
+        config.egress.iter().map(|e| e.spec.clone()).collect();
+    assert_eq!(
+        specs[0],
+        rillane_config::EgressConfig::Vless {
+            server: "xh1.example.com".into(),
+            port: 443,
+            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            flow: None,
+            reality: None,
+            network: "xhttp".into(),
+            path: Some("/xh1".into()),
+            host: Some(vec!["cdn1.example.com".into()]),
+            grpc_service_name: None,
+            xhttp_mode: Some("auto".into()),
+            tls: true,
+            skip_cert_verify: false,
+            sni: Some("sni.example.com".into()),
+            alpn: None,
+            tls_fingerprint: None,
+        }
+    );
+    assert_eq!(
+        specs[1],
+        rillane_config::EgressConfig::Vless {
+            server: "203.0.113.71".into(),
+            port: 8443,
+            uuid: "00000000-0000-0000-0000-000000000000".into(),
+            flow: None,
+            reality: None,
+            network: "xhttp".into(),
+            path: Some("/xh2".into()),
+            host: None,
+            grpc_service_name: None,
+            xhttp_mode: Some("stream-one".into()),
+            tls: true,
+            skip_cert_verify: true,
+            sni: None,
+            alpn: None,
+            tls_fingerprint: None,
+        }
+    );
+    assert!(
+        report.dropped_nodes.is_empty(),
+        "XHTTP 节点必须保留，不丢弃: {:?}",
+        report.dropped_nodes
+    );
+    assert!(
+        report.degraded_nodes.is_empty(),
+        "network/path/host/mode 全字段入 IR，无降级: {:?}",
+        report.degraded_nodes
+    );
+
+    // 反向 1：IR → serde → IR（序列化不丢字段，往返逐字段一致）
+    for spec in &specs {
+        let json = serde_json::to_string(spec).expect("IR 序列化");
+        let back: rillane_config::EgressConfig = serde_json::from_str(&json).expect("IR 反序列化");
+        assert_eq!(&back, spec, "serde 往返必须逐字段一致");
+    }
+
+    // 反向 2：IR → clash 导出（network: xhttp + xhttp-opts 块键）→ 回读再转 IR
+    let mut project: rillane_config::RillaneConfig = serde_yaml::from_str(
+        "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+    )
+    .expect("基底配置");
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-xhttp-auto".into(),
+        spec: specs[0].clone(),
+    });
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-xhttp-stream-one".into(),
+        spec: specs[1].clone(),
+    });
+    let (yaml, export_report) = rillane_subscription::ClashExporter
+        .export(&project)
+        .unwrap();
+    assert_eq!(
+        export_report.exported_proxies,
+        vec!["sample-xhttp-auto", "sample-xhttp-stream-one"],
+        "XHTTP 节点应可导出"
+    );
+    assert!(yaml.contains("network: xhttp"), "{yaml}");
+    assert!(yaml.contains("type: vless"), "{yaml}");
+    assert!(
+        yaml.contains("xhttp-opts:"),
+        "导出必须携带 xhttp-opts 块键: {yaml}"
+    );
+    assert!(yaml.contains("mode: auto"), "{yaml}");
+    assert!(yaml.contains("mode: stream-one"), "{yaml}");
+    assert!(yaml.contains("path: /xh1"), "{yaml}");
+    assert!(yaml.contains("path: /xh2"), "{yaml}");
+    assert!(yaml.contains("host:"), "{yaml}");
+    // 回读：xhttp-opts 键位保证往返不丢字段
+    let reparsed = ClashConverter::new()
+        .parse(&yaml)
+        .expect("导出必须可被导入侧解析");
+    let (back_config, back_report) = ClashConverter::new()
+        .convert_to_rillane_with_report(&reparsed)
+        .expect("回读转换");
+    assert!(
+        back_report.dropped_nodes.is_empty(),
+        "回读不丢节点: {:?}",
+        back_report.dropped_nodes
+    );
+    assert!(
+        back_report.degraded_nodes.is_empty(),
+        "回读零损失: {:?}",
+        back_report.degraded_nodes
+    );
+    assert_eq!(
+        back_config.egress[0].spec, specs[0],
+        "导出→回读必须逐字段还原 auto+host 节点"
+    );
+    assert_eq!(
+        back_config.egress[1].spec, specs[1],
+        "stream-one 节点同样逐字段还原"
+    );
+}
+
 // ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
 
 #[test]

@@ -387,10 +387,10 @@ fn proxy_mapping(
                     ins(&mut m, "grpc-opts", gopts);
                 }
             }
-            // RIL-129：XHTTP 选项导出为 xhttp-opts（mihomo 键位），mode/
-            // path/host 不丢（network=xhttp 时 path/host 已随 ws_opts/h2_opts
-            // 落扁平键，这里补块键 mode/host 供 mihomo 回读）
+            // RIL-129：XHTTP 选项导出为 xhttp-opts（mihomo 键位），network
+            // 键位 + mode/path/host 不丢（供 mihomo 回读还原载具与载具参数）
             if network == "xhttp" {
+                ins(&mut m, "network", "xhttp");
                 let mut xopts = Mapping::new();
                 if let Some(mode) = xhttp_mode {
                     ins(&mut xopts, "mode", mode.as_str());
