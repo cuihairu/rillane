@@ -1824,6 +1824,25 @@ pub enum IngressConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         udp_enabled: Option<bool>,
     },
+    /// VLESS 入口（RIL-136）：自写 server 面（评估见两语
+    /// protocol-backends.md vless 服务端面段——xray-rs 有可组合形状 Handler
+    /// 但单包无特性门拖全内核；meow-proxy 仅出口面；jets 无 VLESS 入站）。
+    /// TLS 材料随 IR 内联（PEM），装配期解析（错误启动时暴露）；uuid 装配期
+    /// 校验。UDP 关联面随 `udp.enabled`/`udp_enabled` 门。Vision/REALITY
+    /// 服务端组合另验，不留字段。
+    Vless {
+        bind: String,
+        /// 认证 UUID（标准形；服务端 16 字节恒时比对）
+        uuid: String,
+        /// 证书链 PEM（含叶起全链；自签测试夹具 rcgen）
+        cert: String,
+        /// 私钥 PEM
+        cert_key: String,
+        /// per-ingress UDP 覆盖（语义同 Socks5）：None 继承 `udp.enabled`，
+        /// Some 显式开/关该入口的 UDP 关联面。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_enabled: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

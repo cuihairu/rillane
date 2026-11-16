@@ -111,7 +111,11 @@ fn capability_mismatch_rejected_with_stable_code_and_feature() {
     ));
 
     let cases: [(&str, &str, CapabilitySet); 4] = [
-        ("network:\n  mode: tun\n", "network", CapabilitySet::minimal()),
+        (
+            "network:\n  mode: tun\n",
+            "network",
+            CapabilitySet::minimal(),
+        ),
         (
             "network:\n  mode: tun\n  dns:\n    enabled: true\n    domestic: []\n    trusted: []\n    default_group: domestic\n    anti_poison: off\n    timeout_ms: 3000\n",
             "network.dns",
@@ -299,6 +303,79 @@ routing:
             assert_eq!(*udp_enabled, None, "缺省继承全局");
         }
         other => panic!("次入口应为 trojan，实际 {other:?}"),
+    }
+
+    // serde 双向往返：序列化 → 回读逐字段一致（含 type 标签）
+    let json = serde_json::to_string(&config).expect("可序列化");
+    let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
+    assert_eq!(back.ingress, config.ingress, "往返后入口逐字段一致");
+}
+
+/// VLESS 入口 yaml 往返（RIL-136）：显式 udp_enabled 与缺省两形态，
+/// 逐字段断言 + IR serde 双向往返（cert/cert_key 内联 PEM 原样保留）
+#[test]
+fn vless_ingress_yaml_roundtrip() {
+    let yaml = r#"
+control:
+  api_bind: 127.0.0.1:9090
+telemetry:
+  log_level: info
+  enable_metrics: false
+  enable_tracing: false
+ingress:
+  - name: vl-in
+    type: vless
+    bind: 127.0.0.1:9443
+    uuid: b831381d-6324-4d2a-b1e7-1bf75a1db7b3
+    cert: "REDACTED-SAMPLE-cert-pem"
+    cert_key: "REDACTED-SAMPLE-key-pem"
+    udp_enabled: true
+  - name: vl-in-min
+    type: vless
+    bind: 127.0.0.1:9444
+    uuid: 47840d09-1911-4ef9-b5e3-30687d1f532f
+    cert: "REDACTED-SAMPLE-cert-pem"
+    cert_key: "REDACTED-SAMPLE-key-pem"
+egress:
+  - name: direct
+    type: direct
+routing:
+  default_node: direct
+  groups: []
+  rules: []
+"#;
+    let config = RillaneConfig::from_str(yaml, None).expect("VLESS 入口配置必须可解析");
+    assert_eq!(config.ingress.len(), 2);
+
+    // 逐字段断言（显式 udp_enabled 与缺省两形态）
+    match &config.ingress[0].spec {
+        rillane_config::IngressConfig::Vless {
+            bind,
+            uuid,
+            cert,
+            cert_key,
+            udp_enabled,
+        } => {
+            assert_eq!(bind, "127.0.0.1:9443");
+            assert_eq!(uuid, "b831381d-6324-4d2a-b1e7-1bf75a1db7b3");
+            assert_eq!(cert, "REDACTED-SAMPLE-cert-pem");
+            assert_eq!(cert_key, "REDACTED-SAMPLE-key-pem");
+            assert_eq!(*udp_enabled, Some(true));
+        }
+        other => panic!("首入口应为 vless，实际 {other:?}"),
+    }
+    match &config.ingress[1].spec {
+        rillane_config::IngressConfig::Vless {
+            bind,
+            uuid,
+            udp_enabled,
+            ..
+        } => {
+            assert_eq!(bind, "127.0.0.1:9444");
+            assert_eq!(uuid, "47840d09-1911-4ef9-b5e3-30687d1f532f");
+            assert_eq!(*udp_enabled, None, "缺省继承全局");
+        }
+        other => panic!("次入口应为 vless，实际 {other:?}"),
     }
 
     // serde 双向往返：序列化 → 回读逐字段一致（含 type 标签）

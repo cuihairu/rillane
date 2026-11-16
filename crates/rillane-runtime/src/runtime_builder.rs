@@ -57,8 +57,9 @@ use rillane_protocols::{
     ShadowsocksIngress, ShadowsocksUdpConnector, ShadowsocksUdpParts, Socks5Connector,
     Socks5Ingress, Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey,
     TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts,
-    TuicConnector, TuicUdpConnector, VlessConnector, VlessUdpConnector, VmessConnector,
-    VmessSecurity, VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
+    TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress, VlessUdpConnector,
+    VlessUdpParts, VmessConnector, VmessSecurity, VmessUdpConnector, WireguardConnector,
+    WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -470,6 +471,9 @@ impl RuntimeBuilder {
                         udp_enabled: Some(true),
                         ..
                     } | IngressConfig::Trojan {
+                        udp_enabled: Some(true),
+                        ..
+                    } | IngressConfig::Vless {
                         udp_enabled: Some(true),
                         ..
                     }
@@ -2662,6 +2666,7 @@ fn build_ingress_endpoints(
             IngressConfig::Mixed { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Shadowsocks { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Trojan { udp_enabled, .. } => *udp_enabled,
+            IngressConfig::Vless { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Http { .. } => None,
         };
         if per_ingress == Some(true) && !udp_enabled_global {
@@ -2763,6 +2768,34 @@ fn build_ingress_endpoints(
                     cert,
                     cert_key,
                     tj_udp,
+                    fake_ip.clone(),
+                )?)
+            }
+            IngressConfig::Vless {
+                bind,
+                uuid,
+                cert,
+                cert_key,
+                udp_enabled,
+            } => {
+                // VLESS UDP 关联面同用进程级会话表 + 连接器族（udp 门与
+                // socks5 同口径）；TLS 材料/uuid 解析拒绝落在装配期
+                let vl_udp = match udp.as_ref() {
+                    Some(svc) if resolve_udp_enabled(udp_enabled_global, *udp_enabled) => {
+                        Some(VlessUdpParts {
+                            table: svc.table().clone(),
+                            connector: svc.connector().clone(),
+                        })
+                    }
+                    _ => None,
+                };
+                Arc::new(VlessIngress::new(
+                    desc.name.clone(),
+                    bind.clone(),
+                    uuid,
+                    cert,
+                    cert_key,
+                    vl_udp,
                     fake_ip.clone(),
                 )?)
             }
