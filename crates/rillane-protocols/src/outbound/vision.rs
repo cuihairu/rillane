@@ -219,7 +219,9 @@ impl FrameDecoder {
             _ => {}
         }
 
-        while cursor < chunk.len() {
+        // 恰在块边界收束的零填充帧也要推进（Padding 无需字节即可完成），
+        // 否则 Direct 信号延拍到下一推入（验收面暴露的边界缺陷）
+        while cursor < chunk.len() || (self.stage == ReadStage::Padding && self.padding_need == 0) {
             match self.stage {
                 ReadStage::Head => {
                     let want = FRAME_HEAD - self.head_n;
@@ -902,7 +904,25 @@ impl VisionTlsFace {
         }
     }
 
+    /// 已解密明文是否可读（借用不跨语句：`into_first_chunk` 的切片
+    /// 借用 conn，持有时不得再触碰连接面）
+    fn has_plaintext(&mut self) -> bool {
+        matches!(
+            self.conn.reader().into_first_chunk(),
+            Ok(data) if !data.is_empty()
+        )
+    }
+
     fn poll_fill_buf(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        // 已解密明文优先返回（逐记录喂入边界保持面）：喂完一条记录即停
+        // ——Direct 切换后 TCP 后续字节是裸流量，超前喂入会把它误判为
+        // 外层 TLS 记录（xray 以排干内部缓冲解决同一问题）
+        if self.has_plaintext() {
+            return match self.conn.reader().into_first_chunk() {
+                Ok(data) => Poll::Ready(Ok(data)),
+                Err(e) => Poll::Ready(Err(e)),
+            };
+        }
         let mut io_pending = false;
         while !self.eof && self.conn.wants_read() {
             match self.poll_feed_record(cx) {
@@ -910,7 +930,14 @@ impl VisionTlsFace {
                     self.eof = true;
                     break;
                 }
-                Poll::Ready(Ok(_)) => {}
+                Poll::Ready(Ok(_)) => {
+                    if self.has_plaintext() {
+                        return match self.conn.reader().into_first_chunk() {
+                            Ok(data) => Poll::Ready(Ok(data)),
+                            Err(e) => Poll::Ready(Err(e)),
+                        };
+                    }
+                }
                 Poll::Pending => {
                     io_pending = true;
                     break;
@@ -919,7 +946,8 @@ impl VisionTlsFace {
             }
         }
         match self.conn.reader().into_first_chunk() {
-            Ok(buf) => Poll::Ready(Ok(buf)),
+            // Ok(空) = 干净关闭面（close_notify 已处理）——上层按 EOF 口径
+            Ok(data) => Poll::Ready(Ok(data)),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if !io_pending {
                     cx.waker().wake_by_ref();
@@ -1143,7 +1171,11 @@ impl RelayCore {
         app_rd: &mut tokio::io::ReadHalf<BoxedIo>,
         face: &mut VisionTlsFace,
     ) -> Poll<io::Result<Step>> {
-        // 半关收束（跨轮次）
+        // 半关收束（跨轮次）；up_done 先判——shutdown 幂等 Ready 会与
+        // closing 分支叠成忙旋（验收面暴露的循环缺陷）
+        if self.up_done {
+            return Poll::Ready(Ok(Step::Pending));
+        }
         if let Some(raw) = self.closing {
             let r = if raw {
                 face.poll_shutdown_raw(cx)
