@@ -56,8 +56,8 @@ use rillane_protocols::{
     Hysteria2Connector, Hysteria2UdpConnector, MixedIngress, ShadowsocksConnector,
     ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress, Socks5UdpConnector,
     TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool, TrojanConnector,
-    TrojanUdpConnector, VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity,
-    VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
+    TrojanUdpConnector, TuicConnector, TuicUdpConnector, VlessConnector, VlessUdpConnector,
+    VmessConnector, VmessSecurity, VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -2725,7 +2725,8 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::Trojan { server, .. }
         | EgressConfig::Anytls { server, .. }
         | EgressConfig::Hysteria { server, .. }
-        | EgressConfig::Hysteria2 { server, .. } => Some(server),
+        | EgressConfig::Hysteria2 { server, .. }
+        | EgressConfig::Tuic { server, .. } => Some(server),
         EgressConfig::Wireguard { endpoint, .. } => Some(endpoint),
     }
 }
@@ -2968,6 +2969,32 @@ fn build_udp_connectors(
                     Some(Arc::new(Hysteria2UdpConnector::from_connector(&conn)))
                 }
             }
+            EgressConfig::Tuic {
+                server,
+                port,
+                uuid,
+                password,
+                congestion_controller,
+                server_name,
+                skip_cert_verify,
+                alpn,
+            } => {
+                // TUIC UDP 数据报面（RIL-105）：官方 v5 Packet 命令 over QUIC
+                // 不可靠数据报，自写（yanked+GPL 结论留证 protocol-backends.md
+                // #tuic）——全组合可用（无 obfs/端口白名单组合面），校验归
+                // 拨号期（uuid 解析/拥塞控制白名单具名拒绝）
+                let conn = TuicConnector::new(
+                    server.clone(),
+                    *port,
+                    uuid.clone(),
+                    password.clone(),
+                    congestion_controller.clone(),
+                    server_name.clone(),
+                    *skip_cert_verify,
+                    alpn.clone(),
+                );
+                Some(Arc::new(TuicUdpConnector::from_connector(&conn)))
+            }
             _ => None,
         };
         if let Some(c) = connector {
@@ -3048,7 +3075,7 @@ fn scan_udp_capability(
         anyhow::bail!(
             "udp.enabled 但以下出站节点不支持 UDP 转发（udp-relay-path.md §3.1 能力表）:\n\
              {detail}\n\
-             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard / reject / vmess / vless / trojan / socks5 / hysteria2（vmess/vless/trojan/hysteria2 仅基础组合：vmess/vless/trojan 限 network=tcp，hysteria2 限无 obfs）\n\
+             当前支持 UDP 的出站类型: direct / shadowsocks / wireguard / reject / vmess / vless / trojan / socks5 / hysteria2 / tuic（vmess/vless/trojan/hysteria2 仅基础组合：vmess/vless/trojan 限 network=tcp，hysteria2 限无 obfs；tuic 全组合）\n\
              请更换这些节点的出站类型，或将 udp.enabled 关闭并移除 UDP 相关规则"
         );
     }
@@ -3507,6 +3534,37 @@ fn build_egress_outputs(
                     mport.clone(),
                     obfs.clone(),
                     obfs_param.clone(),
+                    server_name.clone(),
+                    *skip_cert_verify,
+                    alpn.clone(),
+                ));
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Tuic {
+                server,
+                port,
+                uuid,
+                password,
+                congestion_controller,
+                server_name,
+                skip_cert_verify,
+                alpn,
+            } => {
+                // TUIC v5（RIL-105）：Connect 流面 + Packet 数据报面自写
+                // （yanked+GPL 结论留证 protocol-backends.md#tuic）；校验归
+                // 拨号期（uuid 解析/拥塞控制白名单具名拒绝，节点级失败不
+                // 拖垮整份订阅）
+                let connector: Arc<dyn EgressConnector> = Arc::new(TuicConnector::new(
+                    server.clone(),
+                    *port,
+                    uuid.clone(),
+                    password.clone(),
+                    congestion_controller.clone(),
                     server_name.clone(),
                     *skip_cert_verify,
                     alpn.clone(),

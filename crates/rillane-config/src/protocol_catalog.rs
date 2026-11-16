@@ -200,6 +200,18 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "tuic",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#tuic",
+        },
+        // RIL-105：官方 v5 Packet 数据报面随客户端自写交付
+        // （tuic 家族全版本 yanked + GPL-3.0 结论留证）
+        udp: true,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/tuic.rs",
+        },
+    },
+    CatalogEntry {
         kind: "wireguard",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#wireguard",
@@ -255,6 +267,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Anytls { .. } => "anytls",
         EgressConfig::Hysteria { .. } => "hysteria",
         EgressConfig::Hysteria2 { .. } => "hysteria2",
+        EgressConfig::Tuic { .. } => "tuic",
         EgressConfig::Wireguard { .. } => "wireguard",
     }
 }
@@ -374,6 +387,16 @@ mod tests {
                 skip_cert_verify: false,
                 alpn: None,
             },
+            EgressConfig::Tuic {
+                server: "203.0.113.11".into(),
+                port: 443,
+                uuid: "2dd35bfe-7d81-4a7e-9325-97e5ae1f8e8e".into(),
+                password: "pw".into(),
+                congestion_controller: None,
+                server_name: None,
+                skip_cert_verify: false,
+                alpn: None,
+            },
             EgressConfig::Wireguard {
                 endpoint: "203.0.113.9:51820".into(),
                 private_key: "pk".into(),
@@ -404,7 +427,7 @@ mod tests {
         assert_eq!(kinds.len(), CATALOG.len(), "类型名唯一");
     }
 
-    /// 准入判定稳定：已准入十条 + hysteria v1 未准入（点名 RIL-109 前置）；
+    /// 准入判定稳定：已准入十一条 + hysteria v1 未准入（点名 RIL-109 前置）；
     /// 目录外类型 → Unknown（订阅/诊断面按 `config.egress.unknown` 点名）。
     #[test]
     fn admission_decisions_are_stable() {
@@ -442,7 +465,7 @@ mod tests {
     /// UDP 能力列与构建期扫描口径一致（§3.1 支持集）。
     #[test]
     fn admitted_requires_evidence_and_backend() {
-        const UDP_SUPPORTED: [&str; 10] = [
+        const UDP_SUPPORTED: [&str; 11] = [
             "direct",
             "shadowsocks",
             "wireguard",
@@ -453,6 +476,7 @@ mod tests {
             "socks5",
             "anytls",
             "hysteria2",
+            "tuic",
         ];
         for e in CATALOG {
             match e.registration {

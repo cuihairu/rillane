@@ -97,6 +97,7 @@ pub enum ClashProxyType {
     Snell,
     Hysteria,
     Hysteria2,
+    Tuic,
     Wireguard,
 }
 
@@ -156,9 +157,18 @@ pub struct ClashProxy {
         alias = "plugin_opts"
     )]
     pub plugin_opts: Option<Value>,
-    /// UUID（用于 VMess/VLESS）
+    /// UUID（用于 VMess/VLESS/TUIC）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
+    /// TUIC: QUIC 拥塞控制（Clash 规范键 `congestion-controller`——无别名
+    /// 则该键被 serde 静默丢弃，往返丢配置）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "congestion-controller",
+        alias = "congestion_controller"
+    )]
+    pub congestion_controller: Option<String>,
     /// 加密（用于 VMess）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypt: Option<String>,
@@ -1934,6 +1944,31 @@ impl ClashConverter {
                     },
                 })
             }
+            ClashProxyType::Tuic => {
+                let password = proxy
+                    .password
+                    .clone()
+                    .ok_or_else(|| anyhow!("TUIC 缺少密码"))?;
+                let uuid = proxy
+                    .uuid
+                    .clone()
+                    .ok_or_else(|| anyhow!("TUIC 缺少 uuid"))?;
+
+                Ok(EgressConfig::Tuic {
+                    server: proxy.server.clone(),
+                    port: proxy.port,
+                    uuid,
+                    password,
+                    congestion_controller: proxy.congestion_controller.clone(),
+                    server_name: proxy.servername.clone(),
+                    skip_cert_verify: proxy.skip_cert_verify,
+                    alpn: if proxy.alpn.is_empty() {
+                        None
+                    } else {
+                        Some(proxy.alpn.clone())
+                    },
+                })
+            }
             ClashProxyType::Wireguard => {
                 let private_key = proxy
                     .private_key
@@ -2332,6 +2367,7 @@ impl ClashConverter {
             ClashProxyType::Vmess | ClashProxyType::Vless => proxy.uuid.is_some(),
             ClashProxyType::Trojan | ClashProxyType::Anytls => proxy.password.is_some(),
             ClashProxyType::Hysteria | ClashProxyType::Hysteria2 => proxy.password.is_some(),
+            ClashProxyType::Tuic => proxy.password.is_some() && proxy.uuid.is_some(),
             ClashProxyType::Snell => proxy.password.is_some(),
             ClashProxyType::Wireguard => {
                 proxy.private_key.is_some()
@@ -2356,6 +2392,7 @@ impl ClashConverter {
             ClashProxyType::Snell => "Snell",
             ClashProxyType::Hysteria => "Hysteria",
             ClashProxyType::Hysteria2 => "Hysteria2",
+            ClashProxyType::Tuic => "TUIC",
             ClashProxyType::Wireguard => "WireGuard",
         }
     }

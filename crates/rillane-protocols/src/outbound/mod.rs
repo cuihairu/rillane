@@ -13,6 +13,7 @@ mod reality;
 mod shadowsocks;
 mod socks5;
 mod trojan;
+mod tuic;
 mod vision;
 mod vless;
 mod vmess;
@@ -42,6 +43,7 @@ pub use reality::{
 pub use shadowsocks::{ShadowsocksConnector, ShadowsocksUdpConnector};
 pub use socks5::{Socks5Connector, Socks5UdpConnector};
 pub use trojan::{TrojanConnector, TrojanUdpConnector};
+pub use tuic::{TuicConnector, TuicStream, TuicUdpConnector, TuicUdpRelay};
 pub use vision::{
     is_complete_tls_record, padding_len, relay, vision_flow_addons, FrameBuilder, FrameDecoder,
     InnerTlsFilter, VisionRelayStats, VisionSignal, VisionTlsFace, VisionWriteAction,

@@ -2002,6 +2002,23 @@ pub enum EgressConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         alpn: Option<Vec<String>>,
     },
+    Tuic {
+        server: String,
+        port: u16,
+        /// TUIC v5 客户端 UUID（16 字节；拨号期解析，非法值具名拒绝）
+        uuid: String,
+        password: String,
+        /// QUIC 拥塞控制：`cubic`（缺省，quinn 缺省载体）/ `bbr` / `new_reno`
+        /// ——非 cubic 拨号期具名拒绝（RIL-105 自写面仅 cubic，不静默降级）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        congestion_controller: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server_name: Option<String>,
+        #[serde(default)]
+        skip_cert_verify: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alpn: Option<Vec<String>>,
+    },
     Wireguard {
         endpoint: String,
         private_key: String,

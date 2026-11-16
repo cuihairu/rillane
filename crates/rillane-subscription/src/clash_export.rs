@@ -539,6 +539,35 @@ fn proxy_mapping(
             }
             Some(m)
         }
+        EgressConfig::Tuic {
+            server,
+            port,
+            uuid,
+            password,
+            congestion_controller,
+            server_name,
+            skip_cert_verify,
+            alpn,
+        } => {
+            ins(&mut m, "type", "tuic");
+            ins(&mut m, "server", server);
+            ins(&mut m, "port", *port as u64);
+            ins(&mut m, "uuid", uuid);
+            ins(&mut m, "password", password);
+            if let Some(cc) = congestion_controller {
+                ins(&mut m, "congestion-controller", cc);
+            }
+            if let Some(s) = server_name {
+                ins(&mut m, "sni", s);
+            }
+            if *skip_cert_verify {
+                ins(&mut m, "skip-cert-verify", true);
+            }
+            if let Some(a) = alpn {
+                ins(&mut m, "alpn", a.clone());
+            }
+            Some(m)
+        }
         EgressConfig::Wireguard {
             endpoint,
             private_key,
