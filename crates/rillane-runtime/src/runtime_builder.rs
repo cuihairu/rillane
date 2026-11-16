@@ -3221,25 +3221,30 @@ fn build_udp_connectors(
             } => {
                 // Hysteria v1 UDP 中继面（RIL-109）：官方 udpMessage 数据报协议
                 // 自写（v1 无任何可用库，结论留证 protocol-backends.md#hysteria）。
-                // 载具 = 原生 UDP 上的 QUIC——obfs/wechat/faketcp 包层传输与
-                // TCP 面同口径判负（换整个 QUIC 载荷）；速率解析拒绝落在
-                // 连接器拨号期（resolve_rates 具名拒绝 Some(0)）
-                let conn = HysteriaConnector::new(
-                    server.clone(),
-                    *port,
-                    password.clone(),
-                    Some(protocol.clone()),
-                    *up_mbps,
-                    *down_mbps,
-                    auth.clone(),
-                    auth_str.clone(),
-                    obfs.clone(),
-                    obfs_param.clone(),
-                    server_name.clone(),
-                    *skip_cert_verify,
-                    alpn.clone(),
-                );
-                Some(Arc::new(HysteriaUdpConnector::from_connector(&conn)))
+                // 载具 = 原生 UDP 上的 QUIC——obfs/wechat/faketcp 包层传输换
+                // 整个 QUIC 载荷，与 hysteria2 salamander 同族判负（UDP 面不
+                // 注册，能力扫描构建期点名）；速率解析拒绝落在连接器拨号期
+                //（resolve_rates 具名拒绝 Some(0)）
+                if protocol != "udp" || obfs.is_some() || obfs_param.is_some() {
+                    None
+                } else {
+                    let conn = HysteriaConnector::new(
+                        server.clone(),
+                        *port,
+                        password.clone(),
+                        Some(protocol.clone()),
+                        *up_mbps,
+                        *down_mbps,
+                        auth.clone(),
+                        auth_str.clone(),
+                        obfs.clone(),
+                        obfs_param.clone(),
+                        server_name.clone(),
+                        *skip_cert_verify,
+                        alpn.clone(),
+                    );
+                    Some(Arc::new(HysteriaUdpConnector::from_connector(&conn)))
+                }
             }
             _ => None,
         };
