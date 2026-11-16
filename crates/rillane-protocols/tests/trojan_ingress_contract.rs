@@ -14,8 +14,8 @@
 use std::{
     net::{Ipv4Addr, SocketAddr},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -23,12 +23,13 @@ use std::{
 use anyhow::Result;
 use async_trait::async_trait;
 use rillane_core::{
-    EgressConnector, Flow, FlowContext, FlowId, FlowMetadata, FlowOutput, FlowReport, FlowRouter,
-    FlowTarget, IngressEndpoint, RouteDecision, TargetProto, fake_ip,
+    fake_ip,
     udp::{
-        Clock, DirectUdpConnector, EgressUdpConnector, MockClock, UdpRelay, UdpSessionConfig,
-        UdpSessionTable, sweep_once,
+        sweep_once, Clock, DirectUdpConnector, EgressUdpConnector, MockClock, UdpRelay,
+        UdpSessionConfig, UdpSessionTable,
     },
+    EgressConnector, Flow, FlowContext, FlowId, FlowMetadata, FlowOutput, FlowReport, FlowRouter,
+    FlowTarget, IngressEndpoint, RouteDecision, TargetProto,
 };
 use rillane_protocols::{
     TlsFingerprint, TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts,
