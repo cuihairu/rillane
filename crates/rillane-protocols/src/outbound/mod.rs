@@ -12,7 +12,7 @@ pub(crate) mod hysteria;
 pub(crate) mod hysteria2;
 mod reality;
 mod shadowsocks;
-mod shadowtls;
+pub(crate) mod shadowtls;
 mod socks5;
 mod trojan;
 mod tuic;

@@ -47,18 +47,18 @@ use tokio::{
 use crate::{fingerprint::TlsFingerprint, tls::create_tls_connector_with_profile};
 
 /// TLS 记录头长度（type 1 + version 2 + length 2）
-const TLS_HEADER_SIZE: usize = 5;
+pub(crate) const TLS_HEADER_SIZE: usize = 5;
 /// application-data 记录类型
-const APPLICATION_DATA: u8 = 0x17;
+pub(crate) const APPLICATION_DATA: u8 = 0x17;
 /// 伪记录版本字节（官方 TLS_MAJOR/TLS_MINOR.0 = 0x03/0x03）
-const TLS_MAJOR: u8 = 0x03;
-const TLS_MINOR: u8 = 0x03;
+pub(crate) const TLS_MAJOR: u8 = 0x03;
+pub(crate) const TLS_MINOR: u8 = 0x03;
 /// 挑战长度（官方 HMAC_SIZE_V2）：20 字节摘要截断 8 字节
-const CHALLENGE_LEN: usize = 8;
+pub(crate) const CHALLENGE_LEN: usize = 8;
 /// 伪记录内容上限（官方 COPY_BUF_SIZE 4096 − 记录头）
-const RECORD_CONTENT_MAX: usize = 4096 - TLS_HEADER_SIZE;
+pub(crate) const RECORD_CONTENT_MAX: usize = 4096 - TLS_HEADER_SIZE;
 /// SHA1 摘要长度
-const SHA1_LEN: usize = 20;
+pub(crate) const SHA1_LEN: usize = 20;
 
 type HmacSha1 = Hmac<Sha1>;
 
