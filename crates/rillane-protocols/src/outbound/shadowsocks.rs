@@ -71,6 +71,21 @@ impl ShadowsocksConnector {
         let cipher = method
             .parse::<CipherKind>()
             .map_err(|_| anyhow!("不支持的加密方法: {method}"))?;
+        // RIL-131 算法矩阵点名拒绝：无加密 NONE 不放行；SS2022 的 password
+        // 语义是 base64 密钥（长度须与算法密钥长精确一致），构建期校验
+        if cipher == CipherKind::NONE {
+            bail!("加密方法 none（无加密）不放行: {method}");
+        }
+        if cipher.is_aead_2022() {
+            use base64::Engine as _;
+            let key = base64::engine::general_purpose::STANDARD
+                .decode(password)
+                .map_err(|_| anyhow!("SS2022 密码须为 base64 密钥: {method}"))?;
+            let need = cipher.key_len();
+            if key.len() != need {
+                bail!("SS2022 密钥长度须为 {need} 字节，得 {} 字节: {method}", key.len());
+            }
+        }
         let addr = ServerAddr::DomainName(server.to_string(), port);
         Ok(ServerConfig::new(addr, password.to_string(), cipher)?)
     }
