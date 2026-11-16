@@ -470,3 +470,93 @@ fn shadowsocks_ingress_assembles_with_valid_credentials() {
             .unwrap_or_else(|e| panic!("method={method} 必须装配成功: {e}"));
     }
 }
+
+// ---------- RIL-135：Trojan 入口装配面 ----------
+
+fn trojan_ingress_node(
+    bind: &str,
+    password: &str,
+    cert: &str,
+    cert_key: &str,
+    udp_enabled: Option<bool>,
+) -> IngressDescriptor {
+    IngressDescriptor {
+        name: "tj-in".to_string(),
+        spec: IngressConfig::Trojan {
+            bind: bind.to_string(),
+            password: password.to_string(),
+            cert: cert.to_string(),
+            cert_key: cert_key.to_string(),
+            udp_enabled,
+        },
+    }
+}
+
+/// rcgen 自签 TLS 材料（SAN=localhost；客户端 skip_cert_verify 不校验链）
+fn self_signed_tls_material() -> (String, String) {
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen 自签");
+    (certified.cert.pem(), certified.key_pair.serialize_pem())
+}
+
+/// 构建期点名拒绝（空密码 / TLS 材料垃圾 PEM）——错误启动时暴露
+#[test]
+fn trojan_ingress_refused_at_assembly_for_bad_material() {
+    let cfg = ss_ingress_shell(
+        vec![trojan_ingress_node(
+            "127.0.0.1:0",
+            "",
+            "not-a-cert-pem",
+            "not-a-key-pem",
+            None,
+        )],
+        "direct-main",
+        true,
+    );
+    let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+        panic!("空密码必须装配期拒绝");
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("密码不得为空"), "应含空密码点名：{msg}");
+
+    let cfg = ss_ingress_shell(
+        vec![trojan_ingress_node(
+            "127.0.0.1:0",
+            "pw",
+            "not-a-cert-pem",
+            "not-a-key-pem",
+            None,
+        )],
+        "direct-main",
+        true,
+    );
+    let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+        panic!("垃圾 TLS 材料必须装配期拒绝");
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("PEM"), "应含材料解析点名：{msg}");
+}
+
+/// 正面控制：合法 TLS 材料 + 密码装配成功——含 udp_enabled: Some(true)
+/// 且全局 udp.enabled=false 的 WARN 组合（入口级 UDP 门语义同 socks5）
+#[test]
+fn trojan_ingress_assembles_with_valid_credentials() {
+    let (cert, key) = self_signed_tls_material();
+    for (password, udp) in [("tj-valid-password", Some(true)), ("tj-min", None)] {
+        let cfg = ss_ingress_shell(
+            vec![trojan_ingress_node(
+                "127.0.0.1:0",
+                password,
+                &cert,
+                &key,
+                udp,
+            )],
+            "direct-main",
+            false,
+        );
+        RuntimeBuilder::new(cfg)
+            .with_runtime_config(opts())
+            .build()
+            .unwrap_or_else(|e| panic!("password={password} 必须装配成功: {e}"));
+    }
+}

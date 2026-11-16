@@ -22,7 +22,10 @@ pub mod pool;
 mod tls;
 
 pub use fingerprint::TlsFingerprint;
-pub use inbound::{HttpIngress, MixedIngress, ShadowsocksIngress, ShadowsocksUdpParts, Socks5Ingress};
+pub use inbound::{
+    HttpIngress, MixedIngress, ShadowsocksIngress, ShadowsocksUdpParts, Socks5Ingress,
+    TrojanIngress, TrojanUdpParts,
+};
 pub use middleware::LatencyProbe;
 pub use outbound::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, Hysteria2Connector,

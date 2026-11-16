@@ -233,3 +233,76 @@ routing:
     let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
     assert_eq!(back.ingress, config.ingress, "往返后入口逐字段一致");
 }
+
+/// Trojan 入口（RIL-135）：显式与缺省（udp_enabled）两形态逐字段 + serde
+/// 双向往返（含 type 标签）；TLS 材料（cert/cert_key）随 IR 原样保留
+#[test]
+fn trojan_ingress_yaml_roundtrip() {
+    let yaml = r#"
+control:
+  api_bind: 127.0.0.1:9090
+telemetry:
+  log_level: info
+  enable_metrics: false
+  enable_tracing: false
+ingress:
+  - name: tj-in
+    type: trojan
+    bind: 127.0.0.1:8443
+    password: tj-sample-password
+    cert: "REDACTED-SAMPLE-cert-pem"
+    cert_key: "REDACTED-SAMPLE-key-pem"
+    udp_enabled: true
+  - name: tj-in-min
+    type: trojan
+    bind: 127.0.0.1:8444
+    password: tj-min-password
+    cert: "REDACTED-SAMPLE-cert-pem"
+    cert_key: "REDACTED-SAMPLE-key-pem"
+egress:
+  - name: direct
+    type: direct
+routing:
+  default_node: direct
+  groups: []
+  rules: []
+"#;
+    let config = RillaneConfig::from_str(yaml, None).expect("Trojan 入口配置必须可解析");
+    assert_eq!(config.ingress.len(), 2);
+
+    // 逐字段断言（显式 udp_enabled 与缺省两形态）
+    match &config.ingress[0].spec {
+        rillane_config::IngressConfig::Trojan {
+            bind,
+            password,
+            cert,
+            cert_key,
+            udp_enabled,
+        } => {
+            assert_eq!(bind, "127.0.0.1:8443");
+            assert_eq!(password, "tj-sample-password");
+            assert_eq!(cert, "REDACTED-SAMPLE-cert-pem");
+            assert_eq!(cert_key, "REDACTED-SAMPLE-key-pem");
+            assert_eq!(*udp_enabled, Some(true));
+        }
+        other => panic!("首入口应为 trojan，实际 {other:?}"),
+    }
+    match &config.ingress[1].spec {
+        rillane_config::IngressConfig::Trojan {
+            bind,
+            password,
+            udp_enabled,
+            ..
+        } => {
+            assert_eq!(bind, "127.0.0.1:8444");
+            assert_eq!(password, "tj-min-password");
+            assert_eq!(*udp_enabled, None, "缺省继承全局");
+        }
+        other => panic!("次入口应为 trojan，实际 {other:?}"),
+    }
+
+    // serde 双向往返：序列化 → 回读逐字段一致（含 type 标签）
+    let json = serde_json::to_string(&config).expect("可序列化");
+    let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
+    assert_eq!(back.ingress, config.ingress, "往返后入口逐字段一致");
+}

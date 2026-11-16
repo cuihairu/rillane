@@ -1806,6 +1806,24 @@ pub enum IngressConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         udp_enabled: Option<bool>,
     },
+    /// Trojan 入口（RIL-135）：自写 server 面（评估见两语
+    /// protocol-backends.md trojan 服务端面段——crates.io 全谱系 GPL-3.0-only
+    /// 与本仓 Apache-2.0 不兼容，且 trojan-server 为整装 run 循环不可组合）。
+    /// TLS 材料随 IR 内联（PEM），装配期解析（错误启动时暴露）。UDP 关联面
+    /// 随 `udp.enabled`/`udp_enabled` 门。
+    Trojan {
+        bind: String,
+        /// 预共享密码（任意非空串；服务端比对 SHA224 hex，恒时）
+        password: String,
+        /// 证书链 PEM（含叶起全链；自签测试夹具 rcgen）
+        cert: String,
+        /// 私钥 PEM
+        cert_key: String,
+        /// per-ingress UDP 覆盖（语义同 Socks5）：None 继承 `udp.enabled`，
+        /// Some 显式开/关该入口的 UDP 关联面。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_enabled: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -56,9 +56,9 @@ use rillane_protocols::{
     Hysteria2Connector, Hysteria2UdpConnector, MixedIngress, ShadowsocksConnector,
     ShadowsocksIngress, ShadowsocksUdpConnector, ShadowsocksUdpParts, Socks5Connector,
     Socks5Ingress, Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey,
-    TransportPool, TrojanConnector, TrojanUdpConnector, TuicConnector, TuicUdpConnector,
-    VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity, VmessUdpConnector,
-    WireguardConnector, WireguardUdpConnector,
+    TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts,
+    TuicConnector, TuicUdpConnector, VlessConnector, VlessUdpConnector, VmessConnector,
+    VmessSecurity, VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -467,6 +467,9 @@ impl RuntimeBuilder {
                         udp_enabled: Some(true),
                         ..
                     } | IngressConfig::Shadowsocks {
+                        udp_enabled: Some(true),
+                        ..
+                    } | IngressConfig::Trojan {
                         udp_enabled: Some(true),
                         ..
                     }
@@ -2658,6 +2661,7 @@ fn build_ingress_endpoints(
             IngressConfig::Socks5 { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Mixed { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Shadowsocks { udp_enabled, .. } => *udp_enabled,
+            IngressConfig::Trojan { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Http { .. } => None,
         };
         if per_ingress == Some(true) && !udp_enabled_global {
@@ -2731,6 +2735,34 @@ fn build_ingress_endpoints(
                     method.clone(),
                     password.clone(),
                     ss_udp,
+                    fake_ip.clone(),
+                )?)
+            }
+            IngressConfig::Trojan {
+                bind,
+                password,
+                cert,
+                cert_key,
+                udp_enabled,
+            } => {
+                // Trojan UDP 关联面同用进程级会话表 + 连接器族（udp 门与
+                // socks5 同口径）；TLS 材料解析拒绝落在装配期
+                let tj_udp = match udp.as_ref() {
+                    Some(svc) if resolve_udp_enabled(udp_enabled_global, *udp_enabled) => {
+                        Some(TrojanUdpParts {
+                            table: svc.table().clone(),
+                            connector: svc.connector().clone(),
+                        })
+                    }
+                    _ => None,
+                };
+                Arc::new(TrojanIngress::new(
+                    desc.name.clone(),
+                    bind.clone(),
+                    password.clone(),
+                    cert,
+                    cert_key,
+                    tj_udp,
                     fake_ip.clone(),
                 )?)
             }
