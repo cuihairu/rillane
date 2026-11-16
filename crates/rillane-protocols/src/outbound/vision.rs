@@ -561,15 +561,16 @@ mod tests {
     fn frame_roundtrip_single() {
         let mut b = FrameBuilder::new(UUID);
         let frame = b.frame(COMMAND_PADDING_CONTINUE, b"hello vision", true);
-        // 首帧前置 UUID
-        assert_eq!(&frame[..16], &UUID);
+        // 首帧前置 UUID（前缀断言而非定长切片：次帧短填充路径帧长
+        // 9+rand(0..256)，rand < 7 时不足 16B，[..16] 切片会越界）
+        assert!(frame.starts_with(&UUID), "首帧前置 UUID");
         let mut d = FrameDecoder::new(UUID);
         let signal = d.push(&frame);
         assert_eq!(signal, VisionSignal::Frames, "Continue 帧后仍在帧态");
         assert_eq!(d.take(), b"hello vision");
         // 次帧不再前置 UUID
         let frame2 = b.frame(COMMAND_PADDING_END, b"tail", false);
-        assert_ne!(&frame2[..16], &UUID, "次帧无 UUID 前置");
+        assert!(!frame2.starts_with(&UUID), "次帧无 UUID 前置");
         let signal = d.push(&frame2);
         assert_eq!(signal, VisionSignal::Plain, "End 后收束");
         assert_eq!(d.take(), b"tail");
