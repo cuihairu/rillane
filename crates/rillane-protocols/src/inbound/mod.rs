@@ -3,6 +3,7 @@
 //! 提供各种入口协议的服务端实现。
 
 mod http;
+mod hysteria;
 mod hysteria2;
 mod mixed;
 mod shadowsocks;
@@ -12,6 +13,7 @@ mod vless;
 mod vmess;
 
 pub use http::HttpIngress;
+pub use hysteria::{HysteriaIngress, HysteriaUdpParts};
 pub use hysteria2::{Hysteria2Ingress, Hysteria2UdpParts};
 pub use mixed::MixedIngress;
 pub use shadowsocks::{ShadowsocksIngress, ShadowsocksUdpParts};

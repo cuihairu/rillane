@@ -1878,6 +1878,35 @@ pub enum IngressConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         udp_enabled: Option<bool>,
     },
+    /// Hysteria v1 入口（RIL-109）：自写 server 面（评估见两语
+    /// protocol-backends.md hysteria 段——v1 无任何可用库：crates.io 无 v1
+    /// crate、GitHub 同名项目皆 v2 重写）。QUIC 端点即监听面——TLS 材料随
+    /// IR 内联（PEM），装配期解析（错误启动时暴露），ALPN 恒 "hysteria"、
+    /// TLS 1.3（QUIC 载具硬性要求）。控制流认证（版本字节 0x03 + 客户端速率
+    /// 申报非零硬校验 + 授权 min 交换 + 口令恒时比对）；授权速率如实回发
+    /// （线面镜像），Brutal 拥塞控制不交付——QUIC 缺省 CC 承载。obfs/wechat/
+    /// faketcp 包层传输、ACL、ACME、流量统计 API 不交付不留字段。UDP 关联面
+    /// 随 `udp.enabled`/`udp_enabled` 门。
+    Hysteria {
+        bind: String,
+        /// 预共享口令（任意非空串；服务端恒时比对）
+        password: String,
+        /// 证书链 PEM（含叶起全链；自签测试夹具 rcgen）
+        cert: String,
+        /// 私钥 PEM
+        cert_key: String,
+        /// 服务端发送速率上限 Mbps（客户端下行向；官方 >0 才施加上限——
+        /// None = 不设上限；0 具名拒绝，不设上限用 None 表达）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        up_mbps: Option<u32>,
+        /// 服务端接收速率上限 Mbps（客户端上行向；语义同 up_mbps）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        down_mbps: Option<u32>,
+        /// per-ingress UDP 覆盖（语义同 Socks5）：None 继承 `udp.enabled`，
+        /// Some 显式开/关该入口的 UDP 关联面。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_enabled: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
