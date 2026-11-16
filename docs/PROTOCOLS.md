@@ -21,7 +21,7 @@ This page records existing boundaries. Future work follows [v1 design](design/ar
 | Shadowsocks | TCP/UDP; SIP003 bridge for TCP | Plugin mode has no UDP; methods follow dependency/runtime validation |
 | Trojan | TCP/TLS and supported transports | No promise of UDP/all upstream extensions |
 | VLESS / VMess | TCP, WebSocket, gRPC, HTTP/2; REALITY over TCP (client side); XTLS Vision framing over tcp+TLS/REALITY (mirror-peer acceptance) | Validate transports/encryption; REALITY requires `network: tcp` with its own TLS posture; Vision requires `flow: xtls-rprx-vision`, tcp network and a TLS1.3 outer handshake, other flow values refused by name at dial time; no UDP; VMess requires AEAD/alter_id=0 |
-| Hysteria2 | TCP streams over QUIC | Current connector has no UDP outbound; not transparent web QUIC carriage |
+| Hysteria2 | TCP streams over QUIC; UDP datagram face (official UDPMessage over QUIC unreliable datagrams, mirror-peer acceptance) | obfs (salamander) unsupported — refused on both TCP/UDP faces; servers without UDP support refused by name (Hysteria-UDP declaration check); not transparent web QUIC carriage |
 | WireGuard | Userspace TCP/UDP carriage | Some targets use rejecting stubs; cross-build is not runtime proof |
 | Hysteria v1 etc. | Not advertised as available | Schema/import fields or research do not establish a connector |
 

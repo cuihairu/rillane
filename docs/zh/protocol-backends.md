@@ -318,19 +318,31 @@ armv7-ohos 桩）在对应小节如实记录。
 
 ## hysteria2
 
-- **结论**：选库 `hysteria2`
+- **结论**：选库 `hysteria2`（TCP 面）+ 官方 UDPMessage 数据报面自写
+  （RIL-133——crate 无数据报公开 API，评估留证见 UDP 行）
 - **版本**：要求 `0.1.6`，lock 实测 0.1.6
 - **许可**：MulanPSL-2.0
 - **平台**：以目标平台 QUIC（quinn 生态）支持为准
-- **公开 API**：`Hysteria2Connector`（crates/rillane-protocols/src/outbound/hysteria2.rs；
-  TCP stream over QUIC）
-- **旁路**：库承载 QUIC 会话——连接器不做底层 socket 旁路
-- **取消**：建立期检查 + 库会话关闭面
+- **公开 API**：`Hysteria2Connector`/`Hysteria2UdpConnector`
+  （crates/rillane-protocols/src/outbound/hysteria2.rs；TCP stream over QUIC
+  + 官方 UDPMessage 数据报面）
+- **旁路**：库承载 QUIC 会话——连接器不做底层 socket 旁路；UDP 面协议头
+  逐包携带真实源地址（平台旁路语义由 UDPMessage 头承载，验收面逐字段断言）
+- **取消**：建立期检查 + 库会话关闭面；UDP 面 relay drop 即 QUIC 连接
+  close（对端可观收束，验收面计数）
 - **统计**：库无逐包观测点——loss 类统计不可用（不伪装游戏丢包率，
-  mesh.md 观测口径同源）
+  mesh.md 观测口径同源）；UDP 面会话统计（外来会话丢弃/分片丢弃计数）
 - **复用**：无预热组合
-- UDP：当前连接器没有可用 UDP 出口（载具 quinn 未决，归 V2；构建期
-  扫描判负口径一致）。
+- UDP（RIL-133）：数据报面已交付。前置评估：hysteria2 crate 0.1.6 无
+  数据报公开 API（网络帧格式模块全部私有，仅 connect/DuplexStream TCP
+  面）——「无可选数据报 API」留证后按官方 PROTOCOL.md 自写：UDPMessage
+  over QUIC 不可靠数据报（session/packet/frag 定界头 + varint 地址），
+  认证复用官方 HTTP/3 /auth 面（状态码 233 + Hysteria-UDP 声明，未声明
+  即点名拒绝）；分片/重装配与外来会话过滤，丢弃/中继计数可观测；载具
+  quinn/h3/h3-quinn 与 crate 同源单版本入锁。obfs（salamander）换整个
+  QUIC 载荷，UDP 面判负；mport 为 TCP 面重连策略不适用。验收：镜像对端
+  契约测试（成功往返/双向分片/认证拒绝/无 UDP 拒绝/取消释放/统计/协议头
+  源地址）。
 
 ## wireguard
 

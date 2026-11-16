@@ -21,7 +21,7 @@
 | Shadowsocks | TCP、UDP；TCP 可用 SIP003 插件桥 | 插件模式不承载 UDP；算法以实际依赖/校验为准 |
 | Trojan | TCP/TLS，可叠加支持的传输 | 不据此承诺 UDP 或所有上游扩展 |
 | VLESS / VMess | TCP、WebSocket、gRPC、HTTP/2 传输；REALITY（TCP 承载，客户端面）；XTLS Vision 分帧（tcp+TLS/REALITY 承载，镜像对端验收） | 传输/加密配置需通过构建校验；REALITY 须 `network: tcp` 并按其口径处置 TLS；Vision 须 `flow: xtls-rprx-vision`、`network: tcp` 且外层为 TLS1.3，其余 flow 取值拨号期点名拒绝；UDP 承载未实现，VMess 限 AEAD/alter_id=0 |
-| Hysteria2 | TCP stream over QUIC | 当前连接器没有可用 UDP 出口；不等价于网页 QUIC 透传 |
+| Hysteria2 | QUIC 上的 TCP stream；UDP 数据报面（官方 UDPMessage over QUIC 不可靠数据报，镜像对端验收） | obfs（salamander）不支持——TCP/UDP 面均判负；服务端未声明 UDP 支持时点名拒绝（Hysteria-UDP 声明校验）；不等价于网页 QUIC 透传 |
 | WireGuard | TCP、UDP 的用户态承载 | 部分平台目标是拒绝桩，交叉编译不能证明可用 |
 | Hysteria v1 等 | 不列为当前可用 | 存在 schema、订阅字段或研究方向不代表已有连接器 |
 

@@ -164,16 +164,16 @@ Every admitted section carries these fields (the contract test checks each one; 
 
 ## hysteria2
 
-- **Conclusion**: selected library `hysteria2`
+- **Conclusion**: selected library `hysteria2` (TCP face) + self-written official UDPMessage datagram face (RIL-133 — the crate has no datagram public API; evaluation recorded under UDP)
 - **Version**: requirement `0.1.6`, lock-resolved 0.1.6
 - **License**: MulanPSL-2.0
 - **Platforms**: follows target-platform QUIC (quinn ecosystem) support
-- **Public API**: `Hysteria2Connector` (crates/rillane-protocols/src/outbound/hysteria2.rs; TCP stream over QUIC)
-- **Bypass**: the library owns the QUIC session — the connector performs no bottom-socket bypass
-- **Cancel**: open-phase checks + the library's session-close face
-- **Stats**: the library has no per-packet observation points — loss-class statistics are unavailable (never dressed up as game packet loss; same observability wording as mesh.md)
+- **Public API**: `Hysteria2Connector`/`Hysteria2UdpConnector` (crates/rillane-protocols/src/outbound/hysteria2.rs; TCP stream over QUIC + official UDPMessage datagram face)
+- **Bypass**: the library owns the QUIC session — the connector performs no bottom-socket bypass; the UDP face carries the true source address per packet in the protocol header (bypass semantics asserted field-by-field in acceptance)
+- **Cancel**: open-phase checks + the library's session-close face; on the UDP face, dropping the relay closes the QUIC connection (peer-observable release, counted in acceptance)
+- **Stats**: the library has no per-packet observation points — loss-class statistics are unavailable (never dressed up as game packet loss; same observability wording as mesh.md); the UDP face exposes session counters (foreign-session drops / fragment drops)
 - **Reuse**: no prewarm composition
-- UDP: the current connector has no usable UDP egress (carrier quinn undecided, V2 scope; the build-time scan refuses consistently).
+- UDP (RIL-133): datagram face delivered. Evaluation first: the hysteria2 crate 0.1.6 exposes no datagram public API (all wire-format modules are private; only the connect/DuplexStream TCP face) — after recording the "no selectable datagram API" conclusion, the face was self-written per the official PROTOCOL.md: UDPMessage over QUIC unreliable datagrams (session/packet/frag delimited header + varint address), authentication reusing the official HTTP/3 /auth face (status 233 + Hysteria-UDP declaration; undeclared support is refused by name); fragmentation/reassembly and foreign-session filtering, drop/relay counters observable; carriers quinn/h3/h3-quinn share the crate's source with a single version in the lock. obfs (salamander) replaces the entire QUIC payload — refused on the UDP face; mport is a TCP-face reconnect policy, not applicable. Acceptance: mirror-peer contract tests (roundtrip / bidirectional fragmentation / auth refusal / no-UDP refusal / cancel-release / stats / protocol-header source address).
 
 ## wireguard
 
