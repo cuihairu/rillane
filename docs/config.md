@@ -50,6 +50,7 @@ This page describes current configuration, not completed v1 fields. Definitions 
 | `vmess` | `bind` (required), `uuid` (required), `udp_enabled`? |
 | `hysteria2` | `bind` (required), `password` (required), `cert` (required), `cert_key` (required), `udp_enabled`? |
 | `hysteria` | `bind` (required), `password` (required), `cert` (required), `cert_key` (required), `up_mbps`?, `down_mbps`?, `udp_enabled`? |
+| `shadow_tls` | `bind` (required), `password` (required), `handshake_addr` (required), `target_addr` (required) |
 
 - `auth`: an `[{username, password}]` credential table -- **non-empty means enforced** (socks5 via RFC 1929, http via a `Proxy-Authorization: Basic` 407 challenge); absent/empty table = anonymous passthrough.
 - `bearer_tokens`: a `[token]` list compared in plaintext (`Proxy-Authorization: Bearer`), in parallel with `auth`; either passing is enough; disabled by default.
@@ -59,8 +60,9 @@ This page describes current configuration, not completed v1 fields. Definitions 
 - `vmess` `uuid`: a standard-form UUID parsed at assembly time (garbage errors before listen); the wire auth key is `cmdKey = MD5(uuid || constant)`, and the AEAD sealed header IS the auth face -- the server carries no TLS fields (bare TCP) and no security knob (the client picks AES-128-GCM or ChaCha20-Poly1305 per connection; AEAD-only, `alter_id: 0` semantics).
 - `hysteria2` `password`: constant-time compared at the HTTP/3 `/auth` gate (233 accept + `Hysteria-UDP` declaration); the QUIC endpoint IS the listen face -- `cert`/`cert_key` are inline PEM parsed at assembly time, ALPN is always `h3`. `obfs`/masquerade/ACME/Brutal are not delivered and carry no config fields.
 - `hysteria` (v1) `password`/`up_mbps`/`down_mbps`: the password is constant-time compared on the control stream (version byte `0x03` handshake); the QUIC endpoint IS the listen face -- `cert`/`cert_key` are inline PEM parsed at assembly time, ALPN is always `hysteria`, TLS 1.3 minimum. `up_mbps`/`down_mbps` are server-side rate CAPS for the client's downlink/uplink direction respectively (`None` = uncapped -- the official `>0` applies-a-cap wording; `0` is refused by name at assembly time, use `None` to express "no cap"). obfs/wechat/faketcp packet transports, ACL routing, ACME and the traffic-stats API are not delivered and carry no config fields.
+- `shadow_tls` (v2 carrier, RIL-110): `handshake_addr` is the handshake/camo site (pure TLS relay + challenge answering), `target_addr` is the inner protocol ingress bind the switched stream is handed to verbatim (usually a Shadowsocks ingress). No `udp_enabled` field -- the carrier has no UDP face. Empty password and malformed addresses error at assembly time.
 
-## egress[] (`type` tags, 12 variants)
+## egress[] (`type` tags, 13 variants)
 
 | type | Fields (yes = required) | Default |
 |------|----------------|------|
@@ -68,6 +70,7 @@ This page describes current configuration, not completed v1 fields. Definitions 
 | `socks5` | `server`yes `port`yes `username`? `password`? | — |
 | `http` | `server`yes `port`yes `username`? `password`? `tls` `skip_cert_verify` `sni`? `tls_fingerprint`? | `tls: false` |
 | `shadowsocks` | `server`yes `port`yes `method`yes `password`yes `plugin`? `plugin_opts`? | — |
+| `shadowsocks-shadow-tls` | `server`yes `port`yes `method`yes `password`yes `shadow_tls`yes (`host`yes `password`yes `version`? `skip_cert_verify`?) | `shadow_tls.version`: 2 |
 | `vmess` | `server`yes `port`yes `uuid`yes `alter_id` `security` `network` `path`? `host`? `grpc_service_name`? `grpc_reuse`? `tls` `skip_cert_verify` `sni`? `alpn`? `tls_fingerprint`? | `alter_id: 0`, `security: auto`, `network: tcp`, `tls: false` |
 | `vless` | same as the vmess base + `flow`? `xhttp_mode`? `packet_encoding`? | `network: tcp`, `tls: false` |
 | `trojan` | `server`yes `port`yes `password`yes `network` `path`? `host`? `grpc_service_name`? `grpc_reuse`? `tls` `skip_cert_verify` `sni`? `alpn`? `tls_fingerprint`? | `network: tcp`, **`tls: true`** |
@@ -85,6 +88,7 @@ Transport and build-time constraints:
 - `security` (vmess): `auto | aes-128-gcm | chacha20-poly1305`; `alter_id > 0` and non-AEAD security are refused at build time.
 - `flow` (vless): dial-time validation — exactly `xtls-rprx-vision` accepted (Vision framing; requires `network: tcp` + `tls: true`/REALITY, UDP refused), any other value refused at dial time and names the node.
 - `method` (shadowsocks): free-form string, invalid values error at build time (the set is whatever the shadowsocks crate 1.25 AEAD methods support); `plugin` goes through the SIP003 bridge (TCP plane via the plugin process, UDP plane judged negative in plugin mode).
+- `shadowsocks-shadow-tls` (RIL-110): SS TCP face over the ShadowTLS v2 carrier -- SS `password` and carrier `shadow_tls.password` are independent; `shadow_tls.version` accepts absent/2 only (v1/v3 refused by name at build time, no silent downgrade); `skip_cert_verify` shares the vless/vmess TLS semantics. No UDP face anywhere -- a combo node under `udp.enabled` is refused by the build-time capability scan. The subscription side converts both ways with the mihomo plugin shape (`plugin: shadow-tls` + `plugin-opts`).
 - `hysteria` (v1): TCP request streams and the UDP datagram plane are available (self-written face, RIL-109; wire mirror of official v1.3.5 core/cs) -- carriers other than `protocol: udp` (wechat/faketcp) and `obfs` packet transports are refused by name at dial time, and the UDP face additionally refuses them at build time when the node is in the UDP-reachable set; `up_mbps`/`down_mbps` of `0` are refused by name at dial time. `hysteria2` TCP and the UDP datagram plane are available (UDP limited to the obfs-free combination; servers without declared UDP support are refused by name).
 - `tuic` (v5): TCP streams and the UDP datagram plane are available -- v5 only (no v4 code path; v4 wire shapes refused by name); `congestion_controller` other than `cubic` is refused by name at dial time (no silent downgrade); auth has no response face -- refusals arrive as stream/QUIC teardown.
 - `tls_fingerprint`: `none | chrome | ios | safari` (comparison table: `rillanectl tls-fingerprint`); emulation is off by default.

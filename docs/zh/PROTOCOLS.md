@@ -15,6 +15,7 @@
 | VMess | 裸 TCP 上的 TCP 流，AEAD 封头即认证面（cmdKey 由 UUID 派生；authID CRC + ±120s 窗 + 防重放缓存）；UDP 关联为同一连接上逐数据报一块的单目标帧（无独立 UDP socket，无终止块语义） | UUID 装配期解析；security 由客户端逐连接自选（AES-128-GCM / ChaCha20-Poly1305，仅 AEAD 口径，alter_id=0）；服务端无 TLS 字段；UDP 需启用 `udp.enabled`；入口还可单独关闭 UDP；ws/grpc/h2 服务端载具未交付 |
 | Hysteria2 | QUIC 流承载 TCP（accept_bi）+ QUIC 不可靠数据报承载 UDP，皆在 HTTP/3 `/auth` 认证门之后（状态码 233，口令恒时比对；`Hysteria-UDP: true` 声明 UDP 面）；UDP 会话走会话表（按 QUIC 连接粘滞，连接收束即吊销） | 证书/私钥内联 PEM 装配期解析；ALPN 恒 `h3`；UDP 需启用 `udp.enabled` 且入口放行（服务端未声明时客户端自拒）；obfs/Salamander、masquerade、ACME、Brutal 拥塞控制与流量统计 API 未交付 |
 | Hysteria（v1） | QUIC 上的 TCP 请求流 + UDP 数据报会话，皆在控制流认证门之后（版本字节 `0x03`、速率申报非零硬校验、授权 min 交换、口令恒时比对）；UDP 会话走会话表（会话号按连接计数，流 EOF 即删除） | 证书/私钥内联 PEM 装配期解析；ALPN 恒 `hysteria`、TLS 最低 1.3；`up_mbps`/`down_mbps` 为服务端速率上限（`None` 不设上限，`0` 装配期拒绝）；UDP 需启用 `udp.enabled` 且入口放行；obfs/wechat/faketcp 包层传输、ACL 路由、ACME、Brutal 拥塞控制与流量统计 API 未交付 |
+| ShadowTLS | v2 载具入口：向握手站点纯 TLS 中继 + HMAC-SHA1 挑战应答切换；切换后流原样交内层数据服务器（通常 Shadowsocks 入口 bind），切换后双向伪记录封帧（内容 ≤ 4091） | 载具面——无寻址/UDP 面（router/output 不经手）；仅 v2（v1/v3 装配期点名拒绝）；挑战未命中 >3 条或任一畸形记录形即永久回退无辜中继（握手站点全量 TLS 面——主动探测防御） |
 | TUN | Linux TCP/UDP 共享数据面 | 其他平台完整接管仍需实现/验收 |
 
 ## 出站
@@ -25,6 +26,7 @@
 | SOCKS5 | TCP 隧道 + 出站 UDP ASSOCIATE（RFC 1928 §6/§7，来源验证 + FRAG≠0 丢弃） | HTTP CONNECT 仅 TCP 隧道 |
 | AnyTLS | TCP（TLS 承载，会话复用）；UDP-over-TCP（UoT） | 订阅 alpn/client-fingerprint 不入 IR（转换报告点名） |
 | Shadowsocks | TCP、UDP；TCP 可用 SIP003 插件桥 | 插件模式不承载 UDP；算法以实际依赖/校验为准 |
+| shadowsocks-shadow-tls | SS TCP 面架于 ShadowTLS v2 载具（自写面；官方 ihciah/shadow-tls v0.2.20 线镜像，契约验收） | 仅 v2——v1/v3 点名拒绝（不静默降级）；载具无寻址面——目标寻址归内层 SS 协议；全组合无 UDP 面——组合节点不配 UDP 连接器（udp.enabled 下构建期扫描判负）；SIP003 插件与本组合不并存 |
 | Trojan | TCP/TLS，可叠加支持的传输；gRPC gun 连接复用（复用旋钮） | 不据此承诺 UDP 或所有上游扩展 |
 | VLESS / VMess | TCP、WebSocket、HTTPUpgrade、gRPC（gun 连接复用，镜像对端验收）、HTTP/2 传输；XHTTP 传输（**仅 VLESS**，TLS1.3/H2 承载，packet-up/stream-one 两模式，镜像对端验收）；REALITY（TCP 承载，客户端面）；XTLS Vision 分帧（tcp+TLS/REALITY 承载，镜像对端验收）；UDP（**VLESS**：raw/xudp/packetaddr 包编码，镜像对端验收；**VMess**：raw 单目标面） | 传输/加密配置需通过构建校验；XHTTP 须 `network: xhttp` 且恒叠 TLS，`xhttp_mode` 限 `auto | packet-up | stream-one`（其余拨号期点名拒绝，stream-up/H3/H1.1 载具未交付）；REALITY 须 `network: tcp` 并按其口径处置 TLS；Vision 须 `flow: xtls-rprx-vision`、`network: tcp` 且外层为 TLS1.3，其余 flow 取值拨号期点名拒绝；`grpc_reuse` gun 旋钮仅 `network: grpc` 可携带（其余传输面构建期拒绝；三键全缺 = 单连接全流复用）；`packet_encoding`（仅 VLESS）限 `raw | xudp | packetaddr`（缺省 raw，构建期白名单），VMess 订阅 `packet-encoding` 仅 `raw` 可交付（xudp/packetaddr 点名拒绝）；VMess 限 AEAD/alter_id=0 |
 | Hysteria2 | QUIC 上的 TCP stream；UDP 数据报面（官方 UDPMessage over QUIC 不可靠数据报，镜像对端验收） | obfs（salamander）不支持——TCP/UDP 面均判负；服务端未声明 UDP 支持时点名拒绝（Hysteria-UDP 声明校验）；不等价于网页 QUIC 透传 |

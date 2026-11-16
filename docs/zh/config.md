@@ -50,6 +50,7 @@
 | `vmess` | `bind`（必填）、`uuid`（必填）、`udp_enabled`? |
 | `hysteria2` | `bind`（必填）、`password`（必填）、`cert`（必填）、`cert_key`（必填）、`udp_enabled`? |
 | `hysteria` | `bind`（必填）、`password`（必填）、`cert`（必填）、`cert_key`（必填）、`up_mbps`?、`down_mbps`?、`udp_enabled`? |
+| `shadow_tls` | `bind`（必填）、`password`（必填）、`handshake_addr`（必填）、`target_addr`（必填） |
 
 - `auth`：`[{username, password}]` 凭据表**非空即强制**（socks5 走 RFC 1929、http 走 `Proxy-Authorization: Basic` 407 挑战）；缺省/空表 = 匿名放行。
 - `bearer_tokens`：`[token]` 明文比对（`Proxy-Authorization: Bearer`），与 `auth` 并列任一通过即放行；缺省不启用。
@@ -59,8 +60,9 @@
 - `vmess` `uuid`：标准形 UUID，装配期解析（垃圾在监听前报错）；线上认证键为 `cmdKey = MD5(uuid ‖ 常量)` 派生，AEAD 封头即认证面——服务端不设 TLS 字段（裸 TCP 承载）也不设 security 旋钮（客户端逐连接自选 AES-128-GCM / ChaCha20-Poly1305；仅 AEAD 口径，`alter_id: 0`）。
 - `hysteria2` `password`：HTTP/3 `/auth` 认证门恒时比对（233 放行 + `Hysteria-UDP` 声明）；QUIC 端点即监听面——`cert`/`cert_key` 为内联 PEM 装配期解析，ALPN 恒 `h3`。obfs/masquerade/ACME/Brutal 不交付不留字段。
 - `hysteria`（v1）`password`/`up_mbps`/`down_mbps`：口令在控制流上恒时比对（版本字节 `0x03` 握手）；QUIC 端点即监听面——`cert`/`cert_key` 为内联 PEM 装配期解析，ALPN 恒 `hysteria`、TLS 最低 1.3。`up_mbps`/`down_mbps` 为服务端速率上限（分别封客户端下行/上行向；`None` = 不设上限——官方「>0 才施加」口径；`0` 装配期具名拒绝，不设上限用 `None` 表达）。obfs/wechat/faketcp 包层传输、ACL 路由、ACME、流量统计 API 不交付不留字段。
+- `shadow_tls`（v2 载具，RIL-110）：`handshake_addr` 为伪装/握手站点（纯 TLS 中继 + 挑战应答），`target_addr` 为切换后流原样交付的内层协议入口 bind（通常 Shadowsocks 入口）。无 `udp_enabled` 字段——载具无 UDP 面。空口令与畸形地址装配期报错。
 
-## egress[]（`type` 标签，12 变体）
+## egress[]（`type` 标签，13 变体）
 
 | type | 字段（✓=必填） | 缺省 |
 |------|----------------|------|
@@ -68,6 +70,7 @@
 | `socks5` | `server`✓ `port`✓ `username`? `password`? | — |
 | `http` | `server`✓ `port`✓ `username`? `password`? `tls` `skip_cert_verify` `sni`? `tls_fingerprint`? | `tls: false` |
 | `shadowsocks` | `server`✓ `port`✓ `method`✓ `password`✓ `plugin`? `plugin_opts`? | — |
+| `shadowsocks-shadow-tls` | `server`✓ `port`✓ `method`✓ `password`✓ `shadow_tls`✓（`host`✓ `password`✓ `version`? `skip_cert_verify`?） | `shadow_tls.version`: 2 |
 | `vmess` | `server`✓ `port`✓ `uuid`✓ `alter_id` `security` `network` `path`? `host`? `grpc_service_name`? `grpc_reuse`? `tls` `skip_cert_verify` `sni`? `alpn`? `tls_fingerprint`? | `alter_id: 0`、`security: auto`、`network: tcp`、`tls: false` |
 | `vless` | 同 vmess 基础 + `flow`? `xhttp_mode`? `packet_encoding`? | `network: tcp`、`tls: false` |
 | `trojan` | `server`✓ `port`✓ `password`✓ `network` `path`? `host`? `grpc_service_name`? `grpc_reuse`? `tls` `skip_cert_verify` `sni`? `alpn`? `tls_fingerprint`? | `network: tcp`、**`tls: true`** |
@@ -85,6 +88,7 @@
 - `security`（vmess）：`auto | aes-128-gcm | chacha20-poly1305`；`alter_id > 0` 与非 AEAD security 构建期拒绝。
 - `flow`（vless）：拨号期校验——精确接受 `xtls-rprx-vision`（Vision 分帧；须 `network: tcp` + `tls: true`/REALITY，UDP 拒绝），其余取值拨号期拒绝（报错含节点名）。
 - `method`（shadowsocks）：自由字符串，非法值构建期报错（以 shadowsocks crate 1.25 AEAD 方法集为准）；`plugin` 走 SIP003 桥（TCP 面经插件进程，UDP 面 plugin 模式判负）。
+- `shadowsocks-shadow-tls`（RIL-110）：SS TCP 面架于 ShadowTLS v2 载具——SS `password` 与载具 `shadow_tls.password` 两侧独立；`shadow_tls.version` 仅接受缺席/2（v1/v3 构建期点名拒绝，不静默降级）；`skip_cert_verify` 与 vless/vmess 的 TLS 语义一致。载具无 UDP 面——组合节点在 `udp.enabled` 下被构建期能力扫描判负。订阅侧按 mihomo 插件形（`plugin: shadow-tls` + `plugin-opts`）双向转换。
 - `hysteria`（v1）：TCP 请求流与 UDP 数据报面可用（自写面，RIL-109；官方 v1.3.5 core/cs 线镜像）——`protocol: udp` 以外的载具（wechat/faketcp）与 `obfs` 包层传输拨号期点名拒绝；节点在 UDP 可达集内时 UDP 面构建期同样判负；`up_mbps`/`down_mbps` 为 `0` 拨号期点名拒绝。`hysteria2` TCP 与 UDP 数据报面可用（UDP 限无 obfs 组合，服务端未声明 UDP 支持时点名拒绝）。
 - `tuic`（v5）：TCP 流与 UDP 数据报面可用——仅 v5（v4 无代码路径，v4 线格式按名拒绝）；`congestion_controller` 非 `cubic` 拨号期点名拒绝（不静默降级）；认证无响应面——拒绝以流/QUIC 收束呈现。
 - `tls_fingerprint`：`none | chrome | ios | safari`（对照表：`rillanectl tls-fingerprint`）；缺省不模拟。
