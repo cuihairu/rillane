@@ -521,3 +521,88 @@ routing:
     let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
     assert_eq!(back.ingress, config.ingress, "往返后入口逐字段一致");
 }
+
+/// Hysteria v1 入口 yaml 往返（RIL-109）：速率上限显式/缺省两形态，
+/// 逐字段断言 + IR serde 双向往返（cert/cert_key 内联 PEM 原样保留；
+/// QUIC 端点即监听面，ALPN 恒 "hysteria"——obfs/ACL/ACME/流量统计
+/// 不交付不留字段；None = 不设上限，0 在装配期具名拒绝不入 yaml 面）
+#[test]
+fn hysteria_ingress_yaml_roundtrip() {
+    let yaml = r#"
+control:
+  api_bind: 127.0.0.1:9090
+telemetry:
+  log_level: info
+  enable_metrics: false
+  enable_tracing: false
+ingress:
+  - name: hy1-in
+    type: hysteria
+    bind: 127.0.0.1:10445
+    password: hy1-pass-2026
+    cert: "REDACTED-SAMPLE-cert-pem"
+    cert_key: "REDACTED-SAMPLE-key-pem"
+    up_mbps: 100
+    down_mbps: 500
+    udp_enabled: true
+  - name: hy1-in-min
+    type: hysteria
+    bind: 127.0.0.1:10446
+    password: hy1-pass-2026
+    cert: "REDACTED-SAMPLE-cert-pem"
+    cert_key: "REDACTED-SAMPLE-key-pem"
+egress:
+  - name: direct
+    type: direct
+routing:
+  default_node: direct
+  groups: []
+  rules: []
+"#;
+    let config = RillaneConfig::from_str(yaml, None).expect("Hysteria v1 入口配置必须可解析");
+    assert_eq!(config.ingress.len(), 2);
+
+    // 逐字段断言（速率上限显式与缺省两形态）
+    match &config.ingress[0].spec {
+        rillane_config::IngressConfig::Hysteria {
+            bind,
+            password,
+            cert,
+            cert_key,
+            up_mbps,
+            down_mbps,
+            udp_enabled,
+        } => {
+            assert_eq!(bind, "127.0.0.1:10445");
+            assert_eq!(password, "hy1-pass-2026");
+            assert_eq!(cert, "REDACTED-SAMPLE-cert-pem");
+            assert_eq!(cert_key, "REDACTED-SAMPLE-key-pem");
+            assert_eq!(*up_mbps, Some(100));
+            assert_eq!(*down_mbps, Some(500));
+            assert_eq!(*udp_enabled, Some(true));
+        }
+        other => panic!("首入口应为 hysteria，实际 {other:?}"),
+    }
+    match &config.ingress[1].spec {
+        rillane_config::IngressConfig::Hysteria {
+            bind,
+            password,
+            up_mbps,
+            down_mbps,
+            udp_enabled,
+            ..
+        } => {
+            assert_eq!(bind, "127.0.0.1:10446");
+            assert_eq!(password, "hy1-pass-2026");
+            assert_eq!(*up_mbps, None, "缺省不设上限");
+            assert_eq!(*down_mbps, None, "缺省不设上限");
+            assert_eq!(*udp_enabled, None, "缺省继承全局");
+        }
+        other => panic!("次入口应为 hysteria，实际 {other:?}"),
+    }
+
+    // serde 双向往返：序列化 → 回读逐字段一致（含 type 标签）
+    let json = serde_json::to_string(&config).expect("可序列化");
+    let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
+    assert_eq!(back.ingress, config.ingress, "往返后入口逐字段一致");
+}
