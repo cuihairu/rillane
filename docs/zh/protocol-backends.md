@@ -142,6 +142,15 @@ armv7-ohos 桩）在对应小节如实记录。
   为 32 字节），构建期校验。六算法全部对真实 crate 服务端对端验收通过
   （TCP 往返+统计、UDP 往返+协议头解码地址、错密码静默、取消/资源释放），
   见 `crates/rillane-protocols/tests/shadowsocks_matrix_contract.rs`。
+- **服务端面（RIL-134）**：复用同库 server 面——`ProxyListener`（TCP accept +
+  handshake 解出目标 `Address`，解密流即 Flow io）与 `ProxySocket`
+  （`UdpSocketType::Server` 数据报解包/封包）。自写无增益：密码学状态机
+  正确性归库（客户端/服务端同一加密核，RIL-131 六算法已在该 server 面真
+  实对端验收双向）。入库角色：`ShadowsocksIngress`（TCP 面全量 + UDP 面
+  随 `udp.enabled`/`udp_enabled` 门），SIP003 插件服务端面未交付（点名）；
+  method/password 校验与 egress 同口径（none/未编译面点名拒绝、SS2022
+  base64 密钥形状）；UDP 会话生命周期归 `UdpSessionTable`（与 socks5
+  ASSOCIATE 同机制：粘滞路由、空闲回收、链路失败吊销）。
 
 ## vmess
 
