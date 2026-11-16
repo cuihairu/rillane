@@ -1,0 +1,24 @@
+# RIL-131 订阅兼容样本：Shadowsocks 算法矩阵出站节点（已脱敏）
+# v1 AEAD 与 SS2022 各一。凭据为占位值：SS2022 的 password 语义是 base64
+# 密钥（长度须与算法密钥长精确一致——aes-256/chacha20 为 32 字节），真实
+# 密钥由契约测试生成；地址用 RFC 5737/2606 文档段。预期：method（cipher）
+# 与 password 双向转换逐字段保留，未编译面（stream/none）在连接器构建期
+# 点名拒绝（见 rillane-protocols shadowsocks_matrix_contract）。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-ss-v1-aes256
+    type: ss
+    server: ss1.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: "REDACTED-SAMPLE-v1-password"
+  - name: sample-ss-2022-aes256
+    type: ss
+    server: 203.0.113.50
+    port: 8443
+    cipher: 2022-blake3-aes-256-gcm
+    password: "REDACTED-SAMPLE-ss2022-base64-key-placeholder"
+proxy-groups: []
+rules: []

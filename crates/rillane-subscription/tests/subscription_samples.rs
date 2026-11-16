@@ -692,6 +692,111 @@ fn vision_flow_subscription_fields_convert_both_ways() {
     );
 }
 
+// ---------- RIL-131：Shadowsocks 算法矩阵——订阅字段双向转换样本 ----------
+
+#[test]
+fn ss_matrix_subscription_fields_convert_both_ways() {
+    // 正向：clash 订阅 → IR（v1 AEAD 与 SS2022 各一，cipher/password 逐字段保留）
+    let (config, report) = loose("ss_matrix_node.yaml");
+    let names: Vec<&str> = config.egress.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["sample-ss-v1-aes256", "sample-ss-2022-aes256"]);
+    let specs: Vec<rillane_config::EgressConfig> =
+        config.egress.iter().map(|e| e.spec.clone()).collect();
+    assert_eq!(
+        specs[0],
+        rillane_config::EgressConfig::Shadowsocks {
+            server: "ss1.example.com".into(),
+            port: 8388,
+            method: "aes-256-gcm".into(),
+            password: "REDACTED-SAMPLE-v1-password".into(),
+            plugin: None,
+            plugin_opts: None,
+        }
+    );
+    assert_eq!(
+        specs[1],
+        rillane_config::EgressConfig::Shadowsocks {
+            server: "203.0.113.50".into(),
+            port: 8443,
+            method: "2022-blake3-aes-256-gcm".into(),
+            password: "REDACTED-SAMPLE-ss2022-base64-key-placeholder".into(),
+            plugin: None,
+            plugin_opts: None,
+        }
+    );
+    assert!(
+        report.dropped_nodes.is_empty(),
+        "SS 节点必须保留，不丢弃: {:?}",
+        report.dropped_nodes
+    );
+    assert!(
+        report.degraded_nodes.is_empty(),
+        "cipher/password 全字段入 IR，无降级: {:?}",
+        report.degraded_nodes
+    );
+
+    // 反向 1：IR → serde → IR（序列化不丢字段，往返逐字段一致）
+    for spec in &specs {
+        let json = serde_json::to_string(spec).expect("IR 序列化");
+        let back: rillane_config::EgressConfig = serde_json::from_str(&json).expect("IR 反序列化");
+        assert_eq!(&back, spec, "serde 往返必须逐字段一致");
+    }
+
+    // 反向 2：IR → clash 导出（type: ss + cipher 键位）→ 导入侧回读再转 IR
+    let mut project: rillane_config::RillaneConfig = serde_yaml::from_str(
+        "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+    )
+    .expect("基底配置");
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-ss-v1-aes256".into(),
+        spec: specs[0].clone(),
+    });
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-ss-2022-aes256".into(),
+        spec: specs[1].clone(),
+    });
+    let (yaml, export_report) = rillane_subscription::ClashExporter
+        .export(&project)
+        .unwrap();
+    assert_eq!(
+        export_report.exported_proxies,
+        vec!["sample-ss-v1-aes256", "sample-ss-2022-aes256"],
+        "SS 节点应可导出"
+    );
+    assert!(yaml.contains("type: ss"), "{yaml}");
+    assert!(yaml.contains("cipher: aes-256-gcm"), "{yaml}");
+    assert!(
+        yaml.contains("2022-blake3-aes-256-gcm"),
+        "导出必须携带 SS2022 算法名: {yaml}"
+    );
+    assert!(yaml.contains("REDACTED-SAMPLE"), "{yaml}");
+    // 回读：cipher 键位保证往返不丢算法（矩阵成员身份随字段保留）
+    let reparsed = ClashConverter::new()
+        .parse(&yaml)
+        .expect("导出必须可被导入侧解析");
+    let (back_config, back_report) = ClashConverter::new()
+        .convert_to_rillane_with_report(&reparsed)
+        .expect("回读转换");
+    assert!(
+        back_report.dropped_nodes.is_empty(),
+        "回读不丢节点: {:?}",
+        back_report.dropped_nodes
+    );
+    assert!(
+        back_report.degraded_nodes.is_empty(),
+        "回读零损失: {:?}",
+        back_report.degraded_nodes
+    );
+    assert_eq!(
+        back_config.egress[0].spec, specs[0],
+        "导出→回读必须逐字段还原 v1 节点"
+    );
+    assert_eq!(
+        back_config.egress[1].spec, specs[1],
+        "SS2022 节点同样逐字段还原"
+    );
+}
+
 // ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
 
 #[test]
