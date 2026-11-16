@@ -49,6 +49,7 @@ This page describes current configuration, not completed v1 fields. Definitions 
 | `vless` | `bind` (required), `uuid` (required), `cert` (required), `cert_key` (required), `udp_enabled`? |
 | `vmess` | `bind` (required), `uuid` (required), `udp_enabled`? |
 | `hysteria2` | `bind` (required), `password` (required), `cert` (required), `cert_key` (required), `udp_enabled`? |
+| `hysteria` | `bind` (required), `password` (required), `cert` (required), `cert_key` (required), `up_mbps`?, `down_mbps`?, `udp_enabled`? |
 
 - `auth`: an `[{username, password}]` credential table -- **non-empty means enforced** (socks5 via RFC 1929, http via a `Proxy-Authorization: Basic` 407 challenge); absent/empty table = anonymous passthrough.
 - `bearer_tokens`: a `[token]` list compared in plaintext (`Proxy-Authorization: Bearer`), in parallel with `auth`; either passing is enough; disabled by default.
@@ -57,6 +58,7 @@ This page describes current configuration, not completed v1 fields. Definitions 
 - `vless` `uuid`: a standard-form UUID parsed at assembly time (garbage errors before listen) and compared on the wire with a constant-time equality over the 16 raw bytes; `cert`/`cert_key` same as trojan (inline PEM parsed at assembly). The server face is plain TLS + UUID auth only -- Vision/REALITY server combinations are a separately validated item and carry no config fields.
 - `vmess` `uuid`: a standard-form UUID parsed at assembly time (garbage errors before listen); the wire auth key is `cmdKey = MD5(uuid || constant)`, and the AEAD sealed header IS the auth face -- the server carries no TLS fields (bare TCP) and no security knob (the client picks AES-128-GCM or ChaCha20-Poly1305 per connection; AEAD-only, `alter_id: 0` semantics).
 - `hysteria2` `password`: constant-time compared at the HTTP/3 `/auth` gate (233 accept + `Hysteria-UDP` declaration); the QUIC endpoint IS the listen face -- `cert`/`cert_key` are inline PEM parsed at assembly time, ALPN is always `h3`. `obfs`/masquerade/ACME/Brutal are not delivered and carry no config fields.
+- `hysteria` (v1) `password`/`up_mbps`/`down_mbps`: the password is constant-time compared on the control stream (version byte `0x03` handshake); the QUIC endpoint IS the listen face -- `cert`/`cert_key` are inline PEM parsed at assembly time, ALPN is always `hysteria`, TLS 1.3 minimum. `up_mbps`/`down_mbps` are server-side rate CAPS for the client's downlink/uplink direction respectively (`None` = uncapped -- the official `>0` applies-a-cap wording; `0` is refused by name at assembly time, use `None` to express "no cap"). obfs/wechat/faketcp packet transports, ACL routing, ACME and the traffic-stats API are not delivered and carry no config fields.
 
 ## egress[] (`type` tags, 12 variants)
 
@@ -83,7 +85,7 @@ Transport and build-time constraints:
 - `security` (vmess): `auto | aes-128-gcm | chacha20-poly1305`; `alter_id > 0` and non-AEAD security are refused at build time.
 - `flow` (vless): dial-time validation — exactly `xtls-rprx-vision` accepted (Vision framing; requires `network: tcp` + `tls: true`/REALITY, UDP refused), any other value refused at dial time and names the node.
 - `method` (shadowsocks): free-form string, invalid values error at build time (the set is whatever the shadowsocks crate 1.25 AEAD methods support); `plugin` goes through the SIP003 bridge (TCP plane via the plugin process, UDP plane judged negative in plugin mode).
-- `hysteria` (v1): schema/subscription conversion is supported, but **the egress connector is missing** -- RuntimeBuilder errors at build time; `hysteria2` TCP and the UDP datagram plane are available (UDP limited to the obfs-free combination; servers without declared UDP support are refused by name).
+- `hysteria` (v1): TCP request streams and the UDP datagram plane are available (self-written face, RIL-109; wire mirror of official v1.3.5 core/cs) -- carriers other than `protocol: udp` (wechat/faketcp) and `obfs` packet transports are refused by name at dial time, and the UDP face additionally refuses them at build time when the node is in the UDP-reachable set; `up_mbps`/`down_mbps` of `0` are refused by name at dial time. `hysteria2` TCP and the UDP datagram plane are available (UDP limited to the obfs-free combination; servers without declared UDP support are refused by name).
 - `tuic` (v5): TCP streams and the UDP datagram plane are available -- v5 only (no v4 code path; v4 wire shapes refused by name); `congestion_controller` other than `cubic` is refused by name at dial time (no silent downgrade); auth has no response face -- refusals arrive as stream/QUIC teardown.
 - `tls_fingerprint`: `none | chrome | ios | safari` (comparison table: `rillanectl tls-fingerprint`); emulation is off by default.
 - `address` (wireguard): comma-separated multiple CIDRs (e.g. `10.0.0.2/32,fd00::2/128`); `listen_port: 0` = automatic.

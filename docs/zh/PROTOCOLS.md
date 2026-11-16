@@ -14,6 +14,7 @@
 | VLESS | TLS 上的 TCP 流，16 字节 UUID 恒时比对认证；UDP 关联为 raw 编码单目标帧，复用同一 TLS 流（无独立 UDP socket） | 证书/私钥内联 PEM 装配期解析；UDP 需启用 `udp.enabled`；入口还可单独关闭 UDP；Vision/REALITY 服务端组合另验（客户端携 Vision flow addons 即点名拒绝）；packetaddr/xudp 服务端面未交付 |
 | VMess | 裸 TCP 上的 TCP 流，AEAD 封头即认证面（cmdKey 由 UUID 派生；authID CRC + ±120s 窗 + 防重放缓存）；UDP 关联为同一连接上逐数据报一块的单目标帧（无独立 UDP socket，无终止块语义） | UUID 装配期解析；security 由客户端逐连接自选（AES-128-GCM / ChaCha20-Poly1305，仅 AEAD 口径，alter_id=0）；服务端无 TLS 字段；UDP 需启用 `udp.enabled`；入口还可单独关闭 UDP；ws/grpc/h2 服务端载具未交付 |
 | Hysteria2 | QUIC 流承载 TCP（accept_bi）+ QUIC 不可靠数据报承载 UDP，皆在 HTTP/3 `/auth` 认证门之后（状态码 233，口令恒时比对；`Hysteria-UDP: true` 声明 UDP 面）；UDP 会话走会话表（按 QUIC 连接粘滞，连接收束即吊销） | 证书/私钥内联 PEM 装配期解析；ALPN 恒 `h3`；UDP 需启用 `udp.enabled` 且入口放行（服务端未声明时客户端自拒）；obfs/Salamander、masquerade、ACME、Brutal 拥塞控制与流量统计 API 未交付 |
+| Hysteria（v1） | QUIC 上的 TCP 请求流 + UDP 数据报会话，皆在控制流认证门之后（版本字节 `0x03`、速率申报非零硬校验、授权 min 交换、口令恒时比对）；UDP 会话走会话表（会话号按连接计数，流 EOF 即删除） | 证书/私钥内联 PEM 装配期解析；ALPN 恒 `hysteria`、TLS 最低 1.3；`up_mbps`/`down_mbps` 为服务端速率上限（`None` 不设上限，`0` 装配期拒绝）；UDP 需启用 `udp.enabled` 且入口放行；obfs/wechat/faketcp 包层传输、ACL 路由、ACME、Brutal 拥塞控制与流量统计 API 未交付 |
 | TUN | Linux TCP/UDP 共享数据面 | 其他平台完整接管仍需实现/验收 |
 
 ## 出站
@@ -27,9 +28,10 @@
 | Trojan | TCP/TLS，可叠加支持的传输；gRPC gun 连接复用（复用旋钮） | 不据此承诺 UDP 或所有上游扩展 |
 | VLESS / VMess | TCP、WebSocket、HTTPUpgrade、gRPC（gun 连接复用，镜像对端验收）、HTTP/2 传输；XHTTP 传输（**仅 VLESS**，TLS1.3/H2 承载，packet-up/stream-one 两模式，镜像对端验收）；REALITY（TCP 承载，客户端面）；XTLS Vision 分帧（tcp+TLS/REALITY 承载，镜像对端验收）；UDP（**VLESS**：raw/xudp/packetaddr 包编码，镜像对端验收；**VMess**：raw 单目标面） | 传输/加密配置需通过构建校验；XHTTP 须 `network: xhttp` 且恒叠 TLS，`xhttp_mode` 限 `auto | packet-up | stream-one`（其余拨号期点名拒绝，stream-up/H3/H1.1 载具未交付）；REALITY 须 `network: tcp` 并按其口径处置 TLS；Vision 须 `flow: xtls-rprx-vision`、`network: tcp` 且外层为 TLS1.3，其余 flow 取值拨号期点名拒绝；`grpc_reuse` gun 旋钮仅 `network: grpc` 可携带（其余传输面构建期拒绝；三键全缺 = 单连接全流复用）；`packet_encoding`（仅 VLESS）限 `raw | xudp | packetaddr`（缺省 raw，构建期白名单），VMess 订阅 `packet-encoding` 仅 `raw` 可交付（xudp/packetaddr 点名拒绝）；VMess 限 AEAD/alter_id=0 |
 | Hysteria2 | QUIC 上的 TCP stream；UDP 数据报面（官方 UDPMessage over QUIC 不可靠数据报，镜像对端验收） | obfs（salamander）不支持——TCP/UDP 面均判负；服务端未声明 UDP 支持时点名拒绝（Hysteria-UDP 声明校验）；不等价于网页 QUIC 透传 |
+| Hysteria（v1） | QUIC 上的 TCP 请求流 + UDP 数据报中继（自写面；官方 v1.3.5 线镜像，契约验收） | 载具限 `protocol: udp`（原生 UDP QUIC）——wechat/faketcp 与 obfs 包层传输拨号期点名拒绝，节点在 UDP 可达集时 UDP 面构建期同样判负；`up_mbps`/`down_mbps` 为 `0` 拨号期点名拒绝；Brutal 拥塞控制不交付（QUIC 缺省 CC，速率如实申报）；端口跳跃接受但不消费；ACL 路由、ACME、流量统计 API 不交付 |
 | TUIC | QUIC 上的 TCP stream（v5 Connect 走双向流，token 认证经 TLS keying-material exporter）；UDP 数据报面（v5 Packet over QUIC 不可靠数据报，按 assoc 独立服务端 socket，客户端分片/重组，镜像对端验收） | 仅 v5——v4 线格式无代码路径，按名拒绝；`congestion-controller` 非 `cubic` 拨号期点名拒绝（不静默降级）；无错误响应面——拒绝以流/QUIC 收束呈现 |
 | WireGuard | TCP、UDP 的用户态承载 | 部分平台目标是拒绝桩，交叉编译不能证明可用 |
-| Hysteria v1 等 | 不列为当前可用 | 存在 schema、订阅字段或研究方向不代表已有连接器 |
+| 其他（Snell、Mieru 等） | 不列为当前可用 | 存在 schema、订阅字段或研究方向不代表已有连接器 |
 
 ## 可选扩展与边界
 
