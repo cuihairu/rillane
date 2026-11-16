@@ -343,6 +343,7 @@ fn proxy_mapping(
             path,
             host,
             grpc_service_name,
+            xhttp_mode,
             tls,
             skip_cert_verify,
             sni,
@@ -385,6 +386,24 @@ fn proxy_mapping(
                     ins(&mut gopts, "grpc-service-name", svc.as_str());
                     ins(&mut m, "grpc-opts", gopts);
                 }
+            }
+            // RIL-129：XHTTP 选项导出为 xhttp-opts（mihomo 键位），mode/
+            // path/host 不丢（network=xhttp 时 path/host 已随 ws_opts/h2_opts
+            // 落扁平键，这里补块键 mode/host 供 mihomo 回读）
+            if network == "xhttp" {
+                let mut xopts = Mapping::new();
+                if let Some(mode) = xhttp_mode {
+                    ins(&mut xopts, "mode", mode.as_str());
+                }
+                if let Some(p) = path {
+                    ins(&mut xopts, "path", p.as_str());
+                }
+                if let Some(h) = host {
+                    if !h.is_empty() {
+                        ins(&mut xopts, "host", h.clone());
+                    }
+                }
+                ins(&mut m, "xhttp-opts", xopts);
             }
             degrade(
                 report,

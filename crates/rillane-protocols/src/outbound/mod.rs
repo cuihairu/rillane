@@ -18,6 +18,7 @@ mod vision;
 mod vless;
 mod vmess;
 mod ws;
+mod xhttp;
 // android / armv7-ohos：defguard_boringtun 无平台支撑（见 wireguard_stub.rs 头注）——
 // 实现剥离为恒 Err 桩，类型名保形使 runtime 侧零改动
 #[cfg(not(any(

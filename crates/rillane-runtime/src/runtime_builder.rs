@@ -2877,6 +2877,7 @@ fn build_udp_connectors(
                 path,
                 host,
                 grpc_service_name,
+                xhttp_mode,
                 tls,
                 skip_cert_verify,
                 sni,
@@ -2896,6 +2897,7 @@ fn build_udp_connectors(
                     path.clone(),
                     host.clone(),
                     grpc_service_name.clone(),
+                    xhttp_mode.clone(),
                     *tls,
                     *skip_cert_verify,
                     sni.clone(),
@@ -3187,12 +3189,13 @@ fn derive_tls_warm_keys(egress: &[EgressDescriptor]) -> Result<Vec<TransportKey>
                 let fp = parse_egress_fingerprint(tls_fingerprint, &desc.name)?;
                 // tcp 主键实际 SNI = sni ∥ server（与 forward_pooled tcp 分支同源）
                 let tcp_sni = sni.clone().unwrap_or_else(|| server.clone());
-                if network == "grpc" || network == "h2" {
-                    // grpc/h2 键 ALPN 固定 h2（gRPC/h2 over TLS 语义）；此类
-                    // 节点上 tcp/ws 借出键不存在，只推在用键。SNI 回退链随
-                    // 传输面：grpc = sni ∥ server，h2 同 ws（host 首值 → sni
-                    // → server，与 forward_pooled h2 分支同源）
-                    let h2_sni = if network == "h2" {
+                if network == "grpc" || network == "h2" || network == "xhttp" {
+                    // grpc/h2/xhttp 键 ALPN 固定 h2（gRPC/h2/XHTTP over TLS
+                    // 语义，RIL-129 xhttp 同 h2 载体）；此类节点上 tcp/ws
+                    // 借出键不存在，只推在用键。SNI 回退链随传输面：
+                    // grpc = sni ∥ server，h2/xhttp 同 ws（host 首值 → sni
+                    // → server，与 forward_pooled h2/xhttp 分支同源）
+                    let h2_sni = if network == "h2" || network == "xhttp" {
                         sni.clone()
                             .or_else(|| host.as_ref().and_then(|v| v.first().cloned()))
                             .unwrap_or_else(|| server.clone())
@@ -3586,6 +3589,7 @@ fn build_egress_outputs(
                 path,
                 host,
                 grpc_service_name,
+                xhttp_mode,
                 tls,
                 skip_cert_verify,
                 sni,
@@ -3596,7 +3600,9 @@ fn build_egress_outputs(
                 // 期即拦——配置随连接器保留，拨号期点名拒绝（VlessConnector::
                 // gate_reality_and_flow，防静默降级），节点级失败不拖垮整份订阅。
                 // network=grpc 需非空服务名（恒叠 TLS，ALPN 固定 h2）；
-                // network=h2 恒叠 TLS（mihomo 口径 h2 仅 TLS）
+                // network=h2 恒叠 TLS（mihomo 口径 h2 仅 TLS）；
+                // network=xhttp 恒叠 TLS 且模式白名单（RIL-129——auto/
+                // packet-up/stream-one，越界构建期具名拒绝）
                 if network == "grpc" {
                     let svc = grpc_service_name.as_deref().map(str::trim).unwrap_or("");
                     if svc.is_empty() {
@@ -3618,6 +3624,21 @@ fn build_egress_outputs(
                         desc.name
                     ));
                 }
+                if network == "xhttp" {
+                    if !*tls {
+                        return Err(anyhow!(
+                            "VLESS network=xhttp 需叠 TLS（h2-over-TLS 语义） (egress={})",
+                            desc.name
+                        ));
+                    }
+                    let mode = xhttp_mode.as_deref().unwrap_or("auto");
+                    if !matches!(mode, "" | "auto" | "packet-up" | "stream-one") {
+                        return Err(anyhow!(
+                            "VLESS network=xhttp mode 仅支持 auto/packet-up/stream-one，当前: {mode} (egress={})",
+                            desc.name
+                        ));
+                    }
+                }
                 let connector: Arc<dyn EgressConnector> = Arc::new(VlessConnector::new(
                     server.clone(),
                     *port,
@@ -3628,6 +3649,7 @@ fn build_egress_outputs(
                     path.clone(),
                     host.clone(),
                     grpc_service_name.clone(),
+                    xhttp_mode.clone(),
                     *tls,
                     *skip_cert_verify,
                     sni.clone(),
@@ -6086,6 +6108,7 @@ routing:
             path: None,
             host: None,
             grpc_service_name: None,
+            xhttp_mode: None,
             tls: false,
             skip_cert_verify: false,
             sni: None,
@@ -6842,6 +6865,7 @@ routing:
                     path: Some("/ws".to_string()),
                     host: Some(vec!["cdn.example".to_string()]),
                     grpc_service_name: None,
+                    xhttp_mode: None,
                     tls: true,
                     skip_cert_verify: false,
                     sni: None,

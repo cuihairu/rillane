@@ -976,6 +976,7 @@ async fn vless_h2_inline_roundtrip_raw_stream() {
         Some("/h2-echo".to_string()),
         None,
         None,
+        None,
         true,
         true,
         Some("localhost".to_string()),

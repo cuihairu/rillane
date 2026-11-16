@@ -22,6 +22,7 @@ use super::httpupgrade::httpupgrade_client_handshake;
 use super::reality::{self, RealityDial};
 use super::vision::{vision_flow_addons, VisionTlsFace, FLOW_VISION};
 use super::ws::{ws_client_handshake, WsClient};
+use super::xhttp::{xhttp_tunnel, XhttpMode};
 use crate::fingerprint::TlsFingerprint;
 use crate::pool::{TransportKey, TransportPool};
 use crate::tls::{create_tls_connector_with_profile, profile_client_config, TlsConnectorFactory};
@@ -136,6 +137,8 @@ pub struct VlessConnector {
     path: Option<String>,
     host: Option<Vec<String>>,
     grpc_service_name: Option<String>,
+    /// XHTTP 模式（RIL-129，network=xhttp 时有效；None/auto = packet-up）
+    xhttp_mode: Option<String>,
     tls: bool,
     skip_cert_verify: bool,
     sni: Option<String>,
@@ -162,6 +165,7 @@ impl VlessConnector {
         path: Option<String>,
         host: Option<Vec<String>>,
         grpc_service_name: Option<String>,
+        xhttp_mode: Option<String>,
         tls: bool,
         skip_cert_verify: bool,
         sni: Option<String>,
@@ -180,6 +184,7 @@ impl VlessConnector {
             path,
             host,
             grpc_service_name,
+            xhttp_mode,
             tls,
             skip_cert_verify,
             sni,
@@ -554,6 +559,66 @@ impl VlessConnector {
                     downstream: down,
                 })
             }
+            "xhttp" => {
+                // XHTTP 传输面（RIL-129）：TLS+ALPN h2 之上的 HTTP/2 请求族
+                // （评估留证 protocol-backends.md#xhttp——crates.io 无库面、
+                // GitHub rust-xhttp 仅服务端守护进程）；模式拨号期解析
+                // （stream-up/H3/H1.1 载具点名拒绝），恒叠 TLS，SNI 回退链
+                // 与 h2 同源：host 首值 → sni → server
+                if !self.tls {
+                    return Err(anyhow!("VLESS network=xhttp 需叠 TLS（h2-over-TLS 语义）"));
+                }
+                let mode = XhttpMode::parse(&self.xhttp_mode)?;
+                let xh_host = self.ws_host_header();
+                let sni_actual = self.sni.clone().unwrap_or_else(|| xh_host.clone());
+                let alpn_h2 = vec!["h2".to_string()];
+                let key = TransportKey::tls(
+                    &self.server,
+                    self.port,
+                    Some(&sni_actual),
+                    self.skip_cert_verify,
+                    &alpn_h2,
+                    self.fingerprint,
+                );
+
+                // 借出传输层（TLS 已由池侧建立）；XHTTP 隧道借出后进行（§4.2）
+                let (boxed, first_lease) = pool
+                    .acquire(&key)
+                    .await
+                    .with_context(|| format!("连接 VLESS 服务器失败: {server_addr}"))?;
+                let tunnel = xhttp_tunnel(boxed, &xh_host, &self.ws_path(), mode).await;
+                let (mut stream, _lease) = match tunnel {
+                    Ok(s) => (s, first_lease),
+                    Err(_) => {
+                        // 隧道握手失败 → stale 一次性重拨（D-11）
+                        drop(first_lease);
+                        pool.note_stale(&key);
+                        let (boxed, lease) = pool.acquire_fresh(&key).await?;
+                        let s = xhttp_tunnel(boxed, &xh_host, &self.ws_path(), mode)
+                            .await
+                            .with_context(|| "VLESS over XHTTP 隧道握手失败")?;
+                        (s, lease)
+                    }
+                };
+
+                // 裸字节流协议段与 tcp 同序：请求头直写、响应头直读、双向泵
+                let req = self.build_vless_tcp_request(&flow.target.host, flow.target.port)?;
+                stream.write_all(&req).await?;
+                stream.flush().await?;
+                Self::read_vless_response_header(&mut stream).await?;
+
+                let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                    &mut flow.io,
+                    &mut stream,
+                    rillane_core::performance::relay_buffer(),
+                    rillane_core::performance::relay_buffer(),
+                )
+                .await?;
+                Ok(FlowReport {
+                    upstream: up,
+                    downstream: down,
+                })
+            }
             other => Err(anyhow!("暂不支持的 VLESS network: {}", other)),
         }
     }
@@ -860,6 +925,51 @@ impl VlessConnector {
                 let mut stream = h2_tunnel(tls_stream, &h2_host, &self.ws_path())
                     .await
                     .with_context(|| "VLESS over h2 隧道握手失败")?;
+                let req = self.build_vless_tcp_request(&flow.target.host, flow.target.port)?;
+                stream.write_all(&req).await?;
+                stream.flush().await?;
+                Self::read_vless_response_header(&mut stream).await?;
+
+                let (up, down) = tokio::io::copy_bidirectional_with_sizes(
+                    &mut flow.io,
+                    &mut stream,
+                    rillane_core::performance::relay_buffer(),
+                    rillane_core::performance::relay_buffer(),
+                )
+                .await?;
+                Ok(FlowReport {
+                    upstream: up,
+                    downstream: down,
+                })
+            }
+            "xhttp" => {
+                // XHTTP 传输面（RIL-129）：恒叠 TLS + ALPN h2，模式拨号期解析
+                // （stream-up/H3/H1.1 载具点名拒绝）；SNI 回退链与 h2 同源
+                if !self.tls {
+                    return Err(anyhow!("VLESS network=xhttp 需叠 TLS（h2-over-TLS 语义）"));
+                }
+                let mode = XhttpMode::parse(&self.xhttp_mode)?;
+                let xh_host = self.ws_host_header();
+                let sni = self.sni.clone().unwrap_or_else(|| xh_host.clone());
+                let connector = match &self.factory {
+                    Some(factory) => factory.connector(
+                        self.skip_cert_verify,
+                        &["h2".to_string()],
+                        self.fingerprint,
+                    )?,
+                    None => create_tls_connector_with_profile(
+                        self.skip_cert_verify,
+                        Some(&["h2".to_string()]),
+                        self.fingerprint,
+                    )?,
+                };
+                let server_name =
+                    rustls::pki_types::ServerName::try_from(sni).context("无效的 SNI")?;
+                let tls_stream = connector.connect(server_name, tcp).await?;
+
+                let mut stream = xhttp_tunnel(tls_stream, &xh_host, &self.ws_path(), mode)
+                    .await
+                    .with_context(|| "VLESS over XHTTP 隧道握手失败")?;
                 let req = self.build_vless_tcp_request(&flow.target.host, flow.target.port)?;
                 stream.write_all(&req).await?;
                 stream.flush().await?;
@@ -1294,6 +1404,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false, // tls
             false,
             None,
@@ -1512,6 +1623,7 @@ mod tests {
             Some("/hp".to_string()),
             Some(vec!["h.test".to_string()]),
             None,
+            None,
             false, // tls
             false,
             None,
@@ -1580,6 +1692,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             true,
             true, // skip_cert_verify 亦不绕过门
             None,
@@ -1625,6 +1738,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false, // tls=false：门必拦
             true,
             None,
@@ -1663,6 +1777,7 @@ mod tests {
                 flow.map(str::to_string),
                 None,
                 network.to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -1737,6 +1852,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             true,
             true,
             None,
@@ -1779,6 +1895,7 @@ mod tests {
                 short_id: None,
             }),
             "tcp".to_string(),
+            None,
             None,
             None,
             None,

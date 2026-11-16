@@ -472,6 +472,8 @@ fn reality_subscription_fields_convert_both_ways() {
             path: None,
             host: None,
             grpc_service_name: None,
+
+            xhttp_mode: None,
             tls: true,
             skip_cert_verify: false,
             sni: Some("sni.example.com".into()),
@@ -494,6 +496,8 @@ fn reality_subscription_fields_convert_both_ways() {
             path: None,
             host: None,
             grpc_service_name: None,
+
+            xhttp_mode: None,
             tls: true,
             skip_cert_verify: false,
             sni: None,
@@ -599,6 +603,8 @@ fn vision_flow_subscription_fields_convert_both_ways() {
             path: None,
             host: None,
             grpc_service_name: None,
+
+            xhttp_mode: None,
             tls: true,
             skip_cert_verify: false,
             sni: Some("sni.example.com".into()),
@@ -621,6 +627,8 @@ fn vision_flow_subscription_fields_convert_both_ways() {
             path: None,
             host: None,
             grpc_service_name: None,
+
+            xhttp_mode: None,
             tls: true,
             skip_cert_verify: false,
             sni: None,

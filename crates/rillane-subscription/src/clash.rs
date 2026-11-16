@@ -302,6 +302,16 @@ pub struct ClashProxy {
         alias = "httpupgradeOptions"
     )]
     pub httpupgrade_opts: Option<ClashHttpUpgradeOpts>,
+    /// XHTTP 传输选项（mihomo 块键 `xhttp-opts`；network=xhttp 时的
+    /// mode/path/host，RIL-129）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "xhttp-opts",
+        alias = "xhttp_opts",
+        alias = "xhttpOptions"
+    )]
+    pub xhttp_opts: Option<ClashXhttpOpts>,
     /// VLESS flow（如 xtls-rprx-vision；G1-6）。捕获随节点保留（拨号期对
     /// 不支持面点名拒绝）——静默降级为普通 VLESS 会连不上真节点（xtls 服务
     /// 端期望 Vision 分帧）。
@@ -381,6 +391,23 @@ pub struct ClashHttpUpgradeOpts {
     /// 请求头（Host 伪装位；键大小写各发行版不一，三形兼容）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<ClashWsHeaders>,
+}
+
+/// Clash `xhttp-opts` 子块（vless 的 XHTTP 传输，RIL-129；mihomo 口径
+/// mode/path/host）
+#[serde_as]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClashXhttpOpts {
+    /// XHTTP 模式（auto/packet-up/stream-one；auto = 缺省判 packet-up）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// 请求路径
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Host/authority 列表（与 h2-opts 同形；单值变体 OneOrMany 兜底）
+    #[serde_as(as = "Option<serde_with::OneOrMany<_>>")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<Vec<String>>,
 }
 
 /// Clash 代理组类型
@@ -508,6 +535,38 @@ impl ClashProxy {
                     .and_then(|h| h.host.clone())
             })
             .filter(|h| !h.is_empty())
+    }
+
+    /// XHTTP 请求路径：平铺 `path` 优先（少数变体口径），否则
+    /// `xhttp-opts.path`（mihomo 规范块键）。空串按缺省处理（path 缺失
+    /// 即 `/`）。
+    pub fn xhttp_path(&self) -> Option<String> {
+        self.path
+            .clone()
+            .filter(|p| !p.is_empty())
+            .or_else(|| self.xhttp_opts.as_ref().and_then(|x| x.path.clone()))
+            .filter(|p| !p.is_empty())
+    }
+
+    /// XHTTP Host/authority 列表：`xhttp-opts.host`（与 h2-opts 同形，单值
+    /// 变体已由 OneOrMany 收敛），平铺 `host` 单值兜底。authority 回落链
+    /// sni → server 由连接器侧负责。
+    pub fn xhttp_hosts(&self) -> Option<Vec<String>> {
+        self.xhttp_opts
+            .as_ref()
+            .and_then(|x| x.host.clone())
+            .filter(|v| !v.is_empty())
+            .or_else(|| self.host.clone().filter(|h| !h.is_empty()).map(|h| vec![h]))
+    }
+
+    /// XHTTP 模式：`xhttp-opts.mode`（auto/packet-up/stream-one；None =
+    /// auto 口径由连接器判 packet-up）。越界值保留原样（RuntimeBuilder
+    /// 构建期具名拒绝，不静默降级）。
+    pub fn xhttp_mode(&self) -> Option<String> {
+        self.xhttp_opts
+            .as_ref()
+            .and_then(|x| x.mode.clone())
+            .filter(|m| !m.is_empty())
     }
 }
 
@@ -1807,6 +1866,7 @@ impl ClashConverter {
                 let network = proxy.network.clone().unwrap_or_else(|| "tcp".to_string());
                 let is_h2 = network == "h2";
                 let is_httpupgrade = network == "httpupgrade";
+                let is_xhttp = network == "xhttp";
                 let (path, host) = if is_h2 {
                     (proxy.h2_path(), proxy.h2_hosts())
                 } else if is_httpupgrade {
@@ -1814,6 +1874,8 @@ impl ClashConverter {
                         proxy.httpupgrade_path(),
                         proxy.httpupgrade_host().map(|h| vec![h]),
                     )
+                } else if is_xhttp {
+                    (proxy.xhttp_path(), proxy.xhttp_hosts())
                 } else {
                     (proxy.ws_path(), proxy.ws_host().map(|h| vec![h]))
                 };
@@ -1828,6 +1890,7 @@ impl ClashConverter {
                     path,
                     host,
                     grpc_service_name: proxy.grpc_service(),
+                    xhttp_mode: proxy.xhttp_mode(),
                     tls: proxy.tls,
                     skip_cert_verify: proxy.skip_cert_verify,
                     sni: proxy.servername.clone(),

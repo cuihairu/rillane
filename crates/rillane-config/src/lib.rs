@@ -1913,6 +1913,10 @@ pub enum EgressConfig {
         /// gRPC 服务名（network=grpc 时必填；线上路径 = /{name}/Tun）
         #[serde(skip_serializing_if = "Option::is_none")]
         grpc_service_name: Option<String>,
+        /// XHTTP 模式（RIL-129，network=xhttp 时有效）：`auto`（缺省，判为
+        /// packet-up）/ `packet-up` / `stream-one`；其余取值拨号期具名拒绝
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        xhttp_mode: Option<String>,
         #[serde(default)]
         tls: bool,
         #[serde(default)]
