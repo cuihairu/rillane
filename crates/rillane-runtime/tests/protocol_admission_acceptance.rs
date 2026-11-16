@@ -64,26 +64,38 @@ fn direct_node() -> EgressDescriptor {
     }
 }
 
-/// Hysteria v1 节点（编目在案、后端未准入——RIL-109 前置）
-fn hysteria_node() -> EgressDescriptor {
+/// Hysteria v1 节点（RIL-109 已准入：自写面，载具 = 原生 UDP 上的 QUIC；
+/// 参数可参——protocol/obfs 组合驱动载具判负样例）
+#[allow(clippy::too_many_arguments)]
+fn hysteria_node_params(
+    name: &str,
+    protocol: &str,
+    obfs: Option<&str>,
+    up_mbps: Option<u32>,
+    down_mbps: Option<u32>,
+) -> EgressDescriptor {
     EgressDescriptor {
-        name: "hy1-node".to_string(),
+        name: name.to_string(),
         spec: EgressConfig::Hysteria {
             server: "203.0.113.7".to_string(),
             port: 443,
             password: "REDACTED".to_string(),
-            protocol: "udp".to_string(),
-            up_mbps: None,
-            down_mbps: None,
+            protocol: protocol.to_string(),
+            up_mbps,
+            down_mbps,
             auth: None,
             auth_str: None,
-            obfs: None,
-            obfs_param: None,
+            obfs: obfs.map(str::to_string),
+            obfs_param: obfs.map(|_| "30:REDACTED".to_string()),
             server_name: None,
             skip_cert_verify: false,
             alpn: None,
         },
     }
+}
+
+fn hysteria_node() -> EgressDescriptor {
+    hysteria_node_params("hy1-node", "udp", None, None, None)
 }
 
 fn hysteria2_node() -> EgressDescriptor {
@@ -103,35 +115,93 @@ fn hysteria2_node() -> EgressDescriptor {
     }
 }
 
-/// 未准入协议不得进热路径：同装配里 direct（已准入）+ hysteria（未准入）
-/// ——整份构建被拒绝（不是部分装配），错误点名稳定码、类型名、节点与
-/// 前置项；构建失败即无运行时可用（装配面准入先于一切连接器）。
+/// 目录机器口径（RIL-109 flip 后）：全目录条目均已准入且带证据锚点与
+/// 选库结论——装配期「未准入拒绝」路径成为纯防御面（无编目条目可触发，
+/// 回归由目录单测钉住）；目录外类型恒 Unknown（订阅转换/诊断面点名）。
 #[test]
-fn not_admitted_protocol_refused_at_assembly() {
-    let cfg = shell(vec![direct_node(), hysteria_node()], "direct-out", false);
+fn catalog_entries_all_admitted_with_evidence() {
+    assert_eq!(protocol_catalog::CATALOG.len(), 13, "全目录十三条");
+    for e in protocol_catalog::CATALOG {
+        let evidence = e
+            .evidence()
+            .unwrap_or_else(|| panic!("{} 已准入必带证据锚点", e.kind));
+        assert!(
+            evidence.starts_with("protocol-backends.md#"),
+            "{} 证据锚点口径: {evidence}",
+            e.kind
+        );
+        assert!(
+            !matches!(e.backend, protocol_catalog::Backend::None),
+            "{} 已准入必有选库结论",
+            e.kind
+        );
+        assert_eq!(
+            protocol_catalog::admission(e.kind),
+            protocol_catalog::Admission::Admitted(e),
+            "{} 准入判定稳定",
+            e.kind
+        );
+    }
+    // hysteria v1 具体口径（RIL-109）：自写面 + UDP 数据报承载
+    let hy = protocol_catalog::entry_for("hysteria").expect("已编目");
+    assert!(hy.udp, "RIL-109 数据报面已承载");
+    assert!(
+        matches!(
+            hy.backend,
+            protocol_catalog::Backend::InTree {
+                path: "crates/rillane-protocols/src/outbound/hysteria.rs"
+            }
+        ),
+        "hysteria 后端 = 仓库自写: {:?}",
+        hy.backend
+    );
+    for unknown in ["mieru", "ss", "snell", ""] {
+        assert_eq!(
+            protocol_catalog::admission(unknown),
+            protocol_catalog::Admission::Unknown,
+            "目录外类型 {unknown} 应 Unknown"
+        );
+    }
+}
+
+/// Hysteria v1 装配面（RIL-109）：基础组合作为 default 装配成功（TCP 工厂
+/// 全变体穷尽——hysteria 臂接入后编译期兜底）；UDP 开启时基础组合产数据报
+/// 连接器装配成功，载具判负组合（obfs 包层传输）被能力扫描构建期点名。
+#[test]
+fn hysteria_assembly_carrier_gate() {
+    // 正面：default=hy1-node（基础组合，速率缺省）→ 装配成功（仅装配，不启动）
+    let cfg = shell(vec![direct_node(), hysteria_node()], "hy1-node", false);
+    let _ok_runtime = RuntimeBuilder::new(cfg)
+        .with_runtime_config(opts())
+        .build()
+        .expect("hysteria 基础组合装配成功（RIL-109 自写面）");
+
+    // 正面：UDP 开 + hysteria（目录 udp=true）→ 数据报连接器注册，装配成功
+    let cfg = shell(vec![direct_node(), hysteria_node()], "hy1-node", true);
+    let _ok_runtime = RuntimeBuilder::new(cfg)
+        .with_runtime_config(opts())
+        .build()
+        .expect("hysteria UDP 数据报面装配成功");
+
+    // 反面：UDP 开 + obfs 包层传输（换整个 QUIC 载荷）→ 能力扫描点名判负
+    let obfs_node = hysteria_node_params("hy1-obfs", "udp", Some("salamander"), None, None);
+    let cfg = shell(vec![direct_node(), obfs_node], "hy1-obfs", true);
     let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
-        panic!("未准入协议须在装配期拒绝");
+        panic!("UDP 可达集内的包层传输节点须构建期判负");
     };
     let rendered = format!("{err:#}");
-    assert!(
-        rendered.contains("config.egress.not_admitted"),
-        "稳定原因码点名: {rendered}"
-    );
-    assert!(rendered.contains("hysteria"), "点名出口类型: {rendered}");
-    assert!(rendered.contains("hy1-node"), "点名节点: {rendered}");
-    assert!(
-        rendered.contains("RIL-109"),
-        "原因点名前置项（谁欠评估）: {rendered}"
-    );
+    assert!(rendered.contains("不支持 UDP"), "能力扫描点名: {rendered}");
+    assert!(rendered.contains("hy1-obfs"), "点名节点: {rendered}");
 
-    // 目录机器口径与本验收一致：hysteria = NotAdmitted + 无后端 + 无 UDP
-    let entry = protocol_catalog::entry_for("hysteria").expect("已编目");
-    assert!(entry.evidence().is_none(), "未准入无证据锚点");
-    assert!(!entry.udp);
-    assert_eq!(
-        protocol_catalog::admission("hysteria"),
-        protocol_catalog::Admission::NotAdmitted(entry)
-    );
+    // 反面：UDP 开 + protocol 非 "udp"（无 QUIC 载具）→ 能力扫描点名判负
+    let faketcp_node = hysteria_node_params("hy1-faketcp", "faketcp", None, None, None);
+    let cfg = shell(vec![direct_node(), faketcp_node], "hy1-faketcp", true);
+    let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+        panic!("UDP 可达集内的非 QUIC 载具节点须构建期判负");
+    };
+    let rendered = format!("{err:#}");
+    assert!(rendered.contains("不支持 UDP"), "能力扫描点名: {rendered}");
+    assert!(rendered.contains("hy1-faketcp"), "点名节点: {rendered}");
 }
 
 /// HTTP 代理节点（目录 udp=false——CONNECT 仅隧道面）
@@ -775,5 +845,155 @@ fn hysteria2_ingress_assembles_with_valid_credentials() {
             .with_runtime_config(opts())
             .build()
             .unwrap_or_else(|e| panic!("udp={udp:?} 必须装配成功: {e}"));
+    }
+}
+
+// ---------- RIL-109：Hysteria v1 入口装配面 ----------
+
+/// Hysteria v1 入口描述子（装配面：bind/password/cert/cert_key/up_mbps/
+/// down_mbps/udp_enabled；QUIC 端点即监听面，ALPN 恒 "hysteria"）
+#[allow(clippy::too_many_arguments)]
+fn hysteria_ingress_node(
+    bind: &str,
+    password: &str,
+    cert: &str,
+    cert_key: &str,
+    up_mbps: Option<u32>,
+    down_mbps: Option<u32>,
+    udp_enabled: Option<bool>,
+) -> IngressDescriptor {
+    IngressDescriptor {
+        name: "hy1-in".to_string(),
+        spec: IngressConfig::Hysteria {
+            bind: bind.to_string(),
+            password: password.to_string(),
+            cert: cert.to_string(),
+            cert_key: cert_key.to_string(),
+            up_mbps,
+            down_mbps,
+            udp_enabled,
+        },
+    }
+}
+
+/// 构建期点名拒绝（空口令 / 速率为 0 / 垃圾 TLS 材料 / bind 非法）——
+/// 错误启动时暴露（None = 不设上限；0 具名拒绝）
+#[test]
+fn hysteria_ingress_refused_at_assembly_for_bad_material() {
+    let (cert, key) = self_signed_tls_material();
+
+    // 空口令：认证面必须非空
+    let cfg = ss_ingress_shell(
+        vec![hysteria_ingress_node(
+            "127.0.0.1:0",
+            "   ",
+            &cert,
+            &key,
+            None,
+            None,
+            None,
+        )],
+        "direct-main",
+        true,
+    );
+    let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+        panic!("空口令必须装配期拒绝");
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("password"), "应含 password 点名：{msg}");
+
+    // 速率为 0：不设上限用 None 表达，Some(0) 具名拒绝（上/下行两向）
+    for (up, down) in [(Some(0), None), (None, Some(0)), (Some(0), Some(0))] {
+        let cfg = ss_ingress_shell(
+            vec![hysteria_ingress_node(
+                "127.0.0.1:0",
+                "hy-pass",
+                &cert,
+                &key,
+                up,
+                down,
+                None,
+            )],
+            "direct-main",
+            true,
+        );
+        let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+            panic!("速率 {up:?}/{down:?} 为 0 必须装配期拒绝");
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("不设上限用 None 表达"),
+            "{up:?}/{down:?}: {msg}"
+        );
+    }
+
+    // 垃圾 PEM：TLS 材料装配期解析
+    let cfg = ss_ingress_shell(
+        vec![hysteria_ingress_node(
+            "127.0.0.1:0",
+            "hy-pass",
+            "not-a-cert-pem",
+            "not-a-key-pem",
+            None,
+            None,
+            None,
+        )],
+        "direct-main",
+        true,
+    );
+    let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+        panic!("垃圾 TLS 材料必须装配期拒绝");
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("PEM"), "应含材料解析点名：{msg}");
+
+    // bind 非法：QUIC 端点监听面装配期解析
+    let cfg = ss_ingress_shell(
+        vec![hysteria_ingress_node(
+            "not-an-addr",
+            "hy-pass",
+            &cert,
+            &key,
+            None,
+            None,
+            None,
+        )],
+        "direct-main",
+        true,
+    );
+    let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+        panic!("非法 bind 必须装配期拒绝");
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("bind"), "应含 bind 点名：{msg}");
+}
+
+/// 正面控制：合法 TLS 材料 + 非空口令装配成功——速率上限合法组合
+///（None = 不设上限；Some = 正整数上限）与 udp_enabled 两态全覆盖
+#[test]
+fn hysteria_ingress_assembles_with_valid_credentials() {
+    let (cert, key) = self_signed_tls_material();
+    for (up, down, udp) in [
+        (None, None, Some(true)),
+        (Some(100), Some(50), None),
+        (Some(200), None, Some(false)),
+    ] {
+        let cfg = ss_ingress_shell(
+            vec![hysteria_ingress_node(
+                "127.0.0.1:0",
+                "hy-pass-2026",
+                &cert,
+                &key,
+                up,
+                down,
+                udp,
+            )],
+            "direct-main",
+            false,
+        );
+        RuntimeBuilder::new(cfg)
+            .with_runtime_config(opts())
+            .build()
+            .unwrap_or_else(|e| panic!("速率 {up:?}/{down:?} udp={udp:?} 必须装配成功: {e}"));
     }
 }
