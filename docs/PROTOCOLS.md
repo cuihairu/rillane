@@ -11,6 +11,7 @@ This page records existing boundaries. Future work follows [v1 design](design/ar
 | mixed | SOCKS5/HTTP detection on one port | Inherits protocol limits |
 | Shadowsocks | TCP streams + UDP datagrams on one port; method/password validated at build time (same rules as egress) | SIP003 plugin server face not delivered; UDP requires `udp.enabled` and ingress permission |
 | Trojan | TCP streams over TLS with SHA224 constant-time password hash; UDP association rides the same TLS stream (no separate UDP socket) | Cert/key inline PEM parsed at assembly; UDP requires `udp.enabled` and ingress permission |
+| VLESS | TCP streams over TLS with constant-time 16-byte UUID auth; UDP association is raw-encoded single-target frames over the same TLS stream (no separate UDP socket) | Cert/key inline PEM parsed at assembly; UDP requires `udp.enabled` and ingress permission; Vision/REALITY server combinations are a separately validated item and are refused when a client sends Vision flow addons; packetaddr/xudp server faces not delivered |
 | TUN | Shared Linux TCP/UDP data plane | Other platforms need complete integration and runtime evidence |
 
 ## Outbounds

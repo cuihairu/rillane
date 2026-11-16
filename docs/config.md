@@ -46,11 +46,13 @@ This page describes current configuration, not completed v1 fields. Definitions 
 | `mixed` | `bind` (required), `auth`?, `udp_enabled`?, `bearer_tokens`? (http branch only) |
 | `shadowsocks` | `bind` (required), `method` (required), `password` (required), `udp_enabled`? |
 | `trojan` | `bind` (required), `password` (required), `cert` (required), `cert_key` (required), `udp_enabled`? |
+| `vless` | `bind` (required), `uuid` (required), `cert` (required), `cert_key` (required), `udp_enabled`? |
 
 - `auth`: an `[{username, password}]` credential table -- **non-empty means enforced** (socks5 via RFC 1929, http via a `Proxy-Authorization: Basic` 407 challenge); absent/empty table = anonymous passthrough.
 - `bearer_tokens`: a `[token]` list compared in plaintext (`Proxy-Authorization: Bearer`), in parallel with `auth`; either passing is enough; disabled by default.
-- `udp_enabled`: ingress-level UDP override (SOCKS5 ASSOCIATE, mixed socks5 branch, Shadowsocks datagram face, Trojan UDP association); defaults to inheriting `udp.enabled`, and an explicit `true`/`false` overrides it for that ingress (explicit true while the global switch is off is a build-time WARN).
+- `udp_enabled`: ingress-level UDP override (SOCKS5 ASSOCIATE, mixed socks5 branch, Shadowsocks datagram face, Trojan/VLESS UDP association); defaults to inheriting `udp.enabled`, and an explicit `true`/`false` overrides it for that ingress (explicit true while the global switch is off is a build-time WARN).
 - `trojan` `cert`/`cert_key`: certificate and private key as inline PEM strings, parsed at assembly time (garbage material errors before listen); the password is a plain string hashed to SHA224 hex on the wire.
+- `vless` `uuid`: a standard-form UUID parsed at assembly time (garbage errors before listen) and compared on the wire with a constant-time equality over the 16 raw bytes; `cert`/`cert_key` same as trojan (inline PEM parsed at assembly). The server face is plain TLS + UUID auth only -- Vision/REALITY server combinations are a separately validated item and carry no config fields.
 
 ## egress[] (`type` tags, 12 variants)
 

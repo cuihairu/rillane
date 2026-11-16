@@ -11,6 +11,7 @@
 | mixed | 同端口识别 SOCKS5 / HTTP | 继承对应协议的限制 |
 | Shadowsocks | TCP 流 + 同端口 UDP 数据报；method/password 构建期校验（与出站同口径） | SIP003 插件服务端面未交付；UDP 需启用 `udp.enabled`；入口还可单独关闭 UDP |
 | Trojan | TLS 上的 TCP 流，SHA224 恒时口令哈希认证；UDP 关联复用同一 TLS 流（无独立 UDP socket） | 证书/私钥内联 PEM 装配期解析；UDP 需启用 `udp.enabled`；入口还可单独关闭 UDP |
+| VLESS | TLS 上的 TCP 流，16 字节 UUID 恒时比对认证；UDP 关联为 raw 编码单目标帧，复用同一 TLS 流（无独立 UDP socket） | 证书/私钥内联 PEM 装配期解析；UDP 需启用 `udp.enabled`；入口还可单独关闭 UDP；Vision/REALITY 服务端组合另验（客户端携 Vision flow addons 即点名拒绝）；packetaddr/xudp 服务端面未交付 |
 | TUN | Linux TCP/UDP 共享数据面 | 其他平台完整接管仍需实现/验收 |
 
 ## 出站
