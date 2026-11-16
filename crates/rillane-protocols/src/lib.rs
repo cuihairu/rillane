@@ -23,9 +23,9 @@ mod tls;
 
 pub use fingerprint::TlsFingerprint;
 pub use inbound::{
-    HttpIngress, MixedIngress, ShadowsocksIngress, ShadowsocksUdpParts, Socks5Ingress,
-    TrojanIngress, TrojanUdpParts, VlessIngress, VlessUdpParts, VmessIngress,
-    VmessUdpParts,
+    Hysteria2Ingress, Hysteria2UdpParts, HttpIngress, MixedIngress, ShadowsocksIngress,
+    ShadowsocksUdpParts, Socks5Ingress, TrojanIngress, TrojanUdpParts, VlessIngress,
+    VlessUdpParts, VmessIngress, VmessUdpParts,
 };
 pub use middleware::LatencyProbe;
 pub use outbound::{

@@ -53,13 +53,13 @@ use std::net::IpAddr;
 use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
-    Hysteria2Connector, Hysteria2UdpConnector, MixedIngress, ShadowsocksConnector,
-    ShadowsocksIngress, ShadowsocksUdpConnector, ShadowsocksUdpParts, Socks5Connector,
-    Socks5Ingress, Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey,
-    TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts,
-    TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress, VlessUdpConnector,
-    VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity, VmessUdpConnector, VmessUdpParts,
-    WireguardConnector, WireguardUdpConnector,
+    Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts, MixedIngress,
+    ShadowsocksConnector, ShadowsocksIngress, ShadowsocksUdpConnector, ShadowsocksUdpParts,
+    Socks5Connector, Socks5Ingress, Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint,
+    TransportKey, TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector,
+    TrojanUdpParts, TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress,
+    VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity,
+    VmessUdpConnector, VmessUdpParts, WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -477,6 +477,9 @@ impl RuntimeBuilder {
                         udp_enabled: Some(true),
                         ..
                     } | IngressConfig::Vmess {
+                        udp_enabled: Some(true),
+                        ..
+                    } | IngressConfig::Hysteria2 {
                         udp_enabled: Some(true),
                         ..
                     }
@@ -2671,6 +2674,7 @@ fn build_ingress_endpoints(
             IngressConfig::Trojan { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Vless { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Vmess { udp_enabled, .. } => *udp_enabled,
+            IngressConfig::Hysteria2 { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Http { .. } => None,
         };
         if per_ingress == Some(true) && !udp_enabled_global {
@@ -2825,6 +2829,35 @@ fn build_ingress_endpoints(
                     bind.clone(),
                     uuid,
                     vm_udp,
+                    fake_ip.clone(),
+                )?)
+            }
+            IngressConfig::Hysteria2 {
+                bind,
+                password,
+                cert,
+                cert_key,
+                udp_enabled,
+            } => {
+                // Hysteria2 UDP 关联面同用进程级会话表 + 连接器族（udp 门与
+                // socks5/vless/vmess 同口径）；TLS 材料/口令解析拒绝落在装配期
+                //（QUIC 端点即监听面，ALPN 恒 h3）
+                let hy_udp = match udp.as_ref() {
+                    Some(svc) if resolve_udp_enabled(udp_enabled_global, *udp_enabled) => {
+                        Some(Hysteria2UdpParts {
+                            table: svc.table().clone(),
+                            connector: svc.connector().clone(),
+                        })
+                    }
+                    _ => None,
+                };
+                Arc::new(Hysteria2Ingress::new(
+                    desc.name.clone(),
+                    bind.clone(),
+                    password,
+                    cert,
+                    cert_key,
+                    hy_udp,
                     fake_ip.clone(),
                 )?)
             }

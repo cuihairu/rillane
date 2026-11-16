@@ -688,3 +688,92 @@ fn vmess_ingress_assembles_with_valid_credentials() {
             .unwrap_or_else(|e| panic!("uuid={uuid} 必须装配成功: {e}"));
     }
 }
+
+/// RIL-138 Hysteria2 入口描述子（装配面：bind/password/cert/cert_key/
+/// udp_enabled；QUIC 端点即监听面，ALPN 恒 h3）
+#[allow(clippy::too_many_arguments)]
+fn hysteria2_ingress_node(
+    bind: &str,
+    password: &str,
+    cert: &str,
+    cert_key: &str,
+    udp_enabled: Option<bool>,
+) -> IngressDescriptor {
+    IngressDescriptor {
+        name: "hy-in".to_string(),
+        spec: IngressConfig::Hysteria2 {
+            bind: bind.to_string(),
+            password: password.to_string(),
+            cert: cert.to_string(),
+            cert_key: cert_key.to_string(),
+            udp_enabled,
+        },
+    }
+}
+
+/// 构建期点名拒绝（空口令 / 垃圾 TLS 材料）——错误启动时暴露
+#[test]
+fn hysteria2_ingress_refused_at_assembly_for_bad_material() {
+    let (cert, key) = self_signed_tls_material();
+
+    // 空口令：认证面必须非空
+    let cfg = ss_ingress_shell(
+        vec![hysteria2_ingress_node(
+            "127.0.0.1:0",
+            "   ",
+            &cert,
+            &key,
+            None,
+        )],
+        "direct-main",
+        true,
+    );
+    let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+        panic!("空口令必须装配期拒绝");
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("password"), "应含 password 点名：{msg}");
+
+    // 垃圾 PEM：TLS 材料装配期解析
+    let cfg = ss_ingress_shell(
+        vec![hysteria2_ingress_node(
+            "127.0.0.1:0",
+            "hy-pass",
+            "not-a-cert-pem",
+            "not-a-key-pem",
+            None,
+        )],
+        "direct-main",
+        true,
+    );
+    let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+        panic!("垃圾 TLS 材料必须装配期拒绝");
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("PEM"), "应含材料解析点名：{msg}");
+}
+
+/// 正面控制：合法 TLS 材料 + 非空口令装配成功——含 udp_enabled: Some(true)
+/// 且全局 udp.enabled=false 的 WARN 组合（入口级 UDP 门语义同
+/// socks5/trojan/vless/vmess）
+#[test]
+fn hysteria2_ingress_assembles_with_valid_credentials() {
+    let (cert, key) = self_signed_tls_material();
+    for udp in [Some(true), None] {
+        let cfg = ss_ingress_shell(
+            vec![hysteria2_ingress_node(
+                "127.0.0.1:0",
+                "hy-pass-2026",
+                &cert,
+                &key,
+                udp,
+            )],
+            "direct-main",
+            false,
+        );
+        RuntimeBuilder::new(cfg)
+            .with_runtime_config(opts())
+            .build()
+            .unwrap_or_else(|e| panic!("udp={udp:?} 必须装配成功: {e}"));
+    }
+}

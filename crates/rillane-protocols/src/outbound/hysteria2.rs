@@ -230,7 +230,7 @@ const FRAG_REASSEMBLY_TIMEOUT: Duration = Duration::from_secs(10);
 /// QUIC 握手 + HTTP/3 认证整体超时（与 TCP 面 CONNECT_TIMEOUT 同口径）
 const UDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// send_datagram_wait 背压上限（QUIC 数据报缓冲满时等待，超时判连接不可用）
-const DGRAM_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const DGRAM_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// 下行重装配输出队列深度（会话表 forwarder 消费）
 const DOWNLINK_QUEUE: usize = 64;
 
@@ -408,7 +408,7 @@ fn random_padding() -> String {
 // ---------- UDPMessage 编解码（apernet/hysteria PROTOCOL.md §UDP） ----------
 
 /// QUIC varint（RFC 9000 §16）编码（地址长度字段；会话内地址长 < 2^62）
-fn put_varint(buf: &mut Vec<u8>, v: u64) {
+pub(crate) fn put_varint(buf: &mut Vec<u8>, v: u64) {
     if v < 1 << 6 {
         buf.push(v as u8);
     } else if v < 1 << 14 {
@@ -424,7 +424,7 @@ fn put_varint(buf: &mut Vec<u8>, v: u64) {
 type ParsedUdpMessage<'a> = (u32, u16, u8, u8, String, &'a [u8]);
 
 /// 解析数据报为 (session_id, packet_id, frag_id, frag_count, addr, payload)
-fn parse_udp_message(buf: &[u8]) -> Option<ParsedUdpMessage<'_>> {
+pub(crate) fn parse_udp_message(buf: &[u8]) -> Option<ParsedUdpMessage<'_>> {
     if buf.len() < 8 {
         return None;
     }
@@ -497,7 +497,7 @@ fn get_varint(buf: &[u8]) -> Option<(u64, usize)> {
 }
 
 /// 编码 UDPMessage（同一 packet 的分片各自携带完整头 + 地址，官方同构）
-fn encode_udp_message(
+pub(crate) fn encode_udp_message(
     session_id: u32,
     packet_id: u16,
     frag_id: u8,
@@ -517,7 +517,7 @@ fn encode_udp_message(
 }
 
 /// 地址串 "host:port" → FlowTarget（IPv6 字面量按最后一个冒号劈分）
-fn flow_target_of_addr(addr: &str) -> Result<FlowTarget> {
+pub(crate) fn flow_target_of_addr(addr: &str) -> Result<FlowTarget> {
     let (host, port_str) = addr
         .rsplit_once(':')
         .ok_or_else(|| anyhow!("Hysteria2 数据报地址缺端口: {addr}"))?;
@@ -537,13 +537,13 @@ fn flow_target_of_addr(addr: &str) -> Result<FlowTarget> {
 type FragParts = (u8, BTreeMap<u8, Vec<u8>>, Instant);
 
 #[derive(Default)]
-struct Reassembler {
+pub(crate) struct Reassembler {
     parts: BTreeMap<u16, FragParts>,
 }
 
 impl Reassembler {
     /// 推入一个分片；完整则返回拼接载荷。丢失分片按超时整包废弃并计数。
-    fn push(
+    pub(crate) fn push(
         &mut self,
         packet_id: u16,
         frag_id: u8,

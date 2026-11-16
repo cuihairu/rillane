@@ -8,7 +8,7 @@ mod grpc;
 mod h2;
 mod http;
 mod httpupgrade;
-mod hysteria2;
+pub(crate) mod hysteria2;
 mod reality;
 mod shadowsocks;
 mod socks5;

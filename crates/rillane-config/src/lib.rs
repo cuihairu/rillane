@@ -1858,6 +1858,26 @@ pub enum IngressConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         udp_enabled: Option<bool>,
     },
+    /// Hysteria2 入口（RIL-138）：自写 server 面（评估见两语
+    /// protocol-backends.md hysteria2 服务端面段——hysteria2/rsteria2 均
+    /// 无服务端面；crapthings/hysteria-rust 有 server face 但 publish=false
+    /// 不可审计 + rc 级 + MSRV 耦合，沿前判拒绝）。QUIC 端点即监听面——
+    /// TLS 材料随 IR 内联（PEM），装配期解析（错误启动时暴露），ALPN 恒
+    /// h3；口令恒时比对。obfs/masquerade/ACME/Brutal 不交付不留字段。
+    /// UDP 关联面随 `udp.enabled`/`udp_enabled` 门。
+    Hysteria2 {
+        bind: String,
+        /// 预共享口令（任意非空串；服务端恒时比对）
+        password: String,
+        /// 证书链 PEM（含叶起全链；自签测试夹具 rcgen）
+        cert: String,
+        /// 私钥 PEM
+        cert_key: String,
+        /// per-ingress UDP 覆盖（语义同 Socks5）：None 继承 `udp.enabled`，
+        /// Some 显式开/关该入口的 UDP 关联面。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_enabled: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
