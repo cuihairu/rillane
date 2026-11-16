@@ -256,6 +256,52 @@ armv7-ohos 桩）在对应小节如实记录。
   UDP 命令拒绝；不入池（仅 inline 路径——直传切换与池借出语义不
   相容）。
 
+## xhttp
+
+- **结论**：自写传输面（RIL-129）——无可用后端。评估扫查（2026-11-16，
+  crates.io API 查询 `xhttp`：6 项无一承载 XHTTP 传输——代理安装器、
+  Web SDK、面板 API 客户端、HTTP/1.1 客户端/服务端库、两个占位；
+  GitHub 核验：jacek4yang/rust-xhttp 是线格式兼容的 XHTTP **服务端
+  守护进程**（`src/main.rs` 入口 + 安装器 + systemd 生命周期，无库面、
+  未发布 crates.io、单作者 pre-1.0、无安全审计）——仅服务端，不能充当
+  出站客户端；jets 是规则隧道二进制）。故按 Xray-core 源码真源自写
+  （浅克隆读 2026-11-16：`transport/internet/splithttp/{config,dialer,
+  client}.go`——请求/URL 塑形、模式判定、POST 语义对照 dialer 与 client
+  实现逐项核验）。
+- **版本**：仓内实现；载具 h2 0.4.19 + rustls fork 0.23.46 全仓已 pin
+  （无新依赖）
+- **许可**：仓库许可（自写）
+- **平台**：随既有 TLS+H2 面（全平台）
+- **公开 API**：`xhttp_tunnel`（crates/rillane-protocols/src/outbound/
+  xhttp.rs）——TLS+H2 io 入、AsyncRead+AsyncWrite 双工出；以
+  `network: "xhttp"` 接入 VLESS
+- **旁路**：连接器自持 TLS+H2 会话（与 h2 传输同形）；请求目标携带节点
+  path/host，无底层 socket 旁路
+- **取消**：开工期校验；下行 EOF / 上行 POST 失败毒化隧道（具名错误），
+  中继在统一面收束；传输租约在中继结束时归还弃置（h2 连接归隧道驱动
+  任务所有——与 h2 同一「不入池」边界）
+- **统计**：字节量经统一 FlowReport；POST 失败按状态行具名；session/seq
+  面貌由镜像对端在验收中逐项断言
+- **复用**：stream-one 整条中继单 H2 请求；packet-up 单 H2 连接同时承载
+  GET 下载流与全部 POST 上行（无预热组合）
+- **模式与参数**（对照 dialer.go/client.go 核验）：承载 `auto`/
+  `packet-up`/`stream-one`；TLS+H2 且无 REALITY、无 download settings 时
+  auto 判为 packet-up（xray 自身判定）。已交付线形状——下载
+  `GET {path}{session}` → 200，响应体流即下行；packet-up 上行
+  `POST {path}{session}/{seq}`（seq 自 0，body=分块，Content-Length 置位，
+  每个 POST 期望 200；非 200 按状态具名毒化隧道）；stream-one 单条
+  `POST {path}`（无 session 段）+ `Content-Type: application/grpc`，
+  上行体开放（关闭即 EOS），响应体即下行。session id 为不透明随机串
+  （path 放置，xray 缺省放置）。不承载——点名拒绝：`stream-up`（须
+  download settings 第二连接）、HTTP/3 与 HTTP/1.1 载具（TLS 拨号强制
+  ALPN h2）、xmux、browser dialer、填充 obfs（XPaddingObfsMode；零填充
+  服务端合法，客户端不发送）、session/seq 的 cookie/header 放置（仅
+  path 放置——xray 缺省）。
+- **角色边界**：仅 VLESS 载体（vmess+xhttp 由 vmess network 白名单构建期
+  拒绝；reality/vision + xhttp 由既有 tcp-only 门拒绝）；恒叠 TLS
+  （h2-over-TLS 语义，与 grpc/h2 同规则）。订阅面：vless 节点
+  `network: xhttp` + `xhttp-opts: {mode, path, host}`，双向转换逐字段。
+
 ## trojan
 
 - **结论**：自写（协议面小、传输组合需求高）
