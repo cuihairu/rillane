@@ -639,3 +639,52 @@ fn vless_ingress_assembles_with_valid_credentials() {
             .unwrap_or_else(|e| panic!("uuid={uuid} 必须装配成功: {e}"));
     }
 }
+
+/// RIL-137 VMess 入口描述子（装配面：bind/uuid/udp_enabled；裸 TCP 承载，
+/// 无 TLS 材料——AEAD 封头即认证面）
+#[allow(clippy::too_many_arguments)]
+fn vmess_ingress_node(bind: &str, uuid: &str, udp_enabled: Option<bool>) -> IngressDescriptor {
+    IngressDescriptor {
+        name: "vm-in".to_string(),
+        spec: IngressConfig::Vmess {
+            bind: bind.to_string(),
+            uuid: uuid.to_string(),
+            udp_enabled,
+        },
+    }
+}
+
+/// 构建期点名拒绝（非法 uuid）——错误启动时暴露
+#[test]
+fn vmess_ingress_refused_at_assembly_for_bad_uuid() {
+    let cfg = ss_ingress_shell(
+        vec![vmess_ingress_node("127.0.0.1:0", "not-a-uuid", None)],
+        "direct-main",
+        true,
+    );
+    let Err(err) = RuntimeBuilder::new(cfg).with_runtime_config(opts()).build() else {
+        panic!("非法 uuid 必须装配期拒绝");
+    };
+    let msg = format!("{err:#}");
+    assert!(msg.contains("uuid"), "应含 uuid 点名：{msg}");
+}
+
+/// 正面控制：合法 uuid 装配成功——含 udp_enabled: Some(true) 且全局
+/// udp.enabled=false 的 WARN 组合（入口级 UDP 门语义同 socks5/trojan/vless）
+#[test]
+fn vmess_ingress_assembles_with_valid_credentials() {
+    for (uuid, udp) in [
+        ("b831381d-6324-4d2a-b1e7-1bf75a1db7b3", Some(true)),
+        ("47840d09-1911-4ef9-b5e3-30687d1f532f", None),
+    ] {
+        let cfg = ss_ingress_shell(
+            vec![vmess_ingress_node("127.0.0.1:0", uuid, udp)],
+            "direct-main",
+            false,
+        );
+        RuntimeBuilder::new(cfg)
+            .with_runtime_config(opts())
+            .build()
+            .unwrap_or_else(|e| panic!("uuid={uuid} 必须装配成功: {e}"));
+    }
+}

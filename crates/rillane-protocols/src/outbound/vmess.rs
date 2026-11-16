@@ -38,7 +38,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::{Aes128, Block};
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes128Gcm, Nonce};
@@ -86,10 +86,10 @@ const S_RESP_PAY_IV: &[u8] = b"AEAD Resp Header IV";
 
 /// 请求 option（ChunkStream|ChunkMasking|GlobalPadding = 0x01|0x04|0x08）：
 /// AEAD security 下 xray 客户端恒置全三位（shouldEnablePadding 恒真）
-const REQUEST_OPTION: u8 = 0x01 | 0x04 | 0x08;
+pub(crate) const REQUEST_OPTION: u8 = 0x01 | 0x04 | 0x08;
 
 /// AEAD 块/头的固定开销（GCM tag）
-const AEAD_OVERHEAD: usize = 16;
+pub(crate) const AEAD_OVERHEAD: usize = 16;
 
 // ---------------------------------------------------------------------------
 // KDF（xray proxy/vmess/aead/kdf.go 的闭式展开）
@@ -190,7 +190,7 @@ fn pad_block(key: &[u8], pad: u8) -> [u8; 64] {
 // ---------------------------------------------------------------------------
 
 /// `NewID`：cmdKey = MD5(uuid 字节 ‖ 盐)
-fn cmd_key_from_uuid(uuid_bytes: &[u8; 16]) -> [u8; 16] {
+pub(crate) fn cmd_key_from_uuid(uuid_bytes: &[u8; 16]) -> [u8; 16] {
     let mut h = Md5::new();
     h.update(uuid_bytes);
     h.update(UUID_CMDKEY_SALT);
@@ -276,6 +276,106 @@ fn seal_vmess_aead_header(cmd_key: &[u8; 16], data: &[u8]) -> Result<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
+// 服务端面镜像（RIL-137，inbound/vmess.rs 复用——KDF/封头与客户端单源）
+// ---------------------------------------------------------------------------
+
+/// authID 时间戳开面：AES-128-ECB 单块解密 → CRC32-IEEE 校验 → unix 秒
+/// （CRC 不过即非本 cmdKey 派生的 authID——GCM 开头失败的前置快筛）
+pub(crate) fn auth_id_timestamp(cmd_key: &[u8; 16], auth_id: &[u8; 16]) -> Result<i64> {
+    let auth_id_key = vmess_kdf16(cmd_key, &[S_AUTH_ID_KEY]);
+    let cipher = Aes128::new((&auth_id_key).into());
+    let mut b = Block::clone_from_slice(auth_id);
+    cipher.decrypt_block(&mut b);
+    let block: [u8; 16] = b.into();
+    let crc = u32::from_be_bytes(block[12..].try_into().expect("CRC 段"));
+    if crc32fast::hash(&block[..12]) != crc {
+        return Err(anyhow!("VMess authID CRC 校验不过（非本凭据派生）"));
+    }
+    Ok(i64::from_be_bytes(block[..8].try_into().expect("时间戳段")))
+}
+
+/// `OpenVMessAEADHeader` 服务端流式第一段：长度块开面（AAD = authID），
+/// 返回 (头块明文长度, authID, connNonce)——调用方据此读齐头块再开
+pub(crate) fn open_vmess_header_len_block(
+    cmd_key: &[u8; 16],
+    sealed_head: &[u8],
+) -> Result<(usize, [u8; 16], [u8; 8])> {
+    if sealed_head.len() < 16 + 18 + 8 {
+        return Err(anyhow!("VMess AEAD 封头过短"));
+    }
+    let auth_id: [u8; 16] = sealed_head[..16].try_into().expect("authID 段");
+    let conn_nonce: [u8; 8] = sealed_head[16 + 18..16 + 18 + 8]
+        .try_into()
+        .expect("connNonce 段");
+    let len_key = vmess_kdf16(cmd_key, &[S_HDR_LEN_KEY, &auth_id, &conn_nonce]);
+    let len_nonce = kdf_nonce12(cmd_key, &[S_HDR_LEN_IV, &auth_id, &conn_nonce]);
+    let len_aead =
+        Aes128Gcm::new_from_slice(&len_key).map_err(|_| anyhow!("VMess 长度块密钥初始化失败"))?;
+    let len_plain = len_aead
+        .decrypt(
+            Nonce::from_slice(&len_nonce),
+            Payload {
+                msg: &sealed_head[16..16 + 18],
+                aad: &auth_id,
+            },
+        )
+        .map_err(|_| anyhow!("VMess 封头长度块解密失败（凭据不匹配）"))?;
+    if len_plain.len() != 2 {
+        return Err(anyhow!("VMess 封头长度块明文长度异常"));
+    }
+    let pay_len = u16::from_be_bytes([len_plain[0], len_plain[1]]) as usize;
+    Ok((pay_len, auth_id, conn_nonce))
+}
+
+/// `OpenVMessAEADHeader` 服务端流式第二段：头块开面（AAD = authID，
+/// 与长度块相同）——`pay_sealed` = 头块 AEAD 全体（密文 ‖ tag）
+pub(crate) fn open_vmess_header_pay_block(
+    cmd_key: &[u8; 16],
+    auth_id: &[u8; 16],
+    conn_nonce: &[u8; 8],
+    pay_sealed: &[u8],
+) -> Result<Vec<u8>> {
+    if pay_sealed.len() < AEAD_OVERHEAD {
+        return Err(anyhow!("VMess 头块密文过短"));
+    }
+    let pay_key = vmess_kdf16(cmd_key, &[S_HDR_PAY_KEY, auth_id, conn_nonce]);
+    let pay_nonce = kdf_nonce12(cmd_key, &[S_HDR_PAY_IV, auth_id, conn_nonce]);
+    let pay_aead =
+        Aes128Gcm::new_from_slice(&pay_key).map_err(|_| anyhow!("VMess 头块密钥初始化失败"))?;
+    pay_aead
+        .decrypt(
+            Nonce::from_slice(&pay_nonce),
+            Payload {
+                msg: pay_sealed,
+                aad: auth_id,
+            },
+        )
+        .map_err(|_| anyhow!("VMess 封头头块解密失败（凭据不匹配）"))
+}
+
+/// 服务端响应头封形（客户端 `read_response_header` 镜像）：长度块
+/// AEAD([2B BE 4]) + 载荷块 AEAD([V][0x00][0x00][0x00])——载荷首字节
+/// 回声请求 V（响应认证字节），恒 4 字节
+pub(crate) fn seal_response_header(keys: &RespHeaderKeys, expect_v: u8) -> Result<Vec<u8>> {
+    let len_aead = Aes128Gcm::new_from_slice(&keys.len_key)
+        .map_err(|_| anyhow!("VMess 响应长度块密钥初始化失败"))?;
+    let len_msg = [0u8, 4];
+    let len_sealed = len_aead
+        .encrypt(Nonce::from_slice(&keys.len_nonce), &len_msg[..])
+        .map_err(|_| anyhow!("VMess 响应长度块加密失败"))?;
+    let pay_aead = Aes128Gcm::new_from_slice(&keys.pay_key)
+        .map_err(|_| anyhow!("VMess 响应载荷块密钥初始化失败"))?;
+    let pay_msg = [expect_v, 0, 0, 0];
+    let pay_sealed = pay_aead
+        .encrypt(Nonce::from_slice(&keys.pay_nonce), &pay_msg[..])
+        .map_err(|_| anyhow!("VMess 响应载荷块加密失败"))?;
+    let mut out = Vec::with_capacity(len_sealed.len() + pay_sealed.len());
+    out.extend_from_slice(&len_sealed);
+    out.extend_from_slice(&pay_sealed);
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // 数据面（encoding/client.go + common/crypto/auth.go 的 AuthenticationWriter/Reader）
 // ---------------------------------------------------------------------------
 
@@ -305,9 +405,20 @@ impl VmessSecurity {
             VmessSecurity::Chacha20Poly1305 => 0x04,
         }
     }
+
+    /// security 头字节 → 枚举（服务端面解析；未知字节点名拒绝）
+    pub(crate) fn from_header_byte(b: u8) -> Result<Self> {
+        match b {
+            0x03 => Ok(VmessSecurity::Aes128Gcm),
+            0x04 => Ok(VmessSecurity::Chacha20Poly1305),
+            other => Err(anyhow!(
+                "vmess security 字节不支持（仅 AEAD 0x03/0x04，legacy 面未交付）: {other}"
+            )),
+        }
+    }
 }
 
-fn fnv1a32(data: &[u8]) -> u32 {
+pub(crate) fn fnv1a32(data: &[u8]) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
     for &b in data {
         h ^= b as u32;
@@ -328,7 +439,7 @@ fn unix_now() -> Result<i64> {
 ///
 /// `command`：RequestCommand 字节（0x01 TCP / 0x02 UDP，xray headers.go 口径）
 #[allow(clippy::too_many_arguments)]
-fn build_request_header_bytes(
+pub(crate) fn build_request_header_bytes(
     req_iv: &[u8; 16],
     req_key: &[u8; 16],
     expect_v: u8,
@@ -384,7 +495,7 @@ fn build_request_header_bytes(
 
 /// 响应头 AEAD 密钥组（DecodeResponseHeader；KDF 单路径）
 #[derive(Clone)]
-struct RespHeaderKeys {
+pub(crate) struct RespHeaderKeys {
     len_key: [u8; 16],
     len_nonce: [u8; 12],
     pay_key: [u8; 16],
@@ -393,7 +504,7 @@ struct RespHeaderKeys {
 
 impl RespHeaderKeys {
     /// 由 reqKey/reqIV 派生（NewClientSession：SHA256 前 16B，而非 legacy MD5）
-    fn derive(req_key: &[u8; 16], req_iv: &[u8; 16]) -> Self {
+    pub(crate) fn derive(req_key: &[u8; 16], req_iv: &[u8; 16]) -> Self {
         let resp_key: [u8; 16] = Sha256::digest(req_key)[..16]
             .try_into()
             .expect("SHA256 截断");
@@ -453,7 +564,7 @@ fn build_session(
 }
 
 /// 逐块 AEAD 实例 + 块 nonce/掩码/padding 序列态
-struct ChunkCrypt {
+pub(crate) struct ChunkCrypt {
     aead: DataAead,
     iv: [u8; 16],
     shake: sha3::Shake128Reader,
@@ -504,7 +615,7 @@ impl DataAead {
 }
 
 impl ChunkCrypt {
-    fn new(security: VmessSecurity, key: &[u8; 16], iv: &[u8; 16]) -> Result<Self> {
+    pub(crate) fn new(security: VmessSecurity, key: &[u8; 16], iv: &[u8; 16]) -> Result<Self> {
         Ok(ChunkCrypt {
             aead: DataAead::new(security, key)?,
             iv: *iv,
@@ -520,7 +631,7 @@ impl ChunkCrypt {
     }
 
     /// 响应方向：respKey/respIV = SHA256(reqKey/reqIV)[:16]（NewClientSession）
-    fn derive_response(
+    pub(crate) fn derive_response(
         security: VmessSecurity,
         req_key: &[u8; 16],
         req_iv: &[u8; 16],
@@ -568,7 +679,7 @@ impl ChunkCrypt {
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-trait ChunkRead: Send {
+pub(crate) trait ChunkRead: Send {
     async fn exact(&mut self, out: &mut [u8]) -> Result<()>;
 }
 
@@ -643,7 +754,7 @@ impl<S: AsyncRead + Unpin + Send + ?Sized> ChunkRead for StreamSrc<'_, S> {
 }
 
 #[async_trait]
-trait ChunkWrite: Send {
+pub(crate) trait ChunkWrite: Send {
     async fn put(&mut self, data: &[u8]) -> Result<()>;
     async fn finish(&mut self) -> Result<()>;
 }
@@ -706,7 +817,7 @@ impl<S: AsyncWrite + Unpin + Send + ?Sized> ChunkWrite for StreamSink<'_, S> {
 
 /// 写一块：[掩码长度 2B][AEAD(明文)][明文随机 padding]；data 为空 = 终止块。
 /// 每块先抽 padding 再抽 mask（AuthenticationWriter.seal 同序）。
-async fn write_chunk<W: ChunkWrite + ?Sized>(
+pub(crate) async fn write_chunk<W: ChunkWrite + ?Sized>(
     c: &mut ChunkCrypt,
     w: &mut W,
     data: &[u8],
@@ -718,7 +829,7 @@ async fn write_chunk<W: ChunkWrite + ?Sized>(
 
 /// 块构造的纯内存面（构造结果追加进 out）——ws 首条消息与请求头合帧复用。
 /// 每块先抽 padding 再抽 mask（AuthenticationWriter.seal 同序）。
-fn append_chunk(c: &mut ChunkCrypt, data: &[u8], out: &mut Vec<u8>) -> Result<()> {
+pub(crate) fn append_chunk(c: &mut ChunkCrypt, data: &[u8], out: &mut Vec<u8>) -> Result<()> {
     let padding = c.next_padding();
     let mask = c.next_mask();
     if data.len() + AEAD_OVERHEAD > u16::MAX as usize {
@@ -742,7 +853,10 @@ fn append_chunk(c: &mut ChunkCrypt, data: &[u8], out: &mut Vec<u8>) -> Result<()
 
 /// 读一块（独立返回明文；空 Vec = 终止块/半关闭）。
 /// 读写同序：先抽 padding 再抽 mask（AuthenticationReader.readSize 一致）。
-async fn read_chunk<R: ChunkRead + ?Sized>(c: &mut ChunkCrypt, r: &mut R) -> Result<Vec<u8>> {
+pub(crate) async fn read_chunk<R: ChunkRead + ?Sized>(
+    c: &mut ChunkCrypt,
+    r: &mut R,
+) -> Result<Vec<u8>> {
     let mut hdr = [0u8; 2];
     r.exact(&mut hdr).await?;
     let padding = c.next_padding();
@@ -2804,5 +2918,69 @@ mod tests {
             });
         }
         Ok(())
+    }
+
+    // ---------- 服务端面镜像原语（RIL-137，inbound/vmess.rs 复用面）----------
+
+    /// 封头开面回环：det 封装 → 流式两段开启（长度块 → 头块）逐字节一致；
+    /// authID 时间戳开面回读同窗
+    #[test]
+    fn server_open_roundtrip_and_authid_timestamp() {
+        let cmd_key = test_cmd_key();
+        let plain = b"ril137 server open roundtrip header";
+        let (sealed, auth_id) =
+            seal_vmess_aead_header_det(&cmd_key, plain, 1_700_000_000, [1, 2, 3, 4], [5u8; 8])
+                .expect("det 封装");
+
+        // 流式两段：42 字节头 → 长度 → 头块
+        let (pay_len, opened_auth_id, conn_nonce) =
+            open_vmess_header_len_block(&cmd_key, &sealed).expect("长度块开面");
+        assert_eq!(opened_auth_id, auth_id, "authID 一致");
+        assert_eq!(conn_nonce, [5u8; 8], "connNonce 一致");
+        assert_eq!(sealed.len(), 42 + pay_len + AEAD_OVERHEAD, "封头总长");
+        let plain2 =
+            open_vmess_header_pay_block(&cmd_key, &opened_auth_id, &conn_nonce, &sealed[42..])
+                .expect("头块开面");
+        assert_eq!(plain2, plain, "明文头逐字节一致");
+
+        // authID 内容面：时间戳开读 + CRC 过
+        let ts = auth_id_timestamp(&cmd_key, &auth_id).expect("authID 开面");
+        assert_eq!(ts, 1_700_000_000, "时间戳回读");
+    }
+
+    /// 外凭据 authID 拒绝：CRC 快筛不过（他 cmdKey 派生的 authID 开不出）
+    #[test]
+    fn authid_timestamp_refuses_foreign_key() {
+        let auth_id = {
+            let cmd_key = test_cmd_key();
+            let (_, id) =
+                seal_vmess_aead_header_det(&cmd_key, b"x", 1_700_000_000, [0u8; 4], [0u8; 8])
+                    .expect("det 封装");
+            id
+        };
+        let foreign: [u8; 16] = *b"foreign-key-16B!";
+        let err = auth_id_timestamp(&foreign, &auth_id).expect_err("外凭据须拒绝");
+        assert!(format!("{err:#}").contains("CRC"), "{err:#}");
+    }
+
+    /// 响应头封形可被客户端读面消费：V 回声过、错 V 点名
+    #[tokio::test]
+    async fn response_header_seals_client_readable() {
+        let req_key = *KEY16;
+        let req_iv: [u8; 16] = hx(IV16_HEX).try_into().expect("IV16");
+        let keys = RespHeaderKeys::derive(&req_key, &req_iv);
+        let sealed = seal_response_header(&keys, 0x2a).expect("响应头封装");
+
+        // 客户端读面（StreamSrc 测试源）——正确 V 过
+        let mut src = std::io::Cursor::new(sealed.clone());
+        read_response_header(&mut StreamSrc(&mut src), 0x2a, &keys)
+            .await
+            .expect("V 回声过");
+        // 错 V 点名拒绝
+        let mut src = std::io::Cursor::new(sealed);
+        let err = read_response_header(&mut StreamSrc(&mut src), 0x2b, &keys)
+            .await
+            .expect_err("错 V 须拒绝");
+        assert!(format!("{err:#}").contains("响应认证字节"), "{err:#}");
     }
 }

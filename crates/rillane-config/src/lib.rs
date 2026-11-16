@@ -1843,6 +1843,21 @@ pub enum IngressConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         udp_enabled: Option<bool>,
     },
+    /// VMess 入口（RIL-137）：自写 server 面（评估见两语
+    /// protocol-backends.md vmess 服务端面段——vmess-rs 为零依赖空壳；
+    /// tobira AGPL 且 binary-only 拖应用内核）。裸 TCP 承载——VMess AEAD
+    /// 封头即认证面，无 TLS 字段；AEAD/alter_id=0 口径，security 由客户端
+    /// 自选（0x03/0x04），不留旋钮。uuid 装配期校验。UDP 关联面随
+    /// `udp.enabled`/`udp_enabled` 门。
+    Vmess {
+        bind: String,
+        /// 认证 UUID（标准形；cmdKey = MD5(uuid ‖ 常量) 派生）
+        uuid: String,
+        /// per-ingress UDP 覆盖（语义同 Socks5）：None 继承 `udp.enabled`，
+        /// Some 显式开/关该入口的 UDP 关联面。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_enabled: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

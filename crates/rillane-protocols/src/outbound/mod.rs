@@ -17,7 +17,7 @@ mod tuic;
 mod vision;
 mod vless;
 mod vless_packet;
-mod vmess;
+pub(crate) mod vmess;
 mod ws;
 mod xhttp;
 // android / armv7-ohos：defguard_boringtun 无平台支撑（见 wireguard_stub.rs 头注）——
@@ -36,7 +36,9 @@ mod wireguard_stub;
 pub use anytls::{AnytlsConnector, AnytlsUdpConnector};
 pub use direct::DirectConnector;
 pub use http::HttpConnector;
-pub use hysteria2::{Hysteria2Connector, Hysteria2UdpConnector, Hysteria2UdpRelay, UdpSessionStats};
+pub use hysteria2::{
+    Hysteria2Connector, Hysteria2UdpConnector, Hysteria2UdpRelay, UdpSessionStats,
+};
 pub use reality::{
     derive_auth_key, extract_client_random, extract_session_id, extract_x25519_key_share,
     handshake, hmac_cert_tag, open_session_id, seal_session_id, zero_session_id_slot,

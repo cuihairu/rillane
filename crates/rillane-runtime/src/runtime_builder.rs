@@ -58,8 +58,8 @@ use rillane_protocols::{
     Socks5Ingress, Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey,
     TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts,
     TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress, VlessUdpConnector,
-    VlessUdpParts, VmessConnector, VmessSecurity, VmessUdpConnector, WireguardConnector,
-    WireguardUdpConnector,
+    VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity, VmessUdpConnector, VmessUdpParts,
+    WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -474,6 +474,9 @@ impl RuntimeBuilder {
                         udp_enabled: Some(true),
                         ..
                     } | IngressConfig::Vless {
+                        udp_enabled: Some(true),
+                        ..
+                    } | IngressConfig::Vmess {
                         udp_enabled: Some(true),
                         ..
                     }
@@ -2667,6 +2670,7 @@ fn build_ingress_endpoints(
             IngressConfig::Shadowsocks { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Trojan { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Vless { udp_enabled, .. } => *udp_enabled,
+            IngressConfig::Vmess { udp_enabled, .. } => *udp_enabled,
             IngressConfig::Http { .. } => None,
         };
         if per_ingress == Some(true) && !udp_enabled_global {
@@ -2796,6 +2800,31 @@ fn build_ingress_endpoints(
                     cert,
                     cert_key,
                     vl_udp,
+                    fake_ip.clone(),
+                )?)
+            }
+            IngressConfig::Vmess {
+                bind,
+                uuid,
+                udp_enabled,
+            } => {
+                // VMess UDP 关联面同用进程级会话表 + 连接器族（udp 门与
+                // socks5/vless 同口径）；uuid 解析拒绝落在装配期（裸 TCP
+                // 承载，无 TLS 材料）
+                let vm_udp = match udp.as_ref() {
+                    Some(svc) if resolve_udp_enabled(udp_enabled_global, *udp_enabled) => {
+                        Some(VmessUdpParts {
+                            table: svc.table().clone(),
+                            connector: svc.connector().clone(),
+                        })
+                    }
+                    _ => None,
+                };
+                Arc::new(VmessIngress::new(
+                    desc.name.clone(),
+                    bind.clone(),
+                    uuid,
+                    vm_udp,
                     fake_ip.clone(),
                 )?)
             }
