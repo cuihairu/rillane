@@ -68,7 +68,7 @@ Transport and build-time constraints:
 
 - `network` values: vless/vmess = `tcp | ws | grpc | h2`; trojan = `tcp | ws | grpc` (**no h2 scope**, anything outside the whitelist errors at build time). `grpc` requires `grpc_service_name` (online path `/{name}/Tun`), and grpc/h2 always layer TLS (`tls: false` is refused at build time); `ws`/`h2` use `path`/`host` (host is a string array).
 - `security` (vmess): `auto | aes-128-gcm | chacha20-poly1305`; `alter_id > 0` and non-AEAD security are refused at build time.
-- `flow` (vless): **anything but None is refused at build time** (Vision etc. are not implemented, and the error names the node).
+- `flow` (vless): dial-time validation — exactly `xtls-rprx-vision` accepted (Vision framing; requires `network: tcp` + `tls: true`/REALITY, UDP refused), any other value refused at dial time and names the node.
 - `method` (shadowsocks): free-form string, invalid values error at build time (the set is whatever the shadowsocks crate 1.25 AEAD methods support); `plugin` goes through the SIP003 bridge (TCP plane via the plugin process, UDP plane judged negative in plugin mode).
 - `hysteria` (v1): schema/subscription conversion is supported, but **the egress connector is missing** -- RuntimeBuilder errors at build time; `hysteria2` UDP underlay is deferred to V2 (the TCP plane is usable).
 - `tls_fingerprint`: `none | chrome | ios | safari` (comparison table: `rillanectl tls-fingerprint`); emulation is off by default.

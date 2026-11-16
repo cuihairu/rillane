@@ -202,8 +202,9 @@ armv7-ohos 桩）在对应小节如实记录。
 - **角色边界**：仅出站客户端（`Vless { reality }` 装配）；fork 的
   服务端面（PreparedServerHello/ServerConnection::new_reality）用于
   测试真实对端；rillane 入站面不编目 REALITY 监听。合法组合：
-  reality 必带 public_key，short_id 可选；flow（XTLS Vision）仍拨号
-  期点名拒绝（RIL-108 范围，防静默降级）
+  reality 必带 public_key，short_id 可选；flow 精确接受
+  `xtls-rprx-vision`（RIL-108 已交付——仅 tcp + TLS/REALITY，UDP 拒绝；
+  其余 flow 取值照旧拨号期点名拒绝，防静默降级）
 - UDP：仅 network=tcp（ws/grpc/h2 的 UDP 面未实现，构建期扫描判负）；
   vless+reality 的 UDP 面走 VLESS UDP 面（RIL-107 放开 gate）。
 

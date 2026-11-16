@@ -68,7 +68,7 @@
 
 - `network` 取值：vless/vmess = `tcp | ws | grpc | h2`；trojan = `tcp | ws | grpc`（**无 h2 口径**，白名单外构建期报错）。`grpc` 须配 `grpc_service_name`（线上路径 `/{name}/Tun`），grpc/h2 恒叠 TLS（`tls: false` 构建期拒绝）；`ws`/`h2` 用 `path`/`host`（host 为字符串数组）。
 - `security`（vmess）：`auto | aes-128-gcm | chacha20-poly1305`；`alter_id > 0` 与非 AEAD security 构建期拒绝。
-- `flow`（vless）：**非 None 即构建期拒绝**（Vision 等未实现，报错含节点名）。
+- `flow`（vless）：拨号期校验——精确接受 `xtls-rprx-vision`（Vision 分帧；须 `network: tcp` + `tls: true`/REALITY，UDP 拒绝），其余取值拨号期拒绝（报错含节点名）。
 - `method`（shadowsocks）：自由字符串，非法值构建期报错（以 shadowsocks crate 1.25 AEAD 方法集为准）；`plugin` 走 SIP003 桥（TCP 面经插件进程，UDP 面 plugin 模式判负）。
 - `hysteria`（v1）：schema/订阅转换支持，**出站连接器缺**——RuntimeBuilder 构建期报错；`hysteria2` UDP 承载归 V2（TCP 面可用）。
 - `tls_fingerprint`：`none | chrome | ios | safari`（对照表：`rillanectl tls-fingerprint`）；缺省不模拟。
