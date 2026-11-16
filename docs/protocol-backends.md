@@ -83,7 +83,7 @@ Every admitted section carries these fields (the contract test checks each one; 
 ## shadowsocks
 
 - **Conclusion**: selected library `shadowsocks` (shadowsocks-rust core)
-- **Version**: requirement `1.25` (default-features=false + aead-cipher), lock-resolved 1.25.0 (shadowsocks-crypto 0.8.0)
+- **Version**: requirement `1.25` (default-features=false + aead-cipher + aead-cipher-2022), lock-resolved 1.25.0 (shadowsocks-crypto 0.8.0)
 - **License**: MIT
 - **Platforms**: all platforms (pure Rust, aead-cipher feature set)
 - **Public API**: `ShadowsocksConnector::new` + the shadowsocks crate client layer (ServerConfig cipher parsing, TCP/UDP data plane; crates/rillane-protocols/src/outbound/shadowsocks.rs)
@@ -91,7 +91,7 @@ Every admitted section carries these fields (the contract test checks each one; 
 - **Cancel**: open-phase checks; the data plane cancels with the stream (no independent blocking section)
 - **Stats**: cipher-parse failures are named at build time; SIP003 plugin mode is a process bridge — the plugin's own I/O is outside this repository's observation points (recorded honestly)
 - **Reuse**: the UDP face reuses the TCP face's server_config (`from_connector`); plugin (SIP003) mode refuses UDP (SIP003 defines only a TCP data plane)
-- The cipher matrix follows the actual dependency and its validation (evidence precedes RIL-131).
+- **Cipher matrix (RIL-131)**: carried methods follow the compiled dependency face — v1 AEAD `aes-128-gcm` / `aes-256-gcm` / `chacha20-ietf-poly1305`; SS2022 `2022-blake3-aes-128-gcm` / `2022-blake3-aes-256-gcm` / `2022-blake3-chacha20-poly1305` (feature `aead-cipher-2022`). Refused by name at construction: `none` (no encryption never enters the data plane), stream-era names such as `rc4-md5` (feature not compiled). SS2022 password semantics are a base64 key whose length must exactly match the algorithm's key length (16 bytes for aes-128, 32 for aes-256/chacha20) — validated at construction. All six carried methods were accepted against real crate-server peers (TCP roundtrip + stats, UDP roundtrip with header-decoded address, wrong-password silence, cancel/release); see `crates/rillane-protocols/tests/shadowsocks_matrix_contract.rs`.
 
 ## vmess
 

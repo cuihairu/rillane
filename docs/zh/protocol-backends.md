@@ -119,7 +119,7 @@ armv7-ohos 桩）在对应小节如实记录。
 ## shadowsocks
 
 - **结论**：选库 `shadowsocks`（shadowsocks-rust 内核）
-- **版本**：要求 `1.25`（default-features=false + aead-cipher），lock
+- **版本**：要求 `1.25`（default-features=false + aead-cipher + aead-cipher-2022），lock
   实测 1.25.0（shadowsocks-crypto 0.8.0）
 - **许可**：MIT
 - **平台**：全平台（纯 Rust，aead-cipher 特性集）
@@ -133,7 +133,15 @@ armv7-ohos 桩）在对应小节如实记录。
   插件自身 IO 不在本仓观测点内（如实记录）
 - **复用**：UDP 面复用 TCP 面同一份 server_config（`from_connector`）；
   插件（SIP003）模式 UDP 判负（SIP003 仅定义 TCP 数据面）
-- 算法矩阵以实际依赖/校验为准（RIL-131 前置留证）。
+- **算法矩阵（RIL-131）**：承载算法随依赖编译面——v1 AEAD `aes-128-gcm` /
+  `aes-256-gcm` / `chacha20-ietf-poly1305`；SS2022 `2022-blake3-aes-128-gcm` /
+  `2022-blake3-aes-256-gcm` / `2022-blake3-chacha20-poly1305`（特性
+  `aead-cipher-2022`）。构建期点名拒绝：`none`（无加密不进数据面）、stream
+  时代方法名如 `rc4-md5`（特性未编译）。SS2022 的 password 语义是 base64
+  密钥，长度须与算法密钥长精确一致（aes-128 为 16 字节，aes-256/chacha20
+  为 32 字节），构建期校验。六算法全部对真实 crate 服务端对端验收通过
+  （TCP 往返+统计、UDP 往返+协议头解码地址、错密码静默、取消/资源释放），
+  见 `crates/rillane-protocols/tests/shadowsocks_matrix_contract.rs`。
 
 ## vmess
 
