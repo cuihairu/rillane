@@ -504,10 +504,14 @@ fn proxy_mapping(
             ins(&mut m, "server", server);
             ins(&mut m, "port", *port as u64);
             ins(&mut m, "protocol", protocol);
+            // 认证面键位与 IR 字段一一对应：显式 auth_str/auth 才写 auth-str
+            //（导入侧回读同名字段）；纯 password 节点写 password 键——不再
+            // 塌缩成 auth-str（否则重导入把 password 复制进 auth_str，往返
+            // 不逐字段一致）
             if let Some(a) = auth_str.clone().or_else(|| auth.clone()) {
                 ins(&mut m, "auth-str", a);
             } else {
-                ins(&mut m, "auth-str", password);
+                ins(&mut m, "password", password);
             }
             if let Some(u) = up_mbps {
                 ins(&mut m, "up", *u as u64);

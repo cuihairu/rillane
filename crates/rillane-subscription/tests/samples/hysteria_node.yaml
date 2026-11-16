@@ -1,0 +1,28 @@
+# RIL-109 订阅兼容样本：Hysteria v1 出站节点（已脱敏）
+# 凭据为占位值；地址用 RFC 5737/2606 文档段。预期：password（auth-str 回退）/
+# protocol/up/down/sni/skip-cert-verify/alpn 双向转换逐字段保留；obfs 包层
+# 传输不入样本（仓内面不交付——携带即转换期降级点名，见 clash 转换面）。
+# 线格式地面真值 = 官方 v1.3.5 core/cs（docs/protocol-backends.md#hysteria）。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-hy1-plain
+    type: hysteria
+    server: hy1.example.com
+    port: 443
+    password: "REDACTED-SAMPLE-hy1-password"
+    sni: hy1.example.com
+    alpn:
+      - hysteria
+  - name: sample-hy1-rates-authstr
+    type: hysteria
+    server: 203.0.113.59
+    port: 36711
+    auth-str: "REDACTED-SAMPLE-hy1-auth"
+    protocol: udp
+    up: 100
+    down: 500
+    skip-cert-verify: true
+proxy-groups: []
+rules: []

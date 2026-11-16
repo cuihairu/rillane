@@ -936,6 +936,135 @@ fn hysteria2_subscription_fields_convert_both_ways() {
     );
 }
 
+// ---------- RIL-109：Hysteria v1——订阅字段双向转换样本 ----------
+
+#[test]
+fn hysteria_subscription_fields_convert_both_ways() {
+    // 正向：clash 订阅 → IR（password 节点与 auth-str+速率申报节点各一，
+    // 逐字段保留；auth-str 键位缺 password 时回退作认证面）
+    let (config, report) = loose("hysteria_node.yaml");
+    let names: Vec<&str> = config.egress.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["sample-hy1-plain", "sample-hy1-rates-authstr"]);
+    let specs: Vec<rillane_config::EgressConfig> =
+        config.egress.iter().map(|e| e.spec.clone()).collect();
+    assert_eq!(
+        specs[0],
+        rillane_config::EgressConfig::Hysteria {
+            server: "hy1.example.com".into(),
+            port: 443,
+            password: "REDACTED-SAMPLE-hy1-password".into(),
+            protocol: "udp".into(),
+            up_mbps: None,
+            down_mbps: None,
+            auth: None,
+            auth_str: None,
+            obfs: None,
+            obfs_param: None,
+            server_name: Some("hy1.example.com".into()),
+            skip_cert_verify: false,
+            alpn: Some(vec!["hysteria".into()]),
+        }
+    );
+    assert_eq!(
+        specs[1],
+        rillane_config::EgressConfig::Hysteria {
+            server: "203.0.113.59".into(),
+            port: 36711,
+            password: "REDACTED-SAMPLE-hy1-auth".into(),
+            protocol: "udp".into(),
+            up_mbps: Some(100),
+            down_mbps: Some(500),
+            auth: None,
+            auth_str: Some("REDACTED-SAMPLE-hy1-auth".into()),
+            obfs: None,
+            obfs_param: None,
+            server_name: None,
+            skip_cert_verify: true,
+            alpn: None,
+        }
+    );
+    assert!(
+        report.dropped_nodes.is_empty(),
+        "Hysteria v1 节点必须保留，不丢弃: {:?}",
+        report.dropped_nodes
+    );
+    assert!(
+        report.degraded_nodes.is_empty(),
+        "password/auth-str/protocol/up/down/sni/skip-cert-verify/alpn 全字段入 IR，无降级: {:?}",
+        report.degraded_nodes
+    );
+
+    // 反向 1：IR → serde → IR（序列化不丢字段，往返逐字段一致）
+    for spec in &specs {
+        let json = serde_json::to_string(spec).expect("IR 序列化");
+        let back: rillane_config::EgressConfig = serde_json::from_str(&json).expect("IR 反序列化");
+        assert_eq!(&back, spec, "serde 往返必须逐字段一致");
+    }
+
+    // 反向 2：IR → clash 导出（type: hysteria + protocol/up/down/auth-str
+    // 键位）→ 回读再转 IR
+    let mut project: rillane_config::RillaneConfig = serde_yaml::from_str(
+        "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+    )
+    .expect("基底配置");
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-hy1-plain".into(),
+        spec: specs[0].clone(),
+    });
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-hy1-rates-authstr".into(),
+        spec: specs[1].clone(),
+    });
+    let (yaml, export_report) = rillane_subscription::ClashExporter
+        .export(&project)
+        .unwrap();
+    assert_eq!(
+        export_report.exported_proxies,
+        vec!["sample-hy1-plain", "sample-hy1-rates-authstr"],
+        "Hysteria v1 节点应可导出"
+    );
+    assert!(yaml.contains("type: hysteria\n"), "{yaml}");
+    assert!(yaml.contains("protocol: udp"), "{yaml}");
+    assert!(yaml.contains("up: 100"), "{yaml}");
+    assert!(yaml.contains("down: 500"), "{yaml}");
+    assert!(
+        yaml.contains("auth-str: REDACTED-SAMPLE-hy1-auth"),
+        "{yaml}"
+    );
+    assert!(
+        yaml.contains("password: REDACTED-SAMPLE-hy1-password"),
+        "纯 password 节点导出 password 键（不塌缩成 auth-str）: {yaml}"
+    );
+    assert!(yaml.contains("sni: hy1.example.com"), "{yaml}");
+    assert!(yaml.contains("alpn:"), "{yaml}");
+    assert!(yaml.contains("skip-cert-verify: true"), "{yaml}");
+    // 回读：protocol/up/down/auth-str/password 键位保证往返不丢字段
+    let reparsed = ClashConverter::new()
+        .parse(&yaml)
+        .expect("导出必须可被导入侧解析");
+    let (back_config, back_report) = ClashConverter::new()
+        .convert_to_rillane_with_report(&reparsed)
+        .expect("回读转换");
+    assert!(
+        back_report.dropped_nodes.is_empty(),
+        "回读不丢节点: {:?}",
+        back_report.dropped_nodes
+    );
+    assert!(
+        back_report.degraded_nodes.is_empty(),
+        "回读零损失: {:?}",
+        back_report.degraded_nodes
+    );
+    assert_eq!(
+        back_config.egress[0].spec, specs[0],
+        "导出→回读必须逐字段还原 password 节点"
+    );
+    assert_eq!(
+        back_config.egress[1].spec, specs[1],
+        "auth-str+速率申报节点同样逐字段还原"
+    );
+}
+
 // ---------- RIL-105：TUIC——订阅字段双向转换样本 ----------
 
 #[test]

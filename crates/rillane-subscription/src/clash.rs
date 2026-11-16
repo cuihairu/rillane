@@ -142,6 +142,25 @@ pub struct ClashProxy {
         alias = "obfs_password"
     )]
     pub obfs_param: Option<String>,
+    /// Hysteria: 载具协议（udp/wechat/faketcp；缺省 udp——仓内面仅交付原生
+    /// UDP 上的 QUIC，其余载具拨号期具名拒绝，转换面不判负节点）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// Hysteria: 上行带宽申报 Mbps（官方 mbpsToBps 口径）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up: Option<u32>,
+    /// Hysteria: 下行带宽申报 Mbps
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub down: Option<u32>,
+    /// Hysteria: 字符串认证（常见键 auth-str，别名 auth_str——premium 侧
+    /// 下划线形；导入缺 password 时回退本字段作认证面）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "auth-str",
+        alias = "auth_str"
+    )]
+    pub auth_str: Option<String>,
     /// 加密方法（用于 Shadowsocks）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cipher: Option<String>,
@@ -2038,20 +2057,33 @@ impl ClashConverter {
                 })
             }
             ClashProxyType::Hysteria => {
+                // 认证面：password 键缺席时回退 auth-str（premium/mihomo 两侧
+                // 键位并存；IR resolve 顺序 auth_str 优先，同一字节面）
                 let password = proxy
                     .password
                     .clone()
+                    .or_else(|| proxy.auth_str.clone())
                     .ok_or_else(|| anyhow!("Hysteria 缺少密码"))?;
-
+                // protocol/up/down 键位直入 IR（RIL-109 字段面随自写客户端
+                // 交付：非 "udp" 载具拨号期具名拒绝，转换面不判负节点；
+                // up/down 缺省 None = 连接器按官方缺省 50/100 申报，不在此
+                // 伪造数值）。obfs 包层传输换整个 QUIC 载荷、仓内面不交付
+                // ——损失显式可见（降级清单），不伪装无损
+                if proxy.obfs.is_some() || proxy.obfs_param.is_some() {
+                    report.degraded_nodes.push((
+                        proxy.name.clone(),
+                        "Hysteria obfs 包层传输不入 IR，转换期丢弃".to_string(),
+                    ));
+                }
                 Ok(EgressConfig::Hysteria {
                     server: proxy.server.clone(),
                     port: proxy.port,
                     password,
-                    protocol: "udp".to_string(), // Clash Hysteria 通常使用 UDP
-                    up_mbps: Some(50),
-                    down_mbps: Some(100),
+                    protocol: proxy.protocol.clone().unwrap_or_else(|| "udp".to_string()),
+                    up_mbps: proxy.up,
+                    down_mbps: proxy.down,
                     auth: None,
-                    auth_str: None,
+                    auth_str: proxy.auth_str.clone(),
                     obfs: None,
                     obfs_param: None,
                     server_name: proxy.servername.clone(),
@@ -2509,7 +2541,10 @@ impl ClashConverter {
             ClashProxyType::Ss => proxy.cipher.is_some() && proxy.password.is_some(),
             ClashProxyType::Vmess | ClashProxyType::Vless => proxy.uuid.is_some(),
             ClashProxyType::Trojan | ClashProxyType::Anytls => proxy.password.is_some(),
-            ClashProxyType::Hysteria | ClashProxyType::Hysteria2 => proxy.password.is_some(),
+            // Hysteria v1 认证面：password 或 auth-str 任一即有效（转换面
+            // 同口径回退）；Hysteria2 仅 password
+            ClashProxyType::Hysteria => proxy.password.is_some() || proxy.auth_str.is_some(),
+            ClashProxyType::Hysteria2 => proxy.password.is_some(),
             ClashProxyType::Tuic => proxy.password.is_some() && proxy.uuid.is_some(),
             ClashProxyType::Snell => proxy.password.is_some(),
             ClashProxyType::Wireguard => {
