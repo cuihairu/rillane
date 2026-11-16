@@ -95,7 +95,10 @@ fn negative_lossy_reports_every_expected_loss() {
         .find(|g| g.name.ends_with("fb-group"))
         .expect("fb-group 须产出");
     assert_eq!(fb.strategy, rillane_config::Strategy::Fallback);
-    assert!(fb.url_test.is_some(), "fb-group 带 url/interval 须注入探测参数");
+    assert!(
+        fb.url_test.is_some(),
+        "fb-group 带 url/interval 须注入探测参数"
+    );
 
     // 跳过规则：仅未声明引用的 RULE-SET（rule-2）。RIL-015 起
     // PROCESS-NAME（rule-1）转换保留并按引擎降级显式报告
@@ -114,7 +117,11 @@ fn negative_lossy_reports_every_expected_loss() {
 
     // 保留面：好节点、select 组、进程规则与两条支持规则照常产出
     assert_eq!(config.egress.len(), 1, "只有 good-node-a 产出");
-    assert_eq!(config.routing.rules.len(), 3, "进程+DOMAIN-SUFFIX+MATCH 保留");
+    assert_eq!(
+        config.routing.rules.len(),
+        3,
+        "进程+DOMAIN-SUFFIX+MATCH 保留"
+    );
 
     // 诊断桥（RIL-002 契约）：每条损失带稳定码并定位到来源对象
     let source = SourceId::new("sample-lossy").unwrap();
@@ -160,12 +167,7 @@ fn negative_lossy_strict_rejects_with_full_list() {
         .convert_to_rillane_with_report(&clash)
         .expect_err("严格导入必须拒绝有损样本");
     let message = err.to_string();
-    for expected in [
-        "bad-port-node",
-        "sample-snell",
-        "rule-1",
-        "rule-2",
-    ] {
+    for expected in ["bad-port-node", "sample-snell", "rule-1", "rule-2"] {
         assert!(
             message.contains(expected),
             "严格拒绝错误须点名 {expected}，实际:\n{message}"
@@ -195,7 +197,11 @@ fn provider_only_surfaces_block_loss_not_silent() {
         1,
         "provider 声明须落 routing.proxy_providers"
     );
-    let decl = config.routing.proxy_providers.get("sample-provider").expect("声明");
+    let decl = config
+        .routing
+        .proxy_providers
+        .get("sample-provider")
+        .expect("声明");
     assert_eq!(decl.provider_type, "http");
     assert_eq!(decl.interval_secs, Some(3600), "interval 秒口径原样");
     assert_eq!(
@@ -249,7 +255,10 @@ fn ruleset_logic_sample_converts_with_tracked_references() {
         .iter()
         .map(|r| r.name.as_str())
         .collect();
-    assert_eq!(names, vec!["rule-1", "rule-2", "rule-3", "rule-4", "rule-5"]);
+    assert_eq!(
+        names,
+        vec!["rule-1", "rule-2", "rule-3", "rule-4", "rule-5"]
+    );
 
     // RULE-SET → 命名引用（可追踪）
     assert_eq!(
@@ -794,6 +803,120 @@ fn ss_matrix_subscription_fields_convert_both_ways() {
     assert_eq!(
         back_config.egress[1].spec, specs[1],
         "SS2022 节点同样逐字段还原"
+    );
+}
+
+// ---------- RIL-133：Hysteria2——订阅字段双向转换样本 ----------
+
+#[test]
+fn hysteria2_subscription_fields_convert_both_ways() {
+    // 正向：clash 订阅 → IR（基础节点与 mport+obfs 节点各一，逐字段保留）
+    let (config, report) = loose("hysteria2_node.yaml");
+    let names: Vec<&str> = config.egress.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["sample-hy2-plain", "sample-hy2-mport-obfs"]);
+    let specs: Vec<rillane_config::EgressConfig> =
+        config.egress.iter().map(|e| e.spec.clone()).collect();
+    assert_eq!(
+        specs[0],
+        rillane_config::EgressConfig::Hysteria2 {
+            server: "hy1.example.com".into(),
+            port: 443,
+            password: "REDACTED-SAMPLE-hy2-password".into(),
+            mport: None,
+            obfs: None,
+            obfs_param: None,
+            server_name: Some("hy1.example.com".into()),
+            skip_cert_verify: false,
+            alpn: Some(vec!["h3".into()]),
+        }
+    );
+    assert_eq!(
+        specs[1],
+        rillane_config::EgressConfig::Hysteria2 {
+            server: "203.0.113.60".into(),
+            port: 36712,
+            password: "REDACTED-SAMPLE-hy2-password-2".into(),
+            mport: Some("20000-30000".into()),
+            obfs: Some("salamander".into()),
+            obfs_param: Some("REDACTED-SAMPLE-hy2-obfs".into()),
+            server_name: None,
+            skip_cert_verify: false,
+            alpn: None,
+        }
+    );
+    assert!(
+        report.dropped_nodes.is_empty(),
+        "Hysteria2 节点必须保留，不丢弃: {:?}",
+        report.dropped_nodes
+    );
+    assert!(
+        report.degraded_nodes.is_empty(),
+        "password/mport/obfs/sni/alpn 全字段入 IR，无降级: {:?}",
+        report.degraded_nodes
+    );
+
+    // 反向 1：IR → serde → IR（序列化不丢字段，往返逐字段一致）
+    for spec in &specs {
+        let json = serde_json::to_string(spec).expect("IR 序列化");
+        let back: rillane_config::EgressConfig = serde_json::from_str(&json).expect("IR 反序列化");
+        assert_eq!(&back, spec, "serde 往返必须逐字段一致");
+    }
+
+    // 反向 2：IR → clash 导出（type: hysteria2 + ports/obfs 键位）→ 回读再转 IR
+    let mut project: rillane_config::RillaneConfig = serde_yaml::from_str(
+        "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+    )
+    .expect("基底配置");
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-hy2-plain".into(),
+        spec: specs[0].clone(),
+    });
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-hy2-mport-obfs".into(),
+        spec: specs[1].clone(),
+    });
+    let (yaml, export_report) = rillane_subscription::ClashExporter
+        .export(&project)
+        .unwrap();
+    assert_eq!(
+        export_report.exported_proxies,
+        vec!["sample-hy2-plain", "sample-hy2-mport-obfs"],
+        "Hysteria2 节点应可导出"
+    );
+    assert!(yaml.contains("type: hysteria2"), "{yaml}");
+    assert!(yaml.contains("sni: hy1.example.com"), "{yaml}");
+    assert!(yaml.contains("alpn:"), "{yaml}");
+    assert!(yaml.contains("ports: 20000-30000"), "{yaml}");
+    assert!(yaml.contains("obfs: salamander"), "{yaml}");
+    assert!(
+        yaml.contains("obfs-password: REDACTED-SAMPLE-hy2-obfs"),
+        "导出必须携带 obfs-password 键位: {yaml}"
+    );
+    assert!(yaml.contains("REDACTED-SAMPLE"), "{yaml}");
+    // 回读：ports/obfs/sni/alpn 键位保证往返不丢字段
+    let reparsed = ClashConverter::new()
+        .parse(&yaml)
+        .expect("导出必须可被导入侧解析");
+    let (back_config, back_report) = ClashConverter::new()
+        .convert_to_rillane_with_report(&reparsed)
+        .expect("回读转换");
+    assert!(
+        back_report.dropped_nodes.is_empty(),
+        "回读不丢节点: {:?}",
+        back_report.dropped_nodes
+    );
+    assert!(
+        back_report.degraded_nodes.is_empty(),
+        "回读零损失: {:?}",
+        back_report.degraded_nodes
+    );
+    assert_eq!(
+        back_config.egress[0].spec, specs[0],
+        "导出→回读必须逐字段还原基础节点"
+    );
+    assert_eq!(
+        back_config.egress[1].spec, specs[1],
+        "mport+obfs 节点同样逐字段还原"
     );
 }
 

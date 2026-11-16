@@ -1,0 +1,27 @@
+# RIL-133 订阅兼容样本：Hysteria2 出站节点（已脱敏）
+# 凭据为占位值；地址用 RFC 5737/2606 文档段。预期：password/mport(ports)/
+# obfs/obfs-password/sni/skip-cert-verify/alpn 双向转换逐字段保留。
+# UDP 数据报面（无 obfs 组合）由 rillane-protocols hysteria2_udp_contract
+# 与真实镜像对端验收；obfs 组合在 UDP 构建期点名判负（RIL-133 口径）。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-hy2-plain
+    type: hysteria2
+    server: hy1.example.com
+    port: 443
+    password: "REDACTED-SAMPLE-hy2-password"
+    sni: hy1.example.com
+    alpn:
+      - h3
+  - name: sample-hy2-mport-obfs
+    type: hysteria2
+    server: 203.0.113.60
+    port: 36712
+    password: "REDACTED-SAMPLE-hy2-password-2"
+    ports: "20000-30000"
+    obfs: salamander
+    obfs-password: "REDACTED-SAMPLE-hy2-obfs"
+proxy-groups: []
+rules: []
