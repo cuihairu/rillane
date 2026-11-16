@@ -20,10 +20,10 @@ This page records existing boundaries. Future work follows [v1 design](design/ar
 | AnyTLS | TCP over TLS with session reuse; UDP-over-TCP (UoT) | Subscription alpn/client-fingerprint do not enter the IR (named in the report) |
 | Shadowsocks | TCP/UDP; SIP003 bridge for TCP | Plugin mode has no UDP; methods follow dependency/runtime validation |
 | Trojan | TCP/TLS and supported transports | No promise of UDP/all upstream extensions |
-| VLESS / VMess | TCP, WebSocket, gRPC, HTTP/2 | Validate transports/encryption; no UDP; VMess requires AEAD/alter_id=0 |
+| VLESS / VMess | TCP, WebSocket, gRPC, HTTP/2; REALITY over TCP (client side) | Validate transports/encryption; REALITY requires `network: tcp` with its own TLS posture; no UDP; VMess requires AEAD/alter_id=0 |
 | Hysteria2 | TCP streams over QUIC | Current connector has no UDP outbound; not transparent web QUIC carriage |
 | WireGuard | Userspace TCP/UDP carriage | Some targets use rejecting stubs; cross-build is not runtime proof |
-| Hysteria v1 / Reality / Vision etc. | Not advertised as available | Schema/import fields or research do not establish a connector |
+| Hysteria v1 / Vision etc. | Not advertised as available | Schema/import fields or research do not establish a connector |
 
 ## Optional features and limits
 
