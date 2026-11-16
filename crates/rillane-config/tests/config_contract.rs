@@ -606,3 +606,177 @@ routing:
     let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
     assert_eq!(back.ingress, config.ingress, "往返后入口逐字段一致");
 }
+
+/// ShadowTLS 入口载具（RIL-110）yaml 双形态（显式/最小）往返：载具无
+/// udp_enabled 字段（无 UDP 面）——字段缺席即拒绝是 serde 默认行为。
+#[test]
+fn shadowtls_ingress_yaml_roundtrip() {
+    let yaml = r#"
+control:
+  api_bind: 127.0.0.1:9090
+telemetry:
+  log_level: info
+  enable_metrics: false
+  enable_tracing: false
+ingress:
+  - name: stls-in
+    type: shadow_tls
+    bind: 127.0.0.1:10447
+    password: carrier-pass-2026
+    handshake_addr: 203.0.113.10:443
+    target_addr: 127.0.0.1:10448
+egress:
+  - name: direct
+    type: direct
+routing:
+  default_node: direct
+  groups: []
+  rules: []
+"#;
+    let config = RillaneConfig::from_str(yaml, None).expect("ShadowTLS 入口配置必须可解析");
+    assert_eq!(config.ingress.len(), 1);
+    match &config.ingress[0].spec {
+        rillane_config::IngressConfig::ShadowTls {
+            bind,
+            password,
+            handshake_addr,
+            target_addr,
+        } => {
+            assert_eq!(bind, "127.0.0.1:10447");
+            assert_eq!(password, "carrier-pass-2026");
+            assert_eq!(handshake_addr, "203.0.113.10:443");
+            assert_eq!(target_addr, "127.0.0.1:10448");
+        }
+        other => panic!("入口应为 shadow_tls，实际 {other:?}"),
+    }
+
+    // serde 双向往返：序列化 → 回读逐字段一致（含 type 标签）
+    let json = serde_json::to_string(&config).expect("可序列化");
+    assert!(json.contains("shadow_tls"), "type 标签随序列化保留: {json}");
+    let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
+    assert_eq!(back.ingress, config.ingress, "往返后入口逐字段一致");
+}
+
+/// shadowsocks-shadow-tls 组合出站（RIL-110）yaml 往返：SS 字段与载具
+/// shadow_tls 块分离（SS 口令与载具口令两侧独立）；version 缺席 = v2
+/// 语义（门在装配期——配置层只保真转写，v1/v3 样例亦可解析，由
+/// runtime 装配面验收点名拒绝）。
+#[test]
+fn shadowsocks_shadow_tls_egress_yaml_roundtrip() {
+    let yaml = r#"
+control:
+  api_bind: 127.0.0.1:9090
+telemetry:
+  log_level: info
+  enable_metrics: false
+  enable_tracing: false
+ingress: []
+egress:
+  - name: stls-full
+    type: shadowsocks-shadow-tls
+    server: 203.0.113.9
+    port: 443
+    method: aes-128-gcm
+    password: inner-ss-pass
+    shadow_tls:
+      host: camo.example.test
+      password: carrier-pass-2026
+      version: 2
+      skip_cert_verify: true
+  - name: stls-min
+    type: shadowsocks-shadow-tls
+    server: 203.0.113.11
+    port: 8388
+    method: aes-128-gcm
+    password: inner-ss-pass
+    shadow_tls:
+      host: camo.example.test
+      password: carrier-pass-2026
+routing:
+  default_node: stls-min
+  groups: []
+  rules: []
+"#;
+    let config = RillaneConfig::from_str(yaml, None).expect("组合出站配置必须可解析");
+    assert_eq!(config.egress.len(), 2);
+
+    // 显式形态：全字段保真
+    match &config.egress[0].spec {
+        rillane_config::EgressConfig::ShadowsocksShadowTls {
+            server,
+            port,
+            method,
+            password,
+            shadow_tls,
+        } => {
+            assert_eq!(server, "203.0.113.9");
+            assert_eq!(*port, 443);
+            assert_eq!(method, "aes-128-gcm");
+            assert_eq!(password, "inner-ss-pass");
+            assert_eq!(shadow_tls.host, "camo.example.test");
+            assert_eq!(shadow_tls.password, "carrier-pass-2026");
+            assert_eq!(shadow_tls.version, Some(2));
+            assert!(shadow_tls.skip_cert_verify);
+        }
+        other => panic!("首出口应为 shadowsocks-shadow-tls，实际 {other:?}"),
+    }
+    // 最小形态：version/skip_cert_verify 缺省（version None = v2 语义）
+    match &config.egress[1].spec {
+        rillane_config::EgressConfig::ShadowsocksShadowTls {
+            server,
+            port,
+            shadow_tls,
+            ..
+        } => {
+            assert_eq!(server, "203.0.113.11");
+            assert_eq!(*port, 8388);
+            assert_eq!(shadow_tls.version, None, "缺席 = v2 语义");
+            assert!(!shadow_tls.skip_cert_verify, "缺席 = 不跳过证书校验");
+        }
+        other => panic!("次出口应为 shadowsocks-shadow-tls，实际 {other:?}"),
+    }
+
+    // 版本门分层：v1 在配置层可解析（保真转写），拒绝落在装配期
+    let v1 = r#"
+control:
+  api_bind: 127.0.0.1:9090
+telemetry:
+  log_level: info
+  enable_metrics: false
+  enable_tracing: false
+ingress: []
+egress:
+  - name: stls-v1
+    type: shadowsocks-shadow-tls
+    server: 203.0.113.9
+    port: 443
+    method: aes-128-gcm
+    password: inner-ss-pass
+    shadow_tls:
+      host: camo.example.test
+      password: carrier-pass-2026
+      version: 1
+routing:
+  default_node: stls-v1
+  groups: []
+  rules: []
+"#;
+    let config = RillaneConfig::from_str(v1, None).expect("配置层不设版本门");
+    assert!(
+        matches!(
+            &config.egress[0].spec,
+            rillane_config::EgressConfig::ShadowsocksShadowTls { shadow_tls, .. }
+                if shadow_tls.version == Some(1)
+        ),
+        "v1 样例配置层保真解析"
+    );
+
+    // serde 双向往返：序列化 → 回读逐字段一致（type 标签 kebab 口径）
+    let json = serde_json::to_string(&config).expect("可序列化");
+    assert!(
+        json.contains("shadowsocks-shadow-tls"),
+        "type 标签 = 目录类型名: {json}"
+    );
+    let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
+    assert_eq!(back.egress, config.egress, "往返后出口逐字段一致");
+}
