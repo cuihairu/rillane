@@ -151,11 +151,13 @@ async fn spawn_udp_echo() -> SocketAddr {
     addr
 }
 
-/// 占位 127.0.0.1:0 摘一个空闲端口（入口内部持有 quinn Endpoint，测试侧无法反查）
+/// 占位 127.0.0.1:0 摘一个空闲端口（入口内部持有 quinn Endpoint，测试侧无法反查）。
+/// 探 UDP 面（QUIC 绑 UDP）——探 TCP 会撞上前序用例仍存活的 QUIC 端点
+///（TCP 空闲 ≠ UDP 空闲，客户端会摸到旧入口上）
 fn reserve_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("占位绑定");
-    let port = l.local_addr().unwrap().port();
-    drop(l);
+    let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("占位绑定");
+    let port = s.local_addr().unwrap().port();
+    drop(s);
     port
 }
 
