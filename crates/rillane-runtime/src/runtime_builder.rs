@@ -53,11 +53,11 @@ use std::net::IpAddr;
 use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
-    Hysteria2Connector, Hysteria2UdpConnector, MixedIngress,
-    ShadowsocksConnector, ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress,
-    Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool,
-    TrojanConnector, TrojanUdpConnector, VlessConnector, VlessUdpConnector, VmessConnector,
-    VmessSecurity, VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
+    Hysteria2Connector, Hysteria2UdpConnector, MixedIngress, ShadowsocksConnector,
+    ShadowsocksUdpConnector, Socks5Connector, Socks5Ingress, Socks5UdpConnector,
+    TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool, TrojanConnector,
+    TrojanUdpConnector, VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity,
+    VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -6120,7 +6120,7 @@ routing:
     #[test]
     fn udp_capability_scan_fails_listing_offending_nodes_and_sources() {
         // default_node=vmess-ws（network=ws 无 UDP 面）+ rule target 指向
-        // hy2（V2，quinn 未决）
+        // hy2-obfs（RIL-133：obfs 判负——salamander 换整个 QUIC 载荷）
         let mut vmess_ws = vmess_spec();
         if let EgressConfig::Vmess { network, .. } = &mut vmess_ws {
             *network = "ws".into();
@@ -6134,8 +6134,8 @@ routing:
                     port: 443,
                     password: "x".into(),
                     mport: None,
-                    obfs: None,
-                    obfs_param: None,
+                    obfs: Some("salamander".into()),
+                    obfs_param: Some("ob".into()),
                     server_name: None,
                     skip_cert_verify: false,
                     alpn: None,
@@ -6143,7 +6143,7 @@ routing:
             ),
         ];
         let connectors = build_udp_connectors(&egress, None, None).unwrap();
-        assert!(connectors.is_empty(), "vmess-ws/hy2 均不产 UDP 连接器");
+        assert!(connectors.is_empty(), "vmess-ws/hy2-obfs 均不产 UDP 连接器");
         let routing = RoutingConfig {
             default_node: "vmess-ws".into(),
             scenarios: Vec::new(),
@@ -6164,6 +6164,36 @@ routing:
             msg.contains("rule:r1") || msg.contains("group:g"),
             "应标注来源: {msg}"
         );
+    }
+
+    /// RIL-133：基础组合（无 obfs）的 hy2 产 UDP 连接器（数据报自写面），
+    /// 作为 default_node 可过扫描
+    #[test]
+    fn udp_capability_scan_admits_plain_hysteria2() {
+        let egress = vec![node(
+            "hy2-out",
+            EgressConfig::Hysteria2 {
+                server: "127.0.0.1".into(),
+                port: 443,
+                password: "x".into(),
+                mport: None,
+                obfs: None,
+                obfs_param: None,
+                server_name: None,
+                skip_cert_verify: false,
+                alpn: None,
+            },
+        )];
+        let connectors = build_udp_connectors(&egress, None, None).unwrap();
+        assert_eq!(connectors.len(), 1, "基础 hy2 应产 UDP 连接器");
+        let routing = RoutingConfig {
+            default_node: "hy2-out".into(),
+            scenarios: Vec::new(),
+            groups: vec![],
+            rules: vec![],
+            ..Default::default()
+        };
+        assert!(scan_udp_capability(&routing, &egress, &connectors).is_ok());
     }
 
     #[test]
