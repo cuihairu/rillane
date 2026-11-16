@@ -57,9 +57,9 @@
 | `socks5` | `server`✓ `port`✓ `username`? `password`? | — |
 | `http` | `server`✓ `port`✓ `username`? `password`? `tls` `skip_cert_verify` `sni`? `tls_fingerprint`? | `tls: false` |
 | `shadowsocks` | `server`✓ `port`✓ `method`✓ `password`✓ `plugin`? `plugin_opts`? | — |
-| `vmess` | `server`✓ `port`✓ `uuid`✓ `alter_id` `security` `network` `path`? `host`? `grpc_service_name`? `tls` `skip_cert_verify` `sni`? `alpn`? `tls_fingerprint`? | `alter_id: 0`、`security: auto`、`network: tcp`、`tls: false` |
-| `vless` | 同 vmess 基础 + `flow`? | `network: tcp`、`tls: false` |
-| `trojan` | `server`✓ `port`✓ `password`✓ `network` `path`? `host`? `grpc_service_name`? `tls` `skip_cert_verify` `sni`? `alpn`? `tls_fingerprint`? | `network: tcp`、**`tls: true`** |
+| `vmess` | `server`✓ `port`✓ `uuid`✓ `alter_id` `security` `network` `path`? `host`? `grpc_service_name`? `grpc_reuse`? `tls` `skip_cert_verify` `sni`? `alpn`? `tls_fingerprint`? | `alter_id: 0`、`security: auto`、`network: tcp`、`tls: false` |
+| `vless` | 同 vmess 基础 + `flow`? `xhttp_mode`? `packet_encoding`? | `network: tcp`、`tls: false` |
+| `trojan` | `server`✓ `port`✓ `password`✓ `network` `path`? `host`? `grpc_service_name`? `grpc_reuse`? `tls` `skip_cert_verify` `sni`? `alpn`? `tls_fingerprint`? | `network: tcp`、**`tls: true`** |
 | `hysteria` | `server`✓ `port`✓ `password`✓ `protocol` `up_mbps`? `down_mbps`? `auth`? `auth_str`? `obfs`? `obfs_param`? `server_name`? `skip_cert_verify` `alpn`? | `protocol: udp` |
 | `hysteria2` | `server`✓ `port`✓ `password`✓ `mport`? `obfs`? `obfs_param`? `server_name`? `skip_cert_verify` `alpn`? | — |
 | `anytls` | `server`✓ `port`✓ `password`✓ `sni`? `skip_cert_verify` | — |
@@ -68,7 +68,9 @@
 
 传输与构建期约束：
 
-- `network` 取值：vless = `tcp | ws | grpc | h2 | xhttp`，vmess = `tcp | ws | grpc | h2`；trojan = `tcp | ws | grpc`（**无 h2 口径**，白名单外构建期报错）。`grpc` 须配 `grpc_service_name`（线上路径 `/{name}/Tun`），grpc/h2 恒叠 TLS（`tls: false` 构建期拒绝）；`ws`/`h2` 用 `path`/`host`（host 为字符串数组）；`xhttp`（仅 vless，RIL-129）恒叠 TLS（`tls: false` 构建期拒绝），`path`/`host` 同 ws 口径，`xhttp_mode` 限 `auto | packet-up | stream-one`（缺省 auto；白名单外构建期拒绝，未交付载具拨号期点名拒绝）。
+- `network` 取值：vless = `tcp | ws | httpupgrade | grpc | h2 | xhttp`，vmess = `tcp | ws | httpupgrade | grpc | h2`；trojan = `tcp | ws | grpc`（**无 h2/httpupgrade 口径**，白名单外构建期报错）。`grpc` 须配 `grpc_service_name`（线上路径 `/{name}/Tun`），grpc/h2 恒叠 TLS（`tls: false` 构建期拒绝）；`ws`/`httpupgrade`/`h2` 用 `path`/`host`（host 为字符串数组；订阅侧 `httpupgrade` 读 `httpupgrade-opts` 块，与 `ws-opts` 同形）；`xhttp`（仅 vless，RIL-129）恒叠 TLS（`tls: false` 构建期拒绝），`path`/`host` 同 ws 口径，`xhttp_mode` 限 `auto | packet-up | stream-one`（缺省 auto；白名单外构建期拒绝，未交付载具拨号期点名拒绝）。
+- `grpc_reuse`（vmess/vless/trojan，RIL-130）：gRPC gun 流复用旋钮，仅 `network: grpc` 可携带——其余传输面携带构建期点名拒绝。字段 `max_connections`/`min_streams`/`max_streams`（均可选）对应订阅键 `grpc-opts.max-connections/min-streams/max-streams`；三键全缺 = 单连接全流复用（mihomo 客户端缺省）。`max_streams` 限单连接并发现役流数；多路复用连接租借随连接全生命周期持有（共享资源——不还池），对端死连接在下次获取时逐出并重拨。
+- `packet_encoding`（仅 vless，RIL-130）：UDP 包编码 `raw | xudp | packetaddr`，缺省 `raw`；白名单外构建期拒绝。订阅侧平铺 `packet-encoding` 键双向转换。VMess 接受订阅键但仅 `raw` 可交付（xudp/packetaddr 载具未交付——转换期点名拒绝）。
 - `security`（vmess）：`auto | aes-128-gcm | chacha20-poly1305`；`alter_id > 0` 与非 AEAD security 构建期拒绝。
 - `flow`（vless）：拨号期校验——精确接受 `xtls-rprx-vision`（Vision 分帧；须 `network: tcp` + `tls: true`/REALITY，UDP 拒绝），其余取值拨号期拒绝（报错含节点名）。
 - `method`（shadowsocks）：自由字符串，非法值构建期报错（以 shadowsocks crate 1.25 AEAD 方法集为准）；`plugin` 走 SIP003 桥（TCP 面经插件进程，UDP 面 plugin 模式判负）。
