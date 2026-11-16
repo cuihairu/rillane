@@ -1,0 +1,34 @@
+# RIL-110 订阅兼容样本：shadowsocks-shadow-tls 组合出站节点（已脱敏）
+# 凭据为占位值（REDACTED-SAMPLE），地址用 RFC 5737/2606 文档段。
+# 预期：mihomo 同形（type: ss + plugin: shadow-tls + plugin-opts）整体换算
+# 为组合出站——SS 字段与载具字段两侧独立保留；显式 version 2 归一为规范
+# None（=v2 语义）；version 1/3 样本在导入面点名拒绝（负样本走守卫面，
+# 本文件只收正例）；载具无 UDP 面（组合节点遇 udp.enabled 构建期判负）。
+mixed-port: 7890
+allow-lan: false
+log-level: info
+proxies:
+  - name: sample-stls-full
+    type: ss
+    server: carrier.example.com
+    port: 443
+    cipher: aes-128-gcm
+    password: "REDACTED-SAMPLE-ss"
+    plugin: shadow-tls
+    plugin-opts:
+      host: camo.example.test
+      password: "REDACTED-SAMPLE-carrier"
+      version: 2
+      skip-cert-verify: true
+  - name: sample-stls-min
+    type: ss
+    server: 203.0.113.61
+    port: 8388
+    cipher: aes-128-gcm
+    password: "REDACTED-SAMPLE-ss"
+    plugin: shadow-tls
+    plugin-opts:
+      host: camo.example.test
+      password: "REDACTED-SAMPLE-carrier"
+proxy-groups: []
+rules: []

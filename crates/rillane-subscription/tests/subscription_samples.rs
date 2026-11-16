@@ -1792,6 +1792,123 @@ fn grpc_reuse_subscription_fields_convert_both_ways() {
 
 // ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
 
+// ---------- RIL-110：shadowsocks-shadow-tls 组合——订阅字段双向转换样本 ----------
+
+#[test]
+fn shadowtls_subscription_fields_convert_both_ways() {
+    // 正向：clash 订阅（ss + shadow-tls 插件）→ IR（显式/最小两节点，
+    // SS 字段与载具字段两侧独立保留；显式 2 归一规范 None）
+    let (config, report) = loose("shadowtls_node.yaml");
+    let names: Vec<&str> = config.egress.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["sample-stls-full", "sample-stls-min"]);
+    let specs: Vec<rillane_config::EgressConfig> =
+        config.egress.iter().map(|e| e.spec.clone()).collect();
+    assert_eq!(
+        specs[0],
+        rillane_config::EgressConfig::ShadowsocksShadowTls {
+            server: "carrier.example.com".into(),
+            port: 443,
+            method: "aes-128-gcm".into(),
+            password: "REDACTED-SAMPLE-ss".into(),
+            shadow_tls: rillane_config::ShadowTlsEgressConfig {
+                host: "camo.example.test".into(),
+                password: "REDACTED-SAMPLE-carrier".into(),
+                version: None,
+                skip_cert_verify: true,
+            },
+        }
+    );
+    assert_eq!(
+        specs[1],
+        rillane_config::EgressConfig::ShadowsocksShadowTls {
+            server: "203.0.113.61".into(),
+            port: 8388,
+            method: "aes-128-gcm".into(),
+            password: "REDACTED-SAMPLE-ss".into(),
+            shadow_tls: rillane_config::ShadowTlsEgressConfig {
+                host: "camo.example.test".into(),
+                password: "REDACTED-SAMPLE-carrier".into(),
+                version: None,
+                skip_cert_verify: false,
+            },
+        }
+    );
+    assert!(
+        report.dropped_nodes.is_empty(),
+        "shadow-tls 插件节点必须整体换算保留，不丢弃: {:?}",
+        report.dropped_nodes
+    );
+    assert!(
+        report.degraded_nodes.is_empty(),
+        "host/password/version/skip-cert-verify 全字段入 IR，无降级: {:?}",
+        report.degraded_nodes
+    );
+
+    // 反向 1：IR → serde → IR（序列化不丢字段，往返逐字段一致）
+    for spec in &specs {
+        let json = serde_json::to_string(spec).expect("IR 序列化");
+        let back: rillane_config::EgressConfig = serde_json::from_str(&json).expect("IR 反序列化");
+        assert_eq!(&back, spec, "serde 往返必须逐字段一致");
+    }
+
+    // 反向 2：IR → clash 导出（plugin: shadow-tls + plugin-opts 键位）→ 回读再转 IR
+    let mut project: rillane_config::RillaneConfig = serde_yaml::from_str(
+        "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+    )
+    .expect("基底配置");
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-stls-full".into(),
+        spec: specs[0].clone(),
+    });
+    project.egress.push(rillane_config::EgressDescriptor {
+        name: "sample-stls-min".into(),
+        spec: specs[1].clone(),
+    });
+    let (yaml, export_report) = rillane_subscription::ClashExporter
+        .export(&project)
+        .unwrap();
+    assert_eq!(
+        export_report.exported_proxies,
+        vec!["sample-stls-full", "sample-stls-min"],
+        "组合节点应可导出"
+    );
+    assert!(yaml.contains("type: ss"), "{yaml}");
+    assert!(yaml.contains("plugin: shadow-tls"), "{yaml}");
+    assert!(yaml.contains("plugin-opts:"), "{yaml}");
+    assert!(yaml.contains("host: camo.example.test"), "{yaml}");
+    // 规范 None 导出为显式 2（mihomo 口径）；skip 仅 true 时携带
+    assert!(yaml.contains("version: 2"), "{yaml}");
+    assert!(yaml.contains("skip-cert-verify: true"), "{yaml}");
+    assert!(yaml.contains("REDACTED-SAMPLE"), "{yaml}");
+    // 回读：plugin-opts 键位保证往返不丢字段（显式 2 回归一为 None）
+    let reparsed = ClashConverter::new()
+        .parse(&yaml)
+        .expect("导出必须可被导入侧解析");
+    let (back_config, back_report) = ClashConverter::new()
+        .convert_to_rillane_with_report(&reparsed)
+        .expect("回读转换");
+    assert!(
+        back_report.dropped_nodes.is_empty(),
+        "回读不丢节点: {:?}",
+        back_report.dropped_nodes
+    );
+    assert!(
+        back_report.degraded_nodes.is_empty(),
+        "回读零损失: {:?}",
+        back_report.degraded_nodes
+    );
+    assert_eq!(
+        back_config.egress[0].spec, specs[0],
+        "导出→回读必须逐字段还原显式节点"
+    );
+    assert_eq!(
+        back_config.egress[1].spec, specs[1],
+        "最小节点同样逐字段还原"
+    );
+}
+
+// ---------- 脱敏红线：样本仓库不得带真实凭据 ----------
+
 #[test]
 fn samples_contain_no_secrets() {
     let samples_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/samples");

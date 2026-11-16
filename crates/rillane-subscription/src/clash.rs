@@ -10,8 +10,8 @@ use tracing::{debug, warn};
 
 use rillane_config::{
     CompatibilityDiagnostic, EgressConfig, EgressDescriptor, GroupMember, GrpcReuseConfig,
-    MatchCondition, ObjectId, PolicyGroup, RealityConfig, RouteRule, RoutingConfig, SourceId,
-    SourceLocation, Strategy, UrlTestConfig,
+    MatchCondition, ObjectId, PolicyGroup, RealityConfig, RouteRule, RoutingConfig,
+    ShadowTlsEgressConfig, SourceId, SourceLocation, Strategy, UrlTestConfig,
 };
 
 /// reality-opts YAML 块 → `RealityConfig`（G1-6 配置保留面）：键 kebab/snake
@@ -1871,9 +1871,14 @@ impl ClashConverter {
                 password: proxy.password.clone(),
             }),
             ClashProxyType::Ss => {
-                // plugin 模式：SIP003 混淆由插件进程承载，直连 SS 协议对开启
-                // 插件的服务端必握手失败——按换算表转 SIP003（仅 obfs/
-                // v2ray-plugin 两族键名有把握），其余插件拒导（宁缺毋滥）
+                // shadow-tls 载具插件（RIL-110）独立换算为组合出站（mihomo
+                // 同形——SS 节点挂 shadow-tls 插件）；其余 plugin 模式：SIP003
+                // 混淆由插件进程承载，直连 SS 协议对开启插件的服务端必握手
+                // 失败——按换算表转 SIP003（仅 obfs/v2ray-plugin 两族键名有
+                // 把握），其余插件拒导（宁缺毋滥）
+                if proxy.plugin.as_deref() == Some("shadow-tls") {
+                    return clash_ss_shadow_tls_to_combo(proxy);
+                }
                 let (plugin, plugin_opts) = clash_ss_plugin_to_sip003(proxy)?;
 
                 let method = proxy
@@ -2662,6 +2667,93 @@ fn clash_ss_plugin_to_sip003(proxy: &ClashProxy) -> Result<(Option<String>, Opti
             proxy.name
         )),
     }
+}
+
+/// clash SS + shadow-tls 插件 → shadowsocks-shadow-tls 组合出站（RIL-110）：
+/// mihomo 同形（`type: ss` + `plugin: shadow-tls` + plugin-opts {host,
+/// password, version?, skip-cert-verify?}）。version 缺席 = v2 语义（IR
+/// None）；version 1/3 点名拒绝——导入面即拒绝（比装配面 validated 门更
+/// 早，订阅展示即可见，口径同源）。SS 字段与载具字段两侧独立（SS 口令
+/// 来自节点 password，载具口令来自 plugin-opts.password）。
+fn clash_ss_shadow_tls_to_combo(proxy: &ClashProxy) -> Result<EgressConfig> {
+    let m = proxy
+        .plugin_opts
+        .as_ref()
+        .and_then(|v| v.as_mapping().cloned())
+        .ok_or_else(|| {
+            anyhow!(
+                "Shadowsocks 节点 {} 的 shadow-tls plugin-opts 缺失或非 map",
+                proxy.name
+            )
+        })?;
+    let str_opt = |key: &str| -> Result<String> {
+        m.get(Value::String(key.into()))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Shadowsocks 节点 {} 的 shadow-tls plugin-opts 缺 {key}",
+                    proxy.name
+                )
+            })
+    };
+    let host = str_opt("host")?;
+    let carrier_password = str_opt("password")?;
+    let version = match m.get(Value::String("version".into())) {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let n = v.as_u64().ok_or_else(|| {
+                anyhow!(
+                    "Shadowsocks 节点 {} 的 shadow-tls plugin-opts.version 非整数",
+                    proxy.name
+                )
+            })?;
+            let n = u8::try_from(n).map_err(|_| {
+                anyhow!(
+                    "Shadowsocks 节点 {} 的 shadow-tls version {n} 越界",
+                    proxy.name
+                )
+            })?;
+            match n {
+                // 显式 2 归一为 None（IR 规范形：缺席 = v2 语义）——导出侧
+                // unwrap_or(2) 与回读形成闭环（双向往返逐字段一致）
+                2 => None,
+                1 => anyhow::bail!(
+                    "Shadowsocks 节点 {} 的 shadow-tls version 1 不交付（官方已死、无主动探测防御）：仅 v2",
+                    proxy.name
+                ),
+                3 => anyhow::bail!(
+                    "Shadowsocks 节点 {} 的 shadow-tls version 3 不交付（会话劫持面 machinery 未交付）：仅 v2",
+                    proxy.name
+                ),
+                other => anyhow::bail!(
+                    "Shadowsocks 节点 {} 的 shadow-tls version {other} 未知（仅 v2）",
+                    proxy.name
+                ),
+            }
+        }
+    };
+    let skip_cert_verify = m
+        .get(Value::String("skip-cert-verify".into()))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let method = proxy
+        .cipher
+        .clone()
+        .unwrap_or_else(|| "aes-256-gcm".to_string());
+    let password = proxy.password.clone().unwrap_or_default();
+    Ok(EgressConfig::ShadowsocksShadowTls {
+        server: proxy.server.clone(),
+        port: proxy.port,
+        method,
+        password,
+        shadow_tls: ShadowTlsEgressConfig {
+            host,
+            password: carrier_password,
+            version,
+            skip_cert_verify,
+        },
+    })
 }
 
 fn build_wireguard_address(proxy: &ClashProxy) -> Option<String> {
@@ -4130,5 +4222,142 @@ rules:
             .diagnostics(&source)
             .iter()
             .any(|d| d.location.pointer == "rules/rule-1"));
+    }
+    /// RIL-110：shadow-tls 插件 → shadowsocks-shadow-tls 组合出站双向转换
+    /// 的导入面。显式 v2 全字段 / 缺省 version = None（=v2 语义）；version
+    /// 1/3 点名拒绝（导入面即拒绝，口径与装配面 validated 同源）；缺
+    /// host/password 点名拒绝；SIP003 换算表不受影响（shadow-tls 分流后
+    /// 其余插件仍走原路径）。
+    #[test]
+    fn test_ss_shadow_tls_plugin_import_converts_to_combo() {
+        let yaml_content = r#"
+proxies:
+  - name: "stls-full"
+    type: ss
+    server: carrier.example.com
+    port: 443
+    cipher: aes-128-gcm
+    password: inner-ss-pass
+    plugin: shadow-tls
+    plugin-opts:
+      host: camo.example.test
+      password: carrier-pass
+      version: 2
+      skip-cert-verify: true
+  - name: "stls-min"
+    type: ss
+    server: carrier2.example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: inner-ss-pass
+    plugin: shadow-tls
+    plugin-opts:
+      host: camo.example.test
+      password: carrier-pass
+proxy-groups: []
+rules:
+  - MATCH,DIRECT
+        "#;
+        let converter = ClashConverter::new();
+        let config = converter.parse(yaml_content).unwrap();
+        let egress = converter
+            .convert_proxies_to_egress(&config.proxies, &mut Default::default())
+            .expect("shadow-tls 插件节点可导入");
+        assert_eq!(egress.len(), 2);
+
+        // 显式形态：SS 字段与载具字段两侧独立
+        match &egress[0].spec {
+            EgressConfig::ShadowsocksShadowTls {
+                server,
+                port,
+                method,
+                password,
+                shadow_tls,
+            } => {
+                assert_eq!(server, "carrier.example.com");
+                assert_eq!(*port, 443);
+                assert_eq!(method, "aes-128-gcm");
+                assert_eq!(password, "inner-ss-pass");
+                assert_eq!(shadow_tls.host, "camo.example.test");
+                assert_eq!(shadow_tls.password, "carrier-pass");
+                assert_eq!(shadow_tls.version, None, "显式 2 归一为规范形 None");
+                assert!(shadow_tls.skip_cert_verify);
+            }
+            other => panic!("显式节点应为组合出站，实际 {other:?}"),
+        }
+        // 缺省形态：version 缺席 = None（=v2 语义）、skip 缺省 false
+        match &egress[1].spec {
+            EgressConfig::ShadowsocksShadowTls { shadow_tls, .. } => {
+                assert_eq!(shadow_tls.version, None, "缺席 = v2 语义");
+                assert!(!shadow_tls.skip_cert_verify);
+            }
+            other => panic!("最小节点应为组合出站，实际 {other:?}"),
+        }
+    }
+
+    /// RIL-110 导入面版本门：v1/v3/未知 version 点名拒绝（不静默降级）。
+    #[test]
+    fn test_ss_shadow_tls_plugin_import_refuses_non_v2() {
+        for (version, marker) in [("1", "version 1"), ("3", "version 3"), ("9", "9")] {
+            let yaml_content = format!(
+                r#"
+proxies:
+  - name: "stls-{version}"
+    type: ss
+    server: carrier.example.com
+    port: 443
+    cipher: aes-128-gcm
+    password: inner-ss-pass
+    plugin: shadow-tls
+    plugin-opts:
+      host: camo.example.test
+      password: carrier-pass
+      version: {version}
+proxy-groups: []
+rules:
+  - MATCH,DIRECT
+        "#
+            );
+            let converter = ClashConverter::new();
+            let config = converter.parse(&yaml_content).unwrap();
+            let err = converter
+                .convert_proxies_to_egress(&config.proxies, &mut Default::default())
+                .expect_err("非 v2 version 须拒绝");
+            assert!(
+                err.to_string().contains(marker),
+                "version {version} 拒绝须点名: {err}"
+            );
+        }
+
+        // 缺 host / 缺 password：点名拒绝
+        for omit in ["host", "password"] {
+            let (a, b) = if omit == "host" {
+                ("      password: carrier-pass\n", "")
+            } else {
+                ("      host: camo.example.test\n", "")
+            };
+            let yaml_content = format!(
+                r#"
+proxies:
+  - name: "stls-missing"
+    type: ss
+    server: carrier.example.com
+    port: 443
+    cipher: aes-128-gcm
+    password: inner-ss-pass
+    plugin: shadow-tls
+    plugin-opts:
+{a}{b}proxy-groups: []
+rules:
+  - MATCH,DIRECT
+        "#
+            );
+            let converter = ClashConverter::new();
+            let config = converter.parse(&yaml_content).unwrap();
+            let err = converter
+                .convert_proxies_to_egress(&config.proxies, &mut Default::default())
+                .expect_err("缺载具必填字段须拒绝");
+            assert!(err.to_string().contains(omit), "缺 {omit} 须点名: {err}");
+        }
     }
 }
