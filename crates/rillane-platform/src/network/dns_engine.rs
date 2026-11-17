@@ -1329,8 +1329,12 @@ pub struct LocalDnsServer {
     local_address: IpAddr,
     local_port: u16,
     /// fake-ip 池（G1-10）：Some = 对客户端 A 查询按池段稳定假地址应答
-    ///（不触上游，TTL 1）；None = 关闭，存量行为零差异
+    ///（不触上游，TTL 1）；None = 关闭，存量行为零差异。RIL-142 起 v6
+    /// 池随表装配（range6 在场时 AAAA 同答假地址）
     fake_ip: Option<Arc<rillane_core::fake_ip::FakeIpTable>>,
+    /// 例外域名表（RIL-142）：Some = 命中例外的 A/AAAA 查询跳过池分配
+    /// 照常真实解析；None = 无例外（既有面零差异）
+    fake_ip_exceptions: Option<Arc<rillane_core::fake_ip::FakeIpExceptions>>,
     /// 静态 hosts 表（G2-15）：Some = A/AAAA 查询命中直接应答真实映射
     /// 地址（不触上游、不经 fake-ip，优先级高于 fake-ip）；None = 无表，
     /// 存量行为零差异
@@ -1354,9 +1358,20 @@ impl LocalDnsServer {
             local_address,
             local_port,
             fake_ip,
+            fake_ip_exceptions: None,
             hosts,
             generation_source: None,
         }
+    }
+
+    /// 注入例外域名表（RIL-142）：命中例外的 A/AAAA 查询跳过池分配
+    /// 照常真实解析（虚拟应答不覆盖显式例外面）。未注入 = 无例外。
+    pub fn with_fake_ip_exceptions(
+        mut self,
+        exceptions: Arc<rillane_core::fake_ip::FakeIpExceptions>,
+    ) -> Self {
+        self.fake_ip_exceptions = Some(exceptions);
+        self
     }
 
     /// 注入代际源（RIL-020 解析上下文）：fake-ip 分配时取当下配置代际
@@ -1402,6 +1417,7 @@ impl LocalDnsServer {
                         };
                         let resolver = self.resolver.clone();
                         let fake_ip = self.fake_ip.clone();
+                        let fake_ip_exceptions = self.fake_ip_exceptions.clone();
                         let hosts = self.hosts.clone();
                         let generation_source = self.generation_source.clone();
                         tokio::spawn(async move {
@@ -1411,6 +1427,7 @@ impl LocalDnsServer {
                                 data,
                                 resolver,
                                 fake_ip,
+                                fake_ip_exceptions,
                                 hosts,
                                 generation_source,
                             )
@@ -1428,14 +1445,19 @@ impl LocalDnsServer {
 /// 单查询处理（坏查询丢弃；NXDOMAIN/失败按 rcode 回写）。
 /// hosts 表（G2-15）命中即静态映射直答（真实地址、TTL 1，不触上游；
 /// 名命中族不符给空 NOERROR 不泄上游）。fake-ip 开启时客户端 A 查询按
-/// 池段稳定假地址直接应答（不触上游，TTL 1 秒）；AAAA 与其余类型照常
-/// 真实解析（应用走 IPv6 即回到 IP 直连路由语义，不破流）。
+/// 池段稳定假地址直接应答（不触上游，TTL 1 秒）；RIL-142 起 v6 池在
+/// 场时 AAAA 同答假地址（v6 池缺席 = AAAA 照常真实解析，存量零差异；
+/// v6 池满全钉住同答 SERVFAIL）；例外域名命中跳过池分配照常真实解析。
+/// 其余类型照常真实解析（应用走 IPv6 且无 v6 池即回到 IP 直连路由
+/// 语义，不破流）。
+#[allow(clippy::too_many_arguments)] // 私有单查询处理：参数皆上下文注入（同 runtime_builder/tun_tcp 口径）
 async fn handle_dns_query(
     sock: UdpSocket,
     peer: SocketAddr,
     data: Vec<u8>,
     resolver: Arc<DnsResolver>,
     fake_ip: Option<Arc<rillane_core::fake_ip::FakeIpTable>>,
+    fake_ip_exceptions: Option<Arc<rillane_core::fake_ip::FakeIpExceptions>>,
     hosts: Option<Arc<rillane_core::hosts::DnsHosts>>,
     generation_source: Option<Arc<dyn Fn() -> String + Send + Sync>>,
 ) {
@@ -1465,6 +1487,13 @@ async fn handle_dns_query(
                     .collect();
                 encode_response(q.id, &q.domain, q.qtype, 0, &answers)
             } else if let (Some(table), DnsRecordType::A) = (fake_ip.as_ref(), q.qtype) {
+                // 例外命中（RIL-142）：跳过池分配，照常真实解析（虚拟
+                // 应答不覆盖显式例外面）
+                if fake_ip_exceptions.as_ref().is_some_and(|x| x.matches(&q.domain)) {
+                    debug!("fake-ip 例外命中：{} 回真实解析", q.domain);
+                    resolve_and_reply(sock, peer, &q, &resolver).await;
+                    return;
+                }
                 // RIL-020：分配挂解析上下文（代际源注入则取当下代际，未
                 // 注入空串=显式缺失）；池满且全钉住（活跃会话在用）→
                 // SERVFAIL，绝不转手在用地址
@@ -1490,22 +1519,73 @@ async fn handle_dns_query(
                         encode_response(q.id, &q.domain, q.qtype, 2, &[])
                     }
                 }
-            } else {
-                match resolver.resolve(&q.domain, q.qtype).await {
-                    Ok(answers) => encode_response(q.id, &q.domain, q.qtype, 0, &answers),
-                    Err(ResolveError::NxDomain(_)) => {
-                        encode_response(q.id, &q.domain, q.qtype, 3, &[])
+            } else if let (Some(table), DnsRecordType::Aaaa) = (fake_ip.as_ref(), q.qtype) {
+                // RIL-142 双栈：例外命中 → 真实解析（同 A 口径）；v6 池
+                // 缺席（range6 无）→ NoV6Pool 显式回落真实解析（存量零
+                // 差异，不伪造地址）；v6 池满全钉住 → SERVFAIL（同 v4
+                // 口径，绝不转手在用地址）
+                if fake_ip_exceptions.as_ref().is_some_and(|x| x.matches(&q.domain)) {
+                    debug!("fake-ip 例外命中：{} 回真实解析", q.domain);
+                    resolve_and_reply(sock, peer, &q, &resolver).await;
+                    return;
+                }
+                let generation = generation_source.as_ref().map(|f| f()).unwrap_or_default();
+                match table.alloc_v6_with_generation(&q.domain, &generation) {
+                    Ok(ip) => {
+                        debug!("fake-ip v6 应答：{} → {ip}（gen {generation:?}）", q.domain);
+                        encode_response(
+                            q.id,
+                            &q.domain,
+                            q.qtype,
+                            0,
+                            &[DnsAnswer {
+                                domain: q.domain.clone(),
+                                rtype: DnsRecordType::Aaaa,
+                                ttl: 1,
+                                data: DnsAnswerData::Aaaa(ip),
+                            }],
+                        )
+                    }
+                    Err(rillane_core::fake_ip::FakeIpError::NoV6Pool { .. }) => {
+                        debug!("fake-ip v6 池缺席（range6 无），{} 回真实解析", q.domain);
+                        resolve_and_reply(sock, peer, &q, &resolver).await;
+                        return;
                     }
                     Err(e) => {
-                        debug!("DNS 查询失败（回 SERVFAIL）：{e}");
+                        debug!("fake-ip v6 池耗尽（{e}），回 SERVFAIL");
                         encode_response(q.id, &q.domain, q.qtype, 2, &[])
                     }
                 }
+            } else {
+                resolve_and_reply(sock, peer, &q, &resolver).await;
+                return;
             }
         }
         Err(e) => {
             debug!("丢弃坏 DNS 查询：{e:#}");
             return;
+        }
+    };
+    if let Err(e) = sock.send_to(&reply, peer).await {
+        debug!("DNS 回包失败：{e}");
+    }
+}
+
+
+/// 真实解析 + 回写（既有 else 分支抽出共用：例外命中 / v6 池缺席
+/// 回落 / 非 fake-ip 面三类路径同口径——Ok 应答 / NXDOMAIN / SERVFAIL）。
+async fn resolve_and_reply(
+    sock: UdpSocket,
+    peer: SocketAddr,
+    q: &DnsWireQuery,
+    resolver: &Arc<DnsResolver>,
+) {
+    let reply = match resolver.resolve(&q.domain, q.qtype).await {
+        Ok(answers) => encode_response(q.id, &q.domain, q.qtype, 0, &answers),
+        Err(ResolveError::NxDomain(_)) => encode_response(q.id, &q.domain, q.qtype, 3, &[]),
+        Err(e) => {
+            debug!("DNS 查询失败（回 SERVFAIL）：{e}");
+            encode_response(q.id, &q.domain, q.qtype, 2, &[])
         }
     };
     if let Err(e) = sock.send_to(&reply, peer).await {
@@ -2558,6 +2638,236 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
     }
 
+    /// RIL-142 双栈应答（验收：双栈映射池）：v6 池在场时 AAAA 查询按
+    /// 池段稳定假地址应答（不触上游——mock 计数不增；TTL 1；反查两族
+    /// 各自还原域名，v4 池行为零差异并存）。
+    #[tokio::test]
+    async fn fakeip_v6_pool_answers_aaaa_and_reverse_works() {
+        let (mock, hits) = spawn_mock(|d| (0, vec![v4(d, [8, 8, 4, 4], 120)])).await;
+        let cfg = ResolverConfig {
+            trusted: vec![DnsUpstream::Udp(mock)],
+            ..base_cfg()
+        };
+        let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
+        let table = Arc::new(
+            rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/30")
+                .unwrap()
+                .with_v6_cidr("fd6e:fd93:5d8f::/126")
+                .unwrap(),
+        );
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let server = LocalDnsServer::new(
+            resolver,
+            "127.0.0.1".parse().unwrap(),
+            port,
+            Some(table.clone()),
+            None,
+        );
+        let (tx, rx) = oneshot::channel();
+        let task = tokio::spawn(server.serve(rx));
+        let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli.connect(SocketAddr::from(([127, 0, 0, 1], port)))
+            .await
+            .unwrap();
+        async fn query_aaaa(cli: &UdpSocket, id: u16, domain: &str) -> DnsWireResponse {
+            let q = encode_query(id, domain, DnsRecordType::Aaaa).unwrap();
+            cli.send(&q).await.unwrap();
+            let mut raw = [0u8; 512];
+            let n = tokio::time::timeout(Duration::from_secs(2), cli.recv(&mut raw))
+                .await
+                .expect("监听应答查询")
+                .unwrap();
+            decode_response(&raw[..n]).unwrap()
+        }
+
+        let r1 = query_aaaa(&cli, 0x41, "v6.test").await;
+        assert_eq!(r1.rcode, 0, "v6 池在场 AAAA 应 NOERROR");
+        let DnsAnswerData::Aaaa(ip6) = r1.answers[0].data else {
+            panic!("应为 AAAA 应答");
+        };
+        assert_eq!(r1.answers[0].ttl, 1, "假地址 TTL 1");
+        assert_eq!(r1.answers[0].rtype, DnsRecordType::Aaaa);
+        assert!(
+            table.in_range_ip(&std::net::IpAddr::V6(ip6)),
+            "假 v6 落池段"
+        );
+        assert_eq!(
+            table.reverse_ip(&std::net::IpAddr::V6(ip6)).as_deref(),
+            Some("v6.test"),
+            "v6 反查还原域名"
+        );
+        // 同域名再查 → 同一假地址（稳定）；走池不触上游
+        let r2 = query_aaaa(&cli, 0x42, "v6.test").await;
+        let DnsAnswerData::Aaaa(ip6_again) = r2.answers[0].data else {
+            panic!("应为 AAAA 应答");
+        };
+        assert_eq!(ip6, ip6_again, "同域名 AAAA 恒同假地址");
+
+        // A 查询走 v4 池（零差异并存），v4 反查不受 v6 绑定影响
+        let qa = encode_query(0x43, "v6.test", DnsRecordType::A).unwrap();
+        cli.send(&qa).await.unwrap();
+        let mut raw = [0u8; 512];
+        let n = tokio::time::timeout(Duration::from_secs(2), cli.recv(&mut raw))
+            .await
+            .expect("A 应答")
+            .unwrap();
+        let ra = decode_response(&raw[..n]).unwrap();
+        let DnsAnswerData::A(ip4) = ra.answers[0].data else {
+            panic!("应为 A 应答");
+        };
+        assert!(table.in_range(&ip4), "假 v4 落 v4 池段");
+        assert_eq!(table.reverse(&ip4).as_deref(), Some("v6.test"));
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "全程不触上游（A/AAAA 均池内应答）"
+        );
+
+        drop(tx);
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    }
+
+    /// RIL-142 存量零差异（验收：切换/缺席有明确行为）：v6 池缺席
+    /// （range6 无）时 AAAA 查询显式回落真实解析——上游应答原样回写，
+    /// 不伪造假地址也不 SERVFAIL。
+    #[tokio::test]
+    async fn fakeip_v6_absent_falls_back_to_real_resolution() {
+        let (mock, hits) = spawn_mock(|d| {
+            (
+                0,
+                vec![DnsAnswer {
+                    domain: d.to_string(),
+                    rtype: DnsRecordType::Aaaa,
+                    ttl: 60,
+                    data: DnsAnswerData::Aaaa(
+                        "2001:db8::42".parse().unwrap(),
+                    ),
+                }],
+            )
+        })
+        .await;
+        let cfg = ResolverConfig {
+            trusted: vec![DnsUpstream::Udp(mock)],
+            ..base_cfg()
+        };
+        let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
+        // v4 池在场、无 v6 池（存量 fake-ip 面原样）
+        let table = Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/15").unwrap());
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let server = LocalDnsServer::new(
+            resolver,
+            "127.0.0.1".parse().unwrap(),
+            port,
+            Some(table.clone()),
+            None,
+        );
+        let (tx, rx) = oneshot::channel();
+        let task = tokio::spawn(server.serve(rx));
+        let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli.connect(SocketAddr::from(([127, 0, 0, 1], port)))
+            .await
+            .unwrap();
+        let q = encode_query(0x51, "real6.test", DnsRecordType::Aaaa).unwrap();
+        cli.send(&q).await.unwrap();
+        let mut raw = [0u8; 512];
+        let n = tokio::time::timeout(Duration::from_secs(2), cli.recv(&mut raw))
+            .await
+            .expect("监听应答查询")
+            .unwrap();
+        let resp = decode_response(&raw[..n]).unwrap();
+        assert_eq!(resp.rcode, 0);
+        let DnsAnswerData::Aaaa(ip6) = resp.answers[0].data else {
+            panic!("应为 AAAA 应答");
+        };
+        assert_eq!(ip6, "2001:db8::42".parse::<Ipv6Addr>().unwrap(), "上游真实应答原样回写");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "v6 池缺席应触上游（真实解析）"
+        );
+        assert_eq!(
+            table.len(),
+            0,
+            "AAAA 查询不写 v4 池"
+        );
+
+        drop(tx);
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    }
+
+    /// RIL-142 例外（验收：例外面明确）：命中例外后缀的查询跳过池分配
+    /// 照常真实解析（不写池、触上游）；非例外域名照常假地址应答。
+    #[tokio::test]
+    async fn fakeip_exceptions_skip_pool_allocation() {
+        let (mock, hits) = spawn_mock(|d| (0, vec![v4(d, [8, 8, 8, 8], 60)])).await;
+        let cfg = ResolverConfig {
+            trusted: vec![DnsUpstream::Udp(mock)],
+            ..base_cfg()
+        };
+        let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
+        let table = Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/30").unwrap());
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let server = LocalDnsServer::new(
+            resolver,
+            "127.0.0.1".parse().unwrap(),
+            port,
+            Some(table.clone()),
+            None,
+        )
+        .with_fake_ip_exceptions(Arc::new(rillane_core::fake_ip::FakeIpExceptions::new(&[
+            "except.example".to_string(),
+        ])));
+        let (tx, rx) = oneshot::channel();
+        let task = tokio::spawn(server.serve(rx));
+        let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli.connect(SocketAddr::from(([127, 0, 0, 1], port)))
+            .await
+            .unwrap();
+        async fn query_a(cli: &UdpSocket, id: u16, domain: &str) -> DnsWireResponse {
+            let q = encode_query(id, domain, DnsRecordType::A).unwrap();
+            cli.send(&q).await.unwrap();
+            let mut raw = [0u8; 512];
+            let n = tokio::time::timeout(Duration::from_secs(2), cli.recv(&mut raw))
+                .await
+                .expect("监听应答查询")
+                .unwrap();
+            decode_response(&raw[..n]).unwrap()
+        }
+
+        // 例外子域命中 → 真实解析（上游应答原样回写）
+        let r = query_a(&cli, 0x61, "a.except.example").await;
+        assert_eq!(r.rcode, 0);
+        let DnsAnswerData::A(ip) = r.answers[0].data else {
+            panic!("应为 A 应答");
+        };
+        assert_eq!(ip, Ipv4Addr::new(8, 8, 8, 8), "例外命中走真实解析");
+        assert!(!table.in_range(&ip), "例外应答不落池段");
+
+        // 非全标签相似名不命中 → 照常假地址
+        let r = query_a(&cli, 0x62, "notexcept.example").await;
+        let DnsAnswerData::A(fake_ip) = r.answers[0].data else {
+            panic!("应为 A 应答");
+        };
+        assert!(table.in_range(&fake_ip), "非例外照常假地址");
+
+        // 池分配面只记非例外域名（例外查询零占用）
+        assert_eq!(table.len(), 1, "例外域名不入池");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "仅例外查询触上游"
+        );
+
+        drop(tx);
+        let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+    }
+
     /// RIL-020 上游 socket 旁路：egress_mark ≠ 0 时 UDP 上游查询走
     /// net_mark 建连面（无 CAP 环境 set_mark 失败降级普通 socket）——
     /// mark 全局态串行化同 net_mark 测试纪律。
@@ -2569,7 +2879,7 @@ mod tests {
             egress_mark: 0x5E45,
             ..base_cfg()
         };
-        let resolver = DnsResolver::new(cfg).unwrap();
+        let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
         let answers = resolver
             .resolve("marked.test", DnsRecordType::A)
             .await

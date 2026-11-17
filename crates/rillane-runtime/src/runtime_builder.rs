@@ -343,6 +343,14 @@ impl RuntimeBuilder {
                         }
                         let table = rillane_core::fake_ip::FakeIpTable::from_cidr(&fake.range)
                             .map_err(|e| anyhow!("network.dns.fake_ip 配置非法：{e}"))?;
+                        // RIL-142 双栈：range6 在场 → 追加独立 v6 池（AAAA
+                        // 同答假地址）；缺席 = AAAA 照常真实解析（存量零差异）
+                        let table = match fake.range6.as_ref() {
+                            Some(range6) => table
+                                .with_v6_cidr(range6)
+                                .map_err(|e| anyhow!("network.dns.fake_ip.range6 配置非法：{e}"))?,
+                            None => table,
+                        };
                         Some(Arc::new(table))
                     }
                     _ => None,
@@ -356,12 +364,22 @@ impl RuntimeBuilder {
                     )),
                     _ => None,
                 };
-                Some(Arc::new(crate::dns_config::DnsService::new(
+                // RIL-142 例外表：非空例外 → 注入监听面（命中例外的
+                // A/AAAA 查询跳过池分配照常真实解析）；空 = 不注入
+                let dns_service = crate::dns_config::DnsService::new(
                     Arc::new(resolver),
                     listen,
                     fake_ip,
                     hosts_table,
-                )))
+                );
+                let dns_service = match dns_cfg.fake_ip.as_ref() {
+                    Some(fake) if !fake.exceptions.is_empty() => dns_service
+                        .with_fake_ip_exceptions(Arc::new(
+                            rillane_core::fake_ip::FakeIpExceptions::new(&fake.exceptions),
+                        )),
+                    _ => dns_service,
+                };
+                Some(Arc::new(dns_service))
             }
             None => None,
         };

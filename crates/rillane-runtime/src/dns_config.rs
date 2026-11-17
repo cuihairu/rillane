@@ -131,8 +131,11 @@ pub struct DnsService {
     resolver: Arc<DnsResolver>,
     listen: SocketAddr,
     /// fake-ip 池（G1-10）：Some = 本地监听面对客户端 A 查询按池段稳定假
-    /// 地址应答；None = 关闭（存量零差异）
+    /// 地址应答；None = 关闭（存量零差异）。RIL-142 起 v6 池随表装配
     fake_ip: Option<Arc<rillane_core::fake_ip::FakeIpTable>>,
+    /// 例外域名表（RIL-142）：Some = 命中例外的 A/AAAA 查询跳过池分配
+    /// 照常真实解析；None = 无例外（存量零差异）
+    fake_ip_exceptions: Option<Arc<rillane_core::fake_ip::FakeIpExceptions>>,
     /// 静态 hosts 表（G2-15）：Some = 本地监听面 A/AAAA 查询命中直接应答
     /// 真实映射地址（优先于 fake-ip）；None = 无表（存量零差异）
     hosts: Option<Arc<rillane_core::hosts::DnsHosts>>,
@@ -168,10 +171,21 @@ impl DnsService {
             resolver,
             listen,
             fake_ip,
+            fake_ip_exceptions: None,
             hosts,
             generation_source: None,
             run: Mutex::new(None),
         }
+    }
+
+    /// 注入例外域名表（RIL-142）：命中例外的 A/AAAA 查询跳过池分配
+    /// 照常真实解析。未注入 = 无例外。
+    pub fn with_fake_ip_exceptions(
+        mut self,
+        exceptions: Arc<rillane_core::fake_ip::FakeIpExceptions>,
+    ) -> Self {
+        self.fake_ip_exceptions = Some(exceptions);
+        self
     }
 
     /// 注入代际源（RIL-020 解析上下文）：本地监听面 fake-ip 分配时取
@@ -230,6 +244,9 @@ impl DnsService {
         );
         if let Some(source) = self.generation_source.clone() {
             server = server.with_generation_source(source);
+        }
+        if let Some(exceptions) = self.fake_ip_exceptions.clone() {
+            server = server.with_fake_ip_exceptions(exceptions);
         }
         let task = tokio::spawn(async move { server.serve(rx).await });
         *run = Some(DnsServiceRun {

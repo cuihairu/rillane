@@ -547,8 +547,17 @@ const fn default_dns_listen_port() -> u16 {
 }
 
 /// fake-ip 块（G1-10）：None = 关闭（存量零差异）。启用后本地 DNS 面对客户端
-/// A 查询按池段稳定假地址应答；出站面按假地址反查原域名回填路由。仅 IPv4；
-/// AAAA 查询照常走真实解析（应用若走 IPv6 即回到 IP 直连路由语义，不破流）。
+/// A 查询按池段稳定假地址应答；出站面按假地址反查原域名回填路由。
+///
+/// 应答模式（RIL-142 口径）：本块在场 = **虚拟应答（fake-ip）**；块缺席 =
+/// **真实应答（redir-host 语义）**——A/AAAA 照常真实解析，路由按地址语义
+/// 走（域名面由嗅探 RIL-143 补齐）。不设独立 mode 字段：块的开/关即模式
+/// 切换（切换=配置代际翻新；存量会话按 RIL-020 钉住语义呆在原代际）。
+///
+/// 双栈（RIL-142）：`range6` 缺席 = AAAA 照常真实解析（存量零差异）；
+/// 在场 = AAAA 查询同样按池段稳定假地址应答（IPv6 池独立分配，A/AAAA
+/// 各族各自反查）。`exceptions` = 例外域名后缀表（全标签后缀匹配，小写
+/// 规范化）：命中例外的查询跳过池分配、照常真实解析。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FakeIpConfig {
@@ -558,6 +567,16 @@ pub struct FakeIpConfig {
     /// fake-ip 池段（IPv4 CIDR；RFC 2544 基准段 198.18.0.0/15）
     #[serde(default = "default_fake_ip_range")]
     pub range: String,
+    /// IPv6 池段（可选；缺席 = AAAA 照常真实解析——存量零差异）。建议
+    /// ULA 段（fc00::/7 内自选子网）：回环/链路本地段校验期拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range6: Option<String>,
+    /// 例外域名后缀表（可选；全标签后缀匹配——`example.com` 命中
+    /// `example.com` 与 `a.example.com`，不命中 `notexample.com`）：命中
+    /// 例外的 A/AAAA 查询跳过池分配照常真实解析（虚拟应答不覆盖显式
+    /// 例外面）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exceptions: Vec<String>,
 }
 
 fn default_fake_ip_range() -> String {
@@ -591,7 +610,123 @@ impl FakeIpConfig {
             "network.dns.fake_ip.range 地址含主机位（应写网络地址）:{:?}",
             self.range
         );
+        self.ensure_no_v4_segment_conflict(ip, prefix)?;
+        if let Some(range6) = &self.range6 {
+            Self::validate_range6(range6)?;
+        }
+        for e in &self.exceptions {
+            let t = e.trim();
+            anyhow::ensure!(
+                !t.is_empty(),
+                "network.dns.fake_ip.exceptions 含空条目（例外须为非空域名后缀）"
+            );
+            anyhow::ensure!(
+                !t.starts_with('.') && !t.ends_with('.'),
+                "network.dns.fake_ip.exceptions 条目须写裸域名后缀（不带前后点）:{t:?}"
+            );
+        }
         Ok(())
+    }
+
+    /// v4 池段与保留网络段冲突拒绝（RIL-142 验收「网络段冲突拒绝」）：
+    /// 池段不得覆盖回环（127/8）、链路本地/APIPA（169.254/16）、RFC 1918
+    /// 内网段（10/8、172.16/12、192.168/16）、RFC 5737 文档段
+    /// （192.0.2/24、198.51.100/24、203.0.113/24）与本段自身之外的
+    /// RFC 2544 基准段——命中即校验期拒绝（假地址若落进真实可达段，
+    /// 反查缺席时流量会被送进真实网络，违反「丢失映射不送公网」的
+    /// 防线前提）。`range` 本身允许 RFC 2544 段（canonical fake-ip 空间），
+    /// 其余保留段一律拒绝。
+    fn ensure_no_v4_segment_conflict(&self, ip: std::net::Ipv4Addr, prefix: u32) -> Result<()> {
+        const RESERVED: &[(&str, u32, u8)] = &[
+            // (段名, 网络地址 u32, 前缀)
+            ("回环 127.0.0.0/8", 0x7F00_0000, 8),
+            ("链路本地/APIPA 169.254.0.0/16", 0xA9FE_0000, 16),
+            ("内网 10.0.0.0/8", 0x0A00_0000, 8),
+            ("内网 172.16.0.0/12", 0xAC10_0000, 12),
+            ("内网 192.168.0.0/16", 0xC0A8_0000, 16),
+            ("文档段 192.0.2.0/24", 0xC000_0200, 24),
+            ("文档段 198.51.100.0/24", 0xC633_6400, 24),
+            ("文档段 203.0.113.0/24", 0xCB00_7100, 24),
+        ];
+        let pool_base = u32::from(ip);
+        let pool_mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(u32::MAX);
+        for (name, net, net_prefix) in RESERVED {
+            let net_mask = u32::MAX.checked_shl(32 - u32::from(*net_prefix)).unwrap_or(u32::MAX);
+            // 重叠判定：两段各取「两侧网络的基准地址」比较——池基址落网内
+            // 或网基址落池内即重叠
+            let pool_in_net = pool_base & net_mask == *net & net_mask;
+            let net_in_pool = (*net & pool_mask) == pool_base & pool_mask;
+            anyhow::ensure!(
+                !(pool_in_net || net_in_pool),
+                "network.dns.fake_ip.range 与保留网络段冲突（{name}）——假地址池不得落入真实可达段:{:?}",
+                self.range
+            );
+        }
+        Ok(())
+    }
+
+    /// v6 池段深检（RIL-142）：合法 IPv6 CIDR、前缀 1..=126（池 ≥4 地址）、
+    /// 主机位清零；保留段冲突拒绝——回环 ::1/128、链路本地 fe80::/10、
+    /// 文档段 2001:db8::/32。ULA（fc00::/7）允许（canonical fake-v6 空间，
+    /// 建议选非家庭内网子网——文档明示）。
+    fn validate_range6(range6: &str) -> Result<()> {
+        let (ip_part, prefix_part) = range6.split_once('/').ok_or_else(|| {
+            anyhow::anyhow!("network.dns.fake_ip.range6 缺前缀长度:{range6:?}")
+        })?;
+        let ip: std::net::Ipv6Addr = ip_part.trim().parse().map_err(|_| {
+            anyhow::anyhow!("network.dns.fake_ip.range6 地址须为 IPv6:{ip_part:?}")
+        })?;
+        let prefix: u32 = prefix_part.trim().parse().map_err(|_| {
+            anyhow::anyhow!("network.dns.fake_ip.range6 前缀须为数字:{prefix_part:?}")
+        })?;
+        anyhow::ensure!(
+            (1..=126).contains(&prefix),
+            "network.dns.fake_ip.range6 前缀须在 1..=126（池至少 4 地址）:{range6:?}"
+        );
+        let host_bits = 128 - prefix;
+        let mask = if host_bits >= 128 {
+            u128::MAX
+        } else {
+            u128::MAX << host_bits
+        };
+        anyhow::ensure!(
+            u128::from(ip) & mask == u128::from(ip),
+            "network.dns.fake_ip.range6 地址含主机位（应写网络地址）:{range6:?}"
+        );
+        let base = u128::from(ip);
+        let pool_mask = u128::MAX.checked_shl(128 - prefix).unwrap_or(u128::MAX);
+        // 保留段（段名, 网络基准（对齐高位）, 前缀）：回环 ::1/128、
+        // 链路本地 fe80::/10、文档段 2001:db8::/32
+        const RESERVED6: &[(&str, u128, u32)] = &[
+            ("回环 ::1/128", 1, 128),
+            (
+                "链路本地 fe80::/10",
+                0x3FAu128 << 118, // 顶 10 位 1111111010
+                10,
+            ),
+            ("文档段 2001:db8::/32", 0x2001_0DB8u128 << 96, 32),
+        ];
+        for (name, rbase, rprefix) in RESERVED6 {
+            let rmask = u128::MAX.checked_shl(128 - rprefix).unwrap_or(u128::MAX);
+            let pool_in_net = base & rmask == rbase & rmask;
+            let net_in_pool = (rbase & pool_mask) == base & pool_mask;
+            anyhow::ensure!(
+                !(pool_in_net || net_in_pool),
+                "network.dns.fake_ip.range6 与保留网络段冲突（{name}）——假地址池不得落入真实可达段:{range6:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// 例外命中（RIL-142）：全标签后缀匹配（小写规范化）——`example.com`
+    /// 命中 `example.com` / `a.example.com`，不命中 `notexample.com`。
+    /// 引擎在池分配前调用；例外表为空恒 false。
+    pub fn is_exception(&self, domain: &str) -> bool {
+        let d = domain.trim_end_matches('.').to_ascii_lowercase();
+        self.exceptions.iter().any(|e| {
+            let e = e.trim().to_ascii_lowercase();
+            d == e || d.ends_with(&format!(".{e}"))
+        })
     }
 }
 
@@ -3058,6 +3193,154 @@ selections:
             resolve_geo_db(Path::new("../../geoip.mmdb"), Path::new("conf")),
             Path::new("../geoip.mmdb")
         );
+    }
+
+    /// RIL-142：fake_ip 块 serde 形态——range6/exceptions 在场可解析、
+    /// 未声明的可选键不落盘（skip_serializing_if）；块在场缺省启用、
+    /// range 缺省 RFC 2544 基准段。
+    #[test]
+    fn fake_ip_dual_stack_and_exceptions_parse_roundtrip() {
+        let yaml = "mode: tun\ndns:\n  enabled: true\n  domestic: [\"223.5.5.5:53\"]\n  fake_ip:\n    range: 198.18.0.0/15\n    range6: fc00::/8\n    exceptions: [example.com, internal.corp]\n";
+        let nb: NetworkBlockConfig = serde_yaml::from_str(yaml).expect("应解析");
+        let dns = nb.dns.as_ref().expect("dns 块应在场");
+        let fake = dns.fake_ip.as_ref().expect("fake_ip 块应在场");
+        assert!(fake.enabled);
+        assert_eq!(fake.range, "198.18.0.0/15");
+        assert_eq!(fake.range6.as_deref(), Some("fc00::/8"));
+        assert_eq!(
+            fake.exceptions,
+            vec!["example.com".to_string(), "internal.corp".to_string()]
+        );
+        // 未声明的可选键不落盘
+        let minimal: FakeIpConfig = serde_yaml::from_str("{}").expect("空块应解析");
+        assert!(minimal.enabled);
+        assert_eq!(minimal.range, "198.18.0.0/15");
+        assert!(minimal.range6.is_none());
+        assert!(minimal.exceptions.is_empty());
+        let rendered = serde_yaml::to_string(&minimal).unwrap();
+        assert!(!rendered.contains("range6") && !rendered.contains("exceptions"));
+        // 未知键拒绝（deny_unknown_fields：拼错立刻报）
+        assert!(serde_yaml::from_str::<FakeIpConfig>("rang: 198.18.0.0/15").is_err());
+    }
+
+    /// RIL-142：v4 池段值域校验——缺前缀/非 IPv4/前缀越界（>30）/主机位
+    /// 未清零，全部校验期拒绝；缺省段本身合法。
+    #[test]
+    fn fake_ip_validate_rejects_illegal_v4_ranges() {
+        let ok = || FakeIpConfig {
+            enabled: true,
+            range: "198.18.0.0/15".to_string(),
+            range6: None,
+            exceptions: Vec::new(),
+        };
+        assert!(ok().validate().is_ok());
+        for (range, why) in [
+            ("198.18.0.0", "缺前缀"),
+            ("not-an-ip/15", "非 IPv4"),
+            ("198.18.0.0/31", "前缀越界"),
+            ("198.18.1.0/15", "主机位未清"),
+            ("198.18.0.0/0", "前缀越界"),
+        ] {
+            let mut bad = ok();
+            bad.range = range.to_string();
+            let err = bad.validate().expect_err(why);
+            assert!(
+                err.to_string().contains("network.dns.fake_ip.range"),
+                "{why}: {err}"
+            );
+        }
+    }
+
+    /// RIL-142：池段与保留网络段重叠即拒绝——池落网内（10/8、回环、
+    /// 文档段）与网落池内（0.0.0.0/1 覆盖 10/8）两个方向都拦。
+    #[test]
+    fn fake_ip_validate_rejects_reserved_v4_conflicts() {
+        for range in [
+            "10.0.0.0/8",
+            "127.0.0.0/8",
+            "192.168.0.0/16",
+            "169.254.0.0/16",
+            "192.0.2.0/24",
+            "0.0.0.0/1",
+        ] {
+            let fake = FakeIpConfig {
+                enabled: true,
+                range: range.to_string(),
+                range6: None,
+                exceptions: Vec::new(),
+            };
+            let err = fake.validate().expect_err(range);
+            assert!(err.to_string().contains("保留网络段"), "{range}: {err}");
+        }
+    }
+
+    /// RIL-142：range6 校验——ULA 段允许（canonical fake-v6 空间）；
+    /// 回环/链路本地/文档段拒绝；前缀越界（>126）与主机位未清拒绝。
+    #[test]
+    fn fake_ip_validate_range6_rules() {
+        let base = |range6: &str| FakeIpConfig {
+            enabled: true,
+            range: "198.18.0.0/15".to_string(),
+            range6: Some(range6.to_string()),
+            exceptions: Vec::new(),
+        };
+        assert!(base("fc00::/8").validate().is_ok());
+        assert!(base("fd00::/64").validate().is_ok());
+        for range6 in [
+            "::1/128",
+            "fe80::/10",
+            "2001:db8::/32",
+            "fd00::/127",
+            "fd00::1/8",
+            "fd00::",
+        ] {
+            let err = base(range6)
+                .validate()
+                .expect_err(range6);
+            assert!(
+                err.to_string().contains("range6"),
+                "{range6}: {err}"
+            );
+        }
+    }
+
+    /// RIL-142：exceptions 值域（空条目/带前后点拒绝）与 is_exception
+    /// 全标签后缀语义——命中本域与子域、不命中 `notexample.com`、
+    /// 尾点与大小写归一、裸 `com` 不命中 `example.com` 后缀。
+    #[test]
+    fn fake_ip_exceptions_hygiene_and_full_label_matching() {
+        let base = |exceptions: Vec<String>| FakeIpConfig {
+            enabled: true,
+            range: "198.18.0.0/15".to_string(),
+            range6: None,
+            exceptions,
+        };
+        assert!(base(vec!["".to_string()]).validate().is_err());
+        assert!(base(vec![".example.com".to_string()]).validate().is_err());
+        assert!(base(vec!["example.com.".to_string()]).validate().is_err());
+
+        let fake = base(vec!["example.com".to_string(), "Corp.Internal".to_string()]);
+        assert!(fake.is_exception("example.com"));
+        assert!(fake.is_exception("a.example.com"));
+        assert!(fake.is_exception("deep.a.example.com"));
+        assert!(!fake.is_exception("notexample.com"));
+        assert!(!fake.is_exception("com"));
+        assert!(fake.is_exception("EXAMPLE.COM."));
+        assert!(fake.is_exception("x.CORP.internal."));
+    }
+
+    /// RIL-142：DnsBlockConfig.validate 门控——fake_ip.enabled=false 容忍
+    /// 半配置（不触发值域深检），enabled=true 才深检并浮出错误。
+    #[test]
+    fn fake_ip_validation_gated_by_enabled_flag() {
+        let yaml_enabled = "enabled: true\ndomestic: [\"223.5.5.5:53\"]\nfake_ip:\n  enabled: true\n  range: 10.0.0.0/8\n";
+        let on: DnsBlockConfig = serde_yaml::from_str(yaml_enabled).expect("应解析");
+        let err = on.validate().expect_err("保留段冲突应被拒");
+        assert!(err.to_string().contains("保留网络段"), "{err}");
+
+        let yaml_disabled = "enabled: true\ndomestic: [\"223.5.5.5:53\"]\nfake_ip:\n  enabled: false\n  range: 10.0.0.0/8\n";
+        let off: DnsBlockConfig = serde_yaml::from_str(yaml_disabled).expect("应解析");
+        off.validate().expect("disabled fake_ip 容忍半配置");
     }
 }
 
