@@ -71,6 +71,8 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | POST | `/config/approve` | operator approval (credential binds proposal digest / owner / scope / TTL; single-use consumption) | `config approve` |
 | POST | `/config/apply` | idempotent apply (version + content prechecks, consume, terminal receipt; retries with the same key replay the receipt) | `config apply` |
 | POST | `/config/rollback` | verifiable rollback (candidate identity daemon-filled from the target receipt; blind-overwrite guard) | `config rollback` (step 3) |
+| POST | `/routing/ai` | AI routing template proposal (RIL-153: target validated against declared groups/egresses — stable codes `ai.target.empty` / `ai.target.unknown`; zero rule diff = explicit no-op, HTTP 200 without a proposal; a diff answers 201 with a normal config proposal that still goes through `/config/approve` + `/config/apply`) | `ai on` |
+| DELETE | `/routing/ai` | remove the AI routing template (`ai-` prefix namespace only — user rules untouched; no template present = explicit no-op 200) | `ai off` |
 
 ## Command overview
 
@@ -94,6 +96,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | `subscription` | subscription management (list/add/remove/refresh) | control plane |
 | `route` | system route management (apply/clear/status) | control plane + local ip commands |
 | `config` | config transaction closure (propose/preview/approve/apply/rollback/state/receipts; RIL-079) | control plane `/config/*` |
+| `ai` | AI routing template one-shot switch — `on <target>` / `off` (RIL-153); proposal → approve → apply in one command | control plane `/routing/ai` + `/config/*` |
 | `diagnose` | one-shot diagnostics collection (creates a diagnostics directory) | control plane + local snapshot |
 | `trace` | per-connection trace queries (list / flow detail / incremental events; explicit absence = exit 2) | control plane `/trace/*` |
 | `probe` | active probe jobs (submit/cancel/result/list; measurements only, no provider-internal path inference) | control plane `/probe*` |
@@ -213,6 +216,21 @@ rillanectl config receipts                               # receipt chain (seq de
 ```
 
 The closure mirrors the MCP path: the daemon fills the base generation, live digest and rollback candidate identity itself, so a client cannot bypass the version/content prechecks (`apply.base.conflict` / `apply.hash.conflict` arrive as 409 stable-code envelopes; the CLI prints them as `Control plane rejected: ... [code]`). `config rollback` performs all three authorized steps (rollback proposal → approval → execution) through the same daemon endpoints — approval stays a real daemon-signed credential. Retry discipline: `apply`/`rollback` retries must repeat the idempotency key verbatim (same key + same identity replays the receipt); a different proposal under the same key is refused (`apply.key.mismatch`).
+
+### ai
+
+```bash
+rillanectl ai on --proxy auto            # template → target group/egress (proposal + approve + apply in one shot)
+rillanectl ai on --proxy auto --owner cli:ai --ttl-ms 60000
+rillanectl ai off                        # remove the template (ai- prefix namespace)
+```
+
+AI/LLM routing preset (RIL-153, design in `docs/design/ai-routing.md`): four domain-only rules (`ai-openai` / `ai-anthropic` / `ai-gemini` / `ai-other`) inserted after user rules and before the generalized region rules, all pointing at `--proxy` (a declared group or egress name; unknown targets are rejected with `ai.target.empty` / `ai.target.unknown`). Semantics:
+
+- **It is an ordinary config transaction**: the daemon computes the `routing.rules` patch and registers a normal proposal — approval and the version/content prechecks are never bypassed. Zero rule diff (template already present with the same target, or nothing to remove) is an explicit no-op: no proposal, no generation bump. `ai on` retries are naturally idempotent.
+- **The `ai-` prefix namespace belongs to the template**: rules you name with the `ai-` prefix are swept by `ai on` / `ai off` (documented ownership — do not use the prefix for your own rules). User rules with other names are never touched.
+- **Effect surface is the in-memory live generation only**: apply does not rewrite the config file; a daemon restart (or a file-driven reload) reverts to the file's rules. Persist by writing the template rules into your config file (they are plain rules; `ai off` removes them again).
+- **Recognition face is domain-only**: `domain_suffix` / `domain_keyword` / `domain_full` — no DPI, no content guessing. There is no UDP face (mainstream AI APIs are HTTPS/TCP). SSE / WebSocket streams are not interrupted by `ai on` (existing flows keep their session pin; only new connections take the new rules).
 
 ### diagnose
 

@@ -343,6 +343,20 @@ pub struct TxApplyRequest {
     pub caller_owner: String,
 }
 
+/// AI 分流模板一次回合结果（RIL-153）：规则面变化计数 + 登记的提案投影。
+/// `proposal = None` = 规则面零差异（no-op——不登记提案不动代际）。
+#[derive(Debug, Clone, Serialize)]
+pub struct AiPresetOutcome {
+    /// 模板规则名（合入面固定 4 条；摘除面为空）
+    pub rules: Vec<String>,
+    /// 本次摘除的在场 `ai-` 前缀规则数
+    pub removed: usize,
+    /// 本次插入的模板规则数
+    pub added: usize,
+    /// 登记的提案（含预览；零差异 no-op 时 None）
+    pub proposal: Option<CreatedProposalDto>,
+}
+
 /// 回滚请求（daemon 面——候选身份由服务端自目标回执取得）。
 #[derive(Debug, Clone)]
 pub struct TxRollbackRequest {
@@ -518,6 +532,143 @@ impl ConfigTxService {
             )
             .map_err(|e| TxError::from_proposal(&e))?;
         Ok(CreatedProposalDto::from_proposal(&proposal, preview))
+    }
+
+    /// AI 分流模板提案（RIL-153 `ai on`）：目标校验 → 规则面补丁计算 →
+    /// 提案登记，全程持锁（live 面快照与补丁同窗，无并发漂移窗）。目标须为
+    /// 已声明组或已声明出口（引用图口径，`ai.target.unknown` 点名拒绝）；
+    /// 补丁为 RFC 7396 merge patch 的 `routing.rules` 全量数组（数组在
+    /// merge 语义下为替换——模板插入位置由守护进程按现役规则面计算：泛化
+    /// 区域规则之前）。规则面零差异 = 显式 no-op（不登记提案不动代际）。
+    /// 返回的提案仍走 /config/approve + /config/apply 既有链（不旁路事务）。
+    pub fn create_ai_preset_proposal(
+        &self,
+        owner: &str,
+        target: &str,
+        ttl_ms: u64,
+        now_ms: u64,
+    ) -> Result<AiPresetOutcome, TxError> {
+        if target.trim().is_empty() {
+            return Err(TxError::bad_request(
+                "ai.target.empty",
+                "AI 分流目标（target）不能为空",
+            ));
+        }
+        let mut inner = self.inner.lock().expect("配置事务锁不可 poisoned");
+        let ConfigTxInner { proposals, live, .. } = &mut *inner;
+        let declared = live.config.routing.groups.iter().any(|g| g.name == target)
+            || live.config.egress.iter().any(|e| e.name == target);
+        if !declared {
+            return Err(TxError::bad_request(
+                "ai.target.unknown",
+                format!("AI 分流目标 `{target}` 未声明（须为已声明组或已声明出口）"),
+            ));
+        }
+        let mut scratch = live.config.routing.clone();
+        let (removed, added) = scratch.apply_ai_preset(target);
+        Self::ai_preset_commit_locked(
+            proposals,
+            live,
+            &scratch,
+            &self.capabilities,
+            removed,
+            added,
+            owner,
+            ttl_ms,
+            now_ms,
+        )
+    }
+
+    /// AI 分流模板摘除提案（RIL-153 `ai off`）：按 `ai-` 前缀摘除（模板
+    /// 命名空间，用户规则零触碰），同锁同窗计算补丁。无在场模板规则 =
+    /// 显式 no-op（不登记提案不动代际）。
+    pub fn create_ai_preset_removal(
+        &self,
+        owner: &str,
+        ttl_ms: u64,
+        now_ms: u64,
+    ) -> Result<AiPresetOutcome, TxError> {
+        let mut inner = self.inner.lock().expect("配置事务锁不可 poisoned");
+        let ConfigTxInner { proposals, live, .. } = &mut *inner;
+        let mut scratch = live.config.routing.clone();
+        let removed = scratch.remove_ai_preset();
+        Self::ai_preset_commit_locked(
+            proposals,
+            live,
+            &scratch,
+            &self.capabilities,
+            removed,
+            0,
+            owner,
+            ttl_ms,
+            now_ms,
+        )
+    }
+
+    /// AI 提案登记的持锁尾段（on/off 共用）：规则面零差异 → 显式 no-op；
+    /// 有差异 → preview_checked + 提案登记（scope 固定 routing）。
+    #[allow(clippy::too_many_arguments)]
+    fn ai_preset_commit_locked(
+        proposals: &mut ProposalStore,
+        live: &mut LiveState,
+        scratch: &rillane_config::RoutingConfig,
+        capabilities: &CapabilitySet,
+        removed: usize,
+        added: usize,
+        owner: &str,
+        ttl_ms: u64,
+        now_ms: u64,
+    ) -> Result<AiPresetOutcome, TxError> {
+        let names = |rules: &[rillane_config::RouteRule]| {
+            rules
+                .iter()
+                .filter(|r| rillane_config::ai_preset::is_ai_preset_rule(&r.name))
+                .map(|r| r.name.clone())
+                .collect::<Vec<_>>()
+        };
+        if scratch.rules == live.config.routing.rules {
+            return Ok(AiPresetOutcome {
+                rules: names(&scratch.rules),
+                removed,
+                added,
+                proposal: None,
+            });
+        }
+        let patch = serde_json::json!({ "routing": { "rules": &scratch.rules } });
+        let scope = vec!["routing".to_string()];
+        let preview = preview_config_patch(&live.config, &patch, capabilities, Some(&scope));
+        if !preview.applicable {
+            let codes = preview
+                .diagnostics
+                .iter()
+                .map(|d| d.code)
+                .collect::<Vec<_>>()
+                .join(",");
+            return Err(TxError::bad_request(
+                "preview.config.invalid",
+                format!("补丁不适用（{codes}）"),
+            ));
+        }
+        let proposal = proposals
+            .create(
+                new_proposal_id(),
+                ProposalInput {
+                    base_generation: live.generation.clone(),
+                    base_hash: live.hash.clone(),
+                    owner: owner.to_string(),
+                    scope: scope.clone(),
+                    patch: patch.clone(),
+                    ttl_ms,
+                },
+                now_ms,
+            )
+            .map_err(|e| TxError::from_proposal(&e))?;
+        Ok(AiPresetOutcome {
+            rules: names(&scratch.rules),
+            removed,
+            added,
+            proposal: Some(CreatedProposalDto::from_proposal(&proposal, preview)),
+        })
     }
 
     /// 登记回滚提案（daemon 创建）：范围固定 rollback 标记、patch 为空

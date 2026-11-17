@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub mod apply;
+pub mod ai_preset;
 pub mod approval;
 pub mod contract;
 pub mod generations;

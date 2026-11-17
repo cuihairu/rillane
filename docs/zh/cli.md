@@ -71,6 +71,8 @@
 | POST | `/config/approve` | 操作员批准（凭证绑定提案摘要 / 所有者 / 范围 / 有效期；一次性核销） | `config approve` |
 | POST | `/config/apply` | 幂等应用（版本 + 内容前置检查、核销、终态回执；同键重试领回执） | `config apply` |
 | POST | `/config/rollback` | 可校验回滚（候选身份由 daemon 自目标回执取得；盲覆盖防线） | `config rollback`（第 3 步） |
+| POST | `/routing/ai` | AI 分流模板提案（RIL-153：目标对已声明组/出口校验——稳定码 `ai.target.empty` / `ai.target.unknown`；规则面零差异 = 显式 no-op（200，无提案）；有差异 → 201 + 普通配置提案，仍走 `/config/approve` + `/config/apply`） | `ai on` |
+| DELETE | `/routing/ai` | 摘除 AI 分流模板（仅 `ai-` 前缀命名空间——用户规则零触碰；无在场模板 = 显式 no-op 200） | `ai off` |
 
 ## 命令总览
 
@@ -94,6 +96,7 @@
 | `subscription` | 订阅管理（list/add/remove/refresh） | 控制面 |
 | `route` | 系统路由管理（apply/clear/status） | 控制面 + 本机 ip 命令 |
 | `config` | 配置事务闭环（propose/preview/approve/apply/rollback/state/receipts；RIL-079） | 控制面 `/config/*` |
+| `ai` | AI 分流模板一键开关——`on <target>` / `off`（RIL-153）；一条龙走提案→批准→应用 | 控制面 `/routing/ai` + `/config/*` |
 | `diagnose` | 一键诊断信息收集（生成诊断目录） | 控制面 + 本机快照 |
 | `trace` | 逐连接轨迹查询（list / 单流详情 / 事件增量；显式缺席 = 退出码 2） | 控制面 `/trace/*` |
 | `probe` | 主动探测作业（submit/cancel/result/list；只展示测量，不推断机场内部路径） | 控制面 `/probe*` |
@@ -213,6 +216,21 @@ rillanectl config receipts                               # 回执链（seq 降�
 ```
 
 闭环与 MCP 同门：基准代际、live 摘要与回滚候选身份全部由 daemon 自填，客户端无法绕过版本/内容前置检查（`apply.base.conflict` / `apply.hash.conflict` 以 409 稳定码信封作答，CLI 打印为 `控制面拒绝: ... [稳定码]`）。`config rollback` 经同一组 daemon 端点连做授权三步（回滚提案 → 批准 → 执行）——批准仍是 daemon 授权权威签发的真实凭证。重试纪律：`apply` / `rollback` 重试须逐字同幂等键（同键 + 同身份领回执）；同键换提案即拒（`apply.key.mismatch`）。
+
+### ai
+
+```bash
+rillanectl ai on --proxy auto            # 模板合入（提案 + 批准 + 应用一条龙）
+rillanectl ai on --proxy auto --owner cli:ai --ttl-ms 60000
+rillanectl ai off                        # 摘除模板（ai- 前缀命名空间）
+```
+
+AI/LLM 分流预设（RIL-153，设计见 `docs/zh/design/ai-routing.md`）：四条纯域名规则（`ai-openai` / `ai-anthropic` / `ai-gemini` / `ai-other`）插入用户规则之后、泛化区域规则之前，全部指向 `--proxy`（已声明组名或出口名；未知目标以 `ai.target.empty` / `ai.target.unknown` 点名拒绝）。语义：
+
+- **它是普通配置事务**：daemon 计算 `routing.rules` 补丁并登记普通提案——批准与版本/内容前置检查不被绕过。规则面零差异（模板已在场且目标相同，或无可摘除）为显式 no-op：不登记提案、不动代际。`ai on` 重试天然幂等。
+- **`ai-` 前缀命名空间归模板所有**：自建规则占用 `ai-` 前缀即随 `ai on` / `ai off` 被替换/摘除（文档明示所有权——自有规则勿用该前缀）。其余名字的用户规则零触碰。
+- **生效面只在内存现役代际**：apply 不回写配置文件；守护进程重启（或按文件热加载）即回到文件规则面。要持久化请把模板规则写进配置文件（它们就是普通规则；`ai off` 可再次摘除）。
+- **识别面只含域名条件**：`domain_suffix` / `domain_keyword` / `domain_full`——无 DPI、不猜内容。无 UDP 面（主流 AI API 均为 HTTPS/TCP）。`ai on` 不中断既有 SSE / WebSocket 流（存量连接保持会话钉住，仅新连接按新规则选路）。
 
 ### diagnose
 

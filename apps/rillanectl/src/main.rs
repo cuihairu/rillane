@@ -193,6 +193,15 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// AI 分流模板一键开关（RIL-153：on 合入 / off 摘除——一条龙走
+    /// 提案/批准/应用事务链，不旁路）
+    Ai {
+        /// 控制面 base URL，如 http://127.0.0.1:9090
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[command(subcommand)]
+        command: AiCommand,
+    },
     /// 真实连接轨迹查询（Trace CLI，RIL-060；语法冻结：
     /// 退出码 0=成功 / 1=用法或连接错误 / 2=显式缺席）
     Trace {
@@ -683,6 +692,42 @@ enum ConfigCommand {
     },
 }
 
+/// AI 分流模板开关子命令（RIL-153）：模板规则名归 `ai-` 前缀命名空间，
+/// on/off 均产出普通配置事务提案（仍走 approve/apply），规则面零差异时
+/// 守护进程显式 no-op（无提案不动代际）。
+#[derive(Subcommand)]
+enum AiCommand {
+    /// 合入 AI 分流模板：四条 `ai-` 规则（openai/anthropic/gemini/other，
+    /// 纯域名面）插入用户规则之后、泛化区域规则之前，全部指向
+    /// `--proxy` 指定的组/出口；模板已在场且目标相同 = no-op
+    On {
+        /// 控制面 base URL
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// 分流目标：已声明组名或已声明出口名
+        #[arg(long)]
+        proxy: String,
+        /// 所有者标签（提案/凭证/应用共用）
+        #[arg(long, default_value = "cli:ai")]
+        owner: String,
+        /// 提案/凭证有效期（毫秒）
+        #[arg(long, default_value = "60000")]
+        ttl_ms: u64,
+    },
+    /// 摘除 AI 分流模板（按 `ai-` 前缀；用户规则零触碰；不在场 = no-op）
+    Off {
+        /// 控制面 base URL
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// 所有者标签（提案/凭证/应用共用）
+        #[arg(long, default_value = "cli:ai")]
+        owner: String,
+        /// 提案/凭证有效期（毫秒）
+        #[arg(long, default_value = "60000")]
+        ttl_ms: u64,
+    },
+}
+
 /// 逗号分隔范围标签 → 列表（空白条目剔除）。
 fn config_scope_list(raw: &str) -> Vec<String> {
     raw.split(',')
@@ -1077,6 +1122,96 @@ fn run_config_command(
             render_config_receipts(&v);
         }
     }
+    Ok(())
+}
+
+/// AI 分流模板开关一条龙（RIL-153）：模板提案（POST/DELETE /routing/ai）
+/// → 批准 → 应用——全程同一组 daemon 端点，凭证是 daemon 授权权威签发的
+/// 真实一次性核销；规则面零差异时 daemon 显式 no-op（无提案，不动代际）。
+/// 应用幂等键取 `ai:{proposal_id}`（同一提案重试逐字同键，重放安全）。
+fn run_ai_command(
+    client: &Client,
+    with_auth: &dyn Fn(reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder,
+    base: &str,
+    command: &AiCommand,
+) -> Result<()> {
+    let (method, owner, ttl_ms, body) = match command {
+        AiCommand::On {
+            proxy,
+            owner,
+            ttl_ms,
+            ..
+        } => (
+            reqwest::Method::POST,
+            owner.clone(),
+            *ttl_ms,
+            serde_json::json!({ "owner": owner, "target": proxy, "ttl_ms": ttl_ms }),
+        ),
+        AiCommand::Off { owner, ttl_ms, .. } => (
+            reqwest::Method::DELETE,
+            owner.clone(),
+            *ttl_ms,
+            serde_json::json!({ "owner": owner, "ttl_ms": ttl_ms }),
+        ),
+    };
+    let v = config_request(client, with_auth, base, method, "/routing/ai", Some(&body))?;
+    let rules = v["rules"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let (removed, added) = (&v["removed"], &v["added"]);
+    let proposal = &v["proposal"];
+    if proposal.is_null() {
+        println!("AI 分流模板无变化（no-op：规则面零差异，未登记提案不动代际）:");
+        println!("  在场规则: {rules}");
+        println!("  removed: {removed} | added: {added}");
+        return Ok(());
+    }
+    let proposal_id = proposal["id"]
+        .as_str()
+        .context("提案响应缺 id")?
+        .to_string();
+    println!("提案已登记:");
+    println!("  proposal_id: {proposal_id}");
+    println!("  在场规则: {rules}");
+    println!("  removed: {removed} | added: {added}");
+    let approve_body = serde_json::json!({
+        "proposal_id": proposal_id,
+        "owner": owner,
+        "ttl_ms": ttl_ms,
+    });
+    let approval = config_request(
+        client,
+        with_auth,
+        base,
+        reqwest::Method::POST,
+        "/config/approve",
+        Some(&approve_body),
+    )?;
+    let approval_id = approval["approval_id"]
+        .as_str()
+        .context("凭证响应缺 approval_id")?
+        .to_string();
+    let apply_body = serde_json::json!({
+        "idempotency_key": format!("ai:{proposal_id}"),
+        "proposal_id": proposal_id,
+        "approval_id": approval_id,
+        "owner": owner,
+    });
+    let outcome = config_request(
+        client,
+        with_auth,
+        base,
+        reqwest::Method::POST,
+        "/config/apply",
+        Some(&apply_body),
+    )?;
+    render_config_apply_outcome(&outcome);
     Ok(())
 }
 
@@ -1723,6 +1858,20 @@ fn main() -> Result<()> {
                 }
             };
             run_config_command(&client, &with_auth, &base, &command)?;
+        }
+        Command::Ai { endpoint, command } => {
+            let config = RillaneConfig::load_from_path(&cli.config)?;
+            let base = endpoint.unwrap_or_else(|| format!("http://{}", config.control.api_bind));
+            let client = Client::new();
+            let token = config.control.admin_token.clone();
+            let with_auth = |req: reqwest::blocking::RequestBuilder| {
+                if let Some(t) = &token {
+                    req.header("x-admin-token", t)
+                } else {
+                    req
+                }
+            };
+            run_ai_command(&client, &with_auth, &base, &command)?;
         }
         Command::Diagnose {
             endpoint,

@@ -170,6 +170,77 @@ impl ControlPlane {
         }
     }
 
+    /// POST /routing/ai：AI 分流模板合入提案（RIL-153 `ai on`）。目标校验
+    /// （已声明组/出口，稳定码 `ai.target.empty` / `ai.target.unknown`）与
+    /// 规则面补丁计算同锁同窗；规则面零差异 = 显式 no-op（200，无提案不落
+    /// 账），有差异 → 201 + 提案身份（仍走 /config/approve + /config/apply）。
+    async fn handle_routing_ai_on(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        #[derive(Deserialize)]
+        struct Body {
+            owner: String,
+            target: String,
+            ttl_ms: u64,
+        }
+        let service = match self.config_tx_or_503() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let body: Body = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match service.create_ai_preset_proposal(
+            &body.owner,
+            &body.target,
+            body.ttl_ms,
+            crate::config_tx::now_ms(),
+        ) {
+            Ok(outcome) => json_v1(
+                if outcome.proposal.is_some() {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                },
+                &outcome,
+            ),
+            Err(err) => Self::tx_error_response(&err),
+        }
+    }
+
+    /// DELETE /routing/ai：AI 分流模板摘除提案（RIL-153 `ai off`）——按
+    /// `ai-` 前缀摘除（模板命名空间，用户规则零触碰）；无在场模板规则 =
+    /// 显式 no-op（200，无提案），有摘除 → 201 + 提案身份。
+    async fn handle_routing_ai_off(&self, req: Request<impl RequestBody>) -> Response<RespBody> {
+        #[derive(Deserialize)]
+        struct Body {
+            owner: String,
+            ttl_ms: u64,
+        }
+        let service = match self.config_tx_or_503() {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let body: Body = match read_json(req).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match service.create_ai_preset_removal(
+            &body.owner,
+            body.ttl_ms,
+            crate::config_tx::now_ms(),
+        ) {
+            Ok(outcome) => json_v1(
+                if outcome.proposal.is_some() {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                },
+                &outcome,
+            ),
+            Err(err) => Self::tx_error_response(&err),
+        }
+    }
+
     /// POST /config/rollback-proposal：登记回滚提案（标记范围 rollback；
     /// 目标回执须在册且 Applied 且属调用者）。
     async fn handle_config_rollback_proposal(
@@ -473,6 +544,10 @@ impl ControlPlane {
             (Method::POST, "/config/approve") => self.handle_config_approve(req).await,
             (Method::POST, "/config/apply") => self.handle_config_apply(req).await,
             (Method::POST, "/config/rollback") => self.handle_config_rollback(req).await,
+            // —— RIL-153 AI 分流模板面（复用配置事务链：产物是普通提案，
+            // 仍走 /config/approve + /config/apply，不旁路事务）——
+            (Method::POST, "/routing/ai") => self.handle_routing_ai_on(req).await,
+            (Method::DELETE, "/routing/ai") => self.handle_routing_ai_off(req).await,
 
             _ => text(StatusCode::NOT_FOUND, "not found"),
         }
@@ -6176,8 +6251,17 @@ mod tests {
         path: &str,
         body: &str,
     ) -> (StatusCode, serde_json::Value) {
+        send_config(cp, Method::POST, path, body).await
+    }
+
+    async fn send_config(
+        cp: &ControlPlane,
+        method: Method,
+        path: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
         let req = Request::builder()
-            .method(Method::POST)
+            .method(method)
             .uri(path)
             .body(RespBody::new(Bytes::from(body.to_string())))
             .unwrap();
@@ -6213,6 +6297,8 @@ mod tests {
             (Method::POST, "/config/preview"),
             (Method::POST, "/config/apply"),
             (Method::POST, "/config/rollback"),
+            (Method::POST, "/routing/ai"),
+            (Method::DELETE, "/routing/ai"),
         ] {
             let req = Request::builder()
                 .method(method)
@@ -6342,6 +6428,224 @@ mod tests {
         assert_eq!(v["phase"], serde_json::json!("replayed"));
         let (_, state) = get_config(&cp, "/config/state").await;
         assert_eq!(state["live_generation"], serde_json::json!(new_gen));
+    }
+
+    // —— RIL-153 AI 分流模板面（HTTP 契约）——
+
+    /// `ai on` → `approve` → `apply` 一条龙：201 + 提案身份（规则名全部
+    /// `ai-` 前缀、removed=0/added=4）；现役翻新；同目标 re-on = 200
+    /// 显式 no-op（proposal null、代际不动——幂等重入）；off 摘除（201，
+    /// removed=4）后再 off = 200 no-op。
+    #[tokio::test]
+    async fn routing_ai_on_lifecycle_reon_noop_and_off() {
+        let cp = cp_with_config_tx(None).await;
+        let (_, state) = get_config(&cp, "/config/state").await;
+        let base_gen = state["live_generation"].as_str().unwrap().to_string();
+
+        let (s, v) = post_config(
+            &cp,
+            "/routing/ai",
+            r#"{"owner":"cli:ai","target":"auto","ttl_ms":60000}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "合入登记提案 → 201");
+        let rules = v["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 4, "模板四条规则");
+        assert!(rules.iter().all(|r| r.as_str().unwrap().starts_with("ai-")));
+        assert_eq!(v["removed"], serde_json::json!(0));
+        assert_eq!(v["added"], serde_json::json!(4));
+        let proposal_id = v["proposal"]["id"].as_str().unwrap().to_string();
+
+        let (s, v) = post_config(
+            &cp,
+            "/config/approve",
+            &format!(r#"{{"proposal_id":"{proposal_id}","owner":"cli:ai","ttl_ms":60000}}"#),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let approval_id = v["approval_id"].as_str().unwrap().to_string();
+        let apply_body = format!(
+            r#"{{"idempotency_key":"ai-e2e-1","proposal_id":"{proposal_id}","approval_id":"{approval_id}","owner":"cli:ai"}}"#
+        );
+        let (s, v) = post_config(&cp, "/config/apply", &apply_body).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["phase"], serde_json::json!("executed"));
+        let (_, state) = get_config(&cp, "/config/state").await;
+        let gen_on = state["live_generation"].as_str().unwrap().to_string();
+        assert_ne!(gen_on, base_gen, "模板合入翻新现役");
+
+        // 同目标 re-on：规则面零差异 → 200 显式 no-op，代际不动
+        let (s, v) = post_config(
+            &cp,
+            "/routing/ai",
+            r#"{"owner":"cli:ai","target":"auto","ttl_ms":60000}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "no-op 非创建 → 200");
+        assert_eq!(v["proposal"], serde_json::Value::Null, "no-op 无提案");
+        let (_, state) = get_config(&cp, "/config/state").await;
+        assert_eq!(state["live_generation"], serde_json::json!(gen_on));
+
+        // off：摘除全部模板 → 201 + apply → 现役翻新
+        let (s, v) = send_config(
+            &cp,
+            Method::DELETE,
+            "/routing/ai",
+            r#"{"owner":"cli:ai","ttl_ms":60000}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        assert_eq!(v["removed"], serde_json::json!(4));
+        assert_eq!(v["added"], serde_json::json!(0));
+        let proposal_id = v["proposal"]["id"].as_str().unwrap().to_string();
+        let (s, v) = post_config(
+            &cp,
+            "/config/approve",
+            &format!(r#"{{"proposal_id":"{proposal_id}","owner":"cli:ai","ttl_ms":60000}}"#),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let approval_id = v["approval_id"].as_str().unwrap().to_string();
+        let (s, v) = post_config(
+            &cp,
+            "/config/apply",
+            &format!(
+                r#"{{"idempotency_key":"ai-e2e-2","proposal_id":"{proposal_id}","approval_id":"{approval_id}","owner":"cli:ai"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["phase"], serde_json::json!("executed"));
+
+        // 再 off：无在场模板 → 200 no-op
+        let (s, v) = send_config(
+            &cp,
+            Method::DELETE,
+            "/routing/ai",
+            r#"{"owner":"cli:ai","ttl_ms":60000}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "无模板摘除 = 显式 no-op");
+        assert_eq!(v["proposal"], serde_json::Value::Null);
+    }
+
+    /// 目标切换：模板在场时 on 新目标 → removed=4/added=4（摘旧插新），
+    /// apply 后现役翻新——模板四条整体换指向，用户规则不在摘除面。
+    #[tokio::test]
+    async fn routing_ai_target_switch_replaces_template() {
+        let cp = cp_with_config_tx(None).await;
+        let on_body = |target: &str| {
+            format!(r#"{{"owner":"cli:ai","target":"{target}","ttl_ms":60000}}"#)
+        };
+
+        // 首次合入（target=auto）并应用
+        let (s, v) = post_config(&cp, "/routing/ai", &on_body("auto")).await;
+        assert_eq!(s, StatusCode::CREATED);
+        let id1 = v["proposal"]["id"].as_str().unwrap().to_string();
+        let (s, v) = post_config(
+            &cp,
+            "/config/approve",
+            &format!(r#"{{"proposal_id":"{id1}","owner":"cli:ai","ttl_ms":60000}}"#),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let ap1 = v["approval_id"].as_str().unwrap().to_string();
+        let (s, v) = post_config(
+            &cp,
+            "/config/apply",
+            &format!(
+                r#"{{"idempotency_key":"ai-switch-1","proposal_id":"{id1}","approval_id":"{ap1}","owner":"cli:ai"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["phase"], serde_json::json!("executed"));
+
+        // 切换目标：摘旧插新（removed=4 added=4）
+        let (s, v) = post_config(&cp, "/routing/ai", &on_body("direct-main")).await;
+        assert_eq!(s, StatusCode::CREATED);
+        assert_eq!(v["removed"], serde_json::json!(4), "旧模板四条被摘除");
+        assert_eq!(v["added"], serde_json::json!(4), "新模板四条插入");
+        let id2 = v["proposal"]["id"].as_str().unwrap().to_string();
+        let (s, v) = post_config(
+            &cp,
+            "/config/approve",
+            &format!(r#"{{"proposal_id":"{id2}","owner":"cli:ai","ttl_ms":60000}}"#),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let ap2 = v["approval_id"].as_str().unwrap().to_string();
+        let (s, v) = post_config(
+            &cp,
+            "/config/apply",
+            &format!(
+                r#"{{"idempotency_key":"ai-switch-2","proposal_id":"{id2}","approval_id":"{ap2}","owner":"cli:ai"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["phase"], serde_json::json!("executed"));
+
+        // 摘除后归零
+        let (s, v) = send_config(
+            &cp,
+            Method::DELETE,
+            "/routing/ai",
+            r#"{"owner":"cli:ai","ttl_ms":60000}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        assert_eq!(v["removed"], serde_json::json!(4));
+    }
+
+    /// 目标校验稳定码：未声明目标 `ai.target.unknown`、空目标
+    /// `ai.target.empty`（引用图口径点名拒绝——不登记提案不烧编号）。
+    #[tokio::test]
+    async fn routing_ai_target_validation_stable_codes() {
+        let cp = cp_with_config_tx(None).await;
+        let (s, v) = post_config(
+            &cp,
+            "/routing/ai",
+            r#"{"owner":"cli:ai","target":"nope","ttl_ms":60000}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"]["code"], serde_json::json!("ai.target.unknown"));
+
+        let (s, v) = post_config(
+            &cp,
+            "/routing/ai",
+            r#"{"owner":"cli:ai","target":"  ","ttl_ms":60000}"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"]["code"], serde_json::json!("ai.target.empty"));
+    }
+
+    /// AI 面是 mutating 端点：admin_token 配置时无 token 401（门在
+    /// handle() 通用层，与 /config 写面同分层）。
+    #[tokio::test]
+    async fn routing_ai_requires_admin_token_when_configured() {
+        let cp = cp_with_config_tx(Some("t")).await;
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/routing/ai")
+            .body(RespBody::new(Bytes::from(
+                r#"{"owner":"cli:ai","target":"auto","ttl_ms":60000}"#.to_string(),
+            )))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri("/routing/ai")
+            .body(RespBody::new(Bytes::from(
+                r#"{"owner":"cli:ai","ttl_ms":60000}"#.to_string(),
+            )))
+            .unwrap();
+        let resp = cp.handle(req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// 版本检查不可绕过（HTTP 面）：旧提案（base = 翻新前）在新现役上
