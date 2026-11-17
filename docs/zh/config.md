@@ -193,6 +193,9 @@ network:
       range: 198.18.0.0/15       # IPv4 池段 CIDR（前缀 1..=30；与保留段重叠拒绝）
       range6: fc00::/64          # 可选 IPv6 池；缺席 = AAAA 照常真实解析（存量零差异）
       exceptions: [example.com]  # 全标签后缀；命中的 A/AAAA 跳过池照常真实解析
+    bootstrap:                   # 可选（RIL-144）；落地 DoT 域名 host 的 IP 字面量专用上游组
+      - "223.5.5.5:53"           # udp ip:port
+      - "tls://1.1.1.1:853"      # 或 tls://ip:port——域名形式 / DoH 条目具名拒绝（引导自身需解析即回环向量）
   sniff:                         # 可选（RIL-143）；块缺席 = 按需缺省（既有行为零差异）
     mode: on_demand              # off | on_demand | scope
     ports: [443, 80]             # scope 模式显式覆盖端口表（覆盖目标需显式配置）
@@ -205,6 +208,7 @@ network:
 - 出站 fwmark 逃逸面（`egress_fwmark` ≠ 0）：planner 追加 `ip rule fwmark` + escape 表 100 默认路由，`rillanectl route apply/clear` 账目内管理。
 - `sniff`（有界域名嗅探策略，RIL-143）：TUN 面首包域名嗅探三态门——`off`（不嗅探）、`on_demand`（缺省：目标为 IP 字面量即路由面缺域名证据时才嗅探）、`scope`（仅显式声明的端口表；空表 = 不嗅探任何流，覆盖目标需显式配置）。首包字节/时间双界可配且有硬上限（`max_bytes` 1..=65535、`timeout_ms` 1..=1000）；peek 不消费数据、forward 首包照常可读（有界且不吞数据）。命中以来源契约注记交付——`sniff.source`（`tls_sni` | `http_host`）+ `sniff.domain`；ECH（加密 ClientHello 无 server_name）与不支持版本（SSLv2 式记录 / QUIC draft）返回未知，不猜测域名。不解密 HTTPS、不推断 PID、不越认证边界。
 - `fake_ip`（fake-ip / redir-host 应答模式，RIL-142）：块在场且启用 = DNS 监听对 A（`range6` 在场后含 AAAA）以池内虚拟地址应答；入站面反查还原原域名，路由按域名规则命中。块缺席或 `enabled: false` = redir-host 语义——一切查询照常真实解析（既有行为，零差异）。校验：`range` 前缀 1..=30 且主机位清零；与回环 / 链路本地(APIPA) / RFC 1918 / RFC 5737 文档段任一重叠即加载期拒绝——假地址落进真实可达段，映射丢失时会送出真实流量（RFC 2544 基准段是规范池空间）；`range6` 前缀 1..=126、主机位清零，回环 / 链路本地 / 文档段重叠拒绝，ULA（`fc00::/7`）允许作规范 fake-v6 空间。`exceptions` 全标签后缀匹配（`example.com` 命中本域与子域，不命中 `notexample.com`）。明确行为：映射仅存内存、按存活代际保留——在用（钉住）地址绝不转手，池满且全在用回 SERVFAIL 而非抢占；映射丢失不送真实网络——入站回落到假 IP 字面量本身，该地址构造上不可路由（段冲突拒绝正是为守住这一点）；重启重建空池——无持久化，客户端持有的过期假地址停止解析直至重查（请清缓存）；块的启停与段变更须重启生效（与 `network` 其余字段同口径）；`cache` 块只缓存真实应答（hosts / 例外 / 上游），假应答以 TTL 1 出门；两域名映射同活期间不共享地址（回绕只回收未在用条目）；绕过本监听的查询（写死上游）拿到真实应答、永不收到假映射——该面只覆盖走本地监听的查询；hosts 表命中优先以真实映射地址直答、不进池；`mode: tun` 时构建期拒绝 fake-ip（TUN 入站回填本版本未接线）。
+- `bootstrap`（DNS 上游防环，RIL-144）：专用于落地 DoT 域名形式 `host` 的 IP 字面量上游组。声明后引导面排他——DoT 域名 host 只走此组落地，落地失败即该查询失败且报错点名 `bootstrap`（绝不静默回落系统解析器——静默回落即重开解析依赖循环）。校验只收 `ip:port`（UDP）与 `tls://ip[:port]`；域名形式 DoT、DoH、裸域名具名拒绝（引导自身需要解析即回环向量）。缺席 = 既有口径：域名形式 DoT host 连接期经系统解析器落地（构建期 WARN 点名回环/泄漏风险）。两类残余缺口如实具名，不冒充零泄漏：DoH 上游 URL host 本版本恒经系统栈落地（reqwest 无 socket 级入口——引导面不覆盖；需要引导落地请改用 UDP/DoT 上游）；DNS 上游查询恒直连出站（UDP/DoT 可经 `egress_fwmark` 打 SO_MARK 旁路，DoH 不可打标）——经代理组出站 / 节点 DNS 本版本未实现。控制面 `GET /dns/resolvers` 展示实际解析器形状：上游组、引导模式（`declared-exclusive` / `system-fallback` 具名区分）、规则数、防污染与各传输旁路态（`doh_egress_marked` 恒 `false`——具名缺口，不伪造零泄漏声明）。
 
 ## obfuscation（缺省 None = 整块关、零开销）
 

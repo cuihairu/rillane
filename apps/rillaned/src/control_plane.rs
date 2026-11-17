@@ -495,6 +495,7 @@ impl ControlPlane {
             (Method::GET, "/udp/stats") => self.handle_udp_stats().await,
             (Method::GET, "/egress/pool/stats") => self.handle_egress_pool_stats().await,
             (Method::GET, "/dns/stats") => self.handle_dns_stats().await,
+            (Method::GET, "/dns/resolvers") => self.handle_dns_resolvers().await,
             (Method::GET, "/plugins/stats") => self.handle_plugins_stats().await,
             (Method::GET, "/runtime/stats") => self.handle_runtime_stats().await,
             (Method::GET, "/routing/stats") => self.handle_routing_stats().await,
@@ -1628,6 +1629,57 @@ impl ControlPlane {
                 pollution_suspected: 0,
                 domestic_queries: 0,
                 trusted_queries: 0,
+            },
+        };
+        json(StatusCode::OK, &dto)
+    }
+
+    /// RIL-144 `GET /dns/resolvers`：解析器形状快照（验收「诊断展示实际
+    /// 解析器/查询出站」）——上游组/引导组/引导模式（排他与系统回落的
+    /// 具名区分）/旁路状态（DoH 缺口点名不冒充零泄漏）。块缺席 = 空
+    /// 形态稳定响应（/dns/stats 先例同款）。
+    async fn handle_dns_resolvers(&self) -> Response<RespBody> {
+        let dto = match self.runtime.get_dns_service() {
+            Some(svc) => {
+                let snap = svc.resolver_snapshot();
+                DnsResolversDto {
+                    enabled: true,
+                    listen: Some(svc.listen().to_string()),
+                    domestic: snap.domestic,
+                    trusted: snap.trusted,
+                    bootstrap: snap.bootstrap,
+                    bootstrap_mode: snap.bootstrap_mode.to_string(),
+                    rules: snap.rules,
+                    default_group: snap.default_group.to_string(),
+                    anti_poison: snap.anti_poison.to_string(),
+                    timeout_ms: snap.timeout_ms,
+                    retries: snap.retries,
+                    cache_enabled: snap.cache_enabled,
+                    tls_skip_verify: snap.tls_skip_verify,
+                    egress_mark: snap.egress_mark,
+                    udp_egress_marked: snap.udp_egress_marked,
+                    dot_egress_marked: snap.dot_egress_marked,
+                    doh_egress_marked: snap.doh_egress_marked,
+                }
+            }
+            None => DnsResolversDto {
+                enabled: false,
+                listen: None,
+                domestic: Vec::new(),
+                trusted: Vec::new(),
+                bootstrap: Vec::new(),
+                bootstrap_mode: String::new(),
+                rules: 0,
+                default_group: String::new(),
+                anti_poison: String::new(),
+                timeout_ms: 0,
+                retries: 0,
+                cache_enabled: false,
+                tls_skip_verify: false,
+                egress_mark: 0,
+                udp_egress_marked: false,
+                dot_egress_marked: false,
+                doh_egress_marked: false,
             },
         };
         json(StatusCode::OK, &dto)
@@ -2784,6 +2836,33 @@ struct DnsStatsDto {
     pollution_suspected: u64,
     domestic_queries: u64,
     trusted_queries: u64,
+}
+
+/// RIL-144 `/dns/resolvers` 响应体（引擎 `DnsResolverSnapshot` 逐字段
+/// 镜像 + 装配态；块缺席 = enabled:false 空形态，/dns/stats 同款）。
+/// `bootstrap_mode` 两态：`declared-exclusive`（引导排他——DoT 域名
+/// host 落地失败即查询失败）| `system-fallback`（未声明引导——连接期
+/// 系统解析器落地，具名回环/泄漏风险）。`doh_egress_marked` 恒 false：
+/// reqwest 无 socket 级打点入口，mark ≠ 0 时 DoH 不旁路——具名缺口。
+#[derive(Debug, Clone, Serialize)]
+struct DnsResolversDto {
+    enabled: bool,
+    listen: Option<String>,
+    domestic: Vec<String>,
+    trusted: Vec<String>,
+    bootstrap: Vec<String>,
+    bootstrap_mode: String,
+    rules: usize,
+    default_group: String,
+    anti_poison: String,
+    timeout_ms: u64,
+    retries: u32,
+    cache_enabled: bool,
+    tls_skip_verify: bool,
+    egress_mark: u32,
+    udp_egress_marked: bool,
+    dot_egress_marked: bool,
+    doh_egress_marked: bool,
 }
 
 /// 观测轮（plugin-loader.md §0 计数面）`/plugins/stats` 响应体。
@@ -4859,6 +4938,7 @@ mod tests {
                 listen_port: 15_353,
                 fake_ip: None,
                 hosts: None,
+                bootstrap: Vec::new(),
             }),
         });
         let rt_cfg = RuntimeConfig {
@@ -4891,6 +4971,93 @@ mod tests {
         ] {
             assert!(s.contains(key), "应含 {key}：{s}");
         }
+    }
+
+    /// RIL-144：`GET /dns/resolvers` 形态（验收「诊断展示实际解析器/查询
+    /// 出站」）——缺席块 enabled:false 空形态；启用块 enabled:true +
+    /// bootstrap_mode 具名（declared-exclusive / system-fallback 两态）+
+    /// DoH 缺口恒具名 false（不冒充零泄漏）。
+    #[tokio::test]
+    async fn dns_resolvers_render_shape_and_named_gaps() {
+        // 缺席块：空形态稳定响应（/dns/stats 先例同款）
+        let runtime = build_runtime(false, false).await;
+        let cp = ControlPlane::new(runtime, None, true);
+        let s = get_body(&cp, "/dns/resolvers").await;
+        assert!(
+            s.contains("\"enabled\":false") && s.contains("\"listen\":null"),
+            "缺席态应报 enabled:false / listen null：{s}"
+        );
+        assert!(
+            s.contains("\"bootstrap\":[]") && s.contains("\"doh_egress_marked\":false"),
+            "空组与缺口键应齐备：{s}"
+        );
+
+        // 启用块（带 IP 字面量引导组）：排他模式具名 + 组展示 + 旁路态
+        let mut cfg = {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../config/rillane.yaml");
+            RillaneConfig::load_from_path(path).unwrap()
+        };
+        cfg.network = Some(rillane_config::NetworkBlockConfig {
+            sniff: None,
+            mode: rillane_config::NetworkBlockMode::Tun,
+            tun: None,
+            routing: None,
+            egress_fwmark: None,
+            dns: Some(rillane_config::DnsBlockConfig {
+                enabled: true,
+                domestic: vec!["223.5.5.5:53".to_string()],
+                trusted: vec!["tls://9.9.9.9:853".to_string()],
+                rules: vec![],
+                default_group: rillane_config::DnsGroup::Trusted,
+                anti_poison: rillane_config::DnsAntiPoisonMode::Off,
+                tls_skip_verify: false,
+                timeout_ms: 5_000,
+                retries: 2,
+                cache: None,
+                listen_address: "127.0.0.1".parse().unwrap(),
+                listen_port: 15_353,
+                fake_ip: None,
+                hosts: None,
+                bootstrap: vec!["223.5.5.5:53".to_string()],
+            }),
+        });
+        let rt_cfg = RuntimeConfig {
+            enable_mesh: false,
+            enable_chain: false,
+            mesh_config: None,
+            ..RuntimeConfig::default()
+        };
+        let runtime = Arc::new(
+            RuntimeBuilder::new(cfg)
+                .with_runtime_config(rt_cfg)
+                .build()
+                .unwrap(),
+        );
+        let cp = ControlPlane::new(runtime, None, true);
+        let s = get_body(&cp, "/dns/resolvers").await;
+        assert!(
+            s.contains("\"enabled\":true") && s.contains("\"listen\":\"127.0.0.1:15353\""),
+            "启用态应报 enabled:true 与配置监听：{s}"
+        );
+        assert!(
+            s.contains("\"bootstrap_mode\":\"declared-exclusive\""),
+            "声明引导 = 排他模式具名：{s}"
+        );
+        assert!(
+            s.contains("\"bootstrap\":[\"udp:223.5.5.5:53\"]"),
+            "引导组应按 Display 形式展示：{s}"
+        );
+        assert!(
+            s.contains("\"trusted\":[\"tls://9.9.9.9:853\"]"),
+            "上游组应按 Display 形式展示：{s}"
+        );
+        assert!(
+            s.contains("\"udp_egress_marked\":false")
+                && s.contains("\"dot_egress_marked\":false")
+                && s.contains("\"doh_egress_marked\":false"),
+            "旁路三键齐备（测试进程无 fwmark，DoH 恒 false）：{s}"
+        );
     }
 
     /// 观测轮（plugin-loader.md §0 计数面）：无 obfs → `/plugins/stats` 报

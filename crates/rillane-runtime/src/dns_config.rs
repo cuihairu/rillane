@@ -17,8 +17,8 @@ use rillane_config::{DnsAntiPoisonMode, DnsBlockConfig, DnsGroup};
 use rillane_platform::network::{
     dns::DnsCacheConfig,
     dns_engine::{
-        AntiPoison, DnsResolver, DnsStatsSnapshot, DnsUpstream, LocalDnsServer, PartitionPattern,
-        ResolverConfig, UpstreamGroup,
+        AntiPoison, DnsResolver, DnsResolverSnapshot, DnsStatsSnapshot, DnsUpstream,
+        LocalDnsServer, PartitionPattern, ResolverConfig, UpstreamGroup,
     },
 };
 use tokio::{
@@ -62,6 +62,10 @@ pub fn dns_block_to_resolver_config(
             .collect();
     }
     let trusted = parse_group("trusted", &cfg.trusted)?;
+    // 引导组（RIL-144）：配置层已限 IP 字面量；此处逐条转换带原串报错。
+    // 声明后 DoT 域名 host 排他走引导（落地失败即查询失败，不静默回落
+    // 系统解析器）；空 = 既有口径。
+    let bootstrap = parse_group("bootstrap", &cfg.bootstrap)?;
 
     let map_group = |g: DnsGroup| match g {
         DnsGroup::Domestic => UpstreamGroup::Domestic,
@@ -107,9 +111,11 @@ pub fn dns_block_to_resolver_config(
         ..DnsCacheConfig::default()
     });
 
+    warn_bootstrap_gaps(&domestic, &trusted, &bootstrap);
     Ok(ResolverConfig {
         domestic,
         trusted,
+        bootstrap,
         rules,
         default_group,
         anti_poison: match cfg.anti_poison {
@@ -122,6 +128,31 @@ pub fn dns_block_to_resolver_config(
         tls_skip_verify: cfg.tls_skip_verify,
         egress_mark: rillane_core::net_mark::egress_fwmark(),
     })
+}
+
+/// 引导面构建期提示（RIL-144「不冒充零泄漏」）：逐组点名两类残余风险
+/// ——①域名形式 DoT 上游存在而引导组未声明：连接期走系统解析器（TUN
+/// include 下可能回环/泄漏）；②DoH 上游（URL host 恒走系统栈，引导面
+/// 本版本不覆盖 reqwest 传输）。每次构建各至多一条（进程级去重）。
+fn warn_bootstrap_gaps(domestic: &[DnsUpstream], trusted: &[DnsUpstream], bootstrap: &[DnsUpstream]) {
+    static DOT_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    static DOH_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let has_domain_dot = domestic.iter().chain(trusted).any(|u| {
+        matches!(u, DnsUpstream::Dot { host, .. } if host.parse::<std::net::IpAddr>().is_err())
+    });
+    let has_doh = domestic.iter().chain(trusted).any(|u| matches!(u, DnsUpstream::Doh { .. }));
+    if has_domain_dot && bootstrap.is_empty() && DOT_WARNED.set(()).is_ok() {
+        warn!(
+            target: "rillane::network",
+            "DoT 上游含域名形式 host 且未声明 network.dns.bootstrap——连接期将经系统解析器落地（TUN include 下存在回环/泄漏风险）；请声明 bootstrap 组（IP 字面量上游）或改用 IP 形式上游"
+        );
+    }
+    if has_doh && DOH_WARNED.set(()).is_ok() {
+        warn!(
+            target: "rillane::network",
+            "DoH 上游 URL host 本版本恒经系统栈落地（bootstrap 面不覆盖 reqwest 传输，无 socket 级入口）——不冒充零泄漏；需要引导落地请改用 UDP/DoT 上游"
+        );
+    }
 }
 
 /// DNS 服务（P2-8 M1 观测接缝）：`DnsResolver` 单例 + 本地 UDP 监听生命周期。
@@ -220,6 +251,12 @@ impl DnsService {
     /// 统计快照（控制面 /dns/stats 取数；验收「命中率有指标」口径）
     pub fn stats_snapshot(&self) -> DnsStatsSnapshot {
         self.resolver.stats_snapshot()
+    }
+
+    /// 解析器形状快照（控制面 /dns/resolvers 取数；RIL-144 诊断「展示
+    /// 实际解析器/查询出站」）
+    pub fn resolver_snapshot(&self) -> DnsResolverSnapshot {
+        self.resolver.resolver_snapshot()
     }
 
     /// 清缓存（控制面运维面透传）
@@ -608,4 +645,40 @@ mod tests {
         assert_eq!(ctx.generation_id, "gen-svc-7", "代际源应写进绑定");
         svc.stop().await.expect("收尾 stop 应成功");
     }
+    /// RIL-144：bootstrap 组转换——IP 字面量上游（UDP/DoT 两形态）落
+    /// `ResolverConfig.bootstrap`；转换层不做形态裁决（配置层已具名拒绝
+    /// 域名/DoH 引导），此处只钉映射完整性。
+    #[test]
+    fn conversion_maps_bootstrap_group() {
+        let cfg = block(
+            "domestic: ['223.5.5.5:53']\n\
+             default_group: domestic\n\
+             bootstrap: ['223.5.5.5:53', 'tls://1.1.1.1:853']\n",
+        );
+        let out = dns_block_to_resolver_config(&cfg, &[]).expect("转换应成功");
+        assert_eq!(out.bootstrap.len(), 2);
+        assert!(
+            matches!(out.bootstrap[0], rillane_platform::network::dns_engine::DnsUpstream::Udp(_)),
+            "UDP 引导应落 Udp 形态"
+        );
+        assert!(
+            matches!(
+                out.bootstrap[1],
+                rillane_platform::network::dns_engine::DnsUpstream::Dot { ref host, .. }
+                    if host == "1.1.1.1"
+            ),
+            "DoT 引导应落 Dot 形态（IP host）"
+        );
+        // 快照读取面：声明引导 = 排他模式（引擎侧经 resolver_snapshot 呈现，
+        // 转换层钉字段映射）
+        let resolver =
+            rillane_platform::network::dns_engine::DnsResolver::new(out).expect("应可构造");
+        let snap = resolver.resolver_snapshot();
+        assert_eq!(snap.bootstrap_mode, "declared-exclusive");
+        assert_eq!(snap.bootstrap.len(), 2);
+        assert!(!snap.doh_egress_marked, "DoH 缺口恒具名 false");
+        assert_eq!(snap.domestic.len(), 1);
+        assert_eq!(snap.rules, 0);
+    }
 }
+

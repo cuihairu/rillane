@@ -358,6 +358,16 @@ pub struct DnsPartition {
 }
 
 impl DnsPartition {
+    /// 分流规则条数（RIL-144 诊断快照观测面）
+    pub fn rules_len(&self) -> usize {
+        self.rules.len()
+    }
+
+    /// 兜底组（RIL-144 诊断快照观测面）
+    pub fn default_group(&self) -> UpstreamGroup {
+        self.default
+    }
+
     /// 构造并校验（§5-E1：exact 非空、suffix 须前导点、模式须可规范化）
     pub fn new(
         rules: Vec<(PartitionPattern, UpstreamGroup)>,
@@ -676,6 +686,45 @@ impl fmt::Display for DnsUpstream {
     }
 }
 
+/// 解析器形状快照（RIL-144 诊断「展示实际解析器/查询出站」读取面；
+/// rillaned 映射为 serde DTO 交 `/dns/resolvers`）。
+#[derive(Debug, Clone)]
+pub struct DnsResolverSnapshot {
+    /// 国内/本地组上游（Display 形式：`udp:…` / `tls://…` / `doh:…`）
+    pub domestic: Vec<String>,
+    /// 可信组上游
+    pub trusted: Vec<String>,
+    /// 引导组上游（IP 字面量专用面）
+    pub bootstrap: Vec<String>,
+    /// 引导模式：`declared-exclusive`（声明引导——DoT 域名 host 排他走
+    /// 引导，落地失败即查询失败不回落系统解析器）| `system-fallback`
+    ///（未声明——连接期系统解析器落地，具名泄漏/回环风险）
+    pub bootstrap_mode: &'static str,
+    /// 分流规则条数
+    pub rules: usize,
+    /// 兜底组（domestic | trusted）
+    pub default_group: &'static str,
+    /// 防污染模式（off | cross-check）
+    pub anti_poison: &'static str,
+    /// 单次查询超时毫秒
+    pub timeout_ms: u64,
+    /// 每服务器重试次数
+    pub retries: u32,
+    /// 缓存是否启用
+    pub cache_enabled: bool,
+    /// DoT/DoH 证书校验是否关闭（仅回环测试显式声明，快照如实呈现）
+    pub tls_skip_verify: bool,
+    /// 出站 fwmark 值（0 = 不打标）
+    pub egress_mark: u32,
+    /// UDP 上游出站是否打标（socket 级旁路入口存在）
+    pub udp_egress_marked: bool,
+    /// DoT 上游出站是否打标（socket 级旁路入口存在）
+    pub dot_egress_marked: bool,
+    /// DoH 上游出站是否打标——恒 false：reqwest 无 socket 级入口，
+    /// mark ≠ 0 时 DoH 不旁路（具名缺口，不冒充零泄漏）
+    pub doh_egress_marked: bool,
+}
+
 /// 解析器构造配置
 #[derive(Debug, Clone)]
 pub struct ResolverConfig {
@@ -703,6 +752,12 @@ pub struct ResolverConfig {
     /// （存量零差异）；DoH 经 reqwest 无 socket 级入口，mark ≠ 0 时
     /// 显式降级 warn（一次）。
     pub egress_mark: u32,
+    /// 引导上游（RIL-144）：专用于落地 DoT 域名形式 host 的 IP——配置层
+    /// 已保证只收 IP 字面量（UDP `ip:port` / `tls://ip:port`），回环向量
+    /// 构造性排除。声明后引导是排他面：DoT 域名 host 只走此组，落地失败
+    /// 即查询失败（不静默回落系统解析器——失败有提示有报错）；空 = 既有
+    /// 口径（域名 host 连接期经系统解析器落地，转换层构建期 warn 点名）。
+    pub bootstrap: Vec<DnsUpstream>,
 }
 
 /// DoT/DoH 共享 TLS 面（每解析器构造一次；connector + DoH HTTP 客户端）。
@@ -796,6 +851,10 @@ impl ServerCertVerifier for NoVerifier {
 pub struct DnsResolver {
     domestic: Vec<DnsUpstream>,
     trusted: Vec<DnsUpstream>,
+    /// 引导上游（RIL-144）：IP 字面量专用面，落地 DoT 域名 host——
+    /// 声明后排他（失败即查询失败不回落系统解析器），空 = 系统解析器
+    /// 既有口径
+    bootstrap: Vec<DnsUpstream>,
     partition: DnsPartition,
     cache: Option<Mutex<DnsCache>>,
     anti_poison: AntiPoison,
@@ -812,6 +871,8 @@ pub struct DnsResolver {
     tls: DnsTlsCtx,
     /// 出站 fwmark（RIL-020 上游 socket 旁路；0 = 不打）
     egress_mark: u32,
+    /// TLS 校验开关（构造期存档——快照如实呈现；跳过仅限回环测试）
+    tls_skip_verify: bool,
 }
 
 /// singleflight 映射（见 DnsResolver::inflight 注）。
@@ -868,6 +929,7 @@ impl DnsResolver {
         Ok(Self {
             domestic: cfg.domestic,
             trusted: cfg.trusted,
+            bootstrap: cfg.bootstrap,
             partition,
             cache,
             anti_poison: cfg.anti_poison,
@@ -877,6 +939,7 @@ impl DnsResolver {
             query_ids: AtomicU16::new(0x4E00),
             inflight: tokio::sync::Mutex::new(HashMap::new()),
             egress_mark: cfg.egress_mark,
+            tls_skip_verify: cfg.tls_skip_verify,
             tls,
         })
     }
@@ -885,6 +948,44 @@ impl DnsResolver {
     pub fn stats_snapshot(&self) -> DnsStatsSnapshot {
         self.stats.snapshot()
     }
+
+    /// 解析器形状快照（RIL-144 诊断「展示实际解析器/查询出站」）：静态
+    /// 面一次成型——上游组/引导组（Display 形式）、引导模式（排他 / 系统
+    /// 回落具名）、分流规则数、兜底组、防污染、超时/重试、缓存、TLS 校验
+    /// 开关、旁路状态（UDP/DoT 有 socket 级打点入口；DoH 无——mark ≠ 0
+    /// 时 DoH 不旁路，具名缺口不冒充零泄漏）。
+    pub fn resolver_snapshot(&self) -> DnsResolverSnapshot {
+        let disp = |v: &[DnsUpstream]| v.iter().map(|u| u.to_string()).collect();
+        let marked = self.egress_mark != 0;
+        DnsResolverSnapshot {
+            domestic: disp(&self.domestic),
+            trusted: disp(&self.trusted),
+            bootstrap: disp(&self.bootstrap),
+            bootstrap_mode: if self.bootstrap.is_empty() {
+                "system-fallback"
+            } else {
+                "declared-exclusive"
+            },
+            rules: self.partition.rules_len(),
+            default_group: match self.partition.default_group() {
+                UpstreamGroup::Domestic => "domestic",
+                UpstreamGroup::Trusted => "trusted",
+            },
+            anti_poison: match self.anti_poison {
+                AntiPoison::Off => "off",
+                AntiPoison::CrossCheck => "cross-check",
+            },
+            timeout_ms: u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX),
+            retries: self.retries,
+            cache_enabled: self.cache.is_some(),
+            tls_skip_verify: self.tls_skip_verify,
+            egress_mark: self.egress_mark,
+            udp_egress_marked: marked,
+            dot_egress_marked: marked,
+            doh_egress_marked: false,
+        }
+    }
+
 
     /// 清空缓存
     pub fn clear_cache(&self) {
@@ -1044,6 +1145,7 @@ impl DnsResolver {
                     &self.query_ids,
                     &self.tls,
                     self.egress_mark,
+                    &self.bootstrap,
                 )
                 .await
                 {
@@ -1076,6 +1178,7 @@ impl DnsResolver {
 /// 单上游查询分发（G1-8）：UDP / DoT / DoH 三态同 wire 格式（RFC 1035）。
 /// UDP/DoT 用随机 id 并校验应答 id（§5-E6）；DoH 按 RFC 8484 §4.1 载荷
 /// id=0（缓存友好，TLS 已保真伪）。
+#[allow(clippy::too_many_arguments)] // 传输 dispatch：参数皆查询上下文（同 handle_dns_query 口径）
 async fn query_upstream(
     server: &DnsUpstream,
     domain: &str,
@@ -1084,6 +1187,7 @@ async fn query_upstream(
     ids: &AtomicU16,
     tls: &DnsTlsCtx,
     egress_mark: u32,
+    bootstrap: &[DnsUpstream],
 ) -> Result<DnsWireResponse, String> {
     match server {
         DnsUpstream::Udp(addr) => {
@@ -1101,10 +1205,10 @@ async fn query_upstream(
             let id = ids.fetch_add(1, Ordering::Relaxed);
             let packet = encode_query(id, domain, qtype).map_err(|e| format!("编码失败:{e}"))?;
             let io = DotIo {
-                connector: &tls.connector,
+                tls,
                 egress_mark,
             };
-            dot_exchange(host, *port, sni, &packet, id, timeout, &io).await
+            dot_exchange(host, *port, sni, &packet, id, timeout, &io, bootstrap).await
         }
         DnsUpstream::Doh { url } => {
             if egress_mark != 0 {
@@ -1176,6 +1280,127 @@ async fn udp_exchange(
     Ok(resp)
 }
 
+/// DoT 对端连接三态（RIL-144）：①host 为 IP 字面量 → 直连（无解析面，
+/// 回环构造性排除）；②域名 host + 引导上游非空 → 经引导组落地（排他面
+/// ——落地失败即查询失败，报错点名 bootstrap，绝不静默回落系统解析器
+/// ——「失败不无提示回系统 DNS」验收锚点）；③域名 host 无引导 = 既有
+/// 口径（系统解析器落地，转换层构建期 warn 点名泄漏/回环风险）。
+/// ②③连接均走 RIL-020 旁路面（mark ≠ 0 打 SO_MARK）。
+async fn connect_dot_peer(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    io: &DotIo<'_>,
+    bootstrap: &[DnsUpstream],
+) -> Result<TcpStream, String> {
+    if host.parse::<IpAddr>().is_ok() {
+        return connect_peer_marked(&format!("{host}:{port}"), io.egress_mark).await;
+    }
+    if !bootstrap.is_empty() {
+        let addrs = bootstrap_lookup(bootstrap, host, port, timeout, io).await?;
+        let mut last: Option<String> = None;
+        for addr in addrs {
+            let sock = if io.egress_mark != 0 {
+                rillane_core::net_mark::connect_tcp_marked(addr, io.egress_mark)
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                TcpStream::connect(addr).await.map_err(|e| e.to_string())
+            };
+            match sock {
+                Ok(s) => return Ok(s),
+                Err(e) => last = Some(format!("{addr}: {e}")),
+            }
+        }
+        return Err(format!(
+            "bootstrap 解析 {host} 后连接失败：{}",
+            last.unwrap_or_else(|| "引导落地为空".to_string())
+        ));
+    }
+    connect_peer_marked(&format!("{host}:{port}"), io.egress_mark).await
+}
+
+/// 引导落地（RIL-144）：对引导组（配置层保证 IP 字面量——引导自身不再
+/// 需要解析，回环向量构造性排除）逐上游查 A/AAAA，收齐首个有地址上游
+/// 的候选表（去重保序），供 DoT 域名 host 连接逐候选首胜。全组无地址
+/// 即 Err——不回落系统解析器（静默回落即重开回环向量）。
+async fn bootstrap_lookup(
+    bootstrap: &[DnsUpstream],
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    io: &DotIo<'_>,
+) -> Result<Vec<SocketAddr>, String> {
+    let mut out: Vec<SocketAddr> = Vec::new();
+    let mut last_err: Option<String> = None;
+    for server in bootstrap {
+        // 引导查询直呼传输层（不走 query_upstream——那会构成 async fn
+        // 递归环；配置层已保证引导只收 IP 字面量，此处 dispatch 纯完备
+        // 性：DoH 分支实际不可达）。单次引导查询超时与业务查询同源。
+        for qtype in [DnsRecordType::A, DnsRecordType::Aaaa] {
+            let dispatched = match server {
+                DnsUpstream::Udp(addr) => {
+                    let id = BOOTSTRAP_IDS.fetch_add(1, Ordering::Relaxed);
+                    udp_exchange(
+                        *addr,
+                        id,
+                        &encode_query(id, host, qtype).map_err(|e| format!("编码失败:{e}"))?,
+                        timeout,
+                        io.egress_mark,
+                    )
+                    .await
+                }
+                DnsUpstream::Dot { host: h, port, sni } => {
+                    // 引导 DoT 上游 host 恒 IP 字面量（配置层保证）——直连
+                    // 无解析面；叶函数交换，不构成 async fn 递归环
+                    let id = BOOTSTRAP_IDS.fetch_add(1, Ordering::Relaxed);
+                    let packet =
+                        encode_query(id, host, qtype).map_err(|e| format!("编码失败:{e}"))?;
+                    let peer = format!("{h}:{port}");
+                    let tcp = connect_peer_marked(&peer, io.egress_mark).await?;
+                    let recv =
+                        tokio::time::timeout(timeout, dot_io_exchange(io, sni, tcp, &packet, &peer))
+                            .await
+                            .map_err(|_| format!("{peer} 超时（{timeout:?}）"))??;
+                    decode_checked(recv, id, &peer)
+                }
+                DnsUpstream::Doh { url } => {
+                    let packet = encode_query(0, host, qtype).map_err(|e| format!("编码失败:{e}"))?;
+                    doh_exchange(url, &packet, timeout, &io.tls.doh).await
+                }
+            };
+            match dispatched {
+                Ok(resp) if resp.rcode == 0 => {
+                    for a in &resp.answers {
+                        let ip: IpAddr = match &a.data {
+                            DnsAnswerData::A(ip) => (*ip).into(),
+                            DnsAnswerData::Aaaa(ip) => (*ip).into(),
+                            _ => continue,
+                        };
+                        let addr = SocketAddr::new(ip, port);
+                        if !out.contains(&addr) {
+                            out.push(addr);
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if !out.is_empty() {
+            return Ok(out);
+        }
+    }
+    Err(format!(
+        "bootstrap 解析 {host} 失败（引导排他面：不回落系统解析器）:{}",
+        last_err.unwrap_or_else(|| "引导上游无应答地址".to_string())
+    ))
+}
+
+/// 引导查询专用 id 源（独立计数——与业务上游 id 空间互不干扰，回环
+/// 面 id 冲突不可能）
+static BOOTSTRAP_IDS: AtomicU16 = AtomicU16::new(0x4200);
+
 /// DoT 对端连接（RIL-020 旁路面）：mark=0 走原生 `connect`（多候选
 /// 首胜语义零差异）；mark ≠ 0 时先落地 host 候选再逐个 marked 连接
 ///（首个胜出；set_mark 失败降级由 net_mark 统一处理）。
@@ -1211,13 +1436,16 @@ async fn connect_peer_marked(peer: &str, egress_mark: u32) -> Result<TcpStream, 
 }
 
 /// DoT 交换（RFC 7858）：TCP+TLS 连接后逐消息 2 字节大端长度前缀。
-/// host 允许域名（连接期经系统解析器落地）；SNI = 配置 host。
-/// DoT 连接 IO 上下文（TLS 面 + 旁路 mark，RIL-020）。
+/// host 允许域名（连接期落地：引导排他 / 系统解析器既有口径，见
+/// [`connect_dot_peer`]）；SNI = 配置 host。
+/// DoT 连接 IO 上下文（TLS 面 + 旁路 mark，RIL-020；RIL-144 起携带
+/// 完整 TLS 面——引导落地需复用 DoT/DoH 传输）。
 struct DotIo<'a> {
-    connector: &'a TlsConnector,
+    tls: &'a DnsTlsCtx,
     egress_mark: u32,
 }
 
+#[allow(clippy::too_many_arguments)] // DoT 一往返：host 落地三态 + 交换上下文（同 handle_dns_query 口径）
 async fn dot_exchange(
     host: &str,
     port: u16,
@@ -1226,42 +1454,64 @@ async fn dot_exchange(
     id: u16,
     timeout: Duration,
     io: &DotIo<'_>,
+    bootstrap: &[DnsUpstream],
 ) -> Result<DnsWireResponse, String> {
     let peer = format!("{host}:{port}");
     let fut = async {
-        // RIL-020：连接经 net_mark 旁路面（mark ≠ 0 打 SO_MARK 逃逸）
-        let tcp = connect_peer_marked(&peer, io.egress_mark).await?;
-        let name = rustls::pki_types::ServerName::try_from(sni.to_string())
-            .map_err(|e| format!("SNI {sni:?} 非法：{e}"))?;
-        let mut stream = io
-            .connector
-            .connect(name, tcp)
-            .await
-            .map_err(|e| format!("{peer} TLS 握手失败：{e}"))?;
-        stream
-            .write_all(&(packet.len() as u16).to_be_bytes())
-            .await
-            .map_err(|e| format!("{peer} 写长度失败：{e}"))?;
-        stream
-            .write_all(packet)
-            .await
-            .map_err(|e| format!("{peer} 写查询失败：{e}"))?;
-        let mut len_buf = [0u8; 2];
-        stream
-            .read_exact(&mut len_buf)
-            .await
-            .map_err(|e| format!("{peer} 读长度失败：{e}"))?;
-        let len = u16::from_be_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; len];
-        stream
-            .read_exact(&mut buf)
-            .await
-            .map_err(|e| format!("{peer} 读应答失败：{e}"))?;
-        Ok::<Vec<u8>, String>(buf)
+        // RIL-020：连接经 net_mark 旁路面（mark ≠ 0 打 SO_MARK 逃逸）；
+        // RIL-144：域名 host 的落地路径见 connect_dot_peer（引导排他 /
+        // 系统解析器既有口径三态）
+        let tcp = connect_dot_peer(host, port, timeout, io, bootstrap).await?;
+        dot_io_exchange(io, sni, tcp, packet, &peer).await
     };
     let recv = tokio::time::timeout(timeout, fut)
         .await
         .map_err(|_| format!("{peer} 超时（{timeout:?}）"))??;
+    decode_checked(recv, id, &peer)
+}
+
+/// DoT TLS 握手 + 长度前缀一往返（dot_exchange 与引导面共用——引导直呼
+/// 此叶函数 + [`decode_checked`]，不经 dot_exchange，async fn 递归环
+/// 构造性排除）。
+async fn dot_io_exchange(
+    io: &DotIo<'_>,
+    sni: &str,
+    tcp: TcpStream,
+    packet: &[u8],
+    peer: &str,
+) -> Result<Vec<u8>, String> {
+    let name = rustls::pki_types::ServerName::try_from(sni.to_string())
+        .map_err(|e| format!("SNI {sni:?} 非法：{e}"))?;
+    let mut stream = io
+        .tls
+        .connector
+        .connect(name, tcp)
+        .await
+        .map_err(|e| format!("{peer} TLS 握手失败：{e}"))?;
+    stream
+        .write_all(&(packet.len() as u16).to_be_bytes())
+        .await
+        .map_err(|e| format!("{peer} 写长度失败：{e}"))?;
+    stream
+        .write_all(packet)
+        .await
+        .map_err(|e| format!("{peer} 写查询失败：{e}"))?;
+    let mut len_buf = [0u8; 2];
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|e| format!("{peer} 读长度失败：{e}"))?;
+    let len = u16::from_be_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    stream
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| format!("{peer} 读应答失败：{e}"))?;
+    Ok(buf)
+}
+
+/// wire 应答解码 + id 校验共用尾（udp/dot/引导三面同口径）
+fn decode_checked(recv: Vec<u8>, id: u16, peer: &str) -> Result<DnsWireResponse, String> {
     let resp = decode_response(&recv).map_err(|e| format!("{peer} 解码失败：{e}"))?;
     if resp.id != id {
         return Err(format!(
@@ -1660,6 +1910,7 @@ impl EngineDnsHandler {
             cache: config.cache.clone(),
             tls_skip_verify: false,
             egress_mark: 0,
+            bootstrap: Vec::new(),
         })?;
         Ok(Self {
             config: config.clone(),
@@ -1838,6 +2089,7 @@ mod tests {
             cache: Some(DnsCacheConfig::default()),
             tls_skip_verify: false,
             egress_mark: 0,
+            bootstrap: Vec::new(),
         }
     }
 
@@ -3188,6 +3440,108 @@ mod tests {
         let r = DnsResolver::new(cfg).unwrap();
         let a = r.resolve("dot.test", DnsRecordType::A).await.unwrap();
         assert_eq!(a[0].data, DnsAnswerData::A(Ipv4Addr::new(10, 1, 2, 3)));
+    }
+
+
+    /// RIL-144 引导排他面（验收「防止解析依赖循环及 TUN 重捕获」+「失败
+    /// 不无提示回系统 DNS」）：①DoT 域名 host 经引导组落地为 127.0.0.1
+    /// 后完成 DoT 回环往返（引导声明 → 排他路径）；②引导组声明但落地
+    /// 失败 → 报错点名 bootstrap——host 用系统解析器可落地的 localhost
+    /// （若静默回落系统路径，报错不会含 bootstrap 字样）。
+    #[tokio::test]
+    async fn dot_domain_host_uses_exclusive_bootstrap() {
+        // 引导组：UDP mock 把任意查询答成 127.0.0.1
+        let (mock, _) = spawn_mock(|_| (0, vec![v4("dot.boot.test", [127, 0, 0, 1], 60)])).await;
+        // DoT 上游：域名 host + 本机随机端口回环服务（同 dot_loopback 口径）
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let acceptor = loopback_acceptor();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let Ok(mut tls) = acceptor.accept(tcp).await else {
+                return;
+            };
+            let mut len_buf = [0u8; 2];
+            if tls.read_exact(&mut len_buf).await.is_err() {
+                return;
+            }
+            let mut buf = vec![0u8; u16::from_be_bytes(len_buf) as usize];
+            if tls.read_exact(&mut buf).await.is_err() {
+                return;
+            }
+            let Ok(q) = decode_query(&buf) else {
+                return;
+            };
+            let reply =
+                encode_response(q.id, &q.domain, q.qtype, 0, &[v4("d", [10, 1, 2, 3], 120)]);
+            if tls
+                .write_all(&(reply.len() as u16).to_be_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let _ = tls.write_all(&reply).await;
+        });
+
+        let cfg = ResolverConfig {
+            trusted: vec![DnsUpstream::Dot {
+                host: "dot.boot.test".into(),
+                port,
+                sni: "localhost".into(),
+            }],
+            bootstrap: vec![DnsUpstream::Udp(mock)],
+            tls_skip_verify: true,
+            egress_mark: 0,
+            ..base_cfg()
+        };
+        let r = DnsResolver::new(cfg).unwrap();
+        let a = r.resolve("boot.test", DnsRecordType::A).await.unwrap();
+        assert_eq!(a[0].data, DnsAnswerData::A(Ipv4Addr::new(10, 1, 2, 3)));
+        // 快照如实呈现：排他模式 + 引导组 Display
+        let snap = r.resolver_snapshot();
+        assert_eq!(snap.bootstrap_mode, "declared-exclusive");
+        assert_eq!(snap.bootstrap, vec![format!("udp:{mock}")]);
+        assert!(!snap.doh_egress_marked, "DoH 缺口恒具名 false");
+    }
+
+    /// RIL-144：引导声明但落地失败 → 查询失败且报错点名 bootstrap
+    ///（验收「失败不无提示回系统 DNS」——不静默回落系统解析器）。
+    #[tokio::test]
+    async fn dot_domain_host_bootstrap_failure_is_named() {
+        let cfg = ResolverConfig {
+            trusted: vec![DnsUpstream::Dot {
+                // localhost 系统解析器可落地——若静默回落会去连
+                // 127.0.0.1:1（报错不含 bootstrap 字样）
+                host: "localhost".into(),
+                port: 1,
+                sni: "localhost".into(),
+            }],
+            bootstrap: vec![DnsUpstream::Udp("127.0.0.1:1".parse().unwrap())],
+            tls_skip_verify: true,
+            egress_mark: 0,
+            ..base_cfg()
+        };
+        let r = DnsResolver::new(cfg).unwrap();
+        let err = r
+            .resolve("x.boot.test", DnsRecordType::A)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("bootstrap"),
+            "报错应点名引导面（不静默回落系统解析器）:{err}"
+        );
+        // 未声明引导 = 既有口径（快照具名 system-fallback）
+        let cfg2 = ResolverConfig {
+            trusted: vec![DnsUpstream::Dot {
+                host: "localhost".into(),
+                port: 1,
+                sni: "localhost".into(),
+            }],
+            ..base_cfg()
+        };
+        let r2 = DnsResolver::new(cfg2).unwrap();
+        assert_eq!(r2.resolver_snapshot().bootstrap_mode, "system-fallback");
     }
 
     /// DoH 回环（RFC 8484 GET）：`?dns=` base64url 无填充、载荷 id=0、

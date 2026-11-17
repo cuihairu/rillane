@@ -105,6 +105,7 @@ fn dns_block_roundtrip() {
         listen_port: 5353,
         fake_ip: None,
         hosts: None,
+        bootstrap: Vec::new(),
     };
     let rendered = serde_yaml::to_string(&cfg).expect("应可序列化");
     let reparsed: DnsBlockConfig = serde_yaml::from_str(&rendered).expect("应可往返");
@@ -153,6 +154,7 @@ fn dns_block_validate_rejects_illegal_values() {
         listen_port: 15_353,
         fake_ip: None,
         hosts: None,
+        bootstrap: Vec::new(),
     };
 
     let mut cfg = base();
@@ -390,4 +392,63 @@ fn dns_block_hosts_schema_and_matrix() {
             .expect("应可解析");
     assert!(cfg.hosts.as_ref().expect("hosts 应在").is_empty());
     cfg.validate().expect("空映射应过 validate");
+}
+
+/// RIL-144 引导面（验收「防止解析依赖循环」的配置半边）：IP 字面量上游
+/// 收下（UDP `ip:port` / DoT `tls://ip:port`）；域名形式 DoT / DoH 引导
+/// 具名拒绝（引导自身不得依赖解析——回环向量构造性排除）；端口 0 拒；
+/// serde 往返保留，缺席键不落盘。
+#[test]
+fn dns_bootstrap_block_validates_and_roundtrips() {
+    let base = || DnsBlockConfig {
+        enabled: true,
+        domestic: vec!["223.5.5.5:53".to_string()],
+        trusted: vec!["tls://9.9.9.9:853".to_string()],
+        rules: vec![],
+        default_group: DnsGroup::Trusted,
+        anti_poison: DnsAntiPoisonMode::Off,
+        timeout_ms: 5_000,
+        retries: 2,
+        cache: None,
+        tls_skip_verify: false,
+        listen_address: "127.0.0.1".parse().unwrap(),
+        listen_port: 15_353,
+        fake_ip: None,
+        hosts: None,
+        bootstrap: Vec::new(),
+    };
+
+    let mut cfg = base();
+    cfg.bootstrap = vec!["223.5.5.5:53".to_string(), "tls://1.1.1.1:853".to_string()];
+    cfg.validate().expect("IP 字面量引导应通过");
+
+    for (bad, why) in [
+        ("tls://dns.google:853", "域名形式 DoT 引导"),
+        ("https://dns.google/dns-query", "DoH 引导"),
+        ("223.5.5.5:0", "UDP 端口 0"),
+        ("tls://1.1.1.1:0", "DoT 端口 0"),
+        ("domain.example", "裸域名条目"),
+    ] {
+        let mut c = base();
+        c.bootstrap = vec![bad.to_string()];
+        let err = c.validate().expect_err(why);
+        assert!(
+            err.to_string().contains("network.dns.bootstrap"),
+            "{why}: {err}"
+        );
+    }
+
+    let mut cfg = base();
+    cfg.bootstrap = vec!["223.5.5.5:53".to_string(), "[2001:db8::1]:53".to_string()];
+    let rendered = serde_yaml::to_string(&cfg).expect("应可序列化");
+    let reparsed: DnsBlockConfig = serde_yaml::from_str(&rendered).expect("应可往返");
+    assert_eq!(reparsed.bootstrap, cfg.bootstrap);
+
+    let empty: DnsBlockConfig =
+        serde_yaml::from_str("enabled: true\ndomestic: ['223.5.5.5:53']\n").unwrap();
+    assert!(empty.bootstrap.is_empty());
+    assert!(
+        !serde_yaml::to_string(&empty).unwrap().contains("bootstrap"),
+        "缺席引导键不落盘"
+    );
 }

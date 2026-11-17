@@ -785,6 +785,15 @@ pub struct DnsBlockConfig {
     /// 键精确匹配（小写归一，通配符不做）；None/空 = 关闭（存量零差异）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosts: Option<std::collections::BTreeMap<String, String>>,
+    /// 引导上游（RIL-144）：专用于落地 DoT 域名形式上游 host 的 IP——
+    /// 只收 IP 字面量（UDP `ip:port` / `tls://ip:port`），域名形式引导
+    /// 自身也需要解析（回环向量）校验期具名拒绝。声明后引导是排他面
+    ///（DoT 域名 host 只走此组，落地失败即查询失败，不静默回落系统
+    /// 解析器）；缺席 = 既有口径（域名 host 连接期经系统解析器落地，
+    /// 构建期 warn 点名泄漏/回环风险）。DoH 不在本面（reqwest 无
+    /// socket 级入口，URL host 仍走系统栈——文档如实标注）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bootstrap: Vec<String>,
 }
 
 impl DnsBlockConfig {
@@ -889,6 +898,38 @@ impl DnsBlockConfig {
             if fake.enabled {
                 fake.validate()?;
             }
+        }
+        // 引导上游（RIL-144）：只收 IP 字面量（UDP `ip:port` / DoT
+        // `tls://ip[:port]`）——引导自身需要解析即回环向量，域名形式
+        // / DoH 具名拒绝（防环是本面的存在理由，形态放宽即自我否定）。
+        for b in &self.bootstrap {
+            let t = b.trim();
+            if let Some(rest) = t.strip_prefix("tls://").or_else(|| t.strip_prefix("dot://")) {
+                let (host, has_port, port) = match rest.rsplit_once(':') {
+                    Some((h, ps)) => match ps.parse::<u16>() {
+                        Ok(p) => (h, true, p),
+                        Err(_) => (rest, false, 0),
+                    },
+                    None => (rest, false, 0),
+                };
+                anyhow::ensure!(
+                    !host.is_empty() && host.parse::<std::net::IpAddr>().is_ok(),
+                    "network.dns.bootstrap DoT 条目 host 须为 IP 字面量（域名引导自身需解析即回环向量）:{b:?}"
+                );
+                anyhow::ensure!(
+                    !has_port || port != 0,
+                    "network.dns.bootstrap 上游端口不能为 0:{b:?}"
+                );
+                continue;
+            }
+            anyhow::ensure!(
+                t.parse::<std::net::SocketAddr>().is_ok(),
+                "network.dns.bootstrap 条目须为 ip:port 或 tls://ip:port（域名/DoH 引导具名拒绝——引导不得依赖解析）:{b:?}"
+            );
+            anyhow::ensure!(
+                !t.ends_with(":0"),
+                "network.dns.bootstrap 上游端口不能为 0:{b:?}"
+            );
         }
         if let Some(hosts) = &self.hosts {
             for (k, v) in hosts {

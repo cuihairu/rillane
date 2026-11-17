@@ -32,6 +32,7 @@
 | GET | `/mesh/switches` | 链路切换账本（最近 100 次） | `switches` |
 | GET | `/egress/pool/stats` | 出站连接池快照 | `pool status` |
 | GET | `/dns/stats` | DNS 服务统计快照 | —（仅 REST） |
+| GET | `/dns/resolvers` | 解析器形状快照：上游组、引导模式、各传输旁路态（RIL-144） | —（仅 REST） |
 | GET | `/plugins/stats` | 插件统计 | —（仅 REST） |
 | GET | `/runtime/stats` | runtime 统计 | —（仅 REST） |
 | GET | `/runtime/config` | 当前生效配置快照 | —（仅 REST） |

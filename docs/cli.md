@@ -32,6 +32,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | GET | `/mesh/switches` | chain switch ledger (last 100) | `switches` |
 | GET | `/egress/pool/stats` | egress connection pool snapshot | `pool status` |
 | GET | `/dns/stats` | DNS service stats snapshot | — (REST only) |
+| GET | `/dns/resolvers` | Resolver shape snapshot: upstream groups, bootstrap mode, per-transport bypass state (RIL-144) | — (REST only) |
 | GET | `/plugins/stats` | plugin stats | — (REST only) |
 | GET | `/runtime/stats` | runtime stats | — (REST only) |
 | GET | `/runtime/config` | snapshot of the currently effective config | — (REST only) |
