@@ -550,14 +550,12 @@ mod tests {
         }
 
         // 旁路可选：CannotInject 也放行（无防环依赖）
-        assert!(
-            check_bypass_compat(
-                &FixedDialer(BypassCapability::CannotInject),
-                &[],
-                BypassPolicy::optional()
-            )
-            .is_ok()
-        );
+        assert!(check_bypass_compat(
+            &FixedDialer(BypassCapability::CannotInject),
+            &[],
+            BypassPolicy::optional()
+        )
+        .is_ok());
         // 旁路必选：拨号器 CannotInject 即拒
         let err = check_bypass_compat(
             &FixedDialer(BypassCapability::CannotInject),
@@ -597,13 +595,11 @@ mod tests {
         assert_eq!(err.code, CODE_BYPASS_UNINJECTABLE);
         assert!(err.detail.contains("blind-ws"));
         // 合法组合：拨号器自施加 + 纯包装层
-        assert!(
-            check_bypass_compat(
-                &FixedDialer(BypassCapability::InjectsAtDial),
-                &[&BlindTransport],
-                BypassPolicy::optional(),
-            )
-            .is_ok()
-        );
+        assert!(check_bypass_compat(
+            &FixedDialer(BypassCapability::InjectsAtDial),
+            &[&BlindTransport],
+            BypassPolicy::optional(),
+        )
+        .is_ok());
     }
 }

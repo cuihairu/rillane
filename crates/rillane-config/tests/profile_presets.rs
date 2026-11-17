@@ -173,9 +173,7 @@ fn expansion_is_idempotent() {
 /// 规则各归各组、game 混淆与 web 连接池同时填充。
 #[test]
 fn scenarios_parallel_expansion_game_and_web() {
-    let yaml = format!(
-        "{BASE_YAML}scenarios:\n  game: {{}}\n  web: {{}}\n"
-    );
+    let yaml = format!("{BASE_YAML}scenarios:\n  game: {{}}\n  web: {{}}\n");
     let cfg: RillaneConfig =
         RillaneConfig::from_str(&yaml, Some("yaml")).expect("scenarios 应可解析");
     assert!(cfg.profile.is_none(), "新配置不再由单枚举控制");
@@ -187,17 +185,11 @@ fn scenarios_parallel_expansion_game_and_web() {
 
     // 规则各归各组
     assert!(
-        cfg.routing
-            .rules
-            .iter()
-            .any(|r| r.target == "game-auto"),
+        cfg.routing.rules.iter().any(|r| r.target == "game-auto"),
         "game 规则模板 target 归 game-auto"
     );
     assert!(
-        cfg.routing
-            .rules
-            .iter()
-            .any(|r| r.target == "web-auto"),
+        cfg.routing.rules.iter().any(|r| r.target == "web-auto"),
         "web 规则模板 target 归 web-auto"
     );
 
@@ -222,11 +214,9 @@ fn scenarios_parallel_expansion_game_and_web() {
 /// （from_str 丢弃、from_str_with_diagnostics 可观察）。
 #[test]
 fn legacy_profile_readable_with_migration_diagnostics() {
-    let (cfg, diags) = RillaneConfig::from_str_with_diagnostics(
-        &base_with_profile("game"),
-        Some("yaml"),
-    )
-    .expect("旧配置可读");
+    let (cfg, diags) =
+        RillaneConfig::from_str_with_diagnostics(&base_with_profile("game"), Some("yaml"))
+            .expect("旧配置可读");
     assert_eq!(cfg.profile, Some(ProfileKind::Game));
     assert_eq!(cfg.routing.groups.len(), 1);
     assert_eq!(cfg.routing.groups[0].name, "game-auto");
@@ -250,8 +240,7 @@ fn legacy_profile_readable_with_migration_diagnostics() {
 #[test]
 fn profile_and_scenarios_together_rejected() {
     let yaml = format!("{BASE_YAML}profile: game\nscenarios:\n  web: {{}}\n");
-    let err = RillaneConfig::from_str(&yaml, Some("yaml"))
-        .expect_err("两面同时声明须拒绝");
+    let err = RillaneConfig::from_str(&yaml, Some("yaml")).expect_err("两面同时声明须拒绝");
     let msg = err.to_string();
     assert!(
         msg.contains("profile") && msg.contains("scenarios") && msg.contains("二选一"),
@@ -288,11 +277,13 @@ routing:
 scenarios:
   game: {}
 "#;
-    let cfg: RillaneConfig =
-        RillaneConfig::from_str(yaml, Some("yaml")).expect("应可解析");
+    let cfg: RillaneConfig = RillaneConfig::from_str(yaml, Some("yaml")).expect("应可解析");
     assert_eq!(cfg.routing.groups.len(), 1, "模板组不重复填");
     assert!(
-        matches!(cfg.routing.groups[0].strategy, rillane_config::Strategy::Fixed),
+        matches!(
+            cfg.routing.groups[0].strategy,
+            rillane_config::Strategy::Fixed
+        ),
         "用户策略不被覆盖"
     );
     assert_eq!(cfg.routing.rules.len(), 1, "模板规则不重复填");

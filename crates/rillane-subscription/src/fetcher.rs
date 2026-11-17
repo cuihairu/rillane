@@ -3,9 +3,9 @@
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use std::error::Error as _;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use reqwest::{header, Client, Proxy, Response};
+use std::error::Error as _;
 use tracing::{debug, warn};
 
 /// 订阅获取终态错误：重试不会改变结果（内容超限 / 非 UTF-8 / HTTP 状态错）。
@@ -91,7 +91,11 @@ pub fn redact_url(url: &str) -> String {
         Err(_) => return "<url 解析失败>".to_string(),
     };
     // 重建为 scheme://host[:port]/path——userinfo 天然剥离
-    let mut base = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or("<host>"));
+    let mut base = format!(
+        "{}://{}",
+        parsed.scheme(),
+        parsed.host_str().unwrap_or("<host>")
+    );
     if let Some(port) = parsed.port() {
         base.push_str(&format!(":{port}"));
     }
@@ -304,7 +308,11 @@ impl SubscriptionFetcher {
     }
 
     /// 单次获取尝试
-    async fn fetch_attempt(&self, url: &str, conditions: Option<&ConditionalGet>) -> Result<FetchResult> {
+    async fn fetch_attempt(
+        &self,
+        url: &str,
+        conditions: Option<&ConditionalGet>,
+    ) -> Result<FetchResult> {
         let mut request = self.client.get(url);
 
         // 设置请求头
@@ -650,7 +658,10 @@ mod tests {
             "http://example.com:8443/a/b?secret=***"
         );
         // 无查询：原样（host 面）
-        assert_eq!(redact_url("https://example.com/sub"), "https://example.com/sub");
+        assert_eq!(
+            redact_url("https://example.com/sub"),
+            "https://example.com/sub"
+        );
     }
 
     #[test]

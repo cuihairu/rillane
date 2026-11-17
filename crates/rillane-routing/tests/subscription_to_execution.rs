@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use rillane_config::{
-    CODE_GENERATION_DANGLING, EgressConfig, GenerationEdge, GenerationObject, GroupMember,
-    MatchCondition, ObjectId, ObjectKind, RillaneConfig, RouteRule, RuntimeGeneration, SourceId,
-    Strategy, digest_parts,
+    digest_parts, EgressConfig, GenerationEdge, GenerationObject, GroupMember, MatchCondition,
+    ObjectId, ObjectKind, RillaneConfig, RouteRule, RuntimeGeneration, SourceId, Strategy,
+    CODE_GENERATION_DANGLING,
 };
 use rillane_core::{FlowContext, FlowId, FlowMetadata, FlowRouter, FlowTarget, TargetProto};
 use rillane_routing::{DomainSource, ExplainInput, RoutingEngine};

@@ -42,9 +42,7 @@ pub enum PublishError {
         detail: String,
     },
     /// 候选代际与现役代际相同
-    #[error(
-        "{CODE_GENERATION_UNCHANGED}: 候选代际 {generation_id} 与现役代际相同，拒绝空转发布"
-    )]
+    #[error("{CODE_GENERATION_UNCHANGED}: 候选代际 {generation_id} 与现役代际相同，拒绝空转发布")]
     GenerationUnchanged {
         /// 候选代际身份
         generation_id: String,
@@ -142,7 +140,10 @@ impl PublishJournal {
             fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(self).expect("journal 可序列化"))?;
+        fs::write(
+            &tmp,
+            serde_json::to_string_pretty(self).expect("journal 可序列化"),
+        )?;
         fs::rename(&tmp, path)
     }
 }
@@ -213,7 +214,10 @@ impl PublishCoordinator {
 
     /// 当前有效代际身份
     pub fn effective(&self) -> Option<&str> {
-        self.journal.effective.as_ref().map(|e| e.generation_id.as_str())
+        self.journal
+            .effective
+            .as_ref()
+            .map(|e| e.generation_id.as_str())
     }
 
     /// journal 只读镜像（诊断/控制面取数）
@@ -402,7 +406,7 @@ pub struct PublishTxnOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rillane_config::{GenerationObject, ObjectKind, ObjectId, SourceId};
+    use rillane_config::{GenerationObject, ObjectId, ObjectKind, SourceId};
 
     fn temp_state_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -435,9 +439,7 @@ mod tests {
         assert_eq!(coord.effective(), None, "初始无现役");
 
         let g1 = gen("v1");
-        let outcome = coord
-            .transact(&g1, |_| Ok(()))
-            .expect("首次发布成功");
+        let outcome = coord.transact(&g1, |_| Ok(())).expect("首次发布成功");
         assert_eq!(outcome.published, g1.generation_id());
         assert_eq!(outcome.previous, None);
         assert_eq!(coord.effective(), Some(g1.generation_id()));
@@ -480,7 +482,11 @@ mod tests {
             .transact(&g2, |_| Err("OS 应用失败: 路由规则写入被拒".to_string()))
             .expect_err("apply 失败须上抛");
         assert!(matches!(err, PublishError::ApplyFailed(_)));
-        assert_eq!(coord.effective(), Some(old_effective.as_str()), "旧代际保留");
+        assert_eq!(
+            coord.effective(),
+            Some(old_effective.as_str()),
+            "旧代际保留"
+        );
         assert!(coord.journal().pending.is_none(), "无挂起事务");
         let reread = PublishCoordinator::open(&dir).expect("re-open");
         assert_eq!(reread.effective(), Some(old_effective.as_str()));
@@ -491,9 +497,7 @@ mod tests {
         );
 
         // 同代际重发拒绝空转
-        let err = coord
-            .transact(&g1, |_| Ok(()))
-            .expect_err("同代际拒绝");
+        let err = coord.transact(&g1, |_| Ok(())).expect_err("同代际拒绝");
         assert_eq!(err.code(), CODE_GENERATION_UNCHANGED);
     }
 
@@ -517,7 +521,11 @@ mod tests {
 
         let notes = coord.recover().expect("recover");
         assert_eq!(notes.len(), 1, "回滚说明: {notes:?}");
-        assert_eq!(coord.effective(), Some(g1.generation_id()), "旧代际保持有效");
+        assert_eq!(
+            coord.effective(),
+            Some(g1.generation_id()),
+            "旧代际保持有效"
+        );
         assert!(coord.journal.pending.is_none());
         assert!(!staged.exists(), "暂存目录清掉");
 
@@ -559,14 +567,20 @@ mod tests {
         assert!(report.staged.is_empty(), "无挂起: {:?}", report.staged);
         assert_eq!(
             report.retained,
-            vec![g2.generation_id().to_string(), g1.generation_id().to_string()],
+            vec![
+                g2.generation_id().to_string(),
+                g1.generation_id().to_string()
+            ],
             "retained 新→旧序"
         );
         assert_eq!(report.orphans, vec!["orphan-gid".to_string()]);
 
         // reclaim：孤儿清除 + retained 收敛到 1（最新退役）
         let removed = coord.reclaim(1).expect("reclaim");
-        assert!(removed.contains(&"orphan-gid".to_string()), "孤儿清除: {removed:?}");
+        assert!(
+            removed.contains(&"orphan-gid".to_string()),
+            "孤儿清除: {removed:?}"
+        );
         assert!(
             removed.iter().any(|id| id == g1.generation_id()),
             "最旧退役清除: {removed:?}"

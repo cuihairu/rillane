@@ -217,9 +217,7 @@ pub struct SourceSnapshot {
 impl SourceSnapshot {
     /// 按来源内 local_id 查找对象
     pub fn find(&self, local_id: &str) -> Option<&SourceObject> {
-        self.objects
-            .iter()
-            .find(|obj| obj.id.local_id == local_id)
+        self.objects.iter().find(|obj| obj.id.local_id == local_id)
     }
 
     /// 按显示名查找对象（可能多个——显示名非唯一身份）
@@ -337,7 +335,10 @@ impl ObjectCatalog {
                 return Err(SourceContractError::InvalidSourceId {
                     raw: format!(
                         "对象 {}({:?}) 与既有 {}({:?}) 同来源同 local_id",
-                        object.display_name, object.id.local_id, existing.display_name, existing.id.local_id
+                        object.display_name,
+                        object.id.local_id,
+                        existing.display_name,
+                        existing.id.local_id
                     ),
                     reason: "来源内稳定 ID 重复，须先诊断去重",
                 });

@@ -20,25 +20,25 @@ pub mod fake_ip;
 pub mod hosts;
 pub mod inbound;
 pub mod meter;
-pub mod observer;
 pub mod net_mark;
+pub mod observer;
 pub mod outbound;
 pub mod performance;
 pub mod plan;
 pub mod pool;
-pub mod resources;
 pub mod probe;
 pub mod quality;
 pub mod query;
 pub mod redact;
+pub mod resources;
 pub mod schedule;
 pub mod scoring;
 pub mod session;
-pub mod underlay;
 pub mod session_trace;
 pub mod trace;
 pub mod trace_svg;
 pub mod udp;
+pub mod underlay;
 
 pub use budgets::{
     BudgetKind, BudgetLimits, BudgetRejection, BudgetUsage, Budgets, ControlPermit, DialPermit,
@@ -64,12 +64,6 @@ pub use inbound::{
     CODE_INBOUND_REPLY_FAILED, CODE_INBOUND_RESPONDER_CONSUMED, CODE_INBOUND_SOURCE_INVALID,
     CODE_INBOUND_UNSUPPORTED,
 };
-pub use outbound::{
-    CancelToken, DatagramIo, DatagramOutbound, EvidenceKind, OpenContext, OpenError, OpenStage,
-    OpenedAssociation, OpenedStream, OutboundCapabilities, StreamIo, StreamOutbound, TargetBinding,
-    CODE_OPEN_CANCELLED, CODE_OPEN_HANDSHAKE, CODE_OPEN_POOL_EXHAUSTED, CODE_OPEN_REFUSED,
-    CODE_OPEN_TIMEOUT, CODE_OPEN_UNSUPPORTED,
-};
 pub use meter::{
     AttributionView, OriginLedger, SessionMeter, SessionTotals, TrafficDirection, TrafficOrigin,
     CODE_METER_ATTEMPT, CODE_METER_CARRIER, CODE_METER_SESSION, MAX_TRACKED_ATTEMPTS,
@@ -78,17 +72,11 @@ pub use observer::{
     MetricKey, ObserverStats, ObserverView, SessionObserver, SessionStage, StageEvent, StageResult,
     CODE_OBSERVER_EVENT, OBSERVER_RING_DEFAULT,
 };
-pub use resources::{
-    AssembledBackend, BackendDeclaration, LeaseGuard, LeaseKey, LeaseState, PoolResourceKind,
-    ResourceError, CODE_CAP_FEATURE, CODE_CAP_REUSE, CODE_CAP_SHAPE, CODE_CAP_TRANSPORT,
-    CODE_KEY_INVALID, CODE_LEASE_STATE, assemble_backend,
-};
-pub use underlay::{
-    BypassCapability, BypassOutcome, BypassPolicy, CompositionError, DialOutcome, DialTarget,
-    PlatformBypass, RawSocketHandle, StreamTransport, TransportClass, TransportStack,
-    UnderlayDialer, CODE_BYPASS_UNINJECTABLE, CODE_DIAL_TARGET, CODE_STACK_DUP, CODE_STACK_NATIVE,
-    CODE_STACK_ORDER, CODE_STACK_UNKNOWN, CODE_STACK_UNREGISTERED, NATIVE_TRANSPORTS,
-    STREAM_TRANSPORTS, check_bypass_compat, check_dial_target, wrap_chain,
+pub use outbound::{
+    CancelToken, DatagramIo, DatagramOutbound, EvidenceKind, OpenContext, OpenError, OpenStage,
+    OpenedAssociation, OpenedStream, OutboundCapabilities, StreamIo, StreamOutbound, TargetBinding,
+    CODE_OPEN_CANCELLED, CODE_OPEN_HANDSHAKE, CODE_OPEN_POOL_EXHAUSTED, CODE_OPEN_REFUSED,
+    CODE_OPEN_TIMEOUT, CODE_OPEN_UNSUPPORTED,
 };
 pub use plan::{
     DecisionSnapshot, EndpointRef, ExecutionOutcome, FlowAssociation, GenerationRef,
@@ -111,6 +99,11 @@ pub use quality::{
     QualityMetric, QualitySample, QualitySampleError, SampleSource, SampleStatus, SampleValue,
     CODE_QUALITY_EXPIRED, CODE_QUALITY_PEER_MISSING, CODE_QUALITY_UNKNOWN,
 };
+pub use resources::{
+    assemble_backend, AssembledBackend, BackendDeclaration, LeaseGuard, LeaseKey, LeaseState,
+    PoolResourceKind, ResourceError, CODE_CAP_FEATURE, CODE_CAP_REUSE, CODE_CAP_SHAPE,
+    CODE_CAP_TRANSPORT, CODE_KEY_INVALID, CODE_LEASE_STATE,
+};
 pub use schedule::{
     FairScheduler, Grant, ScheduleError, ScheduleShape, TrafficClass, CODE_EMPTY_REQUEST,
     CODE_SHAPE_INVALID,
@@ -130,6 +123,13 @@ pub use session_trace::{
     CODE_ASSOCIATION_RECLAIMED, CODE_ATTEMPT_DIALED, CODE_EGRESS_ESTABLISHED, CODE_REPLY_FAILED,
     CODE_STREAM_CLOSED, CODE_TRACE_PLAN, CODE_TRACE_RULE, CODE_TRACE_TAKEOVER,
     CODE_TRANSFER_FIRST_DOWN, CODE_TRANSFER_FIRST_UP,
+};
+pub use underlay::{
+    check_bypass_compat, check_dial_target, wrap_chain, BypassCapability, BypassOutcome,
+    BypassPolicy, CompositionError, DialOutcome, DialTarget, PlatformBypass, RawSocketHandle,
+    StreamTransport, TransportClass, TransportStack, UnderlayDialer, CODE_BYPASS_UNINJECTABLE,
+    CODE_DIAL_TARGET, CODE_STACK_DUP, CODE_STACK_NATIVE, CODE_STACK_ORDER, CODE_STACK_UNKNOWN,
+    CODE_STACK_UNREGISTERED, NATIVE_TRANSPORTS, STREAM_TRANSPORTS,
 };
 
 /// Trait object safe IO stream with AsyncRead/AsyncWrite combined.

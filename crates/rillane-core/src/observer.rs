@@ -11,8 +11,8 @@
 //! 经同一 [`ObserverView`] 复用诊断视图。
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use crate::meter::TrafficOrigin;
 use crate::resources::ResourceError;

@@ -17,7 +17,7 @@ use rillane_config::{
     ObfsPluginConfig, ObfuscationConfig, RillaneConfig, RoutingConfig, TelemetryConfig, UdpConfig,
 };
 use rillane_core::{FlowContext, FlowId, FlowMetadata, FlowTarget, TargetProto};
-use rillane_mesh::{CapabilityOffer, NegotiationError, PeerHello, PeerTrust, negotiate};
+use rillane_mesh::{negotiate, CapabilityOffer, NegotiationError, PeerHello, PeerTrust};
 use rillane_runtime::mesh_transport::{MeshTlsConfig, MeshUdpGate};
 use rillane_runtime::{Runtime, RuntimeBuilder, RuntimeConfig};
 use rillane_subscription::ClashConverter;

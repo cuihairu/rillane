@@ -6,8 +6,8 @@
 //! 相加不是总使用量；发送成功不证明对端已接收。
 
 use rillane_core::{
-    AttributionView, CODE_METER_ATTEMPT, CODE_METER_CARRIER, CODE_METER_SESSION, OriginLedger,
-    SessionMeter, SessionTotals, TrafficDirection, TrafficOrigin,
+    AttributionView, OriginLedger, SessionMeter, SessionTotals, TrafficDirection, TrafficOrigin,
+    CODE_METER_ATTEMPT, CODE_METER_CARRIER, CODE_METER_SESSION,
 };
 
 /// 模拟出口写侧：每次 write 最多吞 `cap` 字节（部分写真实面）——

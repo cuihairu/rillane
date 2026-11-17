@@ -177,10 +177,7 @@ impl DnsService {
     /// 注入代际源（RIL-020 解析上下文）：本地监听面 fake-ip 分配时取
     /// 当下配置代际写进绑定（`FakeIpTable::reverse_with_context` 可读，
     /// 路由据此挂正确代际建计划）。未注入 = 空代际。
-    pub fn with_generation_source(
-        mut self,
-        source: Arc<dyn Fn() -> String + Send + Sync>,
-    ) -> Self {
+    pub fn with_generation_source(mut self, source: Arc<dyn Fn() -> String + Send + Sync>) -> Self {
         self.generation_source = Some(source);
         self
     }
@@ -551,10 +548,10 @@ mod tests {
         let mut resolver_cfg = dns_block_to_resolver_config(&base, &[]).expect("转换应成功");
         resolver_cfg.trusted = vec![DnsUpstream::Udp(mock)];
         let resolver = Arc::new(DnsResolver::new(resolver_cfg).expect("引擎装配应成功"));
-        let table = Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/15").unwrap());
+        let table =
+            Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/15").unwrap());
         let port = free_udp_port();
-        let gen_src: Arc<dyn Fn() -> String + Send + Sync> =
-            Arc::new(|| "gen-svc-7".to_string());
+        let gen_src: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "gen-svc-7".to_string());
         let svc = DnsService::new(
             resolver,
             SocketAddr::from(([127, 0, 0, 1], port)),
@@ -589,9 +586,7 @@ mod tests {
         let DnsAnswerData::A(ip) = resp.answers[0].data else {
             panic!("应为 A 应答");
         };
-        let ctx = table
-            .reverse_with_context(&ip)
-            .expect("池表应有绑定");
+        let ctx = table.reverse_with_context(&ip).expect("池表应有绑定");
         assert_eq!(ctx.domain, "ctx.example");
         assert_eq!(ctx.generation_id, "gen-svc-7", "代际源应写进绑定");
         svc.stop().await.expect("收尾 stop 应成功");

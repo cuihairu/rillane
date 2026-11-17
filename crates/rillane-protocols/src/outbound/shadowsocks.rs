@@ -83,7 +83,10 @@ impl ShadowsocksConnector {
                 .map_err(|_| anyhow!("SS2022 密码须为 base64 密钥: {method}"))?;
             let need = cipher.key_len();
             if key.len() != need {
-                bail!("SS2022 密钥长度须为 {need} 字节，得 {} 字节: {method}", key.len());
+                bail!(
+                    "SS2022 密钥长度须为 {need} 字节，得 {} 字节: {method}",
+                    key.len()
+                );
             }
         }
         let addr = ServerAddr::DomainName(server.to_string(), port);

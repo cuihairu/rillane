@@ -1121,9 +1121,7 @@ async fn query_upstream(
 /// 原因与可用替代（UDP/DoT 上游已旁路），不静默。
 static DOH_UNBYPASSED_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 fn warn_doh_unbypassed(url: &str) {
-    if DOH_UNBYPASSED_WARNED.get().is_none()
-        && DOH_UNBYPASSED_WARNED.set(()).is_ok()
-    {
+    if DOH_UNBYPASSED_WARNED.get().is_none() && DOH_UNBYPASSED_WARNED.set(()).is_ok() {
         tracing::warn!(
             target: "rillane::network",
             %url,
@@ -1207,8 +1205,7 @@ async fn connect_peer_marked(peer: &str, egress_mark: u32) -> Result<TcpStream, 
     }
     Err(format!(
         "连接 {peer} 失败：{}",
-        last
-            .map(|e| e.to_string())
+        last.map(|e| e.to_string())
             .unwrap_or_else(|| "无候选地址".to_string())
     ))
 }
@@ -1365,10 +1362,7 @@ impl LocalDnsServer {
     /// 注入代际源（RIL-020 解析上下文）：fake-ip 分配时取当下配置代际
     /// 身份写进绑定。运行时装配在发布协调器（RIL-019）接线后传入真实
     /// 代际读数；未注入 = 空代际。
-    pub fn with_generation_source(
-        mut self,
-        source: Arc<dyn Fn() -> String + Send + Sync>,
-    ) -> Self {
+    pub fn with_generation_source(mut self, source: Arc<dyn Fn() -> String + Send + Sync>) -> Self {
         self.generation_source = Some(source);
         self
     }
@@ -1474,10 +1468,7 @@ async fn handle_dns_query(
                 // RIL-020：分配挂解析上下文（代际源注入则取当下代际，未
                 // 注入空串=显式缺失）；池满且全钉住（活跃会话在用）→
                 // SERVFAIL，绝不转手在用地址
-                let generation = generation_source
-                    .as_ref()
-                    .map(|f| f())
-                    .unwrap_or_default();
+                let generation = generation_source.as_ref().map(|f| f()).unwrap_or_default();
                 match table.alloc_with_generation(&q.domain, &generation) {
                     Ok(ip) => {
                         debug!("fake-ip 应答：{} → {ip}（gen {generation:?}）", q.domain);
@@ -2506,7 +2497,8 @@ mod tests {
         };
         let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
         // /30 池恰 4 地址，便于打满
-        let table = Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/30").unwrap());
+        let table =
+            Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/30").unwrap());
         let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
@@ -2582,10 +2574,7 @@ mod tests {
             .resolve("marked.test", DnsRecordType::A)
             .await
             .expect("mark ≠ 0（降级或真打）都应解析成功");
-        assert_eq!(
-            answers[0].data,
-            DnsAnswerData::A(Ipv4Addr::new(9, 9, 9, 9))
-        );
+        assert_eq!(answers[0].data, DnsAnswerData::A(Ipv4Addr::new(9, 9, 9, 9)));
         assert!(
             hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "上游应收到查询"

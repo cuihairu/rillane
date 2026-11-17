@@ -68,16 +68,9 @@ pub use ports::{
     SocketHandle, SocketInput, SystemChange, TransportProtocol,
 };
 #[cfg(target_os = "linux")]
-pub use takeover::{
-    parse_default_ifaces, parse_packet_meta, parse_resolv_nameservers, parse_step_payload,
-    pump_tun, read_net_snapshot, read_so_mark, step_payload, LinuxNetworkEvents,
-    LinuxRouteTransaction, LinuxSocketBypass, LinuxTakeoverPort, NetSnapshot, StepExecutor,
-    TakeoverPortStats, TAKEOVER_FWMARK,
-};
-#[cfg(target_os = "linux")]
 pub use recovery::{
-    handle_network_event, journaling_executor, plan_for_event, recover, CrashJournal,
-    JournalEntry, JournalSnapshot, NetworkRecoveryAction, RecoveryReport, AUDIT_TARGET,
+    handle_network_event, journaling_executor, plan_for_event, recover, CrashJournal, JournalEntry,
+    JournalSnapshot, NetworkRecoveryAction, RecoveryReport, AUDIT_TARGET,
 };
 pub use route::{
     BypassAction, BypassCondition, BypassRule, RouteDestination, RouteManager, RouteRule,
@@ -86,6 +79,13 @@ pub use route::{
 pub use side_effects::{
     ChangeEntry, InverseChange, Ownership, SideEffectError, SideEffectJournal, SystemArea,
     CODE_SIDE_EFFECT_FOREIGN, CODE_SIDE_EFFECT_UNKNOWN,
+};
+#[cfg(target_os = "linux")]
+pub use takeover::{
+    parse_default_ifaces, parse_packet_meta, parse_resolv_nameservers, parse_step_payload,
+    pump_tun, read_net_snapshot, read_so_mark, step_payload, LinuxNetworkEvents,
+    LinuxRouteTransaction, LinuxSocketBypass, LinuxTakeoverPort, NetSnapshot, StepExecutor,
+    TakeoverPortStats, TAKEOVER_FWMARK,
 };
 pub use tun::{PacketInfo as TunPacketInfo, PacketType, TunConfig, TunProvider};
 // pub use platform::*;

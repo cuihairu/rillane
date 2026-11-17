@@ -36,11 +36,11 @@ use std::sync::Mutex;
 use serde::Serialize;
 
 use rillane_config::{
-    ApplyError, ApplyLedger, ApplyReceipt, ApplyReconcile, ApplyRequest, ApplyResult, ApplyStatus,
+    digest_parts, merge_patch, new_proposal_id, preview_config_patch, rollback_apply, ApplyError,
+    ApplyLedger, ApplyReceipt, ApplyReconcile, ApplyRequest, ApplyResult, ApplyStatus,
     ApprovalAuthority, ApprovalError, CapabilitySet, ConfigPreview, ConfigProposal,
     ExecutionOutcome, ProposalApproval, ProposalInput, ProposalStore, ProposalStoreError,
-    RillaneConfig, RollbackError, RollbackExecution, RollbackReport, RollbackRequest, digest_parts,
-    merge_patch, new_proposal_id, preview_config_patch, rollback_apply,
+    RillaneConfig, RollbackError, RollbackExecution, RollbackReport, RollbackRequest,
 };
 
 /// 回滚提案的标记范围（daemon 创建回滚提案时固定使用；正向提案禁用）。

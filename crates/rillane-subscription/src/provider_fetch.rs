@@ -236,8 +236,7 @@ impl ProviderFetcher {
                         let wait = until.saturating_duration_since(Instant::now());
                         return Err(ProviderRefreshError::BackoffGate {
                             provider,
-                            retry_after_secs: wait.as_secs()
-                                + u64::from(wait.subsec_millis() > 0),
+                            retry_after_secs: wait.as_secs() + u64::from(wait.subsec_millis() > 0),
                             last_error: state.last_error.clone(),
                         });
                     }
@@ -372,7 +371,10 @@ impl ProviderFetcher {
                         state.conditional = None;
                     }
                 }
-                Err(ProviderRefreshError::Parse { provider, reason: refresh_err.reason })
+                Err(ProviderRefreshError::Parse {
+                    provider,
+                    reason: refresh_err.reason,
+                })
             }
         }
     }
@@ -422,7 +424,10 @@ mod tests {
                 ),
                 kind: rillane_config::ObjectKind::Node,
                 display_name: format!("节点-{i}"),
-                location: rillane_config::SourceLocation::new(source.clone(), format!("proxies/{i}")),
+                location: rillane_config::SourceLocation::new(
+                    source.clone(),
+                    format!("proxies/{i}"),
+                ),
             })
             .collect())
     }
@@ -484,11 +489,20 @@ mod tests {
         store
             .refresh_with(SourceId::new("p").unwrap(), "1.1.1.1", parse_stub)
             .unwrap();
-        let before = store.snapshot(&SourceId::new("p").unwrap()).unwrap().clone();
+        let before = store
+            .snapshot(&SourceId::new("p").unwrap())
+            .unwrap()
+            .clone();
 
         let (_, cancel) = CancelToken::channel();
         let err = pf
-            .refresh_payload(&SourceId::new("p").unwrap(), &url, &mut store, &cancel, parse_stub)
+            .refresh_payload(
+                &SourceId::new("p").unwrap(),
+                &url,
+                &mut store,
+                &cancel,
+                parse_stub,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ProviderRefreshError::Parse { .. }), "{err}");
@@ -503,7 +517,13 @@ mod tests {
         assert!(wait.is_some(), "应有退避余量");
         assert!(last_err.unwrap().contains("坏载荷"));
         let err2 = pf
-            .refresh_payload(&SourceId::new("p").unwrap(), &url, &mut store, &cancel, parse_stub)
+            .refresh_payload(
+                &SourceId::new("p").unwrap(),
+                &url,
+                &mut store,
+                &cancel,
+                parse_stub,
+            )
             .await
             .unwrap_err();
         assert!(
@@ -548,7 +568,13 @@ mod tests {
 
         let (_, cancel) = CancelToken::channel();
         let err = pf
-            .refresh_payload(&SourceId::new("p").unwrap(), &url, &mut store, &cancel, parse_stub)
+            .refresh_payload(
+                &SourceId::new("p").unwrap(),
+                &url,
+                &mut store,
+                &cancel,
+                parse_stub,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ProviderRefreshError::Fetch { .. }), "{err}");
@@ -649,8 +675,7 @@ mod tests {
                         .lines()
                         .find(|l| l.to_ascii_lowercase().starts_with("if-none-match:"))
                     {
-                        seen
-                            .lock()
+                        seen.lock()
                             .unwrap()
                             .push(inm.split(':').nth(1).unwrap_or("").trim().to_string());
                         let _ = s.write_all(body304.as_bytes()).await;
@@ -667,7 +692,13 @@ mod tests {
 
         let (_, cancel) = CancelToken::channel();
         let out = pf
-            .refresh_payload(&SourceId::new("p").unwrap(), &url, &mut store, &cancel, parse_stub)
+            .refresh_payload(
+                &SourceId::new("p").unwrap(),
+                &url,
+                &mut store,
+                &cancel,
+                parse_stub,
+            )
             .await
             .unwrap();
         assert!(
@@ -799,10 +830,7 @@ mod tests {
             h.await.unwrap().expect("并发下载应成功");
         }
         let max = max_seen.load(Ordering::SeqCst);
-        assert!(
-            max <= 2,
-            "并发上限 2 不得被突破，服务端观测峰值 {max}"
-        );
+        assert!(max <= 2, "并发上限 2 不得被突破，服务端观测峰值 {max}");
     }
 
     /// 验收「预置摘要」：载荷摘要与预置不符 → 终态失败不发布；一致 →
@@ -880,7 +908,13 @@ mod tests {
         let (_, cancel) = CancelToken::channel();
         let url = format!("http://user:hunter2@{addr}/payload?token=abc123");
         let err = pf
-            .refresh_payload(&SourceId::new("p").unwrap(), &url, &mut store, &cancel, parse_stub)
+            .refresh_payload(
+                &SourceId::new("p").unwrap(),
+                &url,
+                &mut store,
+                &cancel,
+                parse_stub,
+            )
             .await
             .unwrap_err();
         let text = format!("{err}");
@@ -889,7 +923,13 @@ mod tests {
 
         // 退避门文案同样脱敏
         let gate = pf
-            .refresh_payload(&SourceId::new("p").unwrap(), &url, &mut store, &cancel, parse_stub)
+            .refresh_payload(
+                &SourceId::new("p").unwrap(),
+                &url,
+                &mut store,
+                &cancel,
+                parse_stub,
+            )
             .await
             .unwrap_err();
         let gate_text = format!("{gate}");

@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use rillane_core::meter::{AttributionView, SessionMeter, TrafficDirection, TrafficOrigin};
 use rillane_core::observer::{
-    MetricKey, OBSERVER_RING_DEFAULT, SessionObserver, SessionStage, StageEvent, StageResult,
+    MetricKey, SessionObserver, SessionStage, StageEvent, StageResult, OBSERVER_RING_DEFAULT,
 };
 use rillane_core::outbound::{
     EvidenceKind, OpenContext, OpenError, OpenStage, OutboundCapabilities, StreamIo,
@@ -20,11 +20,11 @@ use rillane_core::outbound::{
 use rillane_core::plan::{EndpointRef, GenerationRef};
 use rillane_core::pool::TransportReuse;
 use rillane_core::resources::{
-    BackendDeclaration, LeaseGuard, LeaseKey, PoolResourceKind, assemble_backend,
+    assemble_backend, BackendDeclaration, LeaseGuard, LeaseKey, PoolResourceKind,
 };
 use rillane_core::underlay::{
-    BypassCapability, BypassOutcome, DialOutcome, DialTarget, PlatformBypass, TransportStack,
-    UnderlayDialer, check_dial_target,
+    check_dial_target, BypassCapability, BypassOutcome, DialOutcome, DialTarget, PlatformBypass,
+    TransportStack, UnderlayDialer,
 };
 
 // ---------------------------------------------------------------------------
@@ -471,16 +471,14 @@ async fn half_close_and_cancel_reconcile() {
         StageResult::Succeeded,
         None,
     ));
-    assert!(
-        dialer
-            .dial(
-                &DialTarget::new("node-c.example.com", 443).expect("目标"),
-                &ctx,
-                None
-            )
-            .await
-            .is_ok()
-    );
+    assert!(dialer
+        .dial(
+            &DialTarget::new("node-c.example.com", 443).expect("目标"),
+            &ctx,
+            None
+        )
+        .await
+        .is_ok());
     meter.record_underlay(0, 60);
     meter.attribute_carrier(0).expect("归属唯一尝试");
 
@@ -506,16 +504,14 @@ async fn half_close_and_cancel_reconcile() {
     let meter2 = SessionMeter::new("sess-cancel-1", TrafficOrigin::User).expect("合法");
     let ctx2 = OpenContext::new("sess-cancel-1", gen_id).expect("合法上下文");
     let dialer2 = ScriptedDialer::new(false);
-    assert!(
-        dialer2
-            .dial(
-                &DialTarget::new("node-d.example.com", 443).expect("目标"),
-                &ctx2,
-                None
-            )
-            .await
-            .is_ok()
-    );
+    assert!(dialer2
+        .dial(
+            &DialTarget::new("node-d.example.com", 443).expect("目标"),
+            &ctx2,
+            None
+        )
+        .await
+        .is_ok());
     meter2.record_underlay(0, 50);
     meter2.attribute_carrier(0).expect("归属唯一尝试");
     let mut sink = LenSink { cap: 64 };
@@ -551,7 +547,7 @@ fn udp_multi_target_and_pool_isolation() {
     meter.record_datagram(TrafficDirection::ClientToTarget, 0); // → t1 零长
     meter.record_datagram(TrafficDirection::ClientToTarget, 80); // → t2
     meter.record_datagram(TrafficDirection::TargetToClient, 200); // ← t1
-    // 越绑定目标（t3）显式拒绝——丢弃面，不冒充业务量
+                                                                  // 越绑定目标（t3）显式拒绝——丢弃面，不冒充业务量
     meter.record_drop(1);
 
     let t = meter.totals();

@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use async_trait::async_trait;
 use anytls::{
-    Address, Client, DEFAULT_MAX_SESSION_AGE, DEFAULT_SCHEME, Dialer, PaddingFactory, StreamIo,
-    UotMode, UotRequest, uot_encode_packet, uot_get_packet_from_stream, uot_sentinel_destination,
-    write_auth_with_client_id,
+    uot_encode_packet, uot_get_packet_from_stream, uot_sentinel_destination,
+    write_auth_with_client_id, Address, Client, Dialer, PaddingFactory, StreamIo, UotMode,
+    UotRequest, DEFAULT_MAX_SESSION_AGE, DEFAULT_SCHEME,
 };
+use async_trait::async_trait;
 use rillane_core::udp::{EgressUdpConnector, UdpRelay};
 use rillane_core::{
     EgressConnector, Flow, FlowContext, FlowReport, FlowTarget, RouteDecision, TargetProto,
@@ -79,11 +79,12 @@ impl AnytlsConnector {
                     (self.proxy_addr(), self.password.clone(), self.sni.clone());
                 let dial_padding = Arc::clone(&padding);
                 let dialer: Dialer = Arc::new(move || {
-                    let (server, password, sni) =
-                        (server.clone(), password.clone(), sni.clone());
+                    let (server, password, sni) = (server.clone(), password.clone(), sni.clone());
                     let tls = tls.clone();
                     let padding = Arc::clone(&dial_padding);
-                    Box::pin(async move { dial(&server, sni.as_deref(), &password, &padding, tls).await })
+                    Box::pin(async move {
+                        dial(&server, sni.as_deref(), &password, &padding, tls).await
+                    })
                 });
                 Ok(Client::new(
                     dialer,
@@ -105,9 +106,9 @@ async fn dial(
     padding: &RwLock<PaddingFactory>,
     tls: tokio_rustls::TlsConnector,
 ) -> std::io::Result<anytls::BoxTransport> {
-    let tcp = TcpStream::connect(server)
-        .await
-        .map_err(|e| std::io::Error::other(format!("AnyTLS 控制连接失败（server={server}）: {e}")))?;
+    let tcp = TcpStream::connect(server).await.map_err(|e| {
+        std::io::Error::other(format!("AnyTLS 控制连接失败（server={server}）: {e}"))
+    })?;
     let name = sni.unwrap_or(server.split(':').next().unwrap_or(server));
     let server_name = rustls::pki_types::ServerName::try_from(name.to_string())
         .map_err(|e| std::io::Error::other(format!("AnyTLS SNI 名称非法（{name}）: {e}")))?;
@@ -117,7 +118,9 @@ async fn dial(
     let padding = padding.read().await.clone();
     write_auth_with_client_id(&mut transport, password, &padding, None)
         .await
-        .map_err(|e| std::io::Error::other(format!("AnyTLS 会话认证失败（server={server}）: {e}")))?;
+        .map_err(|e| {
+            std::io::Error::other(format!("AnyTLS 会话认证失败（server={server}）: {e}"))
+        })?;
     Ok(Box::new(transport))
 }
 
@@ -229,9 +232,10 @@ impl EgressUdpConnector for AnytlsUdpConnector {
         let mut io = StreamIo::new(stream);
         // 数据报模式声明：sentinel destination + UotRequest（库 client_app 同序）
         let outer: Vec<u8> = uot_sentinel_destination().into();
-        io.write_all(&outer).await.context("UoT sentinel 写入失败")?;
-        let request: Vec<u8> =
-            UotRequest::new(UotMode::Datagram, Address::unspecified_v4()).into();
+        io.write_all(&outer)
+            .await
+            .context("UoT sentinel 写入失败")?;
+        let request: Vec<u8> = UotRequest::new(UotMode::Datagram, Address::unspecified_v4()).into();
         io.write_all(&request).await.context("UoT 请求写入失败")?;
         Ok(Arc::new(AnytlsUdpRelay {
             stream: Mutex::new(io),
@@ -279,9 +283,6 @@ impl UdpRelay for AnytlsUdpRelay {
             ));
         }
         buf[..payload.len()].copy_from_slice(&payload);
-        Ok((
-            flow_target_of(source, &self.fixed_target),
-            payload.len(),
-        ))
+        Ok((flow_target_of(source, &self.fixed_target), payload.len()))
     }
 }

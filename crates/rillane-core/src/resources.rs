@@ -22,7 +22,7 @@ use std::fmt;
 use crate::outbound::OutboundCapabilities;
 use crate::plan::EndpointRef;
 use crate::pool::TransportReuse;
-use crate::underlay::{STREAM_TRANSPORTS, TransportStack};
+use crate::underlay::{TransportStack, STREAM_TRANSPORTS};
 
 // ---------------------------------------------------------------------------
 // 稳定原因码

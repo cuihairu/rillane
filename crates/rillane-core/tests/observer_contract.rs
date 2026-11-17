@@ -4,8 +4,8 @@
 //! 留有界尾环；CLI/MCP 复用同一诊断视图。
 
 use rillane_core::{
-    CODE_OBSERVER_EVENT, MetricKey, OBSERVER_RING_DEFAULT, SessionMeter, SessionObserver,
-    SessionStage, StageEvent, StageResult, TrafficDirection, TrafficOrigin,
+    MetricKey, SessionMeter, SessionObserver, SessionStage, StageEvent, StageResult,
+    TrafficDirection, TrafficOrigin, CODE_OBSERVER_EVENT, OBSERVER_RING_DEFAULT,
 };
 
 fn ev(

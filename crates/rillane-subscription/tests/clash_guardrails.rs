@@ -105,7 +105,11 @@ fn load_balance_strategy_subkey_dispatch() {
     let clash = converter.parse(&yaml).unwrap();
     let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
     assert_eq!(config.routing.groups[0].strategy, Strategy::ConsistentHash);
-    assert_eq!(report.degraded_groups.len(), 1, "sticky-sessions 须进降级清单");
+    assert_eq!(
+        report.degraded_groups.len(),
+        1,
+        "sticky-sessions 须进降级清单"
+    );
     assert!(
         report.degraded_groups[0].1.contains("sticky-sessions"),
         "降级说明须点名子键: {:?}",
@@ -143,7 +147,10 @@ fn fallback_group_imports_with_probe_params() {
     let (config, report) = converter.convert_to_rillane_with_report(&clash).unwrap();
     assert_eq!(config.routing.groups[0].strategy, Strategy::Fallback);
     // 探测参数随行：url/interval → UrlTestConfig；interval 单位是秒（RIL-092）
-    let ut = config.routing.groups[0].url_test.as_ref().expect("fallback 组带 url 应注入探测参数");
+    let ut = config.routing.groups[0]
+        .url_test
+        .as_ref()
+        .expect("fallback 组带 url 应注入探测参数");
     assert_eq!(ut.probe, "www.gstatic.com:443");
     assert_eq!(ut.path, "/generate_204");
     assert_eq!(ut.interval_secs, 300);
@@ -195,7 +202,10 @@ async fn nodes_only_import_keeps_nodes_strips_policy() {
         last_modified: None,
     };
     let full_result = full.auto_convert(&sub, &yaml).await.unwrap();
-    assert!(!full_result.config.routing.groups.is_empty(), "FullPolicy 保留组");
+    assert!(
+        !full_result.config.routing.groups.is_empty(),
+        "FullPolicy 保留组"
+    );
 
     // NodesOnly：只收出口节点，策略面整块剥离并显式登记
     let nodes_only = SubscriptionConverter::with_options(ConversionOptions {
@@ -392,7 +402,10 @@ fn report_summary_renders_counts_and_names() {
     assert!(summary.contains("降级组 1 个"));
     assert!(summary.contains("g1"));
     // RIL-015：进程规则不再是跳过项，而是显式降级项
-    assert!(summary.contains("降级规则 1 条"), "进程规则须按降级报告: {summary}");
+    assert!(
+        summary.contains("降级规则 1 条"),
+        "进程规则须按降级报告: {summary}"
+    );
     assert!(summary.contains("rule-1"));
     // 空报告字面量
     assert_eq!(

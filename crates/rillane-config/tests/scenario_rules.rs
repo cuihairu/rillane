@@ -2,7 +2,7 @@
 //! roundtrip、空场景面不落盘、构建期校验（name/target 非空；条件正则
 //! 按 `scenario:<名>` 归因——与规则面同口径，非法正则不得吞成默认路由）。
 
-use rillane_config::{MatchCondition, ScenarioFailureAction, RoutingConfig};
+use rillane_config::{MatchCondition, RoutingConfig, ScenarioFailureAction};
 
 #[test]
 fn scenario_rule_defaults_and_roundtrip() {

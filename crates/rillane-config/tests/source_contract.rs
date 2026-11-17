@@ -3,8 +3,8 @@
 
 use rillane_config::{
     derive_local_id, CompatibilityDiagnostic, ObjectCatalog, ObjectId, ObjectKind,
-    SourceContractError, SourceId, SourceLocation, SourceObject, SourceSnapshot,
-    CODE_COMPAT_LOSSY, CODE_COMPAT_UNSUPPORTED, CODE_SOURCE_ID_INVALID, CODE_SOURCE_MISMATCH,
+    SourceContractError, SourceId, SourceLocation, SourceObject, SourceSnapshot, CODE_COMPAT_LOSSY,
+    CODE_COMPAT_UNSUPPORTED, CODE_SOURCE_ID_INVALID, CODE_SOURCE_MISMATCH,
 };
 
 /// 构造来源内对象：local_id 由内容身份派生（Clash proxies 无上游 ID）
@@ -34,8 +34,18 @@ fn same_display_name_across_sources_no_conflict() {
     let src_b = SourceId::new("airport-b").unwrap();
     let name = "香港 01";
 
-    let obj_a = node(src_a.clone(), "proxies/0", name, &["vmess", "1.2.3.4", "443"]);
-    let obj_b = node(src_b.clone(), "proxies/0", name, &["vmess", "5.6.7.8", "443"]);
+    let obj_a = node(
+        src_a.clone(),
+        "proxies/0",
+        name,
+        &["vmess", "1.2.3.4", "443"],
+    );
+    let obj_b = node(
+        src_b.clone(),
+        "proxies/0",
+        name,
+        &["vmess", "5.6.7.8", "443"],
+    );
     let obj_a_id = obj_a.id.clone();
     let obj_b_id = obj_b.id.clone();
 
@@ -48,10 +58,17 @@ fn same_display_name_across_sources_no_conflict() {
         .expect("同名跨来源对象必须共存，不冲突");
 
     assert_eq!(catalog.len(), 2, "同名两对象都在目录中");
-    assert_eq!(catalog.by_display_name(name).len(), 2, "按名查找可区分地返回两个");
+    assert_eq!(
+        catalog.by_display_name(name).len(),
+        2,
+        "按名查找可区分地返回两个"
+    );
     assert!(catalog.get(&obj_a_id).is_some());
     assert!(catalog.get(&obj_b_id).is_some());
-    assert_ne!(obj_a_id, obj_b_id, "身份 = (来源, local_id)，来源不同即不同");
+    assert_ne!(
+        obj_a_id, obj_b_id,
+        "身份 = (来源, local_id)，来源不同即不同"
+    );
 }
 
 #[test]
@@ -98,8 +115,7 @@ fn diagnostic_locates_object_and_field() {
     );
     assert_eq!(lossy.code, CODE_COMPAT_LOSSY);
     assert_eq!(
-        lossy.location.pointer,
-        "proxies/3/ws-opts.headers.Host",
+        lossy.location.pointer, "proxies/3/ws-opts.headers.Host",
         "诊断定位到具体字段"
     );
     assert_eq!(lossy.field.as_deref(), Some("host"));
@@ -115,7 +131,12 @@ fn delete_and_rename_semantics_explicit() {
         src.clone(),
         vec![
             node(src.clone(), "proxies/0", "A", &["vmess", "10.0.0.1", "443"]),
-            node(src.clone(), "proxies/1", "B-old", &["vmess", "10.0.0.2", "443"]),
+            node(
+                src.clone(),
+                "proxies/1",
+                "B-old",
+                &["vmess", "10.0.0.2", "443"],
+            ),
             node(src.clone(), "proxies/2", "C", &["vmess", "10.0.0.3", "443"]),
         ],
     );
@@ -123,7 +144,12 @@ fn delete_and_rename_semantics_explicit() {
         src.clone(),
         vec![
             node(src.clone(), "proxies/0", "A", &["vmess", "10.0.0.1", "443"]),
-            node(src.clone(), "proxies/1", "B-new", &["vmess", "10.0.0.2", "443"]),
+            node(
+                src.clone(),
+                "proxies/1",
+                "B-new",
+                &["vmess", "10.0.0.2", "443"],
+            ),
             node(src.clone(), "proxies/3", "D", &["vmess", "10.0.0.4", "443"]),
         ],
     );
@@ -147,7 +173,12 @@ fn delete_and_rename_semantics_explicit() {
     // 同显示名、不同身份 = 两个对象（增+删），不算改名——不靠名字猜身份
     let v3 = snapshot(
         src.clone(),
-        vec![node(src.clone(), "proxies/9", "A", &["vmess", "10.0.0.9", "443"])],
+        vec![node(
+            src.clone(),
+            "proxies/9",
+            "A",
+            &["vmess", "10.0.0.9", "443"],
+        )],
     );
     let diff = v1.diff(&v3).expect("同来源 diff 必须成功");
     assert!(
