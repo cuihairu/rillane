@@ -24,6 +24,7 @@
 //! 单向的：表面消费内核契约，内核对面无感知。
 
 pub mod authz;
+pub mod dev_snippets;
 pub mod dispatch;
 pub mod mcp;
 pub mod ops;

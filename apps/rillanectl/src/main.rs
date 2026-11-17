@@ -1,6 +1,6 @@
 use std::{
-    fs,
-    path::PathBuf,
+    env, fs,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,6 +12,10 @@ use rcgen::{
 };
 use reqwest::blocking::Client;
 use rillane_app::client::BlockingApp;
+use rillane_app::dev_snippets::{
+    diff_preview, forbidden_ssh_lines, git_config_lines, plan_ssh_write, ssh_config_block,
+    terminal_env_lines, DevShell, ProxyEndpoints,
+};
 use rillane_app::ops::{AppOperation, FlowEventsParams, FlowListFilter};
 use rillane_config::{
     EgressConfig, EgressDescriptor, IngressConfig, IngressDescriptor, RillaneConfig,
@@ -66,6 +70,30 @@ enum Command {
     },
     /// TLS 指纹形态预设对照表（O-tfp1：各预设 shape_material 四维导出）
     TlsFingerprint,
+    /// 开发者终端与配置片段预览（RIL-147：终端变量/Git/SSH 片段，缺省只打印不修改系统）
+    DevEnv {
+        /// 终端 shell：bash | zsh | fish | powershell | cmd
+        #[arg(long, default_value = "bash")]
+        shell: String,
+        /// HTTP 代理入口 host:port（通常为 mixed 入口 bind）
+        #[arg(long)]
+        http: String,
+        /// SOCKS5 代理入口 host:port（SSH ProxyCommand 用）
+        #[arg(long)]
+        socks: String,
+        /// SSH 走代理的主机表（逗号分隔；缺省 github.com,gitlab.com）
+        #[arg(long)]
+        ssh_hosts: Option<String>,
+        /// 只读预览 ~/.ssh/config 写入 diff
+        #[arg(long, default_value_t = false)]
+        ssh_diff: bool,
+        /// 写入 ~/.ssh/config 管理块（先备份 .rillane-bak；幂等；禁用键审计拦截）
+        #[arg(long, default_value_t = false)]
+        write_ssh: bool,
+        /// 执行 git config --global（http.proxy/https.proxy 两键，精确 argv）
+        #[arg(long, default_value_t = false)]
+        apply_git: bool,
+    },
     /// 批量导入 geosite/chnroutes 文本规则源（O-dns1：路由或 DNS 分流规则）
     ImportRules {
         /// 规则源：文件路径或 http(s) URL（v2fly 文本清单行集）
@@ -1163,6 +1191,109 @@ fn main() -> Result<()> {
         }
         Command::TlsFingerprint => {
             print!("{}", render_tls_fingerprints());
+        }
+        Command::DevEnv {
+            shell,
+            http,
+            socks,
+            ssh_hosts,
+            ssh_diff,
+            write_ssh,
+            apply_git,
+        } => {
+            let shell = parse_dev_shell(&shell)?;
+            let ep = ProxyEndpoints::new(http, socks);
+            let hosts: Vec<String> = ssh_hosts
+                .map(|s| {
+                    s.split(',')
+                        .map(|h| h.trim().to_string())
+                        .filter(|h| !h.is_empty())
+                        .collect()
+                })
+                .unwrap_or_else(|| vec!["github.com".to_string(), "gitlab.com".to_string()]);
+            let host_refs: Vec<&str> = hosts.iter().map(String::as_str).collect();
+
+            // 片段产出（复制不修改系统——缺省只打印）
+            println!("{}", terminal_env_lines(shell, &ep));
+            for line in git_config_lines(&ep) {
+                println!("{line}");
+            }
+            let block = ssh_config_block(&host_refs, &ep);
+            println!("{block}");
+
+            // 工具存在性验证（RIL-147）：SSH 片段依赖 nc，Git 片段依赖 git
+            let git_ok = helper_present("git");
+            let nc_ok = helper_present("nc");
+            println!("工具存在性: git {git_ok} / nc {nc_ok}");
+            if !nc_ok {
+                eprintln!("提示: nc 缺席（netcat-openbsd）——SSH 片段不可用，ProxyCommand 将失败");
+            }
+            if !git_ok {
+                eprintln!("提示: git 缺席——Git 片段与 --apply-git 不可用");
+            }
+
+            let path = ssh_config_path()?;
+            let path_str = path.display().to_string();
+            let current = fs::read_to_string(&path).ok();
+            let plan = plan_ssh_write(&path_str, current.as_deref(), &block);
+
+            if ssh_diff {
+                println!("--- {path_str} 写入预览 ---");
+                for line in diff_preview(current.as_deref(), &block) {
+                    println!("{line}");
+                }
+            }
+            if write_ssh {
+                anyhow::ensure!(
+                    helper_present("nc"),
+                    "nc 缺席——SSH 片段写入被拒（工具存在性验证）"
+                );
+                let bad = forbidden_ssh_lines(&block);
+                anyhow::ensure!(bad.is_empty(), "禁用键审计拦截: {bad:?}");
+                if plan.idempotent {
+                    println!("已含管理块，跳过写入（幂等）");
+                } else {
+                    anyhow::ensure!(
+                        !Path::new(&plan.backup_path).exists(),
+                        "备份 {} 已在场（冲突）——先恢复或移除备份再写",
+                        plan.backup_path
+                    );
+                    if let Some(cur) = &current {
+                        fs::write(&plan.backup_path, cur)
+                            .with_context(|| format!("写备份 {} 失败", plan.backup_path))?;
+                    }
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("建目录 {} 失败", parent.display()))?;
+                    }
+                    let mut out = current.unwrap_or_default();
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push('\n');
+                    out.push_str(&block);
+                    fs::write(&path, out).with_context(|| format!("写入 {path_str} 失败"))?;
+                    println!(
+                        "已写入 {}（备份 {}；恢复：把备份拷回原路径）",
+                        plan.path, plan.backup_path
+                    );
+                }
+            }
+            if apply_git {
+                anyhow::ensure!(git_ok, "git 缺席——--apply-git 被拒（工具存在性验证）");
+                let proxy = format!("http://{}", ep.http);
+                for key in rillane_app::dev_snippets::GIT_CONFIG_KEYS {
+                    let status = std::process::Command::new("git")
+                        .args(["config", "--global", key, &proxy])
+                        .status()
+                        .context("执行 git config 失败")?;
+                    anyhow::ensure!(status.success(), "git config --global {key} 失败");
+                    println!("git config --global {key} 已写");
+                }
+            }
+            if !write_ssh && !apply_git && !ssh_diff {
+                println!("（预览模式：未修改系统。写入需显式 --write-ssh / --apply-git）");
+            }
         }
         Command::ImportRules {
             source,
@@ -2958,6 +3089,39 @@ struct RoutingMemberQuality {
 // ---------- O-prof1：profile 场景骨架 ----------
 
 /// 场景名白名单（O-prof1）：报错给合法值
+/// dev-env shell 参数解析（闭合枚举，白名单外点名拒绝）
+fn parse_dev_shell(s: &str) -> Result<DevShell> {
+    match s {
+        "bash" => Ok(DevShell::Bash),
+        "zsh" => Ok(DevShell::Zsh),
+        "fish" => Ok(DevShell::Fish),
+        "powershell" => Ok(DevShell::PowerShell),
+        "cmd" => Ok(DevShell::Cmd),
+        other => anyhow::bail!("未知 shell {other:?}（bash | zsh | fish | powershell | cmd）"),
+    }
+}
+
+/// ~/.ssh/config 路径（HOME/USERPROFILE 推导；SSH 管理块写入目标）
+fn ssh_config_path() -> Result<PathBuf> {
+    let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .context("无法定位主目录（HOME/USERPROFILE 均缺席）")?;
+    Ok(PathBuf::from(home).join(".ssh").join("config"))
+}
+
+/// PATH 工具存在性检查（RIL-147 工具存在性验证面；Windows 补 .exe 后缀）
+fn helper_present(name: &str) -> bool {
+    let Some(path_var) = env::var_os("PATH") else {
+        return false;
+    };
+    let exe_names: Vec<String> = if cfg!(windows) {
+        vec![name.to_string(), format!("{name}.exe")]
+    } else {
+        vec![name.to_string()]
+    };
+    env::split_paths(&path_var).any(|dir| exe_names.iter().any(|n| dir.join(n).is_file()))
+}
+
 fn parse_profile_variant(s: &str) -> Result<String> {
     match s {
         "proxy" | "game" | "web" => Ok(s.to_string()),
@@ -4102,6 +4266,31 @@ fn parse_duration_arg(raw: &str) -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RIL-147：dev-env shell 白名单解析（合法/非法两态）
+    #[test]
+    fn dev_shell_parse_whitelist() {
+        for (name, want) in [
+            ("bash", DevShell::Bash),
+            ("zsh", DevShell::Zsh),
+            ("fish", DevShell::Fish),
+            ("powershell", DevShell::PowerShell),
+            ("cmd", DevShell::Cmd),
+        ] {
+            assert_eq!(parse_dev_shell(name).expect("合法"), want);
+        }
+        assert!(parse_dev_shell("pwsh").is_err(), "白名单外拒绝");
+        assert!(parse_dev_shell("").is_err());
+    }
+
+    /// RIL-147：工具存在性检查——缺席工具返回 false（不误报）
+    #[test]
+    fn helper_present_reports_missing_tool() {
+        assert!(
+            !helper_present("rillane-definitely-missing-tool-xyz"),
+            "不存在的工具必须判否"
+        );
+    }
 
     /// §9-1 响应示例原文（数字为设计稿示意）
     const SAMPLE: &str = r#"{
