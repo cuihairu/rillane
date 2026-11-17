@@ -12,6 +12,7 @@ pub mod apply;
 pub mod approval;
 pub mod contract;
 pub mod generations;
+pub mod git_preset;
 pub mod mode;
 pub mod preview;
 pub mod proposal;
@@ -42,6 +43,12 @@ pub use generations::{
     digest_parts, GenerationEdge, GenerationError, GenerationObject, GenerationStore,
     RuntimeGeneration, CODE_GENERATION_CYCLE, CODE_GENERATION_DANGLING, CODE_GENERATION_DUPLICATE,
     CODE_GENERATION_ID_MISMATCH,
+};
+pub use git_preset::{
+    git_preset_preview, git_preset_rule_names, git_preset_rule_sets, git_rule_set_cards,
+    GitPresetBlock, GitPresetPreview, GitRuleSetCard, GIT_ASSETS_HOSTS_SET, GIT_ASSETS_RULE,
+    GIT_HTTPS_HOSTS_SET, GIT_HTTPS_RULE, GIT_PRESET_VERSION, GIT_RULE_PREFIX,
+    GIT_SSH_ALT_HOSTS_SET, GIT_SSH_ALT_RULE, GIT_SSH_HOSTS_SET, GIT_SSH_RULE,
 };
 pub use mode::{mode_override_preview, mode_receipt, ModeOverridePreview, ModeReceipt};
 pub use preview::{
@@ -1460,6 +1467,8 @@ impl RillaneConfig {
         }
         config.apply_profile();
         // RIL-141：区域预设展开（块在场即生效；规则追加在用户规则之后）
+        // RIL-146 Git 预设先于区域预设展开（应用预设先于泛化区域规则）
+        config.routing.apply_git_preset();
         config.routing.apply_region_preset();
         Ok(config)
     }
@@ -1492,6 +1501,8 @@ impl RillaneConfig {
         }
         config.apply_profile();
         // RIL-141：区域预设展开（块在场即生效；规则追加在用户规则之后）
+        // RIL-146 Git 预设先于区域预设展开（应用预设先于泛化区域规则）
+        config.routing.apply_git_preset();
         config.routing.apply_region_preset();
         Ok((config, diagnostics))
     }
@@ -2340,6 +2351,11 @@ pub struct RoutingConfig {
     /// 缺席 = 无预设（存量配置零差异）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region_preset: Option<RegionPresetBlock>,
+    /// Git 路由预置块（RIL-146）：块在场即展开生效——规则追加在用户规则
+    /// 之后、泛化区域规则之前（先用户 → 应用预设 → 区域），同名规则/
+    /// 规则集用户声明优先，展开幂等。缺席 = 无预设（存量配置零差异）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_preset: Option<GitPresetBlock>,
     pub groups: Vec<PolicyGroup>,
     pub rules: Vec<RouteRule>,
     /// GeoIP 数据库文件（MaxMind DB `.mmdb`，GeoLite2/GeoIP2 Country）。
@@ -2469,6 +2485,7 @@ impl Default for RoutingConfig {
             global_node: None,
             direct_node: None,
             region_preset: None,
+            git_preset: None,
             scenarios: Vec::new(),
             groups: Vec::new(),
             rules: Vec::new(),
@@ -2498,6 +2515,19 @@ impl RoutingConfig {
                 !block.proxy.trim().is_empty(),
                 "区域预设的代理侧目标（proxy）不能为空"
             );
+        }
+        // RIL-146 Git 路由预置块：target 显式非空、ssh 缺席回落 target
+        if let Some(block) = &self.git_preset {
+            anyhow::ensure!(
+                !block.target.trim().is_empty(),
+                "Git 预设的目标（target）不能为空"
+            );
+            if let Some(ssh) = &block.ssh {
+                anyhow::ensure!(
+                    !ssh.trim().is_empty(),
+                    "Git 预设的 SSH 目标（ssh）不能为空——要回落 target 请省略该字段"
+                );
+            }
         }
         // RIL-140 统一选路模式：全局/直连出口显式声明——模式入口不做隐式
         // 回落，缺出口即构建期点名拒绝（静默直连是被禁止的行为；引用不
