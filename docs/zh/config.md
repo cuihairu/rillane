@@ -124,11 +124,15 @@ routing:
     kind: mainland_direct          # mainland_direct | mainland_proxy（反向）
     direct: direct-main            # 直连侧目标（组或 Direct 出口节点）；LAN 绕过恒用它
     proxy: proxy-group             # 代理侧目标（反向预设的 CN 面走向它）
+  git_preset:                      # 可选（RIL-146）；块在场即展开版本化 Git 路由规则
+    target: proxy-group            # Git HTTPS/API/release/LFS/下载面走向目标（组或出口名）
+    ssh: direct                    # 可选；Git over SSH 面走向目标，缺席 = 同 target
 ```
 
 - `strategy` 七种：`fixed | latency | random | bandwidth | weighted | consistent_hash | round_robin`。
 - `mode`（统一选路模式，RIL-140）：决定**已接管**业务流量如何选出口——与流量接管正交。`rule`（缺省）= 场景 → 规则 → 默认按声明求值；`global` / `direct` 编译为同一决策路径的模式入口，**短路**场景/规则面（暂停求值，不是静默忽略）。模式入口不触碰身份认证、资源限制、硬性安全拒绝与防环（均在路由之前），也不改变 DNS 应答。普通订阅 REJECT 规则**不是**硬性安全拒绝——切到 `global`/`direct` 会暂停它们；`mode::mode_override_preview` 显式点名被暂停的场景/规则与 REJECT 子集，`mode::mode_receipt` 回执已请求/已生效模式、代际与冲突。校验/装配门：`global` 须给 `global_node`（已声明组或出口，含 reject 出口），`direct` 须给 `direct_node` 且指向 **Direct 类型**出口节点——引用不存在或类型不符装配期点名拒绝，不留到建连期。全局/直连出口不可用按显式失败上抛（组无健康成员即报错）——**绝不静默落直连**。新流按当下代际的模式求值，既有流钉在原代际。
 - `region_preset`（区域绕过预设，RIL-141）：in-tree 版本化预设——`mainland_direct`（CN 域名/IP + LAN → `direct`，其余流量走 `default_node`，期望指向代理组）与 `mainland_proxy`（反向：CN 域名/IP → `proxy`，LAN 恒 `direct`）。展开在用户规则**之后**追加三条规则（`region-lan`/`region-cn-domain`/`region-cn-ip`）——用户优先级不被重排/覆盖；用户同名声明优先，模板退让；重复展开幂等。CN 域名/IP 规则组合数据库面（`geo_site` `cn` / `geoip` `CN`）与 in-tree 版本化样例规则集（`region-cn-domain-sample`/`region-cn-ip-sample`，外加 RFC-1918/4193 完整 LAN 集 `region-lan`）——样例种子如实标注非全量；geo 数据库缺席时对应条件恒不命中、流量落 `default_node`（不猜测归属）。`region_preset_preview` 给出求值序样例、逐规则集来源卡片（名/语义域/版本/来源/条数）与固定说明（点名当前 `default_node` 的方向提示、未知地理兜底、LAN 独立、全局/直连模式暂停预设规则——预设规则即普通规则，出现在模式覆盖暂停清单里）。`direct`/`proxy` 为空校验期拒绝；目标存在性与普通规则 target 同口径。
+- `git_preset`（Git/SSH/GitHub 路由预设，RIL-146）：in-tree 版本化预设，展开在用户规则之后、**泛化区域规则之前**追加四条规则（`git-ssh`（SSH 主机 + port 22 AND 限定——不泛化劫持所有 22 端口流量）、`git-ssh-alt`（ssh.github.com 等官方 443 备用入口 + port 443）、`git-https`（Git HTTPS/API 主域——API 均为主域子域，suffix 一并覆盖）、`git-assets`（release/LFS/下载 CDN 重定向域样例，如实标注非全量））；同名规则/规则集用户声明优先、模板退让、重复展开幂等。`ssh` 缺席回落 `target`；`target` 空与 `ssh` 显式空校验期拒绝。`git_preset_preview` 给出求值序样例、四张规则集来源卡片（重定向域名/规则来源可查）与固定说明：**连通不等于加速**（预设只改写路由走向，速度取决于所选出口链路质量）、**SSH 主机密钥与认证保持**（只做域名能力路由，known_hosts/主机密钥/端到端认证不受影响，不把 SSH 面混同成 HTTPS 出口协议）、样例非全量可扩展、全局/直连模式暂停预设规则。
 - 路由条件 `type` 标签：`any{conditions}` / `not{condition}` / `domain_suffix{values}` / `domain_keyword{values}` / `domain_regex{patterns}` / `domain_full{values}` / `geoip{country}` / `geo_site{category}` / `ip_cidr{cidrs}` / `network{cidrs}` / `port{values}` / `process{values}`。进程名口径 `/proc/<pid>/comm` 截断 15 字节；**仅 TUN 入口有该注解**，其它 ingress 恒不命中。`geoip` 读 `routing.geoip_db`（MaxMind DB Country `.mmdb`，仅目标 IP 字面量）；`geo_site` 读 `routing.geosite_db`（v2fly `.dat`）。数据库路径缺席或加载失败时对应条件恒不命中。数据库相对路径按配置文件所在目录解析。
 - `slo` 校验：`loss_ratio ∈ [0,1]`、`loss_penalty_ms ≥ 0`；`latency` 策略在 `slo:` 门内取最低分，chain 侧 `slo_watch` 劣化自动切换。
 
