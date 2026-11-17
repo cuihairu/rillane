@@ -70,6 +70,9 @@ pub struct TunIngressConfig {
     /// §2.7 auto-bypass 域名集（egress server 为域名时——构建期不解析 DNS，
     /// run() 起始处解析后并入 set_auto_bypass）
     pub auto_bypass_hosts: Vec<String>,
+    /// RIL-143 有界域名嗅探策略（off/on_demand/scope + 字节/时间双界；
+    /// 缺省按需 = 既有嗅探行为零差异）
+    pub sniff: rillane_config::SniffPolicy,
 }
 
 impl Default for TunIngressConfig {
@@ -83,6 +86,7 @@ impl Default for TunIngressConfig {
             has_process_rules: false,
             auto_bypass_literals: Vec::new(),
             auto_bypass_hosts: Vec::new(),
+            sniff: rillane_config::SniffPolicy::default(),
         }
     }
 }
@@ -726,6 +730,8 @@ impl TunIngress {
         };
         let tcp = Arc::clone(&self.tcp);
         let router = Arc::clone(&self.router());
+        // RIL-143：策略值拷入 spawn 任务（任务不得借用 self 生命周期）
+        let sniff_policy = self.config.sniff.clone();
         let mut target = tcp_target(key.server);
         let mut metadata = FlowMetadata::default();
         if let Some(p) = &process {
@@ -742,16 +748,42 @@ impl TunIngress {
             // （不阻塞 run 循环；peek 不消费数据，forward 首包照常可读），
             // 提取 SNI/Host 后覆写 target.host 并按域名重路由。
             let mut sniffed_domain = None;
-            let peeked = tcp
-                // 上限容纳单条最大 TLS 记录（16384+5 记录头），超长 ClientHello
-                // 不被截断，`sniff_tls_sni` 的整记录要求得以满足。
-                .peek_socket_with_wait(handle, 16384 + 5, Duration::from_millis(120))
-                .await;
-            if !peeked.is_empty() {
-                let sniffed = sniff_tls_sni(&peeked).or_else(|| sniff_http_host(&peeked));
-                if let Some(host) = sniffed {
-                    target.host.clone_from(&host);
-                    sniffed_domain = Some(host);
+            // RIL-143 嗅探门：off / scope 未命中即零 peek（不付首包时延）；
+            // 按需 = 目标为 IP 字面量（路由面缺域名证据）才嗅探——TUN 面
+            // 目标恒为字面量，缺省 = 既有行为零差异。字节/时间双界取自
+            // 策略（缺省 16389B/120ms），peek 不消费数据、forward 首包
+            // 照常可读——有界且不吞数据。
+            if sniff_policy.applies(
+                target.host.parse::<std::net::IpAddr>().is_ok(),
+                key.server.port(),
+            ) {
+                let peeked = tcp
+                    // 上限容纳单条最大 TLS 记录（策略 max_bytes，缺省 16384+5
+                    // 记录头），超长 ClientHello 不被截断，`sniff_tls_sni`
+                    // 的整记录要求得以满足。
+                    .peek_socket_with_wait(
+                        handle,
+                        sniff_policy.max_bytes as usize,
+                        Duration::from_millis(sniff_policy.timeout_ms),
+                    )
+                    .await;
+                if !peeked.is_empty() {
+                    let sniffed = sniff_tls_sni(&peeked)
+                        .map(|h| (h, "tls_sni"))
+                        .or_else(|| sniff_http_host(&peeked).map(|h| (h, "http_host")));
+                    if let Some((host, source)) = sniffed {
+                        // 来源契约（RIL-143）：域名注记明示证据来源——
+                        // SNI/Host 皆为首包明文元数据，不解密 HTTPS、
+                        // 不推断 PID、不越认证边界。
+                        metadata
+                            .annotations
+                            .insert("sniff.source".to_string(), source.to_string());
+                        metadata
+                            .annotations
+                            .insert("sniff.domain".to_string(), host.clone());
+                        target.host.clone_from(&host);
+                        sniffed_domain = Some(host);
+                    }
                 }
             }
             let decision = if let Some(ref host) = sniffed_domain {

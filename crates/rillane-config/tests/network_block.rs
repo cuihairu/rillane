@@ -96,6 +96,7 @@ fn network_block_denies_unknown_fields() {
 #[test]
 fn network_block_serde_roundtrip() {
     let cfg = NetworkBlockConfig {
+        sniff: None,
         egress_fwmark: None,
         mode: NetworkBlockMode::Tun,
         tun: Some(TunBlockConfig {
@@ -128,6 +129,7 @@ fn network_block_rejects_non_tun_modes() {
         NetworkBlockMode::Hybrid,
     ] {
         let cfg = NetworkBlockConfig {
+            sniff: None,
             egress_fwmark: None,
             mode,
             tun: None,
@@ -142,6 +144,7 @@ fn network_block_rejects_non_tun_modes() {
     }
     // tun 通过（空块 = 最小合法形态）
     NetworkBlockConfig {
+        sniff: None,
         egress_fwmark: None,
         mode: NetworkBlockMode::Tun,
         tun: None,
@@ -156,6 +159,7 @@ fn network_block_rejects_non_tun_modes() {
 #[test]
 fn network_block_validate_rejects_illegal_values() {
     let base = || NetworkBlockConfig {
+        sniff: None,
         egress_fwmark: None,
         mode: NetworkBlockMode::Tun,
         tun: Some(TunBlockConfig {

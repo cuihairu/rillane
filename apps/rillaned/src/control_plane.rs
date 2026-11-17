@@ -4765,6 +4765,7 @@ mod tests {
             RillaneConfig::load_from_path(path).unwrap()
         };
         cfg.network = Some(rillane_config::NetworkBlockConfig {
+            sniff: None,
             mode: rillane_config::NetworkBlockMode::Tun,
             tun: None,
             routing: None,

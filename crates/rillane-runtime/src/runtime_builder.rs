@@ -640,6 +640,14 @@ impl RuntimeBuilder {
                     TunIngressConfig {
                         tun: network_cfg.tun.clone().unwrap_or_default(),
                         routing: network_cfg.routing.clone().unwrap_or_default(),
+                        // RIL-143：有界嗅探策略取自原始 network 块（与
+                        // network_block_to_platform 同源同代际；None = 按需
+                        // 缺省零差异）
+                        sniff: config_snapshot
+                            .network
+                            .as_ref()
+                            .and_then(|n| n.sniff.clone())
+                            .unwrap_or_default(),
                         // §2.5：Process 规则在场才做 /proc 归因扫描
                         has_process_rules: config_snapshot.routing.rules.iter().any(|r| {
                             r.matches
@@ -6030,6 +6038,7 @@ routing:
     fn egress_fwmark_config_wires_net_mark() {
         let mut cfg = s5_udp_config(false);
         cfg.network = Some(rillane_config::NetworkBlockConfig {
+            sniff: None,
             mode: rillane_config::NetworkBlockMode::Tun,
             tun: None,
             routing: None,
@@ -6112,6 +6121,7 @@ routing:
         let present = {
             let mut cfg = s5_udp_config(true);
             cfg.network = Some(rillane_config::NetworkBlockConfig {
+                sniff: None,
                 egress_fwmark: None,
                 mode: rillane_config::NetworkBlockMode::Tun,
                 tun: None,
@@ -6158,6 +6168,7 @@ routing:
     async fn dns_block_disabled_builds_none() {
         let mut cfg = s5_udp_config(true);
         cfg.network = Some(rillane_config::NetworkBlockConfig {
+            sniff: None,
             egress_fwmark: None,
             mode: rillane_config::NetworkBlockMode::Tun,
             tun: None,
@@ -6185,6 +6196,7 @@ routing:
         let mk_cfg = || {
             let mut cfg = s5_udp_config(false);
             cfg.network = Some(rillane_config::NetworkBlockConfig {
+                sniff: None,
                 egress_fwmark: None,
                 mode: rillane_config::NetworkBlockMode::Tun,
                 tun: None,
@@ -6248,6 +6260,7 @@ routing:
         let mk_cfg = |dns_yaml: &str| {
             let mut cfg = s5_udp_config(false);
             cfg.network = Some(rillane_config::NetworkBlockConfig {
+                sniff: None,
                 egress_fwmark: None,
                 mode: rillane_config::NetworkBlockMode::Tun,
                 tun: None,
@@ -6382,6 +6395,7 @@ routing:
     async fn dns_block_referenced_empty_group_rejected_at_build() {
         let mut cfg = s5_udp_config(true);
         cfg.network = Some(rillane_config::NetworkBlockConfig {
+            sniff: None,
             egress_fwmark: None,
             mode: rillane_config::NetworkBlockMode::Tun,
             tun: None,

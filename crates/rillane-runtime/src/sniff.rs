@@ -582,6 +582,60 @@ pub(crate) mod tests {
         assert_eq!(sniff_tls_sni(&[0x15, 0x03, 0x03, 0x00, 0x00]), None);
     }
 
+    /// 构造仅携带单个任意扩展、无 server_name 的 ClientHello
+    /// （ECH/未知扩展验收面用）。
+    fn build_client_hello_with_ext(ext_type: u16, payload: &[u8]) -> Vec<u8> {
+        let mut hs = Vec::new();
+        hs.push(0x01);
+        hs.extend_from_slice(&[0x00, 0x00, 0x00]);
+        hs.extend_from_slice(&[0x03, 0x03]);
+        hs.extend_from_slice(&[0u8; 32]);
+        hs.push(0);
+        hs.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
+        hs.push(0);
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&ext_type.to_be_bytes());
+        ext.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        ext.extend_from_slice(payload);
+        hs.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+        hs.extend_from_slice(&ext);
+        let hs_len = (hs.len() - 4) as u16;
+        hs[1] = (hs_len >> 8) as u8;
+        hs[2] = hs_len as u8;
+        hs
+    }
+
+    /// RIL-143 验收「ECH 返回未知」：ECH（加密 ClientHello）只有
+    /// encrypted_client_hello(0xFE0D) 扩展、真实 SNI 在密文内不可见——
+    /// 解析返回 None，不猜测域名。
+    #[test]
+    fn ech_client_hello_without_sni_is_unknown() {
+        let hs = build_client_hello_with_ext(0xFE0D, &[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(sniff_tls_sni(&wrap_tls_record(&hs)), None);
+        // ECH 外层带公开扩展 + 无 server_name：同样未知
+        let hs = build_client_hello_with_ext(0x0017, &[0x00, 0x10]);
+        assert_eq!(sniff_tls_sni(&wrap_tls_record(&hs)), None);
+    }
+
+    /// RIL-143 验收「不支持版本返回未知」：SSLv2 式记录（首字节为长度
+    /// 高位、非 0x16 record）不解析——未知，不猜测。
+    #[test]
+    fn sslv2_style_record_is_unknown() {
+        let mut rec = vec![0x80, 0x2E];
+        rec.push(0x01);
+        rec.extend_from_slice(&[0u8; 44]);
+        assert_eq!(sniff_tls_sni(&rec), None);
+    }
+
+    /// RIL-143 验收「不支持版本返回未知」：QUIC 仅认 v1——draft 版本
+    /// Initial 返回未知（None），不猜测域名。
+    #[test]
+    fn quic_draft_version_is_unknown() {
+        let mut pkt = build_quic_initial(&[0xAA; 8], b"draft.example");
+        pkt[1..5].copy_from_slice(&0xff00_0020u32.to_be_bytes());
+        assert_eq!(sniff_quic_sni(&pkt), None);
+    }
+
     #[test]
     fn http_host_extracts_host_header_without_port() {
         let req = b"GET /path HTTP/1.1\r\nHost: example.com:443\r\nAccept: */*\r\n\r\n";

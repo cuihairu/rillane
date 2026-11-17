@@ -256,6 +256,7 @@ mod tests {
 
         // network 块（Tun 模式最小形——无 Default，显式全字段）→ 虚拟化开 + mode 直通
         cfg.network = Some(NetworkBlockConfig {
+            sniff: None,
             mode: NetworkBlockMode::Tun,
             tun: None,
             routing: None,

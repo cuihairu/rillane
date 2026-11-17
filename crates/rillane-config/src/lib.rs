@@ -18,6 +18,7 @@ pub mod proposal;
 pub mod protocol_catalog;
 pub mod region_preset;
 pub mod rollback;
+pub mod sniff;
 pub mod source;
 pub mod watchdog;
 
@@ -65,6 +66,10 @@ pub use rollback::{
     RollbackRequest, CODE_ROLLBACK_CANDIDATE_MISMATCH, CODE_ROLLBACK_INPUT_INVALID,
     CODE_ROLLBACK_LIVE_MOVED, CODE_ROLLBACK_TARGET_FOREIGN, CODE_ROLLBACK_TARGET_NOT_APPLIED,
     CODE_ROLLBACK_TARGET_UNKNOWN, CONNECTION_TRUTH_STATEMENT,
+};
+pub use sniff::{
+    SniffMode, SniffPolicy, SNIFF_DEFAULT_MAX_BYTES, SNIFF_DEFAULT_TIMEOUT_MS, SNIFF_MAX_BYTES_CAP,
+    SNIFF_TIMEOUT_MS_CAP,
 };
 pub use source::{
     derive_local_id, CompatibilityDiagnostic, ObjectCatalog, ObjectId, ObjectKind, ObjectRenamed,
@@ -335,6 +340,10 @@ pub struct NetworkBlockConfig {
     /// 零差异；0 同 None。运行期非 Linux/无 CAP_NET_ADMIN 降级直连（warn 一次）。
     #[serde(default)]
     pub egress_fwmark: Option<u32>,
+    /// 有界域名嗅探策略（RIL-143）：off/on_demand/scope 三态 + 字节/时间
+    /// 双界；None = 缺省按需（既有行为零差异）
+    #[serde(default)]
+    pub sniff: Option<SniffPolicy>,
 }
 
 /// network.mode（serde 名随 platform 枚举：transparent 弃 "redir"，§1.3 B4 收口）
@@ -437,6 +446,9 @@ impl NetworkBlockConfig {
         }
         if let Some(dns) = &self.dns {
             dns.validate()?;
+        }
+        if let Some(sniff) = &self.sniff {
+            sniff.validate()?;
         }
         Ok(())
     }

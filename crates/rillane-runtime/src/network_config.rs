@@ -150,6 +150,7 @@ mod tests {
 
     fn block() -> NetworkBlockConfig {
         NetworkBlockConfig {
+            sniff: None,
             egress_fwmark: None,
             mode: NetworkBlockMode::Tun,
             tun: Some(TunBlockConfig {
@@ -203,6 +204,7 @@ mod tests {
         assert!(!tun.enable_dns);
 
         let no_routing = NetworkBlockConfig {
+            sniff: None,
             routing: None,
             ..block()
         };
@@ -294,6 +296,7 @@ mod tests {
             (NetworkBlockMode::Hybrid, NetworkMode::Hybrid),
         ] {
             let cfg = NetworkBlockConfig {
+                sniff: None,
                 egress_fwmark: None,
                 mode: block_mode,
                 tun: None,

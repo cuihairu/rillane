@@ -231,6 +231,7 @@ fn dns_block_disabled_tolerates_half_config() {
 #[test]
 fn network_block_carries_dns_validation() {
     let base = || NetworkBlockConfig {
+        sniff: None,
         egress_fwmark: None,
         mode: NetworkBlockMode::Tun,
         tun: Some(TunBlockConfig {
