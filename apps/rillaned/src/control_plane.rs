@@ -6,8 +6,7 @@ use std::{
     time::Instant,
 };
 // SystemTime：route handler 的 at 时间戳（Linux 门控体，platform-packaging.md）
-// 与测试临时目录名用——非 Linux 非 test 编译单元缺席（免 unused）
-#[cfg(any(target_os = "linux", test))]
+// 与测试临时目录名用——SystemTime 另供平台无关的 trace 历史时间戳（handle_trace_history_delete）
 use std::time::SystemTime;
 
 use bytes::Bytes;
