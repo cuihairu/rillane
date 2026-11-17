@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use rillane_config::{
-    GroupMember, MatchCondition, PolicyGroup, RouteRule, RoutingConfig, Strategy,
+    GroupMember, MatchCondition, PolicyGroup, RouteRule, RoutingConfig, SelectionMode, Strategy,
 };
 use rillane_core::{FlowContext, FlowId, FlowMetadata, FlowRouter, FlowTarget, TargetProto};
 use rillane_routing::RoutingEngine;
@@ -1065,6 +1065,112 @@ async fn scenario_priority_ascending_and_tie_keeps_declaration_order() -> Result
         Some("scenario:tie-a"),
         "同优先级按声明序，不重排"
     );
+
+    Ok(())
+}
+
+// ---------- RIL-140 统一选路模式：全局/直连入口 ----------
+
+/// 验收：全局模式短路场景与规则面——普通求值暂停，业务流走显式全局
+/// 出口；reason 带 mode:global 可追溯（回执面逐流可解释）。
+#[tokio::test]
+async fn global_mode_short_circuits_scenarios_and_rules() -> Result<()> {
+    let config = RoutingConfig {
+        default_node: "direct-node".to_string(),
+        mode: SelectionMode::Global,
+        global_node: Some("global-exit".to_string()),
+        scenarios: vec![scenario(
+            "catch-all-scene",
+            vec![],
+            "game-exit",
+            10,
+            ScenarioFailureAction::Fallback,
+        )],
+        groups: vec![
+            one_node_group("global-exit", "global-node"),
+            one_node_group("game-exit", "game-node"),
+        ],
+        rules: vec![RouteRule {
+            name: "example-rule".to_string(),
+            matches: vec![MatchCondition::DomainSuffix {
+                values: vec!["example.com".to_string()],
+            }],
+            target: "rule-exit".to_string(),
+        }],
+        ..Default::default()
+    };
+    let engine = RoutingEngine::new(config);
+
+    // 命中规则 + 无条件命中的场景都本可截走——全局入口短路两者
+    let decision = engine
+        .route(create_flow_context("example.com", 443))
+        .await?;
+    assert_eq!(decision.final_node(), "global-node");
+    assert_eq!(decision.reason.as_deref(), Some("mode:global"));
+
+    Ok(())
+}
+
+/// 验收：全局出口不可用（组无健康成员）= 显式失败上抛——不静默落
+/// 直连/规则面/默认节点（设计：全局出口不可用按显式失败策略返回）。
+#[tokio::test]
+async fn global_mode_failure_is_explicit_not_silent_direct() -> Result<()> {
+    let config = RoutingConfig {
+        default_node: "direct-node".to_string(),
+        mode: SelectionMode::Global,
+        global_node: Some("empty-exit".to_string()),
+        groups: vec![one_node_group("empty-exit", "dead-node")],
+        rules: vec![],
+        ..Default::default()
+    };
+    let engine = RoutingEngine::new(config);
+    engine.set_node_health("dead-node", false);
+
+    let err = engine
+        .route(create_flow_context("example.com", 443))
+        .await
+        .expect_err("全局出口无健康成员须显式失败，不静默改道");
+    assert!(
+        err.to_string().contains("无健康成员"),
+        "失败信息须点名组健康面: {err}"
+    );
+
+    Ok(())
+}
+
+/// 验收：直连模式走显式直连出口，场景/规则面暂停；reason 带
+/// mode:direct。直连不等于关闭 DNS/统计（那些面不归路由器）——本
+/// 断言只钉选路行为。
+#[tokio::test]
+async fn direct_mode_uses_explicit_direct_node_and_pauses_rules() -> Result<()> {
+    let config = RoutingConfig {
+        default_node: "direct-node".to_string(),
+        mode: SelectionMode::Direct,
+        direct_node: Some("direct-main".to_string()),
+        scenarios: vec![scenario(
+            "catch-all-scene",
+            vec![],
+            "game-exit",
+            10,
+            ScenarioFailureAction::Fallback,
+        )],
+        groups: vec![one_node_group("game-exit", "game-node")],
+        rules: vec![RouteRule {
+            name: "example-rule".to_string(),
+            matches: vec![MatchCondition::DomainSuffix {
+                values: vec!["example.com".to_string()],
+            }],
+            target: "proxy-node".to_string(),
+        }],
+        ..Default::default()
+    };
+    let engine = RoutingEngine::new(config);
+
+    let decision = engine
+        .route(create_flow_context("example.com", 443))
+        .await?;
+    assert_eq!(decision.final_node(), "direct-main");
+    assert_eq!(decision.reason.as_deref(), Some("mode:direct"));
 
     Ok(())
 }

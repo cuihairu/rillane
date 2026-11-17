@@ -30,7 +30,7 @@ use anyhow::{anyhow, Result};
 use dashmap::DashMap;
 use rillane_config::{
     GroupDescriptor, GroupDescriptorMember, MatchCondition, RoutingConfig, RuleSetLibrary,
-    ScenarioFailureAction,
+    ScenarioFailureAction, SelectionMode,
 };
 use rillane_core::{FlowContext, FlowId, FlowMetadata, FlowTarget, TargetProto};
 use serde::{Deserialize, Serialize};
@@ -409,6 +409,50 @@ fn explain_over(
     let mut unknowns: Vec<UnknownEvidence> = Vec::new();
     let mut evaluated: Vec<EvaluatedStep> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
+
+    // RIL-140 选路模式入口（镜像 route()）：全局/直连 = 模式入口短路，
+    // 场景/规则面暂停——推演不得宣称普通场景/规则「正在生效」（全局
+    // 模式 UI 必须解释：普通选路面暂停）。模式出口缺席/不可用 = 显式
+    // 失败（确定性结论），不静默落直连；规则模式 = 原路径。
+    if config.mode != SelectionMode::Rule {
+        let label = match config.mode {
+            SelectionMode::Global => "mode:global",
+            _ => "mode:direct",
+        };
+        let field = match config.mode {
+            SelectionMode::Global => "global_node",
+            _ => "direct_node",
+        };
+        let target = match config.mode {
+            SelectionMode::Global => config.global_node.as_deref(),
+            _ => config.direct_node.as_deref(),
+        }
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+        let (matched_by, error, predicted) = match target {
+            None => (
+                Some(label.to_string()),
+                Some(format!(
+                    "选路模式为 {} 时缺少模式出口 routing.{field}",
+                    label
+                )),
+                None,
+            ),
+            Some(target) => {
+                match resolve_frozen_target(snapshot, target, &ctx.target.host, &mut unknowns) {
+                    Ok(predicted) => (Some(label.to_string()), None, Some(predicted)),
+                    Err(reason) => (
+                        Some(label.to_string()),
+                        Some(format!("模式出口 {target} 不可用: {reason}")),
+                        None,
+                    ),
+                }
+            }
+        };
+        return Ok(finish(
+            input, evaluated, notes, unknowns, matched_by, error, None, predicted,
+        ));
+    }
 
     // RIL-021 场景面（镜像 route()）：优先级稳定排序 → 条件合取 →
     // 目标解析（fallback 落回规则面 / reject 显式拒绝）

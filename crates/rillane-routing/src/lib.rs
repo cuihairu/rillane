@@ -12,7 +12,7 @@ use dashmap::DashMap;
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use rillane_config::{
     GroupDescriptor, GroupDescriptorMember, MatchCondition, PolicyGroup, RouteRule, RoutingConfig,
-    RuleSetLibrary, ScenarioFailureAction, SloPolicy, Strategy,
+    RuleSetLibrary, ScenarioFailureAction, SelectionMode, SloPolicy, Strategy,
 };
 use rillane_core::{FlowContext, FlowRouter, RouteDecision, TargetProto};
 use serde::Serialize;
@@ -824,6 +824,43 @@ impl FlowRouter for RoutingEngine {
     async fn route(&self, ctx: FlowContext) -> Result<RouteDecision> {
         let config = self.snapshot();
         let geo = self.geo.read().expect("geo lock poisoned").clone();
+
+        // RIL-140 统一选路模式入口（设计 ui-prototype-v1.md §3）：模式决定
+        // **已接管**业务流如何选出口——规则（默认）= 场景→规则→默认原路径；
+        // 全局/直连 = 模式入口短路，普通场景/规则面暂停（不评估）。全局/
+        // 直连目标解析失败按显式失败上抛（组无健康成员等）——**不静默落
+        // 直连/规则面**；选路前的身份认证、资源限制、硬性安全拒绝与防环
+        // 在路由之前、不受模式影响；模式不改变 DNS 应答（DNS 面独立）。
+        // 新流按当下模式求值，既有流钉在原代际（SessionPin 既有契约）。
+        match config.mode {
+            SelectionMode::Global => {
+                let target = config
+                    .global_node
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("选路模式为 global 时缺少 routing.global_node（全局出口）")
+                    })?;
+                return self
+                    .resolve_target(target, Some("mode:global".into()), Some(&ctx))
+                    .await;
+            }
+            SelectionMode::Direct => {
+                let target = config
+                    .direct_node
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("选路模式为 direct 时缺少 routing.direct_node（直连出口）")
+                    })?;
+                return self
+                    .resolve_target(target, Some("mode:direct".into()), Some(&ctx))
+                    .await;
+            }
+            SelectionMode::Rule => {}
+        }
 
         // RIL-021 并列场景面：声明的场景意图先于泛化规则。优先级数值小者
         // 先评估（stable sort——同优先级按声明序，不重排）；条件合取（AND

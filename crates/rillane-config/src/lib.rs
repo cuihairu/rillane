@@ -12,6 +12,7 @@ pub mod apply;
 pub mod approval;
 pub mod contract;
 pub mod generations;
+pub mod mode;
 pub mod preview;
 pub mod proposal;
 pub mod protocol_catalog;
@@ -40,6 +41,7 @@ pub use generations::{
     RuntimeGeneration, CODE_GENERATION_CYCLE, CODE_GENERATION_DANGLING, CODE_GENERATION_DUPLICATE,
     CODE_GENERATION_ID_MISMATCH,
 };
+pub use mode::{mode_override_preview, mode_receipt, ModeOverridePreview, ModeReceipt};
 pub use preview::{
     merge_patch, preview_config_patch, AffectedCategory, ConfigPreview, DiffEntry, DiffOp,
     PreviewDiagnostic, SideEffectHint, CODE_PREVIEW_CONFIG_INVALID, CODE_PREVIEW_PATCH_INVALID,
@@ -2266,9 +2268,50 @@ fn default_tls_true() -> bool {
     true
 }
 
+/// 统一选路模式（RIL-140，设计 ui-prototype-v1.md §3）：决定**已接管**
+/// 业务流量如何选出口——与流量接管（系统代理/TUN/平台 VPN，决定哪些
+/// 流量进入内核）正交，代理模式不能接管未进入的流量。
+///
+/// - **规则**（默认）：场景 → 规则 → 默认依序求值，原有路径不变；
+/// - **全局**：已接管业务流走显式选择的全局出口（[`RoutingConfig::
+///   global_node`]），普通场景/区域/规则求值**暂停**；
+/// - **直连**：已接管业务流走显式直连出口（[`RoutingConfig::
+///   direct_node`]，须为 Direct 类型出口节点）——不等于关闭 TUN/VPN、
+///   DNS、统计或系统代理配置。
+///
+/// 模式编译为统一决策路径的模式入口，不为三种模式建立三套执行引擎；
+/// 选路前的身份认证、资源限制、硬性安全拒绝与防环不受模式影响（普通
+/// 订阅 REJECT 不是硬性安全拒绝——全局/直连暂停普通规则的影响由
+/// 覆盖预览显式给出，`mode::mode_override_preview`）；模式不改变 DNS
+/// 应答。全局/直连出口解析失败按显式失败上抛，**不静默落直连**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionMode {
+    /// 规则模式（默认）：场景/规则/默认依序求值
+    #[default]
+    Rule,
+    /// 全局模式：走显式全局出口，普通选路面暂停
+    Global,
+    /// 直连模式：走显式直连出口，普通选路面暂停
+    Direct,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingConfig {
     pub default_node: String,
+    /// 选路模式（RIL-140）：缺省 `rule`——存量配置反序列化零差异。
+    #[serde(default)]
+    pub mode: SelectionMode,
+    /// 全局模式出口（RIL-140）：组名或出口节点名。模式为 `global` 时
+    /// 必填（validate 强制非空；装配期再点名存在性——引用不存在即拒绝，
+    /// 不留到建连期才失败）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_node: Option<String>,
+    /// 直连模式出口（RIL-140）：须为 Direct 类型出口节点名。模式为
+    /// `direct` 时必填（validate 强制非空；装配期再点名类型——引用非
+    /// Direct 出口即拒绝）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_node: Option<String>,
     pub groups: Vec<PolicyGroup>,
     pub rules: Vec<RouteRule>,
     /// GeoIP 数据库文件（MaxMind DB `.mmdb`，GeoLite2/GeoIP2 Country）。
@@ -2394,6 +2437,9 @@ impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             default_node: "direct".to_string(),
+            mode: SelectionMode::Rule,
+            global_node: None,
+            direct_node: None,
             scenarios: Vec::new(),
             groups: Vec::new(),
             rules: Vec::new(),
@@ -2412,6 +2458,36 @@ impl RoutingConfig {
     /// 组级 SLO 值域构建期拦截（slo-scoring.md §4）：runtime build()/热更新
     /// 装配前防御性调用。
     pub fn validate(&self) -> anyhow::Result<()> {
+        // RIL-140 统一选路模式：全局/直连出口显式声明——模式入口不做隐式
+        // 回落，缺出口即构建期点名拒绝（静默直连是被禁止的行为；引用不
+        // 存在/类型不符由装配期再点名，配置层看不到出口目录）。
+        match self.mode {
+            SelectionMode::Rule => {}
+            SelectionMode::Global => {
+                let empty = self
+                    .global_node
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty();
+                anyhow::ensure!(
+                    !empty,
+                    "选路模式为 global 时须显式声明 routing.global_node（全局出口）"
+                );
+            }
+            SelectionMode::Direct => {
+                let empty = self
+                    .direct_node
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty();
+                anyhow::ensure!(
+                    !empty,
+                    "选路模式为 direct 时须显式声明 routing.direct_node（直连出口）"
+                );
+            }
+        }
         for group in &self.groups {
             if let Some(slo) = &group.slo {
                 slo.validate()

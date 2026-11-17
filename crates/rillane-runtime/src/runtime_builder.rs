@@ -25,7 +25,7 @@ use tokio::{
 
 use rillane_config::{
     resolve_udp_enabled, EgressConfig, EgressDescriptor, GroupMember, IngressConfig,
-    IngressDescriptor, PolicyGroup, RillaneConfig, RoutingConfig, UdpConfig,
+    IngressDescriptor, PolicyGroup, RillaneConfig, RoutingConfig, SelectionMode, UdpConfig,
 };
 // TUN 装配块专用（Linux 门控面，platform-packaging.md）
 #[cfg(target_os = "linux")]
@@ -165,6 +165,11 @@ impl RuntimeBuilder {
         // 组级 SLO 值域构建期拦截（slo-scoring.md §4：schema validate +
         // 装配前防御性调用，存量路由配置无 slo 时零开销直通）
         config_snapshot.routing.validate()?;
+
+        // RIL-140 选路模式出口装配门：全局出口须引用已声明组/出口，直连
+        // 出口须为 Direct 类型出口节点——引用不存在或类型不符在装配期
+        // 点名拒绝，不留到建连期才失败（无静默直连）。
+        validate_mode_targets(&config_snapshot)?;
 
         // P3-5 performance-io.md §3：进程级 relay 缓冲设定（块缺省 None =
         // 不设定，缓冲维持 8192×2，行为零差异 §2-D5；变更需重启）
@@ -2662,6 +2667,47 @@ impl FlowOutput for RejectFlowOutput {
     }
 }
 
+/// RIL-140：选路模式出口的装配期校验（存在性 + 直连类型面）。配置层
+/// 看不到出口目录，只能强制非空；本门补齐引用面——全局出口须为已
+/// 声明组或已声明出口（含 reject 出口），直连出口须为 Direct 类型出口
+/// 节点。引用不存在/类型不符装配期点名拒绝，不留到建连期才失败。
+fn validate_mode_targets(config: &RillaneConfig) -> Result<()> {
+    match config.routing.mode {
+        SelectionMode::Rule => {}
+        SelectionMode::Global => {
+            let target = config
+                .routing
+                .global_node
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default();
+            let declared = config.routing.groups.iter().any(|g| g.name == target)
+                || config.egress.iter().any(|e| e.name == target);
+            anyhow::ensure!(
+                declared,
+                "全局出口 `{target}` 未声明（须为已声明组或已声明出口）"
+            );
+        }
+        SelectionMode::Direct => {
+            let target = config
+                .routing
+                .direct_node
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default();
+            let is_direct = config
+                .egress
+                .iter()
+                .any(|e| e.name == target && matches!(e.spec, EgressConfig::Direct));
+            anyhow::ensure!(
+                is_direct,
+                "直连出口 `{target}` 须为已声明的 Direct 类型出口节点"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn build_ingress_endpoints(
     descriptors: &[IngressDescriptor],
     udp: Option<Arc<rillane_core::udp::UdpAssociateService>>,
@@ -4173,10 +4219,9 @@ fn build_egress_outputs(
                 ));
                 outputs.insert(desc.name.clone(), flow_output);
                 connectors.insert(desc.name.clone(), connector);
-            }
-            // 防御面已由编译期穷尽性接管（RIL-109 接入 hysteria 后本 match
-            // 覆盖全部 IR 变体）：目录与装配工厂失同步在编译期即报错，
-            // 「编目内类型无工厂臂」不再可能到运行期。
+            } // 防御面已由编译期穷尽性接管（RIL-109 接入 hysteria 后本 match
+              // 覆盖全部 IR 变体）：目录与装配工厂失同步在编译期即报错，
+              // 「编目内类型无工厂臂」不再可能到运行期。
         }
     }
 

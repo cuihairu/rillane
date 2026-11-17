@@ -605,3 +605,95 @@ fn engine_freeze_freezes_group_state() {
     assert_eq!(out.predicted.unwrap().node.as_deref(), Some("B"));
     assert_eq!(out.certainty, EgressCertainty::Definitive);
 }
+
+// ---------- RIL-140 选路模式：推演镜像模式入口 ----------
+
+/// 全局模式：推演短路场景/规则面——求值序为空（不得宣称普通规则
+/// 「正在生效」）、matched_by 带 mode:global、预测走显式全局出口。
+#[test]
+fn global_mode_explain_skips_rules_and_scenarios() {
+    let mut config = base_config();
+    config.mode = rillane_config::SelectionMode::Global;
+    config.global_node = Some("GLOBAL-GW".to_string());
+    config.scenarios = vec![ScenarioRule {
+        name: "catch-all".to_string(),
+        conditions: vec![],
+        target: "S".to_string(),
+        priority: 10,
+        on_failure: ScenarioFailureAction::Fallback,
+    }];
+    config.rules = vec![rule(
+        "hit",
+        MatchCondition::DomainFull {
+            values: vec!["example.com".to_string()],
+        },
+        "B",
+    )];
+    let engine = RoutingEngine::new(config);
+    let snap = ExplainSnapshot::default();
+    let out = engine.explain(&snap, &input("example.com")).unwrap();
+
+    assert_eq!(out.matched_by.as_deref(), Some("mode:global"));
+    assert!(
+        out.evaluated.is_empty(),
+        "普通场景/规则面暂停——推演不得宣称正在生效: {:?}",
+        out.evaluated
+    );
+    assert_eq!(
+        out.predicted.as_ref().unwrap().node.as_deref(),
+        Some("GLOBAL-GW")
+    );
+    assert_eq!(out.certainty, EgressCertainty::Definitive);
+}
+
+/// 直连模式：推演走显式直连出口，matched_by 带 mode:direct。
+#[test]
+fn direct_mode_explain_uses_explicit_direct_node() {
+    let mut config = base_config();
+    config.mode = rillane_config::SelectionMode::Direct;
+    config.direct_node = Some("direct-main".to_string());
+    config.rules = vec![rule(
+        "hit",
+        MatchCondition::DomainFull {
+            values: vec!["example.com".to_string()],
+        },
+        "B",
+    )];
+    let engine = RoutingEngine::new(config);
+    let snap = ExplainSnapshot::default();
+    let out = engine.explain(&snap, &input("example.com")).unwrap();
+
+    assert_eq!(out.matched_by.as_deref(), Some("mode:direct"));
+    assert!(out.evaluated.is_empty());
+    assert_eq!(
+        out.predicted.as_ref().unwrap().node.as_deref(),
+        Some("direct-main")
+    );
+}
+
+/// 模式出口缺席：推演给确定性失败（生产面同路径上抛），不静默落
+/// 规则面/默认节点。
+#[test]
+fn mode_explain_missing_target_is_definitive_error() {
+    let mut config = base_config();
+    config.mode = rillane_config::SelectionMode::Global;
+    config.rules = vec![rule(
+        "hit",
+        MatchCondition::DomainFull {
+            values: vec!["example.com".to_string()],
+        },
+        "B",
+    )];
+    let engine = RoutingEngine::new(config);
+    let snap = ExplainSnapshot::default();
+    let out = engine.explain(&snap, &input("example.com")).unwrap();
+
+    assert_eq!(out.matched_by.as_deref(), Some("mode:global"));
+    let err = out.error.expect("缺模式出口须确定性失败");
+    assert!(
+        err.contains("global_node"),
+        "错误须点名 routing.global_node: {err}"
+    );
+    assert_eq!(out.certainty, EgressCertainty::Definitive);
+    assert!(out.predicted.is_none());
+}

@@ -780,3 +780,93 @@ routing:
     let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
     assert_eq!(back.egress, config.egress, "往返后出口逐字段一致");
 }
+
+// ---------- RIL-140 统一选路模式（rule/global/direct） ----------
+
+fn minimal_routing_yaml(mode_block: &str) -> String {
+    format!(
+        r#"
+control:
+  api_bind: 127.0.0.1:9090
+telemetry:
+  log_level: info
+  enable_metrics: false
+  enable_tracing: false
+ingress: []
+egress:
+  - name: direct
+    type: direct
+routing:
+  default_node: direct
+  groups: []
+  rules: []
+{mode_block}"#
+    )
+}
+
+#[test]
+fn routing_mode_defaults_to_rule_when_absent() {
+    let yaml = minimal_routing_yaml("");
+    let config = RillaneConfig::from_str(&yaml, None).expect("缺省模式配置必须可解析");
+    assert_eq!(config.routing.mode, rillane_config::SelectionMode::Rule);
+    assert_eq!(config.routing.global_node, None);
+    assert_eq!(config.routing.direct_node, None);
+}
+
+#[test]
+fn routing_mode_global_yaml_roundtrip() {
+    let yaml = minimal_routing_yaml("  mode: global\n  global_node: proxy-group");
+    let config = RillaneConfig::from_str(&yaml, None).expect("global 模式配置必须可解析");
+    assert_eq!(config.routing.mode, rillane_config::SelectionMode::Global);
+    assert_eq!(config.routing.global_node.as_deref(), Some("proxy-group"));
+
+    let json = serde_json::to_string(&config).expect("可序列化");
+    assert!(
+        json.contains("\"mode\":\"global\""),
+        "模式标签 snake_case: {json}"
+    );
+    let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
+    let before = serde_json::to_string(&config.routing).expect("可序列化");
+    let after = serde_json::to_string(&back.routing).expect("可序列化");
+    assert_eq!(before, after, "往返后路由面逐字段一致");
+}
+
+#[test]
+fn routing_mode_direct_yaml_roundtrip() {
+    let yaml = minimal_routing_yaml("  mode: direct\n  direct_node: direct");
+    let config = RillaneConfig::from_str(&yaml, None).expect("direct 模式配置必须可解析");
+    assert_eq!(config.routing.mode, rillane_config::SelectionMode::Direct);
+    assert_eq!(config.routing.direct_node.as_deref(), Some("direct"));
+
+    let json = serde_json::to_string(&config).expect("可序列化");
+    let back: RillaneConfig = serde_json::from_str(&json).expect("回读可解析");
+    let before = serde_json::to_string(&config.routing).expect("可序列化");
+    let after = serde_json::to_string(&back.routing).expect("可序列化");
+    assert_eq!(before, after, "往返后路由面逐字段一致");
+}
+
+#[test]
+fn routing_mode_validate_requires_explicit_targets() {
+    // global 缺 global_node：校验点名字段
+    let mut cfg = RillaneConfig::from_str(&minimal_routing_yaml("  mode: global"), None)
+        .expect("解析先于校验");
+    let err = cfg.routing.validate().expect_err("global 缺出口须校验拒绝");
+    assert!(
+        err.to_string().contains("global_node"),
+        "拒绝须点名 global_node: {err}"
+    );
+
+    // direct 缺 direct_node：校验点名字段
+    cfg.routing.mode = rillane_config::SelectionMode::Direct;
+    let err = cfg.routing.validate().expect_err("direct 缺出口须校验拒绝");
+    assert!(
+        err.to_string().contains("direct_node"),
+        "拒绝须点名 direct_node: {err}"
+    );
+
+    // 规则模式不要求出口（全局/直连出口缺席合法——模式未启用）
+    cfg.routing.mode = rillane_config::SelectionMode::Rule;
+    cfg.routing
+        .validate()
+        .expect("规则模式无模式出口须校验通过");
+}
