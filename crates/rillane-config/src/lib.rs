@@ -16,6 +16,7 @@ pub mod mode;
 pub mod preview;
 pub mod proposal;
 pub mod protocol_catalog;
+pub mod region_preset;
 pub mod rollback;
 pub mod source;
 pub mod watchdog;
@@ -52,6 +53,12 @@ pub use proposal::{
     CODE_PROPOSAL_FOREIGN, CODE_PROPOSAL_ID_CLASH, CODE_PROPOSAL_INPUT_INVALID,
     CODE_PROPOSAL_SCOPE_INVALID, CODE_PROPOSAL_TTL_INVALID, CODE_PROPOSAL_UNKNOWN,
     PROPOSAL_MAX_TTL_MS, PROPOSAL_STORE_CAP,
+};
+pub use region_preset::{
+    preset_rule_names, region_preset_preview, rule_set_cards, RegionPresetBlock, RegionPresetKind,
+    RegionPresetPreview, RegionRuleSetCard, REGION_CN_DOMAIN_RULE, REGION_CN_DOMAIN_SAMPLE_SET,
+    REGION_CN_IP_RULE, REGION_CN_IP_SAMPLE_SET, REGION_LAN_RULE, REGION_LAN_SET,
+    REGION_PRESET_VERSION, REGION_RULE_PREFIX,
 };
 pub use rollback::{
     rollback_apply, ConnectionTruth, DrainPlan, RollbackError, RollbackExecution, RollbackReport,
@@ -1440,6 +1447,8 @@ impl RillaneConfig {
                 .map(|db| resolve_geo_db(&db, base_dir));
         }
         config.apply_profile();
+        // RIL-141：区域预设展开（块在场即生效；规则追加在用户规则之后）
+        config.routing.apply_region_preset();
         Ok(config)
     }
 
@@ -1470,6 +1479,8 @@ impl RillaneConfig {
             probe.validate()?;
         }
         config.apply_profile();
+        // RIL-141：区域预设展开（块在场即生效；规则追加在用户规则之后）
+        config.routing.apply_region_preset();
         Ok((config, diagnostics))
     }
 
@@ -2312,6 +2323,11 @@ pub struct RoutingConfig {
     /// Direct 出口即拒绝）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_node: Option<String>,
+    /// 区域预置块（RIL-141）：块在场即展开生效——规则追加在用户规则
+    /// 之后（先用户后区域），同名规则/规则集用户声明优先，展开幂等。
+    /// 缺席 = 无预设（存量配置零差异）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region_preset: Option<RegionPresetBlock>,
     pub groups: Vec<PolicyGroup>,
     pub rules: Vec<RouteRule>,
     /// GeoIP 数据库文件（MaxMind DB `.mmdb`，GeoLite2/GeoIP2 Country）。
@@ -2440,6 +2456,7 @@ impl Default for RoutingConfig {
             mode: SelectionMode::Rule,
             global_node: None,
             direct_node: None,
+            region_preset: None,
             scenarios: Vec::new(),
             groups: Vec::new(),
             rules: Vec::new(),
@@ -2458,6 +2475,18 @@ impl RoutingConfig {
     /// 组级 SLO 值域构建期拦截（slo-scoring.md §4）：runtime build()/热更新
     /// 装配前防御性调用。
     pub fn validate(&self) -> anyhow::Result<()> {
+        // RIL-141 区域预置块：两侧目标显式非空（目标存在性同规则 target
+        // 口径——配置层不做出口目录校验，装配/拨号期命名失败）
+        if let Some(block) = &self.region_preset {
+            anyhow::ensure!(
+                !block.direct.trim().is_empty(),
+                "区域预设的直连侧目标（direct）不能为空"
+            );
+            anyhow::ensure!(
+                !block.proxy.trim().is_empty(),
+                "区域预设的代理侧目标（proxy）不能为空"
+            );
+        }
         // RIL-140 统一选路模式：全局/直连出口显式声明——模式入口不做隐式
         // 回落，缺出口即构建期点名拒绝（静默直连是被禁止的行为；引用不
         // 存在/类型不符由装配期再点名，配置层看不到出口目录）。

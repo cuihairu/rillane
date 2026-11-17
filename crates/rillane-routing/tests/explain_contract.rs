@@ -697,3 +697,33 @@ fn mode_explain_missing_target_is_definitive_error() {
     assert_eq!(out.certainty, EgressCertainty::Definitive);
     assert!(out.predicted.is_none());
 }
+
+// ---------- RIL-141 区域预设：Explain 面照常推演预设规则 ----------
+
+/// 区域预设展开产物是普通规则——Explain 面按同一求值器推演：LAN IP
+/// 流命中 region-lan → 直连侧目标（预设规则可解释，不是黑盒）。
+#[test]
+fn region_preset_rules_are_explained_like_rules() {
+    use rillane_config::RegionPresetBlock;
+    let mut config = base_config();
+    config.region_preset = Some(RegionPresetBlock {
+        kind: rillane_config::RegionPresetKind::MainlandDirect,
+        direct: "DIRECT".to_string(),
+        proxy: "PROXY-GROUP".to_string(),
+    });
+    config.apply_region_preset();
+    let engine = RoutingEngine::new(config);
+    let snap = ExplainSnapshot::default();
+
+    // LAN 目标命中 region-lan（规则集载荷已注入）
+    let out = engine.explain(&snap, &input("192.168.1.10")).unwrap();
+    assert_eq!(out.matched_by.as_deref(), Some("region-lan"));
+    assert_eq!(
+        out.predicted.as_ref().unwrap().node.as_deref(),
+        Some("DIRECT")
+    );
+
+    // 非局域网、非 CN 样例域名的流不命中预设面 → 落默认出口
+    let out = engine.explain(&snap, &input("example.org")).unwrap();
+    assert_eq!(out.matched_by.as_deref(), Some("default"));
+}
