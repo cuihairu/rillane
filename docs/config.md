@@ -183,11 +183,17 @@ network:
       negative_ttl: 300          # >= 1
     listen_address: 127.0.0.1
     listen_port: 15353           # must not be 0
+  sniff:                         # optional (RIL-143); absent = on-demand default (zero diff from prior behavior)
+    mode: on_demand              # off | on_demand | scope
+    ports: [443, 80]             # explicit scope ports (scope requires an explicit target list)
+    max_bytes: 16389             # first-packet byte bound (1..=65535; default fits the largest TLS record 16384+5)
+    timeout_ms: 120              # first-packet wait bound in ms (1..=1000)
   egress_fwmark: 0               # 0/absent = no SO_MARK; non-zero needs root/CAP_NET_ADMIN (degrades to direct with a WARN)
 ```
 
 - `routing.include` CIDRs must be in explicit `addr/prefix` form (bare IPs are rejected; write `/32` for host routes).
 - Outbound fwmark escape surface (`egress_fwmark` != 0): the planner appends `ip rule fwmark` + an escape table with the 100 default route, and `rillanectl route apply/clear` manages the ledger.
+- `sniff` (bounded domain-sniff policy, RIL-143): a three-state gate for TUN first-packet domain sniffing — `off` (no sniffing), `on_demand` (default: sniff only when the target is an IP literal, i.e. the routing face lacks domain evidence), `scope` (only the explicitly declared port table; an empty table sniffs nothing — the coverage target must be explicit). Byte/time bounds are configurable with hard caps (`max_bytes` 1..=65535, `timeout_ms` 1..=1000); peek does not consume data and the forwarded first packet reads normally (bounded and never swallowed). A hit is delivered with a provenance annotation — `sniff.source` (`tls_sni` | `http_host`) plus `sniff.domain`; ECH (encrypted ClientHello without server_name) and unsupported versions (SSLv2-style records / QUIC drafts) return unknown instead of guessing a domain. No HTTPS decryption, no PID inference, no crossing of the authentication boundary.
 
 ## obfuscation (default None = the whole block off, zero overhead)
 

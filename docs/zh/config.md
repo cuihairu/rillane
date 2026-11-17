@@ -183,11 +183,17 @@ network:
       negative_ttl: 300          # ≥1
     listen_address: 127.0.0.1
     listen_port: 15353           # ≠0
+  sniff:                         # 可选（RIL-143）；块缺席 = 按需缺省（既有行为零差异）
+    mode: on_demand              # off | on_demand | scope
+    ports: [443, 80]             # scope 模式显式覆盖端口表（覆盖目标需显式配置）
+    max_bytes: 16389             # 首包字节界（1..=65535；缺省容纳最大 TLS 记录 16384+5）
+    timeout_ms: 120              # 首包等待界毫秒（1..=1000）
   egress_fwmark: 0               # 0/缺省 = 不打 SO_MARK；非 0 须 root/CAP_NET_ADMIN（降级直连 WARN）
 ```
 
 - `routing.include` CIDR 须显式 `addr/prefix` 形式（裸 IP 不收，主机路由写 `/32`）。
 - 出站 fwmark 逃逸面（`egress_fwmark` ≠ 0）：planner 追加 `ip rule fwmark` + escape 表 100 默认路由，`rillanectl route apply/clear` 账目内管理。
+- `sniff`（有界域名嗅探策略，RIL-143）：TUN 面首包域名嗅探三态门——`off`（不嗅探）、`on_demand`（缺省：目标为 IP 字面量即路由面缺域名证据时才嗅探）、`scope`（仅显式声明的端口表；空表 = 不嗅探任何流，覆盖目标需显式配置）。首包字节/时间双界可配且有硬上限（`max_bytes` 1..=65535、`timeout_ms` 1..=1000）；peek 不消费数据、forward 首包照常可读（有界且不吞数据）。命中以来源契约注记交付——`sniff.source`（`tls_sni` | `http_host`）+ `sniff.domain`；ECH（加密 ClientHello 无 server_name）与不支持版本（SSLv2 式记录 / QUIC draft）返回未知，不猜测域名。不解密 HTTPS、不推断 PID、不越认证边界。
 
 ## obfuscation（缺省 None = 整块关、零开销）
 
