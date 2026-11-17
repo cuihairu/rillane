@@ -9,6 +9,7 @@ This directory maintains only the current v1 design. **Proposal, not implemented
 | [IO and accounting contracts](io-and-accounting.md) | Inbound/outbound, executor, transport/pools and business/underlying accounting |
 | [Protocol integration plan](protocol-roadmap.md) | Reuse gates and additional protocols/tunnels/transports |
 | [UI prototypes and controls](ui-prototype-v1.md) | Routing modes, regions, DNS/sniff, streaming and developer interactions |
+| [AI/LLM traffic routing (proposal)](ai-routing.md) | Domain/CDN/SNI-prefix rule template, direction and CLI shortcut semantics (implementation under RIL-153) |
 | [10-image prototype gallery](ui/README.md) | Six desktop and two screens per mobile platform, saved PNGs/prompts |
 | [Debug, paths and optional MCP](debug-and-mcp.md) | Explanation, actual traces, active probes, privacy, authority and configuration lifecycle |
 | [Upstream architecture study](../research/proxy-architectures-2026-11-14.md) | Primary evidence, SVGs and influences from Mihomo, sing-box and Surge |
