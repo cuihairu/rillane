@@ -16,3 +16,8 @@ platforms/android/local.properties
 # 示例插件 wasm 产物（plugins/build.sh 产 output/，不入库；crate target/ 由顶层 target/ 覆盖不到 plugins/*/target，显式补）
 plugins/output/
 plugins/*/target/
+
+# 2026-10-17: 依赖目录，禁止任何操作（含 git mv / glob 展开）
+node_modules/
+**/node_modules/
+.pnpm-store/
