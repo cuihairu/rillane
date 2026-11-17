@@ -483,8 +483,9 @@ HTTP MCP、远程公开管理、Android 按应用独立路由、iOS 受管 Per-A
   交付：上游传输、直连/组/跟随规则、按域名解析与bootstrap/节点DNS分离。验收：防止解析依赖循环及TUN重捕获，失败不无提示回系统DNS；诊断展示实际解析器/查询出站，DoH/fake-ip不冒充零泄漏。
 - [ ] **RIL-145｜P2｜流媒体可用性与地区检测**；依赖：RIL-026、RIL-057、RIL-059。
   交付：服务检测方法、选定出口、结果/地区/时间/TTL与取消配额。验收：未检测/未知/受限/失败/过期分开，HTTP200不等于播放；不收密码/装证书/承诺解锁，自动选组需显式启用与迟滞，检测流量单计。
-- [ ] **RIL-146｜P1｜Git/SSH/GitHub 路由预设**；依赖：RIL-014、RIL-015、RIL-021、RIL-059。
+- [x] **RIL-146｜P1｜Git/SSH/GitHub 路由预设**；依赖：RIL-014、RIL-015、RIL-021、RIL-059。
   交付：Git HTTPS、API、release/LFS/下载与Git over SSH的版本化规则和分阶段测试。验收：重定向域名/规则来源可查，连通不等于加速；SSH主机密钥和认证保持，移动仅域名能力，不混同SSH出口协议。
+  证据（2026-11-17，commit 57a7883 代码 + c22bb51 文档）：`routing.git_preset` 块落地——in-tree 版本化预设（GIT_PRESET_VERSION=1）展开四条规则：`git-ssh`（SSH 主机集 + port 22 AND 限定，不泛化劫持裸端口）、`git-ssh-alt`（ssh.github.com/altssh.gitlab.com 官方 443 备用 + port 443）、`git-https`（HTTPS/API 主域——API 均为主域子域 suffix 覆盖）、`git-assets`（release/LFS/下载 CDN 重定向域样例，如实标注非全量）；追加在用户规则之后、泛化区域规则之前（先用户 → 应用预设 → 区域，集成测试钉住并存次序）；同名规则/规则集用户声明优先、模板退让、幂等；`ssh` 缺席回落 `target`，空 target/显式空 ssh 校验具名拒绝；`git_preset_preview` 交付求值序样例 + 四张来源卡片（重定向域名/规则来源可查）+ 固定说明（连通不等于加速 / SSH known_hosts/主机密钥/端到端认证保持——仅域名能力路由，不混同 SSH 出口协议 / 样例非全量 / 全局直连模式暂停）。测试：config 新增 13（5 内联 + 8 契约 tests/git_presets.rs），10× 重复跑 2320 ok / 0 FAILED；clippy -D warnings 全绿；docs/config.md + docs/zh/config.md 增 git_preset 块行与语义条目。
 - [ ] **RIL-147｜P2｜开发者终端与配置片段预览**；依赖：RIL-073、RIL-075、RIL-076、RIL-146。
   交付：各平台当前终端变量、Git/SSH片段的复制与diff；可选写入限定具体文件/作用域。验收：复制不修改系统，SSH不假定HTTP_PROXY生效，工具存在性验证；写入需授权/备份/幂等/冲突/恢复，不改密钥或关host-key校验，不开放任意shell。
 - [ ] **RIL-148｜P2｜桌面客户端核心页面**；依赖：RIL-057、RIL-060、RIL-140、RIL-141、RIL-144、RIL-146。
