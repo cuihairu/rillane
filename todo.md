@@ -503,3 +503,13 @@ HTTP MCP、远程公开管理、Android 按应用独立路由、iOS 受管 Per-A
 RIL-152 交付证据（2026-11-15）：10张PNG及尺寸/SHA-256清单已保存，原始与4项修改提示词在 docs/design/ui/prompts.json；离线图库与中英规格可读，文档链接检查152项零失效，站点构建通过。此勾选仅表示原型资产交付。
 - [ ] **RIL-153｜P1｜AI/LLM 应用流量识别分流**；依赖：RIL-006、RIL-014、RIL-143。
   交付：域名/CDN/SNI 前缀规则模板（不猜流量内容）命中→指定 node/group；配置面=订阅转换规则模板 + CLI 快捷命令（`rillane ai on --proxy <group>` / `ai off`）。立项口径与 YAML 模板样例：[AI 分流立项](docs/zh/design/ai-routing.md)。验收：模板首批只含域名面（SNI/HTTP 头特征为新增条件面，依赖 RIL-143 有界证据面，不解密 HTTPS、不越认证边界）；SSE 长连接不中断、websocket 兼容、UDP 场景不存在如实标注；模板 in-tree 来源可查版本化、不远程拉取；on/off 走配置事务面（RIL-073～077）不旁路代际，按 `ai-` 规则名前缀寻址摘除不碰用户规则；合入位置在泛化区域规则之前且幂等；target 指向不存在组被引用图校验拒绝。
+- [ ] **RIL-154｜P2｜UDP 出口拨号解析多地址回退**；依赖：RIL-059。
+  立项依据（2026-11-17 work-runner 验证批发现）：`crates/rillane-core/src/udp/relay.rs` `resolve_first` 对 `tokio::net::lookup_host` 只取**首地址**拨号——当主机解析返回多地址且首址不可达时（实测：`/etc/hosts` 含 `::1 localhost` 的机器上 getaddrinfo 按 RFC 6724 排序 `::1` 优先，direct UDP 出口把数据报投给 `[::1]` 而对端绑在 `127.0.0.1`，黑洞超时），生产 direct UDP 出口走同一代码路径，同面成立。交付方向：逐地址尝试回退（首个 connect 成功即用）/ 首址失败显式错误携带尝试清单，不静默黑洞。验收：双栈解析主机上 localhost 级 UDP 往返不依赖 hosts 文件布局；现有 6 个 fakeip UDP 契约测在 `::1 localhost` 布局的机器上原生通过（当前靠环境规范绕过，见下方迁移收口记录）。
+
+## 13. 迁移收口与验证常态（2026-11-17 完成）
+
+- [x] **本地深清**：push 硬闸通过（`origin/main == HEAD == d360669`，工作树净）后 `cargo clean`——移除 78,863 文件 / 198.6GiB，根分区可用 148G→343G。
+- [x] **work-runner 全量验证**：repo @ d360669，`cargo test --workspace --no-fail-fast -j 4`（8C/7G+8G swap，任务书已同步 `~/rillane-migrate-closeout.md`）。最终单跑全绿：**103 targets / 1681 passed / 0 failed**（EXIT=0，warm 执行 28s；首次冷构建从空 target 到首个测试执行 ~17min）；target 最终 32.3GiB（对照本地历史 163G——增量残渣面就此归零）。
+- [x] **环境依赖面（代码零改动）**：① rillane-app client 4 测 `control.http.502` = work-runner `~/.bashrc` 的 http_proxy 泄入 reqwest 默认代理面，回环 mock 被劫到外部代理——测试跑法固定为清代理环境变量后即绿；② 6 协议契约 `fakeip_targets_reversed_to_original_domains`（UDP 半）5s 回程超时 = work-runner `/etc/hosts` 含 `::1 localhost` 行（本地无），getaddrinfo 首址 `::1` 命中 RIL-154 所述首址拨号面，数据报黑洞——hosts 已规范为本地布局（备份 `/etc/hosts.bak-rillane-20261117`）后 6/6 通过（0.21s/个，此前 5.2~6.3s 超时）。
+- [x] **已知 flake 维持记录**：`transaction_fault_acceptance::concurrent_readers_never_observe_torn_journal` 并行负载下偶发（全绿单跑 run 3 命中 1 次），隔离重跑 4/4 ok 0.01s——与既有档案一致，非本批回归。
+- [x] **防复发**：disk-sweep 已落 rillane 动态规则（本机 `target/debug` > 20G 且无活跃 cargo 进程 cwd 在仓内 → cargo clean；阈值 `DISK_SWEEP_RILLANE_CLEAN_MB` 可调），`bash -n` 过。
