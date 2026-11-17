@@ -121,8 +121,9 @@ impl Socks5UdpConnector {
     }
 
     /// TCP 控制信道：方法协商（RFC 1928 §3）+ UDP ASSOCIATE（§6）。
-    /// 返回控制流与对端中继端点（BND.ADDR/BND.PORT；BND 不指定时回退
-    /// 代理服务器地址——RFC 1928 §7 常见服务端行为）。
+    /// 返回控制流与对端中继端点（BND.ADDR/BND.PORT；BND 不指定时取控制
+    /// 信道落地地址——RFC 1928 §7「以客户端连代理所用地址为准」，RIL-154
+    /// 同面收口：不再解析服务器地址取首址）。
     async fn associate_control(&self) -> Result<(TcpStream, SocketAddr)> {
         let proxy_addr = self.proxy_addr();
         let mut control = TcpStream::connect(&proxy_addr)
@@ -190,16 +191,18 @@ impl Socks5UdpConnector {
             ));
         }
         let (bnd, bnd_port) = read_reply_endpoint(&mut control, head[3]).await?;
-        let relay_addr = match bnd {
-            // 0.0.0.0/:: → 中继与控制信道同主机（RFC 1928 §7：以客户端连接
-            // 代理所用的地址为准）
-            EndpointAddr::Ip(ip) if ip.is_unspecified() => {
-                SocketAddr::new(resolve_first(&self.server).await?, bnd_port)
-            }
-            EndpointAddr::Ip(ip) => SocketAddr::new(ip, bnd_port),
-            EndpointAddr::Domain(host) => SocketAddr::new(resolve_first(&host).await?, bnd_port),
+        // RFC 1928 §7 中继地址（RIL-154 同面收口，不再解析取首址）：
+        // BND 未指定（0.0.0.0/::）→ 以控制信道实际落地地址为准——该地址族
+        // 在本机→代理路径上已被 TCP 建连证实可达；BND 为域名 → 解析全部
+        // 地址并按控制信道地址族优先选取（无同族落回首址），解析失败显式
+        // 报错带主机名。
+        let control_peer = control.peer_addr().context("控制信道对端地址缺失")?;
+        let relay_ip = match bnd {
+            EndpointAddr::Ip(ip) if ip.is_unspecified() => control_peer.ip(),
+            EndpointAddr::Ip(ip) => ip,
+            EndpointAddr::Domain(host) => resolve_relay_ip(&host, control_peer.ip()).await?,
         };
-        Ok((control, relay_addr))
+        Ok((control, SocketAddr::new(relay_ip, bnd_port)))
     }
 }
 
@@ -248,17 +251,31 @@ async fn read_reply_endpoint(control: &mut TcpStream, atyp: u8) -> Result<(Endpo
     Ok((addr, u16::from_be_bytes(port)))
 }
 
-/// 域名解析首个地址（本模块无独立 DNS 面——标准解析器）
-async fn resolve_first(host: &str) -> Result<std::net::IpAddr> {
+/// 解析域名型 BND.ADDR 为中继 IP（RIL-154 同面收口）：解析结果按序扫描，
+/// 优先取与控制信道落地地址同族的地址（该族可达性已被 TCP 建连证实），
+/// 无同族落回首址；字面 IP 直接透传。解析失败显式报错带主机名。
+async fn resolve_relay_ip(host: &str, prefer: std::net::IpAddr) -> Result<std::net::IpAddr> {
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return Ok(ip);
     }
-    tokio::net::lookup_host((host, 0u16))
+    let mut first = None;
+    let mut same_family = None;
+    for addr in tokio::net::lookup_host((host, 0u16))
         .await
-        .with_context(|| format!("代理地址解析失败（{host}）"))?
-        .next()
-        .map(|sa| sa.ip())
-        .ok_or_else(|| anyhow!("代理地址解析为空（{host}）"))
+        .with_context(|| format!("代理中继地址解析失败（{host}）"))?
+    {
+        let ip = addr.ip();
+        if first.is_none() {
+            first = Some(ip);
+        }
+        if same_family.is_none() && ip.is_ipv4() == prefer.is_ipv4() {
+            same_family = Some(ip);
+            break; // 同族命中即取——族优先语义不要求扫全部
+        }
+    }
+    same_family
+        .or(first)
+        .ok_or_else(|| anyhow!("代理中继地址解析为空（{host}）"))
 }
 
 /// RFC 1928 §7 数据报帧头（RSV2 FRAG1 ATYP1 ADDR.. PORT2）

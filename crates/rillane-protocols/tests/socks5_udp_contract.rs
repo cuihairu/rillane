@@ -25,6 +25,12 @@ enum PeerMode {
     /// 中继首条合法数据报后：注入一条陌生来源数据报 + 一条 FRAG=1 分片
     /// （客户端应只下传合法回显——来源验证与分片丢弃的可观测证明）
     InjectNoise,
+    /// BND.ADDR 应答 0.0.0.0（未指定）——客户端按 RFC 1928 §7 取控制信道
+    /// 落地地址（RIL-154 同面收口验证面）
+    EchoUnspecifiedBnd,
+    /// BND.ADDR 应答域名 "localhost"——客户端按控制信道地址族优先解析
+    /// （RIL-154 同面收口验证面）
+    EchoDomainBnd,
 }
 
 /// 生成真实对端：返回代理地址与控制信道 EOF 监视（资源释放面）。
@@ -99,13 +105,31 @@ async fn handle_control(mut control: TcpStream, mode: PeerMode, eof_tx: watch::S
         tokio::time::sleep(Duration::from_millis(200)).await;
         return;
     }
-    // 绑定中继 socket，应答 BND.ADDR=127.0.0.1 BND.PORT
+    // 绑定中继 socket，按模式应答 BND.ADDR（端口同一）：
+    //   默认 → 127.0.0.1（显式 IP）；EchoUnspecifiedBnd → 0.0.0.0（未指定，
+    //   客户端取控制信道落地地址）；EchoDomainBnd → "localhost"（域名，
+    //   客户端按控制信道地址族优先解析）
     let relay = UdpSocket::bind("127.0.0.1:0").await.expect("中继绑定");
     let rport = relay.local_addr().expect("中继端口").port();
-    control
-        .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1])
-        .await
-        .expect("BND.ADDR");
+    match &mode {
+        PeerMode::EchoUnspecifiedBnd => {
+            control
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0])
+                .await
+                .expect("BND.ADDR");
+        }
+        PeerMode::EchoDomainBnd => {
+            control.write_all(&[0x05, 0x00, 0x00, 0x03]).await.expect("BND 头");
+            control.write_all(&[9u8]).await.expect("BND.LEN");
+            control.write_all(b"localhost").await.expect("BND.ADDR");
+        }
+        _ => {
+            control
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1])
+                .await
+                .expect("BND.ADDR");
+        }
+    }
     control
         .write_all(&rport.to_be_bytes())
         .await
@@ -283,6 +307,73 @@ async fn udp_associate_roundtrip_ip_and_domain_targets() {
         .expect("下行限时")
         .expect("下行成功");
     assert_eq!(&buf[..n], &[0u8, 1, 255, 128, 42], "二进制载荷完整往返");
+}
+
+/// RIL-154 同面收口：BND 未指定 → 客户端按 RFC 1928 §7 取控制信道落地
+/// 地址。代理以域名（localhost，双栈解析）配置：hosts `::1 localhost` 布局
+/// 下解析 ::1 在前也不得选中（旧代码取首址 → 数据报投 ::1 黑洞超时），
+/// 干净布局与无 IPv6 机器同样通过（确定性不依赖 hosts 排布）。
+#[tokio::test]
+async fn unspecified_bnd_uses_control_channel_family() {
+    let (addr, _eof) = spawn_peer(PeerMode::EchoUnspecifiedBnd).await;
+    let connector = Socks5UdpConnector::from_connector(&rillane_protocols::Socks5Connector::new(
+        "localhost".into(),
+        addr.port(),
+        None,
+        None,
+    ));
+    let relay = connector
+        .associate(flow_ctx("10.0.0.1", 53), &decision())
+        .await
+        .expect("关联成功");
+    relay
+        .send_to(
+            &FlowTarget {
+                host: "10.0.0.1".into(),
+                port: 53,
+                proto: TargetProto::Udp,
+            },
+            b"bnd-unspecified",
+        )
+        .await
+        .expect("上行");
+    let mut buf = [0u8; 2048];
+    let (target, n) = tokio::time::timeout(Duration::from_secs(2), relay.recv_from(&mut buf))
+        .await
+        .expect("下行限时（中继地址不可达即黑洞超时）")
+        .expect("下行成功");
+    assert_eq!(&buf[..n], b"bnd-unspecified", "载荷完整往返");
+    assert_eq!(target.host, "127.0.0.1", "回显源地址随下行带回");
+}
+
+/// RIL-154 同面收口：BND 为域名 → 客户端按控制信道地址族优先解析
+/// （可达族已证实），无同族落回首址；往返不受解析序影响。
+#[tokio::test]
+async fn domain_bnd_prefers_control_channel_family() {
+    let (addr, _eof) = spawn_peer(PeerMode::EchoDomainBnd).await;
+    let connector = connector(addr, None, None);
+    let relay = connector
+        .associate(flow_ctx("10.0.0.1", 53), &decision())
+        .await
+        .expect("关联成功");
+    relay
+        .send_to(
+            &FlowTarget {
+                host: "10.0.0.1".into(),
+                port: 53,
+                proto: TargetProto::Udp,
+            },
+            b"bnd-domain",
+        )
+        .await
+        .expect("上行");
+    let mut buf = [0u8; 2048];
+    let (target, n) = tokio::time::timeout(Duration::from_secs(2), relay.recv_from(&mut buf))
+        .await
+        .expect("下行限时")
+        .expect("下行成功");
+    assert_eq!(&buf[..n], b"bnd-domain", "载荷完整往返");
+    assert_eq!(target.host, "127.0.0.1", "回显源地址随下行带回");
 }
 
 /// ASSOCIATE 被拒：错误码透传（失败面——不伪装成功不静默重试）
