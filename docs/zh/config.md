@@ -99,6 +99,9 @@
 ```yaml
 routing:
   default_node: direct-main        # 必填
+  mode: rule                       # rule（缺省）| global | direct
+  global_node: proxy-group         # mode: global 时必填；已声明组或出口名
+  direct_node: direct-main         # mode: direct 时必填；须为 Direct 类型出口节点
   groups:                          # 必填（可为空表）
     - name: auto
       strategy: latency
@@ -120,6 +123,7 @@ routing:
 ```
 
 - `strategy` 七种：`fixed | latency | random | bandwidth | weighted | consistent_hash | round_robin`。
+- `mode`（统一选路模式，RIL-140）：决定**已接管**业务流量如何选出口——与流量接管正交。`rule`（缺省）= 场景 → 规则 → 默认按声明求值；`global` / `direct` 编译为同一决策路径的模式入口，**短路**场景/规则面（暂停求值，不是静默忽略）。模式入口不触碰身份认证、资源限制、硬性安全拒绝与防环（均在路由之前），也不改变 DNS 应答。普通订阅 REJECT 规则**不是**硬性安全拒绝——切到 `global`/`direct` 会暂停它们；`mode::mode_override_preview` 显式点名被暂停的场景/规则与 REJECT 子集，`mode::mode_receipt` 回执已请求/已生效模式、代际与冲突。校验/装配门：`global` 须给 `global_node`（已声明组或出口，含 reject 出口），`direct` 须给 `direct_node` 且指向 **Direct 类型**出口节点——引用不存在或类型不符装配期点名拒绝，不留到建连期。全局/直连出口不可用按显式失败上抛（组无健康成员即报错）——**绝不静默落直连**。新流按当下代际的模式求值，既有流钉在原代际。
 - 路由条件 `type` 标签：`any{conditions}` / `not{condition}` / `domain_suffix{values}` / `domain_keyword{values}` / `domain_regex{patterns}` / `domain_full{values}` / `geoip{country}` / `geo_site{category}` / `ip_cidr{cidrs}` / `network{cidrs}` / `port{values}` / `process{values}`。进程名口径 `/proc/<pid>/comm` 截断 15 字节；**仅 TUN 入口有该注解**，其它 ingress 恒不命中。`geoip` 读 `routing.geoip_db`（MaxMind DB Country `.mmdb`，仅目标 IP 字面量）；`geo_site` 读 `routing.geosite_db`（v2fly `.dat`）。数据库路径缺席或加载失败时对应条件恒不命中。数据库相对路径按配置文件所在目录解析。
 - `slo` 校验：`loss_ratio ∈ [0,1]`、`loss_penalty_ms ≥ 0`；`latency` 策略在 `slo:` 门内取最低分，chain 侧 `slo_watch` 劣化自动切换。
 

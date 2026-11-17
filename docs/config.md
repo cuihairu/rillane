@@ -99,6 +99,9 @@ Transport and build-time constraints:
 ```yaml
 routing:
   default_node: direct-main        # required
+  mode: rule                       # rule (default) | global | direct
+  global_node: proxy-group         # required when mode: global; declared group or egress name
+  direct_node: direct-main         # required when mode: direct; must be a Direct egress node
   groups:                          # required (may be empty)
     - name: auto
       strategy: latency
@@ -120,6 +123,7 @@ routing:
 ```
 
 - Seven `strategy` values: `fixed | latency | random | bandwidth | weighted | consistent_hash | round_robin`.
+- `mode` (unified selection mode, RIL-140): decides how **already-captured** traffic picks an egress — orthogonal to traffic capture. `rule` (default) = scenarios → rules → default as declared; `global` / `direct` compile into the same decision path as a mode entry that short-circuits the scenario/rule faces (they are paused, not evaluated). The mode entry never touches authentication, resource limits, hard security rejections or loop prevention (they run before routing), and never changes DNS answers. Ordinary subscription REJECT rules are **not** hard security boundaries — switching to `global`/`direct` pauses them; `mode::mode_override_preview` names the paused scenarios/rules and the REJECT subset explicitly, and `mode::mode_receipt` reports requested vs effective mode, generation and conflicts. Validation/assembly gates: `global` requires `global_node` (a declared group or egress, `reject` included), `direct` requires `direct_node` naming a **Direct-type** egress node — undeclared names or wrong types are refused at build time, never at dial time. An unavailable global/direct egress fails the flow explicitly (group without healthy members errors out) — **never a silent fallback to direct**. New flows follow the current generation's mode; established flows stay pinned to their original generation.
 - Routing condition `type` tags: `any{conditions}` / `not{condition}` / `domain_suffix{values}` / `domain_keyword{values}` / `domain_regex{patterns}` / `domain_full{values}` / `geoip{country}` / `geo_site{category}` / `ip_cidr{cidrs}` / `network{cidrs}` / `port{values}` / `process{values}`. The process-name scope is `/proc/<pid>/comm` truncated to 15 bytes; **only the TUN ingress carries that annotation**, so other ingresses never match. `geoip` reads `routing.geoip_db` (MaxMind DB Country `.mmdb`, target IP literal only) and `geo_site` reads `routing.geosite_db` (v2fly `.dat`); if a database path is absent or fails to load, the condition never matches. Relative database paths are resolved against the config-file directory.
 - `slo` validation: `loss_ratio` in [0,1], `loss_penalty_ms >= 0`; the `latency` strategy takes the lowest score inside the `slo:` gate, and the chain side's `slo_watch` switches automatically on degradation.
 
