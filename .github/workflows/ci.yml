@@ -159,9 +159,11 @@ jobs:
       run: cargo install cargo-audit --version 0.22.2 --locked
 
     - name: Run security audit
-      # RUSTSEC-2026-0258（h2 <0.4.16 空 DATA 帧放大）已随 hyper 0.14 → 1.x
-      # 迁移清零（h2 ≥0.4.16 入锁），无 ignore 项；新告警出现时按条目定向处理
-      run: cargo audit
+      # RUSTSEC-2026-0258（h2）已随 hyper 0.14 → 1.x 迁移清零。
+      # 定向 ignore（逐条核实非误报，新告警出现时按条目处理）：
+      # - RUSTSEC-2024-0370 postgres：tokio-postgres 生态无 1.x 迁移、已停维护；仅订阅同步面使用，待换 sqlx
+      # - RUSTSEC-2026-0486 rustix xattr unsound：零长 buffer 误标初始化；随 rustix 1.x 升级跟进
+      run: cargo audit --ignore RUSTSEC-2024-0370 --ignore RUSTSEC-2026-0486
 
   msrv:
     name: Check MSRV

@@ -7,19 +7,21 @@
 //! 错误密码失败、不可达服务器点名错误、流释放对端可见、取消路径资源释放。
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anytls::{
-    Address, DEFAULT_MAX_SESSION_AGE, DEFAULT_SCHEME, PaddingFactory, Session, StreamIo,
-    UotMode, read_auth, uot_encode_packet, uot_get_packet_from_stream,
-    uot_get_request_from_stream, uot_is_sentinel_destination,
+    read_auth, uot_encode_packet, uot_get_packet_from_stream, uot_get_request_from_stream,
+    uot_is_sentinel_destination, Address, PaddingFactory, Session, StreamIo, UotMode,
+    DEFAULT_MAX_SESSION_AGE, DEFAULT_SCHEME,
 };
 use rillane_core::udp::EgressUdpConnector;
-use rillane_core::{EgressConnector, Flow, FlowContext, FlowId, RouteDecision, RoutePath, RouteType, TargetProto};
-use rustls::pki_types::pem::PemObject;
+use rillane_core::{
+    EgressConnector, Flow, FlowContext, FlowId, RouteDecision, RoutePath, RouteType, TargetProto,
+};
 use rillane_protocols::{AnytlsConnector, AnytlsUdpConnector};
+use rustls::pki_types::pem::PemObject;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -309,23 +311,24 @@ async fn tcp_roundtrip_stats_and_session_reuse() {
     // 文本回环 + 统计对账
     let (flow, mut client) = make_flow("203.0.113.9", 443);
     let connector_task = connector.clone();
-    let report =
-        tokio::spawn(async move { connector_task.forward(flow).await });
+    let report = tokio::spawn(async move { connector_task.forward(flow).await });
     let payload = b"ril106 anytls tcp roundtrip";
     client.write_all(payload).await.expect("上行写入");
     client.shutdown().await.expect("客户端半边写关闭");
     let mut echoed = Vec::new();
     client.read_to_end(&mut echoed).await.expect("下行回读");
     let report = report.await.expect("forward 任务").expect("forward 成功");
-    assert_eq!(std::str::from_utf8(&echoed).unwrap(), "ril106 anytls tcp roundtrip");
+    assert_eq!(
+        std::str::from_utf8(&echoed).unwrap(),
+        "ril106 anytls tcp roundtrip"
+    );
     assert_eq!(report.upstream, payload.len() as u64, "上行统计对账");
     assert_eq!(report.downstream, payload.len() as u64, "下行统计对账");
 
     // 二进制回环（同一连接器 → 池复用）
     let (flow, mut client) = make_flow("203.0.113.10", 8443);
     let connector_task = connector.clone();
-    let report =
-        tokio::spawn(async move { connector_task.forward(flow).await });
+    let report = tokio::spawn(async move { connector_task.forward(flow).await });
     let binary: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
     client.write_all(&binary).await.expect("上行写入");
     client.shutdown().await.expect("客户端半边写关闭");
@@ -333,7 +336,10 @@ async fn tcp_roundtrip_stats_and_session_reuse() {
     client.read_to_end(&mut echoed).await.expect("下行回读");
     let report = report.await.expect("forward 任务").expect("forward 成功");
     assert_eq!(echoed, binary, "二进制回环一致");
-    assert_eq!(report.upstream + report.downstream, (binary.len() * 2) as u64);
+    assert_eq!(
+        report.upstream + report.downstream,
+        (binary.len() * 2) as u64
+    );
 
     wait_for(&peer.streams_closed, 2).await;
     assert_eq!(
@@ -397,13 +403,10 @@ async fn wrong_password_fails_named() {
     // 客户端半边持开：对端认证拒绝关连 → 会话死亡杀流 → forward 错误
     // （先 drop 会立即 EOF，回环速度可能赶在对端拒绝前伪装成功）
     let (flow, _client) = make_flow("203.0.113.11", 443);
-    let err = tokio::time::timeout(
-        Duration::from_secs(5),
-        connector.forward(flow),
-    )
-    .await
-    .expect("错误密码 5s 内应出错")
-    .expect_err("错误密码必须失败");
+    let err = tokio::time::timeout(Duration::from_secs(5), connector.forward(flow))
+        .await
+        .expect("错误密码 5s 内应出错")
+        .expect_err("错误密码必须失败");
     assert!(
         format!("{err:#}").contains("AnyTLS"),
         "错误应点名 AnyTLS: {err:#}"
@@ -424,16 +427,16 @@ async fn unreachable_server_names_control_failure() {
     );
     let (flow, client) = make_flow("203.0.113.12", 443);
     drop(client);
-    let err = connector
-        .forward(flow)
-        .await
-        .expect_err("不可达必须失败");
+    let err = connector.forward(flow).await.expect_err("不可达必须失败");
     let rendered = format!("{err:#}");
     assert!(
         rendered.contains("AnyTLS 控制连接失败"),
         "错误应点名控制连接失败: {rendered}"
     );
-    assert!(rendered.contains("127.0.0.1:1"), "错误应携带 server 上下文: {rendered}");
+    assert!(
+        rendered.contains("127.0.0.1:1"),
+        "错误应携带 server 上下文: {rendered}"
+    );
 }
 
 /// 取消路径：forward 进行中 abort → 流随 future drop → 对端流结束可见
@@ -452,7 +455,7 @@ async fn cancel_releases_peer_stream() {
 
     handle.abort();
     let _ = handle.await; // JoinError::Cancelled 即取消语义本身
-    // 取消 → StreamIo/Flow io drop → 会话流 FIN → 对端 2s 内见释放
+                          // 取消 → StreamIo/Flow io drop → 会话流 FIN → 对端 2s 内见释放
     drop(client);
     wait_for(&peer.streams_closed, 1).await;
 }

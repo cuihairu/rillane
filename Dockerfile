@@ -29,17 +29,20 @@ COPY crates/rillane-plugins/Cargo.toml      crates/rillane-plugins/Cargo.toml
 COPY crates/rillane-ffi/Cargo.toml          crates/rillane-ffi/Cargo.toml
 COPY apps/rillaned/Cargo.toml              apps/rillaned/Cargo.toml
 COPY apps/rillanectl/Cargo.toml            apps/rillanectl/Cargo.toml
+COPY crates/rillane-app/Cargo.toml         crates/rillane-app/Cargo.toml
+COPY apps/rillane-mcp/Cargo.toml           apps/rillane-mcp/Cargo.toml
 
 RUN for c in rillane-config rillane-core rillane-routing rillane-protocols rillane-telemetry \
              rillane-platform rillane-runtime rillane-mesh rillane-subscription \
-             rillane-plugins rillane-ffi; do \
+             rillane-plugins rillane-ffi rillane-app; do \
         mkdir -p "crates/$c/src" && touch "crates/$c/src/lib.rs"; \
     done \
     && mkdir -p crates/rillane-core/benches \
     && touch crates/rillane-core/benches/relay_throughput.rs crates/rillane-core/benches/write_frame.rs \
-    && mkdir -p apps/rillaned/src apps/rillanectl/src \
+    && mkdir -p apps/rillaned/src apps/rillanectl/src apps/rillane-mcp/src \
     && echo 'fn main() {}' > apps/rillaned/src/main.rs \
     && echo 'fn main() {}' > apps/rillanectl/src/main.rs \
+    && echo 'fn main() {}' > apps/rillane-mcp/src/main.rs \
     && cargo build --release \
     && rm -rf crates/*/src crates/*/benches apps/*/src
 

@@ -24,7 +24,7 @@ mod tls;
 pub use fingerprint::TlsFingerprint;
 pub use inbound::{
     HttpIngress, Hysteria2Ingress, Hysteria2UdpParts, HysteriaIngress, HysteriaUdpParts,
-    MixedIngress, ShadowsocksIngress, ShadowsocksUdpParts, ShadowTlsIngress, Socks5Ingress,
+    MixedIngress, ShadowTlsIngress, ShadowsocksIngress, ShadowsocksUdpParts, Socks5Ingress,
     TrojanIngress, TrojanUdpParts, VlessIngress, VlessUdpParts, VmessIngress, VmessUdpParts,
 };
 pub use middleware::LatencyProbe;
@@ -32,9 +32,8 @@ pub use outbound::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, Hysteria2Connector,
     Hysteria2UdpConnector, Hysteria2UdpRelay, HysteriaConnector, HysteriaUdpConnector,
     HysteriaUdpRelay, ShadowsocksConnector, ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector,
-    Socks5Connector,
-    Socks5UdpConnector, TrojanConnector, TrojanUdpConnector, TuicConnector, TuicStream,
-    TuicUdpConnector, TuicUdpRelay, VlessConnector, VlessUdpConnector, VmessConnector,
+    Socks5Connector, Socks5UdpConnector, TrojanConnector, TrojanUdpConnector, TuicConnector,
+    TuicStream, TuicUdpConnector, TuicUdpRelay, VlessConnector, VlessUdpConnector, VmessConnector,
     VmessSecurity, VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
 };
 pub use pool::{
