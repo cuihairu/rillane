@@ -15,7 +15,7 @@
   - `--endpoint` 语义分两型（易混）：
     - **完整 URL 型**（替换整个目标 URL，须含路径）：`stats`（缺省 `http://{api_bind}/flows`）、`group`（`/routing/stats`）、`switches`（`/mesh/switches`）、`pool status`（`/egress/pool/stats`）、`nodes`（`/nodes`）；
     - **base URL 型**（仅替换 base，路径内部拼接）：`chain`、`subscription`、`route`、`config`、`diagnose`、`trace`、`mtls revoke status`。
-- **离线命令**（`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / `mtls` 证书工具）：不经控制面，只读本地文件（`udp-probe` 例外——直接连 SOCKS5 入口实测）。
+- **离线命令**（`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / `dev-env` / `mtls` 证书工具）：不经控制面，只读本地文件（例外：`udp-probe` 直接连 SOCKS5 入口实测；`dev-env --apply-git` 执行两键 `git config --global`、`dev-env --write-ssh` 把管理块写入 `~/.ssh/config` 并先备份——均只在显式旗标之后）。
 - 无 `rillanectl reload` 子命令：rillaned 启动一次性读配置，运行期热更新仅由订阅刷新与控制面端点驱动（见 [architecture.md](architecture.md) 热更新口径）。
 
 ## 控制面 REST 端点总表
@@ -83,6 +83,7 @@
 | `switches` | 查看链路切换账本（最近 100 次事件，含前后路径与原因） | 控制面 `/mesh/switches` |
 | `profile` | 生成场景骨架配置（`proxy\|game\|web`） | 离线 |
 | `tls-fingerprint` | TLS 指纹形态预设对照表（none/chrome/ios/safari 的 shape_material 四维导出） | 离线 |
+| `dev-env` | 开发者终端与配置片段预览（各 shell 终端变量 / Git / SSH ProxyCommand 片段；复制不动系统，写入有旗标门；RIL-147） | 离线 |
 | `import-rules` | 批量导入 geosite/chnroutes 文本规则源为路由/DNS 规则 YAML | 离线 |
 | `udp-probe` | UDP ASSOCIATE 联调探测（最小 RFC 1928 客户端；退出码 0-4） | 直连 SOCKS5 入口 |
 | `nodes` | 查看 mesh 节点注册信息 | 控制面 `/nodes` |
@@ -126,6 +127,15 @@ rillanectl profile <proxy|game|web> [--out <路径>]   # 缺省打印 stdout
 ### tls-fingerprint
 
 无旗标；打印四预设的 `shape_material` 形态串对照表（版本|套件|群|签名方案）。
+
+### dev-env
+
+```bash
+rillanectl dev-env --shell <bash|zsh|fish|powershell|cmd> --http <host:port> --socks <host:port> \
+                   [--ssh-hosts <逗号分隔>] [--ssh-diff] [--write-ssh] [--apply-git]
+```
+
+打印（缺省不改系统——复制即用）：各 shell 终端代理变量（`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`(SOCKS)/`NO_PROXY`）、`git config --global` 两键（`http.proxy`/`https.proxy`）、SSH 管理块。**SSH 不读取 HTTP(S)_PROXY**——片段仅经 `ProxyCommand nc -X connect -x <socks>` 中继，不碰密钥、不关 host-key 校验（生成块过禁用键审计）。工具存在性（`git`/`nc`）经 PATH 验证并拦写入面。`--ssh-diff` 只读预览 `~/.ssh/config` diff；`--write-ssh` 追加管理块（先备份 `<路径>.rillane-bak`；按管理块标记幂等；残留备份=具名冲突，恢复=把备份拷回）；`--apply-git` 经精确 argv 只跑那两键 `git config --global`（无任意 shell）。
 
 ### import-rules
 

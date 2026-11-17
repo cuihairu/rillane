@@ -15,7 +15,7 @@ This page describes existing commands; use `rillanectl <command> --help` for cur
   - `--endpoint` comes in two flavors (easy to confuse):
     - **Full-URL flavor** (replaces the whole target URL, must include the path): `stats` (default `http://{api_bind}/flows`), `group` (`/routing/stats`), `switches` (`/mesh/switches`), `pool status` (`/egress/pool/stats`), `nodes` (`/nodes`);
     - **Base-URL flavor** (replaces only the base, path appended internally): `chain`, `subscription`, `route`, `config`, `diagnose`, `trace`, `mtls revoke status`.
-- **Offline commands** (`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / the `mtls` cert tools): no control plane, only local files are read (exception: `udp-probe` dials the SOCKS5 ingress directly).
+- **Offline commands** (`check` / `show` / `profile` / `tls-fingerprint` / `import-rules` / `udp-probe` / `import-clash` / `export-clash` / `dev-env` / the `mtls` cert tools): no control plane, only local files are read (exceptions: `udp-probe` dials the SOCKS5 ingress directly; `dev-env --apply-git` runs two scoped `git config --global` keys and `dev-env --write-ssh` writes the managed block into `~/.ssh/config` with a backup — both only behind their explicit flags).
 - There is no `rillanectl reload` subcommand: rillaned reads config once at startup, and runtime hot reloads are driven only by subscription refresh and control-plane endpoints (see the hot-reload scope in [architecture.md](architecture.md)).
 
 ## Control-plane REST endpoint reference
@@ -83,6 +83,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | `switches` | view the chain switch ledger (last 100 events, with before/after paths and reasons) | control plane `/mesh/switches` |
 | `profile` | generate a scenario skeleton config (`proxy\|game\|web`) | offline |
 | `tls-fingerprint` | TLS fingerprint preset comparison table (four-dimension shape_material export of none/chrome/ios/safari) | offline |
+| `dev-env` | developer terminal & config snippet preview (per-shell env vars / Git / SSH ProxyCommand snippets; copy modifies nothing, writes are flag-gated; RIL-147) | offline |
 | `import-rules` | batch import geosite/chnroutes text rule sources as routing/DNS rule YAML | offline |
 | `udp-probe` | UDP ASSOCIATE integration probe (minimal RFC 1928 client; exit codes 0-4) | dials the SOCKS5 ingress directly |
 | `nodes` | view mesh node registration info | control plane `/nodes` |
@@ -126,6 +127,15 @@ rillanectl profile <proxy|game|web> [--out <path>]   # default prints to stdout
 ### tls-fingerprint
 
 No flags; prints the comparison table of `shape_material` shape strings for the four presets (version|cipher suite|group|signature scheme).
+
+### dev-env
+
+```bash
+rillanectl dev-env --shell <bash|zsh|fish|powershell|cmd> --http <host:port> --socks <host:port> \
+                   [--ssh-hosts <comma-separated>] [--ssh-diff] [--write-ssh] [--apply-git]
+```
+
+Prints (default modifies nothing — copy to use): per-shell terminal proxy env vars (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`(SOCKS)/`NO_PROXY`), the two `git config --global` keys (`http.proxy`/`https.proxy`), and the SSH managed block. **SSH does not honor HTTP(S)_PROXY** — the snippet relays via `ProxyCommand nc -X connect -x <socks>` only; it never touches keys or host-key checks (generated blocks pass the forbidden-key audit). Tool presence (`git`, `nc`) is verified against PATH and gates the write faces. `--ssh-diff` previews the `~/.ssh/config` diff read-only; `--write-ssh` appends the managed block (backup `<path>.rillane-bak` first; idempotent via the managed-block marker; a stale backup is a named conflict with recovery = copy the backup back); `--apply-git` runs exactly the two `git config --global` keys via precise argv (no arbitrary shell).
 
 ### import-rules
 
