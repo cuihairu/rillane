@@ -56,6 +56,10 @@ h3-quinn.workspace = true
 # AnyTLS（RIL-106）
 anytls.workspace = true
 
+# ShadowQUIC（RIL-118）：库承载出站——协议自身 Rust 实现（唯一 crates.io
+# 落点），缺省特性即探针实测面；评估与探针留证 protocol-backends.md#shadowquic
+shadowquic.workspace = true
+
 # REALITY 认证与传输适配（RIL-107）：见 outbound/reality.rs
 x25519-dalek.workspace = true
 ed25519-dalek.workspace = true

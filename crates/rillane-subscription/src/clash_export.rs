@@ -635,6 +635,46 @@ fn proxy_mapping(
             ins(&mut m, "version", 4);
             Some(m)
         }
+        EgressConfig::ShadowQuic {
+            server,
+            port,
+            username,
+            password,
+            server_name,
+            alpn,
+            congestion_controller,
+            zero_rtt,
+            udp_over_stream,
+        } => {
+            // ShadowQUIC（RIL-118）：键形随 mihomo schema（kebab 规范键；
+            // congestion-controller 两种写法 mihomo 均读，落规范形）。
+            // zero-rtt 仅显式 true 落键（mihomo 缺省 false 同口径——缺省
+            // 落 false 会给不支持该键的旧解析器添噪）；udp-over-stream
+            // 仅显式 true 落键（UDP 面未交付，显式 true 是用户意图记录，
+            // 缺省不落）；sni 缺省回落 server，回落值不落键（等价缺省）；
+            // alpn 缺省 [h3] 不落键（同 mihomo 缺省口径）
+            ins(&mut m, "type", "shadowquic");
+            ins(&mut m, "server", server);
+            ins(&mut m, "port", *port as u64);
+            ins(&mut m, "username", username);
+            ins(&mut m, "password", password);
+            if let Some(s) = server_name {
+                ins(&mut m, "sni", s);
+            }
+            if let Some(a) = alpn {
+                ins(&mut m, "alpn", a.clone());
+            }
+            if let Some(cc) = congestion_controller {
+                ins(&mut m, "congestion-controller", cc);
+            }
+            if zero_rtt.unwrap_or(false) {
+                ins(&mut m, "zero-rtt", true);
+            }
+            if udp_over_stream.unwrap_or(false) {
+                ins(&mut m, "udp-over-stream", true);
+            }
+            Some(m)
+        }
         EgressConfig::Ssh {
             server,
             port,
@@ -1260,6 +1300,110 @@ mod tests {
         assert_eq!(parsed.proxies.len(), report.exported_proxies.len());
         assert_eq!(parsed.proxy_groups.len(), report.exported_groups.len());
         assert_eq!(parsed.rules.len(), report.exported_rules + 1); // + MATCH
+    }
+
+    /// ShadowQUIC 导出往返（RIL-118）：键形落 mihomo schema（kebab 规范键
+    /// congestion-controller / zero-rtt / udp-over-stream），且导出 YAML 经
+    /// ClashConverter 再解析回 ShadowQuic IR 字段等值（真往返证据——
+    /// 缺省面不落键：sni 回落 server、alpn 缺省 h3、zero-rtt/udp-over-stream
+    /// false）
+    #[test]
+    fn shadowquic_export_roundtrips_via_reparse() {
+        let cfg = ProjectConfig {
+            egress: vec![
+                EgressDescriptor {
+                    name: "sq-rt".into(),
+                    spec: EgressConfig::ShadowQuic {
+                        server: "sq.example.com".into(),
+                        port: 443,
+                        username: "u".into(),
+                        password: "pw".into(),
+                        server_name: Some("camo.example.com".into()),
+                        alpn: Some(vec!["h3".into()]),
+                        congestion_controller: Some("new-reno".into()),
+                        zero_rtt: Some(true),
+                        udp_over_stream: Some(true),
+                    },
+                },
+                EgressDescriptor {
+                    name: "sq-def".into(),
+                    spec: EgressConfig::ShadowQuic {
+                        server: "sq2.example.com".into(),
+                        port: 8443,
+                        username: "u2".into(),
+                        password: "pw2".into(),
+                        server_name: None,
+                        alpn: None,
+                        congestion_controller: None,
+                        zero_rtt: None,
+                        udp_over_stream: None,
+                    },
+                },
+            ],
+            ..serde_yaml::from_str(
+                "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+            )
+            .unwrap()
+        };
+        let (yaml, report) = ClashExporter.export(&cfg).unwrap();
+        assert_eq!(report.exported_proxies, vec!["sq-rt", "sq-def"], "{yaml}");
+        // 显式面键形
+        assert!(yaml.contains("type: shadowquic"), "{yaml}");
+        assert!(yaml.contains("congestion-controller: new-reno"), "{yaml}");
+        assert!(yaml.contains("zero-rtt: true"), "{yaml}");
+        assert!(yaml.contains("udp-over-stream: true"), "{yaml}");
+        assert!(yaml.contains("sni: camo.example.com"), "{yaml}");
+        // 缺省面不落键（sq2 段无 sni/zero-rtt/udp-over-stream）
+        let sq2 = yaml.split("name: sq-def").nth(1).expect("sq2 段");
+        assert!(!sq2.contains("sni:"), "缺省 sni 回落 server 不落键: {sq2}");
+        assert!(!sq2.contains("zero-rtt"), "{sq2}");
+        assert!(!sq2.contains("udp-over-stream"), "{sq2}");
+        assert!(!sq2.contains("congestion-controller"), "{sq2}");
+
+        // 再解析回 IR：字段等值（真往返）
+        let parsed = ClashConverter::new().parse(&yaml).unwrap();
+        let rillane = ClashConverter::new().convert_to_rillane(&parsed).unwrap();
+        let by_name = |n: &str| {
+            rillane
+                .egress
+                .iter()
+                .find(|e| e.name == n)
+                .unwrap_or_else(|| panic!("egress {n} 缺席"))
+                .spec
+                .clone()
+        };
+        let expected = by_name("sq-rt");
+        assert_eq!(
+            expected,
+            EgressConfig::ShadowQuic {
+                server: "sq.example.com".into(),
+                port: 443,
+                username: "u".into(),
+                password: "pw".into(),
+                server_name: Some("camo.example.com".into()),
+                alpn: Some(vec!["h3".into()]),
+                congestion_controller: Some("new-reno".into()),
+                zero_rtt: Some(true),
+                udp_over_stream: Some(true),
+            },
+            "sq-rt 往返等值"
+        );
+        let expected_def = by_name("sq-def");
+        assert_eq!(
+            expected_def,
+            EgressConfig::ShadowQuic {
+                server: "sq2.example.com".into(),
+                port: 8443,
+                username: "u2".into(),
+                password: "pw2".into(),
+                server_name: None,
+                alpn: None,
+                congestion_controller: None,
+                zero_rtt: None,
+                udp_over_stream: None,
+            },
+            "sq-def 缺省面往返等值"
+        );
     }
 
     /// G0-2 域名正则导出往返：`DomainRegex` 条件 → `DOMAIN-REGEX` 规则串，

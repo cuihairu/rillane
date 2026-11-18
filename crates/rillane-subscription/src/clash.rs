@@ -95,6 +95,7 @@ pub enum ClashProxyType {
     #[serde(rename = "socks5")]
     Socks5,
     Snell,
+    ShadowQuic,
     Ssh,
     Hysteria,
     Hysteria2,
@@ -219,6 +220,35 @@ pub struct ClashProxy {
         alias = "congestion_controller"
     )]
     pub congestion_controller: Option<String>,
+    /// ShadowQUIC: 0-RTT 开关（Clash 规范键 `zero-rtt`，mihomo shadowquic
+    /// schema——缺省 false，官方服务器 ≤v0.3.11 有 zero-rtt 断连 bug）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "zero-rtt",
+        alias = "zero_rtt"
+    )]
+    pub zero_rtt: Option<bool>,
+    /// ShadowQUIC: UDP-over-stream 开关（Clash 规范键 `udp-over-stream`，
+    /// mihomo shadowquic schema 缺省 false——本仓 UDP 面未交付，容忍读取
+    /// 不落行为）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "udp-over-stream",
+        alias = "udp_over_stream"
+    )]
+    pub udp_over_stream: Option<bool>,
+    /// ShadowQUIC: QUIC 版本族（Clash 规范键 `quic-versions`，mihomo 缺省
+    /// [v1]——v2 与 v1 线格式不同族，显式非 v1 导入点名拒绝；本仓承载库
+    /// 仅 v1 面）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "quic-versions",
+        alias = "quic_versions"
+    )]
+    pub quic_versions: Option<Vec<String>>,
     /// 加密（用于 VMess）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypt: Option<String>,
@@ -2235,6 +2265,43 @@ impl ClashConverter {
                     psk,
                 })
             }
+            ClashProxyType::ShadowQuic => {
+                let username = proxy
+                    .username
+                    .clone()
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| anyhow!("ShadowQUIC 缺少 username"))?;
+                let password = proxy
+                    .password
+                    .clone()
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| anyhow!("ShadowQUIC 缺少 password"))?;
+                // QUIC 版本族边界（RIL-118 评估留证 protocol-backends.md
+                // #shadowquic）：mihomo 缺省 [v1]；v2 与 v1 线格式不同族，
+                // 显式非 v1 点名拒绝（承载库仅 v1 面）；缺省/显式 v1 透传
+                if let Some(versions) = &proxy.quic_versions {
+                    if versions.iter().any(|v| !v.eq_ignore_ascii_case("v1")) {
+                        return Err(anyhow!(
+                            "ShadowQUIC quic-versions {versions:?} 未交付（仅 v1 线格式）"
+                        ));
+                    }
+                }
+                Ok(EgressConfig::ShadowQuic {
+                    server: proxy.server.clone(),
+                    port: proxy.port,
+                    username,
+                    password,
+                    server_name: proxy.servername.clone(),
+                    alpn: if proxy.alpn.is_empty() {
+                        None
+                    } else {
+                        Some(proxy.alpn.clone())
+                    },
+                    congestion_controller: proxy.congestion_controller.clone(),
+                    zero_rtt: proxy.zero_rtt,
+                    udp_over_stream: proxy.udp_over_stream,
+                })
+            }
             ClashProxyType::Ssh => {
                 // 主机钥钉扎必填（RIL-113 评估留证 protocol-backends.md#ssh）：
                 // mihomo 缺省首用即信，本仓按 TOFU 判负口径拒绝无钉扎节点
@@ -2666,6 +2733,12 @@ impl ClashConverter {
             ClashProxyType::Hysteria2 => proxy.password.is_some(),
             ClashProxyType::Tuic => proxy.password.is_some() && proxy.uuid.is_some(),
             ClashProxyType::Snell => proxy.psk.is_some(),
+            // ShadowQUIC：认证面恰 username/password（缺失即无效节点按
+            // 有效性过滤丢弃，与转换面具名拒绝同口径）
+            ClashProxyType::ShadowQuic => {
+                proxy.username.as_deref().is_some_and(|u| !u.is_empty())
+                    && proxy.password.as_deref().is_some_and(|p| !p.is_empty())
+            }
             // SSH：钉扎必填 + username 必填 + 认证恰一选一（异或——双带/
             // 双缺均判负，与转换面具名拒绝同口径）
             ClashProxyType::Ssh => {
@@ -2701,6 +2774,7 @@ impl ClashConverter {
             ClashProxyType::Https => "HTTPS",
             ClashProxyType::Socks5 => "SOCKS5",
             ClashProxyType::Snell => "Snell",
+            ClashProxyType::ShadowQuic => "ShadowQUIC",
             ClashProxyType::Ssh => "SSH",
             ClashProxyType::Hysteria => "Hysteria",
             ClashProxyType::Hysteria2 => "Hysteria2",
@@ -3382,6 +3456,125 @@ rules: []
                 .dropped_nodes
                 .iter()
                 .any(|(n, r)| n == "snell-edge" && r.contains("有效性")),
+            "丢弃须可见: {:?}",
+            report.dropped_nodes
+        );
+    }
+
+    #[test]
+    fn test_shadowquic_converted_to_egress() {
+        // RIL-118：kebab 规范键（zero-rtt / udp-over-stream /
+        // congestion-controller + mihomo 键形 new_reno）→ ShadowQuic IR
+        let yaml_content = r#"
+proxies:
+  - name: "test-sq"
+    type: shadowquic
+    server: sq.example.com
+    port: 443
+    username: "u"
+    password: "hunter2"
+    sni: camo.example.com
+    zero-rtt: true
+    udp-over-stream: true
+    congestion-controller: new_reno
+    alpn:
+      - h3
+
+proxy-groups: []
+rules: []
+        "#;
+        let converter = ClashConverter::new();
+        let clash_config = converter.parse(yaml_content).unwrap();
+        let rillane_config = converter.convert_to_rillane(&clash_config).unwrap();
+        let sq = rillane_config
+            .egress
+            .iter()
+            .find(|e| e.name == "test-sq")
+            .expect("shadowquic egress");
+        match &sq.spec {
+            EgressConfig::ShadowQuic {
+                server,
+                port,
+                username,
+                password,
+                server_name,
+                alpn,
+                congestion_controller,
+                zero_rtt,
+                udp_over_stream,
+            } => {
+                assert_eq!(server, "sq.example.com");
+                assert_eq!(*port, 443);
+                assert_eq!(username, "u");
+                assert_eq!(password, "hunter2");
+                assert_eq!(server_name.as_deref(), Some("camo.example.com"));
+                assert_eq!(alpn.as_deref(), Some(["h3".to_string()].as_slice()));
+                assert_eq!(congestion_controller.as_deref(), Some("new_reno"));
+                assert_eq!(*zero_rtt, Some(true));
+                assert_eq!(*udp_over_stream, Some(true));
+            }
+            other => panic!("unexpected egress config: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_shadowquic_boundary_configs_refused_by_name() {
+        // 类型已支持 → 配置级错误为硬错误（宽松模式亦整体拒绝，RIL-093/G1-6）
+        let base = |extra: &str| {
+            format!(
+                r#"
+proxies:
+  - name: "sq-edge"
+    type: shadowquic
+    server: sq.example.com
+    port: 443
+    username: "u"
+    password: "hunter2"
+{}
+proxy-groups: []
+rules: []
+"#,
+                extra
+            )
+        };
+        let converter = ClashConverter::new();
+        // quic-versions 非 v1（v2 线格式不同族）具名拒绝
+        let clash_config = converter
+            .parse(&base("    quic-versions:\n      - v2\n"))
+            .unwrap();
+        let err = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut Default::default())
+            .expect_err("quic-versions v2 须拒绝");
+        assert!(err.to_string().contains("v1"), "实际: {err:#}");
+        // 拥塞控制支持集外不在导入面拦（拨号前 new 内具名拒绝，tuic 同口径
+        // ——转换面透传原值不判形）；此处只验透传不吞键
+        let clash_config = converter
+            .parse(&base("    congestion-controller: brutal\n"))
+            .unwrap();
+        let out = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut Default::default())
+            .unwrap();
+        match &out[0].spec {
+            EgressConfig::ShadowQuic {
+                congestion_controller,
+                ..
+            } => assert_eq!(congestion_controller.as_deref(), Some("brutal")),
+            other => panic!("unexpected egress config: {:?}", other),
+        }
+        // 缺 password：先被有效性校验拦下（过滤默认开）——节点丢弃且损失可见
+        let clash_config = converter
+            .parse(&base("").replace(r#"    password: "hunter2""#, ""))
+            .unwrap();
+        let mut report = Default::default();
+        let out = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut report)
+            .unwrap();
+        assert!(out.is_empty(), "缺 password 节点不得产出");
+        assert!(
+            report
+                .dropped_nodes
+                .iter()
+                .any(|(n, r)| n == "sq-edge" && r.contains("有效性")),
             "丢弃须可见: {:?}",
             report.dropped_nodes
         );

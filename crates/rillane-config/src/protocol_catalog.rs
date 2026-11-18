@@ -252,6 +252,20 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "shadowquic",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#shadowquic",
+        },
+        // RIL-118：库承载 TCP 面（shadowquic 0.4.12——协议自身 Rust 实现）；
+        // 两种 UDP 中继面（over-datagram / over-stream）与服务端面未交付
+        udp: false,
+        backend: Backend::Library {
+            crate_name: "shadowquic",
+            version_req: "0.4.12",
+            license: "MIT",
+        },
+    },
+    CatalogEntry {
         kind: "ssh",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#ssh",
@@ -326,6 +340,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Hysteria2 { .. } => "hysteria2",
         EgressConfig::Tuic { .. } => "tuic",
         EgressConfig::Snell { .. } => "snell",
+        EgressConfig::ShadowQuic { .. } => "shadowquic",
         EgressConfig::Ssh { .. } => "ssh",
         EgressConfig::Tor { .. } => "tor",
         EgressConfig::Wireguard { .. } => "wireguard",
@@ -490,6 +505,17 @@ mod tests {
                 server: "203.0.113.12".into(),
                 port: 6160,
                 psk: "pw".into(),
+            },
+            EgressConfig::ShadowQuic {
+                server: "203.0.113.14".into(),
+                port: 443,
+                username: "u".into(),
+                password: "pw".into(),
+                server_name: None,
+                alpn: None,
+                congestion_controller: None,
+                zero_rtt: None,
+                udp_over_stream: None,
             },
             EgressConfig::Ssh {
                 server: "203.0.113.13".into(),

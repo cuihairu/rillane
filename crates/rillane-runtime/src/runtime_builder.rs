@@ -55,12 +55,12 @@ use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
     Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts,
     HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MixedIngress,
-    ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress, ShadowsocksShadowTlsConnector,
-    ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector, Socks5Connector, Socks5Ingress,
-    Socks5UdpConnector, SshConnector, TlsConnectorFactory, TlsFingerprint, TorConnector,
-    TransportKey, TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector,
-    TrojanUdpParts, TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress,
-    VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity,
+    ShadowQuicConnector, ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress,
+    ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector,
+    Socks5Connector, Socks5Ingress, Socks5UdpConnector, SshConnector, TlsConnectorFactory,
+    TlsFingerprint, TorConnector, TransportKey, TransportPool, TrojanConnector, TrojanIngress,
+    TrojanUdpConnector, TrojanUdpParts, TuicConnector, TuicUdpConnector, VlessConnector,
+    VlessIngress, VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity,
     VmessUdpConnector, VmessUdpParts, WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
@@ -3018,6 +3018,7 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::ShadowsocksShadowTls { server, .. }
         | EgressConfig::Tuic { server, .. }
         | EgressConfig::Snell { server, .. }
+        | EgressConfig::ShadowQuic { server, .. }
         | EgressConfig::Ssh { server, .. } => Some(server),
         // Tor 是网络不是服务器：无 server/port 字段（同 Reject/Direct 的
         // None 口径）
@@ -3312,6 +3313,13 @@ fn build_udp_connectors(
                 // Snell UDP 判负（RIL-111）：TCP 段自写面仅交付；官方 UDP
                 // over TCP 数据报面未交付——该节点 UDP 需求由
                 // scan_udp_capability 按既有口径构建期报错
+                None
+            }
+            EgressConfig::ShadowQuic { .. } => {
+                // ShadowQUIC UDP 判负（RIL-118）：库承载 TCP 面仅交付；库
+                // 的两种 UDP 中继面（over-datagram / over-stream）未交付
+                // ——该节点 UDP 需求由 scan_udp_capability 按既有口径
+                // 构建期报错
                 None
             }
             EgressConfig::Ssh { .. } => {
@@ -4038,6 +4046,45 @@ fn build_egress_outputs(
                 let connector: Arc<dyn EgressConnector> = Arc::new(
                     SnellConnector::new(server.clone(), *port, psk.clone(), String::new())
                         .with_context(|| format!("节点 {} 的 snell 配置无效", desc.name))?,
+                );
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::ShadowQuic {
+                server,
+                port,
+                username,
+                password,
+                server_name,
+                alpn,
+                congestion_controller,
+                zero_rtt,
+                udp_over_stream: _,
+            } => {
+                // ShadowQUIC（RIL-118）：库承载 TCP 面（协议自身 Rust 实现
+                // shadowquic 0.4.12；评估与探针留证 protocol-backends.md
+                // #shadowquic）。校验归 new 内（认证面非空/拥塞控制支持集/
+                // ALPN 非空表——节点级失败不拖垮整份订阅）；zero_rtt IR
+                // 缺省 false（mihomo 口径，官方服务器 ≤v0.3.11 断连 bug）；
+                // udp_over_stream 容忍读取不落行为（UDP 面未交付）；SNI
+                // 缺省回落 server（new 内）；端点随连接器 Arc 存活（探针
+                // 实证 drop-panic 毛刺）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    ShadowQuicConnector::new(
+                        server.clone(),
+                        *port,
+                        username.clone(),
+                        password.clone(),
+                        server_name.clone(),
+                        alpn.clone(),
+                        congestion_controller.clone(),
+                        zero_rtt.unwrap_or(false),
+                    )
+                    .with_context(|| format!("节点 {} 的 shadowquic 配置无效", desc.name))?,
                 );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),

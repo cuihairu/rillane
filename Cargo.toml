@@ -113,6 +113,11 @@ h3-quinn = "0.0.10"
 # （clap/env_logger/ctrlc2/ffi/panel-sync 均不入库）；server 特性仅测试对端用
 # （rillane-protocols dev-dependencies 追加，resolver v2 下不泄漏进生产构建）
 anytls = { version = "0.5", default-features = false, features = ["client"] }
+# ShadowQUIC（RIL-118）：协议自身 Rust 实现的库承载出站（唯一 crates.io
+# 落点）——客户端面直连路径（ShadowQuicClient::new → get_conn →
+# squic::outbound::connect_tcp）；评估与探针留证 protocol-backends.md
+# #shadowquic；伴生 shadowquic-macros（线格式 derive）随行
+shadowquic = "0.4.12"
 defguard_wireguard_rs = "0.11"
 x509-parser = "0.16"
 time = "0.3"

@@ -2441,6 +2441,39 @@ pub enum EgressConfig {
         port: u16,
         psk: String,
     },
+    /// ShadowQUIC 出口（RIL-118）：库承载（shadowquic 0.4.12——协议自身
+    /// Rust 实现，评估与探针留证 protocol-backends.md#shadowquic）。
+    /// username/password 走 JLS 伪装 TLS 握手层认证（凭据错误在 QUIC
+    /// 握手期暴露）；server_name 缺省回落 server（crate 文档具名须与
+    /// 服务器 jls_upstream 域一致）；alpn 缺省 [h3]；zero_rtt 缺省 false
+    /// （mihomo 口径——官方服务器 ≤v0.3.11 有 zero-rtt 断连 bug，mihomo
+    /// 具名；crate 自身缺省 true 不迁移）；udp_over_stream 容忍读取不改
+    /// 变交付面（UDP 面未交付，catalog udp=false）。仅 TCP 面；服务端面
+    /// 与统计 API 未交付。评估与交付边界见两语 protocol-backends.md
+    /// shadowquic 段。
+    ShadowQuic {
+        server: String,
+        port: u16,
+        username: String,
+        password: String,
+        /// SNI（server_name，缺省回落 server）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alpn: Option<Vec<String>>,
+        /// QUIC 拥塞控制：`bbr`（缺省，crate 载具缺省）/ `new-reno`（
+        /// mihomo 键形 `new_reno` 归一）/ `cubic`；brutal（需 up/down
+        /// 参数面）拨号前具名拒绝
+        #[serde(skip_serializing_if = "Option::is_none")]
+        congestion_controller: Option<String>,
+        /// 0-RTT（缺省 false，mihomo 口径，见变体头注）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zero_rtt: Option<bool>,
+        /// UDP-over-stream 开关（mihomo 键形兼容读取；本仓 UDP 面未交付，
+        /// 落库不落行为）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_over_stream: Option<bool>,
+    },
     /// SSH-2 出口（RIL-113）：russh 客户端面——主机钥钉扎必填（不钉扎
     /// 首用即信是具名拒绝的降级面）+ 认证恰一选一 + direct-tcpip 通道流。
     /// private_key 为 OpenSSH 格式文件路径，加密键须携口令解码（无口令

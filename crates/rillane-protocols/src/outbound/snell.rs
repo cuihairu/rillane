@@ -44,7 +44,7 @@ use bytes::BytesMut;
 use rand::{rngs::OsRng, RngCore};
 use rillane_core::{EgressConnector, Flow, FlowReport};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::TcpStream,
 };
 
@@ -815,6 +815,7 @@ impl EgressConnector for SnellConnector {
 mod tests {
     use super::*;
     use rillane_core::{FlowId, TargetProto};
+    use tokio::io::AsyncReadExt as _;
     use tokio::net::TcpListener;
 
     fn hex(b: &[u8]) -> String {
@@ -1359,7 +1360,10 @@ mod tests {
                 client.write_all(b"official hello").await.expect("上行写");
                 client.write_all(&task_payload).await.expect("上行大块写");
                 let mut got = vec![0u8; 14 + task_payload.len()];
-                tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut got))
+                // 10s：全量并行下官方对端读侧偶发数秒级迟滞（本席实测
+                // 5.15s——server2.log STAGE_INIT 滞后 accept），上限放宽
+                // 不改判据（逐字节还原 + 计数对账）
+                tokio::time::timeout(Duration::from_secs(10), client.read_exact(&mut got))
                     .await
                     .expect("下行超时（官方对端回放面）")
                     .expect("下行读");
@@ -1370,7 +1374,7 @@ mod tests {
             });
             (report, got)
         });
-        let (report, got) = tokio::time::timeout(Duration::from_secs(8), task)
+        let (report, got) = tokio::time::timeout(Duration::from_secs(20), task)
             .await
             .expect("任务超时（官方对端应答/中继面）")
             .expect("join");

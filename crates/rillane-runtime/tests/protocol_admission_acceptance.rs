@@ -120,7 +120,7 @@ fn hysteria2_node() -> EgressDescriptor {
 /// 回归由目录单测钉住）；目录外类型恒 Unknown（订阅转换/诊断面点名）。
 #[test]
 fn catalog_entries_all_admitted_with_evidence() {
-    assert_eq!(protocol_catalog::CATALOG.len(), 17, "全目录十七条");
+    assert_eq!(protocol_catalog::CATALOG.len(), 18, "全目录十八条");
     for e in protocol_catalog::CATALOG {
         let evidence = e
             .evidence()
@@ -210,6 +210,22 @@ fn catalog_entries_all_admitted_with_evidence() {
         ),
         "tor 后端 = arti-client 库承载: {:?}",
         tor.backend
+    );
+    // shadowquic 具体口径（RIL-118）：shadowquic 库承载 + 无 UDP 面
+    // （over-datagram / over-stream 两种 UDP 中继面均未交付）
+    let sq = protocol_catalog::entry_for("shadowquic").expect("已编目");
+    assert!(!sq.udp, "RIL-118 库承载 TCP 面，两种 UDP 中继面未交付");
+    assert!(
+        matches!(
+            sq.backend,
+            protocol_catalog::Backend::Library {
+                crate_name: "shadowquic",
+                version_req: "0.4.12",
+                license: "MIT"
+            }
+        ),
+        "shadowquic 后端 = shadowquic 库承载: {:?}",
+        sq.backend
     );
     for unknown in ["mieru", "ss", ""] {
         assert_eq!(

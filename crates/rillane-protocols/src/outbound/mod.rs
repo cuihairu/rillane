@@ -11,6 +11,7 @@ mod httpupgrade;
 pub(crate) mod hysteria;
 pub(crate) mod hysteria2;
 mod reality;
+mod shadowquic;
 mod shadowsocks;
 pub(crate) mod shadowtls;
 mod snell;
@@ -50,6 +51,7 @@ pub use reality::{
     handshake, hmac_cert_tag, open_session_id, seal_session_id, zero_session_id_slot,
     RealityAuthSession, RealityDial, RealityStream, TlsAdapter, CORE_VERSION,
 };
+pub use shadowquic::ShadowQuicConnector;
 pub use shadowsocks::{ShadowsocksConnector, ShadowsocksUdpConnector};
 pub use shadowtls::ShadowsocksShadowTlsConnector;
 pub use snell::{SnellConnector, SnellStream};

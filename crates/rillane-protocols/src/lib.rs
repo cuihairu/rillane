@@ -31,11 +31,11 @@ pub use middleware::LatencyProbe;
 pub use outbound::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, Hysteria2Connector,
     Hysteria2UdpConnector, Hysteria2UdpRelay, HysteriaConnector, HysteriaUdpConnector,
-    HysteriaUdpRelay, ShadowsocksConnector, ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector,
-    SnellConnector, Socks5Connector, Socks5UdpConnector, SshConnector, TorConnector,
-    TrojanConnector, TrojanUdpConnector, TuicConnector, TuicStream, TuicUdpConnector, TuicUdpRelay,
-    VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity, VmessUdpConnector,
-    WireguardConnector, WireguardUdpConnector,
+    HysteriaUdpRelay, ShadowQuicConnector, ShadowsocksConnector, ShadowsocksShadowTlsConnector,
+    ShadowsocksUdpConnector, SnellConnector, Socks5Connector, Socks5UdpConnector, SshConnector,
+    TorConnector, TrojanConnector, TrojanUdpConnector, TuicConnector, TuicStream, TuicUdpConnector,
+    TuicUdpRelay, VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity,
+    VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
 };
 pub use pool::{
     BoxedIo, KeySnapshot, LeaseGuard, MockPoolClock, PoolClock, PoolPolicy, PoolSnapshot,

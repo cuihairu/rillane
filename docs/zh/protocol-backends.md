@@ -652,15 +652,22 @@ armv7-ohos 桩）在对应小节如实记录。
 - 版本/许可/平台/公开 API/旁路/取消/统计/复用/UDP/服务端面：**暂不钉**——无后端交付；首段落库时钉定（许可将为仓库许可，自写）。
 - 复开条件：无需——自写梯子已开启，规范与对端锚俱在；本项按实现项（自写）推进。
 
-## shadowquic（ShadowQUIC）
+## shadowquic
 
-- **结论**：**库承载——载具钉定为 `shadowquic`**（RIL-118，评估 + 探针留证 2026-11-18；连接器尚未交付——目录条目、IR 变体、runtime 三面随实现提交落库）。评估扫查（2026-11-18，crates.io + 缓存源码核验 + 进程内探针）：`shadowquic` 0.4.12（MIT，crates.io 创建 2026-02-09，约 4 万下载，隔数日一发版，最新 2026-11-16）是该协议自身的 Rust 实现，也是唯一实现——客户端（`ShadowQuicClient`）与服务端（`ShadowQuicServer`）皆为可嵌入库面，且直连连接器路径无需该 crate 的应用机械（`Manager`/SOCKS 挂具）：`ShadowQuicClient::new(cfg, resolver)` → `get_conn() -> SQConn`（QUIC 连接，带关闭连接替换的缓存）→ `squic::outbound::connect_tcp(&conn, SocksAddr) -> Unsplit`（打开双向流并预编码 `SQConnect(dst)` 请求，AsyncRead/AsyncWrite）。伴生 crate `shadowquic-macros`（同版本，线格式 derive 支持）随行。crates.io 无其他实现该协议的 crate；README 具名的客户端生态（nekobox、v2rayN）经同一线格式互操。
+- **结论**：**库承载——`shadowquic` 0.4.12 连接器交付（RIL-118，交付 2026-11-18）**。评估扫查（2026-11-18，crates.io + 缓存源码核验 + 进程内探针）：`shadowquic`（MIT，crates.io 创建 2026-02-09，约 4 万下载，隔数日一发版，最新 2026-11-16）是该协议自身的 Rust 实现，也是唯一实现——客户端（`ShadowQuicClient`）与服务端（`ShadowQuicServer`）皆为可嵌入库面，且直连连接器路径无需该 crate 的应用机械（`Manager`/SOCKS 挂具）：`ShadowQuicClient::new(cfg, resolver)` → `get_conn()`（地址解析 → QUIC 连接——直连路径逐流新建 QUIC 连接，zero_rtt 启用时握手 0-RTT 复用（探针实测二次 `get_conn()` 0.64ms）；客户端内 `prepare_conn` 的连接缓存属应用机械面，直连路径不经）→ `squic::outbound::connect_tcp(&conn, SocksAddr) -> Unsplit`（打开双向流并预编码 `SQConnect(dst)` 请求，AsyncRead/AsyncWrite）。伴生 crate `shadowquic-macros`（同版本，线格式 derive 支持）随行。crates.io 无其他实现该协议的 crate；README 具名的客户端生态（nekobox、v2rayN）经同一线格式互操。
+- **版本**：要求 `0.4.12`，缺省特性（`shadowquic-quinn` + `sunnyquic-noq` + `ring` + `statistics`）——探针实测面
 - **许可**：MIT——与本仓许可兼容
-- **平台**：未声明 MSRV；工作区工具链 1.100.0 缺省特性（`shadowquic-quinn` + `sunnyquic-noq` + `ring` + `statistics`）编译干净；仅在本席 linux-amd64 验证（交叉编译不是运行时证明，与 wireguard/russh/arti 同措辞）
-- 探针留证（本席，`/tmp/sqprobe` 临时 crate，进程内客户端对库自身服务端面——anytls 验收姿态）：QUIC 握手冷 3.1ms（127.0.0.1），双向流打开 96µs，TCP 回声全栈字节精确往返 4.7ms（SQConnect 请求 → 服务端 accept → 中继到真实 TCP 回声对端），写半关闭被对端尊重，二次 `get_conn()` 0.64ms 且连接复用（0-RTT/连接缓存面）。认证 = username/password（`AuthUser`）；`jls_upstream` 是 SNI 伪装声明（JLS = 该 crate 自带的伪装 TLS client hello rustls fork）
-- 探针实证的收尾毛刺（交付相关）：后台任务仍在轮询时丢弃 QUIC 端点会在 crate 内 panic（"Quic endpoint closed"，`quinn_wrapper/wrapper.rs:486`）——交付的连接器必须在连接器生命周期内持有端点/连接，流存活期间绝不丢弃；取消路径显式关闭连接
-- 版本/公开 API/旁路/取消/统计/复用/UDP/服务端面：交付时钉定（库暴露两种 UDP 面——over-datagram 与 over-stream——及逐用户统计 API；rillane 交付哪个子集随连接器具名）
-- 复开条件：无需——载具已钉定；本项按实现项推进
+- **平台**：未声明 MSRV；工作区工具链 1.100.0 缺省特性编译干净；仅在本席 linux-amd64 验证（交叉编译不是运行时证明，与 wireguard/russh/arti 同措辞）
+- **公开 API**：`ShadowQuicConnector`（crates/rillane-protocols/src/outbound/shadowquic.rs）——构建期具名校验：username/password 非空；ALPN 空表拒绝（无公共 ALPN 握手必败）；拥塞控制在支持集内归一（`bbr` 缺省 / `new-reno`（mihomo 键形 `new_reno` 同收）/ `cubic`；`brutal` 需 mihomo 私有 up/down 参数面、`bbr3` 在 crate 文档支持集外——均具名拒绝）；SNI 缺省回落 server（crate 文档具名须与服务器 `jls_upstream` 域一致）；ALPN 缺省 `["h3"]`；`zero_rtt` 缺省 **false**（mihomo 文档缺省——官方服务器 ≤v0.3.11 有具名 zero-rtt 断连 bug；crate 自身缺省 true 不迁移）。探针钉定载具值：`initial_mtu = 1200`（crate 下界）、`over_stream = true`。forward = `get_conn`（15s 拨号超时）→ `connect_tcp`（15s 流打开超时）→ `copy_bidirectional_with_sizes` → FlowReport 字节计数
+- **旁路**：无——载具自持 UDP 套接字与整个 QUIC/TLS 栈（JLS 伪装），无底层套接字接缝可供传输池组合（anytls/tuic 同姿态）
+- **取消**：分阶段拨号超时（连接 15s、流打开 15s）；流中取消即丢弃该流 duplex/stream——QUIC 连接由 QUIC 空闲语义收口；端点持于连接器（`Arc<ShadowQuicClient>`），流存活期间绝不丢弃
+- **统计**：FlowReport 上/下行字节（copy_bidirectional 语义）；crate 的逐用户统计 API 未交付（具名）
+- **复用**：直连路径 QUIC 连接逐流新建（zero_rtt 启用时握手 0-RTT 软化）；无连接器级预热/复用组合——具名边界
+- 探针留证（本席，`/tmp/sqprobe` 临时 crate，进程内客户端对库自身服务端面——anytls 验收姿态）：QUIC 握手冷 3.1ms（127.0.0.1），双向流打开 96µs，TCP 回声全栈字节精确往返 4.7ms（SQConnect 请求 → 服务端 accept → 中继到真实 TCP 回声对端），写半关闭被对端尊重。探针实证的收尾毛刺（交付成形）：后台任务仍在轮询时丢弃 QUIC 端点会在 crate 内 panic（"Quic endpoint closed"，`quinn_wrapper/wrapper.rs:486`）——交付的连接器把客户端整体 `Arc` 持于连接器生命周期
+- 认证面（crate 源码核验）：username/password 走 JLS 伪装 TLS 握手层承载——服务端在连接受理时经 `authed_user()` 取用户、无此用户即拒接；凭据错误在 QUIC 握手期暴露（测试钉定：错密码在拨号超时内 forward 失败，绝不静默成功）。直连 TCP 路径不另发 `SQAuthenticate` 流（那是 sunnyquic/UDP 面）
+- UDP：未交付（catalog udp=false）——库自带两种 UDP 面（over-datagram 与 over-stream），均具名未交付；mihomo `udp-over-stream` 键导入容忍读取、落 IR 不落行为（无 UDP 面可切）
+- 服务端面：未交付（具名）——库的 `ShadowQuicServer` 仅作进程内验收镜像对端（anytls 同姿态）
+- 版本边界：QUIC 版本族仅 v1——mihomo `quic-versions` 键缺省 `[v1]`；显式非 v1（v2 为不同线格式族）导入期具名拒绝。mihomo 私有调参键（`up`/`down` brutal、`cwnd`、`bbr-profile`、`recv-window` 族、`max-datagram-frame-size`、`max-open-streams`、`disable-mtu-discovery`）不入 IR——具名边界
 
 ## 公共传输面（跨协议共享）
 
