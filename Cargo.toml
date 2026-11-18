@@ -66,6 +66,11 @@ md-5 = "0.10"
 # ——仅用作 KDF，PHC 口令串面（password-hash/getrandom）在此无用，故关默认特性
 # 只留 alloc（hash_password_into 的唯二 cfg 门控）
 argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
+# SSH-2 出站（outbound/ssh.rs）：russh 客户端面（连接/认证/direct-tcpip 通道流）
+# + ssh-key 私钥解析与 host key SHA256 指纹（rc 线漂移，钉死 rc.12；
+# russh::keys 即同一 crate 再导出）
+russh = "0.65"
+ssh-key = "=0.7.0-rc.12"
 # QUIC Initial 解密（G0-3 sniff）：HKDF-SHA256 派生 Initial 密钥
 hkdf = "0.12"
 regex = "1.10"
