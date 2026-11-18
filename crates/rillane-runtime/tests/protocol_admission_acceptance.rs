@@ -120,7 +120,7 @@ fn hysteria2_node() -> EgressDescriptor {
 /// 回归由目录单测钉住）；目录外类型恒 Unknown（订阅转换/诊断面点名）。
 #[test]
 fn catalog_entries_all_admitted_with_evidence() {
-    assert_eq!(protocol_catalog::CATALOG.len(), 14, "全目录十四条");
+    assert_eq!(protocol_catalog::CATALOG.len(), 15, "全目录十五条");
     for e in protocol_catalog::CATALOG {
         let evidence = e
             .evidence()
@@ -168,7 +168,20 @@ fn catalog_entries_all_admitted_with_evidence() {
         "shadow-tls 组合后端 = 仓库自写: {:?}",
         st.backend
     );
-    for unknown in ["mieru", "ss", "snell", ""] {
+    // snell 具体口径（RIL-111）：自写面 + 无 UDP 面（数据报面未交付）
+    let sn = protocol_catalog::entry_for("snell").expect("已编目");
+    assert!(!sn.udp, "RIL-111 TCP 段自写面，UDP 数据报面未交付");
+    assert!(
+        matches!(
+            sn.backend,
+            protocol_catalog::Backend::InTree {
+                path: "crates/rillane-protocols/src/outbound/snell.rs"
+            }
+        ),
+        "snell 后端 = 仓库自写: {:?}",
+        sn.backend
+    );
+    for unknown in ["mieru", "ss", ""] {
         assert_eq!(
             protocol_catalog::admission(unknown),
             protocol_catalog::Admission::Unknown,

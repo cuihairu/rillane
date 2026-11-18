@@ -142,6 +142,24 @@ pub struct ClashProxy {
         alias = "obfs_password"
     )]
     pub obfs_param: Option<String>,
+    /// Snell: 预共享密钥（Clash 规范键 `psk`——snell 用 psk 而非 password，
+    /// mihomo 侧只读 psk；缺字段则密钥被 serde 静默丢弃）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psk: Option<String>,
+    /// Snell: 协议版本（Clash 规范键 `version`，mihomo 缺省 4；v3 为不同
+    /// 帧格式——本仓仅交付 v4，显式非 4 点名拒绝。代理级 `version` 键仅
+    /// snell 一族使用，rename 无越界捕获面）
+    #[serde(default, rename = "version", skip_serializing_if = "Option::is_none")]
+    pub snell_version: Option<u8>,
+    /// Snell: 混淆选项（Clash 规范键 `obfs-opts`，mode http/tls——本仓仅
+    /// 交付 obfs=none，携带即点名拒绝，防静默按明记录误连致隧道必败）
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "obfs-opts",
+        alias = "obfs_opts"
+    )]
+    pub obfs_opts: Option<Value>,
     /// Hysteria: 载具协议（udp/wechat/faketcp；缺省 udp——仓内面仅交付原生
     /// UDP 上的 QUIC，其余载具拨号期具名拒绝，转换面不判负节点）
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1542,8 +1560,11 @@ impl ConversionReport {
 /// 该代理类型是否已有到 Rillane 的换算表（RIL-093：类型级不支持的节点按
 /// 丢弃+报告处理，不再让单个节点炸掉整个导入；已支持类型的配置级错误——
 /// 如 reality 缺 public-key——仍点名硬错误，不降级成静默丢节点，G1-6 保持）。
-fn is_supported_proxy_type(proxy_type: ClashProxyType) -> bool {
-    !matches!(proxy_type, ClashProxyType::Snell)
+///
+/// RIL-111 后枚举全类型均有换算臂（snell 是最后一个补齐的）——保留本
+/// 函数面位以承载未来类型级不支持的登记点。
+fn is_supported_proxy_type(_proxy_type: ClashProxyType) -> bool {
+    true
 }
 
 /// Clash 配置转换器
@@ -1816,7 +1837,7 @@ impl ClashConverter {
             let egress_config = match self.convert_proxy_to_egress_config(proxy, report) {
                 Ok(spec) => spec,
                 Err(err) => {
-                    // 类型级不支持（如 Snell）：宽松丢弃并报告、严格记入清单
+                    // 类型级不支持：宽松丢弃并报告、严格记入清单
                     // 统一拒绝——单节点不再炸掉整个导入；已支持类型的配置级
                     // 错误（如 reality 缺 public-key）保持点名硬错误，不降级
                     // 成静默丢节点（G1-6 拒绝策略，RIL-093 保持）
@@ -2173,7 +2194,28 @@ impl ClashConverter {
                     dns: proxy.dns.clone(),
                 })
             }
-            proxy_type => Err(anyhow!("暂不支持的代理类型: {:?}", proxy_type)),
+            ClashProxyType::Snell => {
+                let psk = proxy.psk.clone().ok_or_else(|| anyhow!("Snell 缺少 psk"))?;
+                // 版本边界（RIL-111 评估留证 protocol-backends.md#snell）：
+                // 仅 v4 帧格式交付——v3 为不同帧格式，显式非 4 点名拒绝；
+                // 缺省按 mihomo 口径视为 4（本仓导出恒写 version: 4）
+                if proxy.snell_version.is_some_and(|v| v != 4) {
+                    return Err(anyhow!(
+                        "Snell 版本 {} 未交付（仅 v4 帧格式）",
+                        proxy.snell_version.unwrap()
+                    ));
+                }
+                // obfs http/tls 混淆层未交付（评估判负：指纹启发式非线结构）
+                // ——携带即点名拒绝，防静默按 obfs=none 误连致隧道必败
+                if proxy.obfs.is_some() || proxy.obfs_opts.is_some() {
+                    return Err(anyhow!("Snell obfs 混淆未交付（仅 obfs=none）"));
+                }
+                Ok(EgressConfig::Snell {
+                    server: proxy.server.clone(),
+                    port: proxy.port,
+                    psk,
+                })
+            }
         }
     }
 
@@ -2551,7 +2593,7 @@ impl ClashConverter {
             ClashProxyType::Hysteria => proxy.password.is_some() || proxy.auth_str.is_some(),
             ClashProxyType::Hysteria2 => proxy.password.is_some(),
             ClashProxyType::Tuic => proxy.password.is_some() && proxy.uuid.is_some(),
-            ClashProxyType::Snell => proxy.password.is_some(),
+            ClashProxyType::Snell => proxy.psk.is_some(),
             ClashProxyType::Wireguard => {
                 proxy.private_key.is_some()
                     && proxy.public_key.is_some()
@@ -3155,6 +3197,107 @@ rules: []
             }
             other => panic!("unexpected egress config: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_snell_v4_converted_to_egress() {
+        // RIL-111：psk 键 + 缺省版本（mihomo 口径视 4）→ Snell IR
+        let yaml_content = r#"
+proxies:
+  - name: "test-snell"
+    type: snell
+    server: snell.example.com
+    port: 6160
+    psk: "hunter2"
+
+proxy-groups: []
+rules: []
+        "#;
+        let converter = ClashConverter::new();
+        let clash_config = converter.parse(yaml_content).unwrap();
+        let rillane_config = converter.convert_to_rillane(&clash_config).unwrap();
+        let snell = rillane_config
+            .egress
+            .iter()
+            .find(|e| e.name == "test-snell")
+            .expect("snell egress");
+        match &snell.spec {
+            EgressConfig::Snell { server, port, psk } => {
+                assert_eq!(server, "snell.example.com");
+                assert_eq!(*port, 6160);
+                assert_eq!(psk, "hunter2");
+            }
+            other => panic!("unexpected egress config: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_snell_boundary_configs_refused_by_name() {
+        // 类型已支持 → 配置级错误为硬错误（宽松模式亦整体拒绝，RIL-093/G1-6）
+        let base = |extra: &str| {
+            format!(
+                r#"
+proxies:
+  - name: "snell-edge"
+    type: snell
+    server: snell.example.com
+    port: 6160
+    psk: "hunter2"
+{}
+proxy-groups: []
+rules: []
+"#,
+                extra
+            )
+        };
+        let converter = ClashConverter::new();
+        // 显式 v3（不同帧格式）点名拒绝
+        let clash_config = converter.parse(&base("    version: 3\n")).unwrap();
+        let err = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut Default::default())
+            .expect_err("v3 须拒绝");
+        assert!(err.to_string().contains("仅 v4"), "实际: {err:#}");
+        // obfs 混淆（http/tls）点名拒绝——两键形（legacy obfs / obfs-opts）
+        let clash_config = converter
+            .parse(&base(
+                "    obfs: tls
+",
+            ))
+            .unwrap();
+        let err = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut Default::default())
+            .expect_err("obfs 须拒绝");
+        assert!(err.to_string().contains("obfs"), "实际: {err:#}");
+        let clash_config = converter
+            .parse(&base(
+                "    obfs-opts:
+      mode: http
+      host: bing.com
+",
+            ))
+            .unwrap();
+        let err = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut Default::default())
+            .expect_err("obfs-opts 须拒绝");
+        assert!(err.to_string().contains("obfs"), "实际: {err:#}");
+        // 缺 psk：先被有效性校验拦下（过滤默认开）——节点丢弃且损失可见，
+        // 不得静默产出半空配置
+        let clash_config = converter
+            .parse(&base("").replace(r#"    psk: "hunter2""#, ""))
+            .unwrap();
+        let mut report = Default::default();
+        let out = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut report)
+            .unwrap();
+        assert!(out.is_empty(), "缺 psk 节点不得产出");
+        assert!(
+            report
+                .dropped_nodes
+                .iter()
+                .any(|(n, r)| n == "snell-edge" && r.contains("有效性")),
+            "丢弃须可见: {:?}",
+            report.dropped_nodes
+        );
     }
 
     #[test]

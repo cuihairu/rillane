@@ -239,6 +239,18 @@ pub const CATALOG: &[CatalogEntry] = &[
             license: "Apache-2.0",
         },
     },
+    CatalogEntry {
+        kind: "snell",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#snell",
+        },
+        // RIL-111：TCP 段自写面（obfs=none/v4）；官方 UDP over TCP 数据报面
+        // 与协议内建复用未交付
+        udp: false,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/snell.rs",
+        },
+    },
 ];
 
 /// 目录条目查询。
@@ -285,6 +297,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Hysteria { .. } => "hysteria",
         EgressConfig::Hysteria2 { .. } => "hysteria2",
         EgressConfig::Tuic { .. } => "tuic",
+        EgressConfig::Snell { .. } => "snell",
         EgressConfig::Wireguard { .. } => "wireguard",
     }
 }
@@ -443,6 +456,11 @@ mod tests {
                 mtu: None,
                 dns: None,
             },
+            EgressConfig::Snell {
+                server: "203.0.113.12".into(),
+                port: 6160,
+                psk: "pw".into(),
+            },
         ];
         assert_eq!(
             CATALOG.len(),
@@ -484,7 +502,7 @@ mod tests {
                 }
             }
         }
-        for unknown in ["mieru", "ss", "trojan-go", "snell", ""] {
+        for unknown in ["mieru", "ss", "trojan-go", ""] {
             assert_eq!(
                 admission(unknown),
                 Admission::Unknown,

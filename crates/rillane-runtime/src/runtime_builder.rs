@@ -56,7 +56,7 @@ use rillane_protocols::{
     Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts,
     HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MixedIngress,
     ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress, ShadowsocksShadowTlsConnector,
-    ShadowsocksUdpConnector, ShadowsocksUdpParts, Socks5Connector, Socks5Ingress,
+    ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector, Socks5Connector, Socks5Ingress,
     Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool,
     TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts, TuicConnector,
     TuicUdpConnector, VlessConnector, VlessIngress, VlessUdpConnector, VlessUdpParts,
@@ -3016,7 +3016,8 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::Hysteria { server, .. }
         | EgressConfig::Hysteria2 { server, .. }
         | EgressConfig::ShadowsocksShadowTls { server, .. }
-        | EgressConfig::Tuic { server, .. } => Some(server),
+        | EgressConfig::Tuic { server, .. }
+        | EgressConfig::Snell { server, .. } => Some(server),
         EgressConfig::Wireguard { endpoint, .. } => Some(endpoint),
     }
 }
@@ -3302,6 +3303,12 @@ fn build_udp_connectors(
                     alpn.clone(),
                 );
                 Some(Arc::new(TuicUdpConnector::from_connector(&conn)))
+            }
+            EgressConfig::Snell { .. } => {
+                // Snell UDP 判负（RIL-111）：TCP 段自写面仅交付；官方 UDP
+                // over TCP 数据报面未交付——该节点 UDP 需求由
+                // scan_udp_capability 按既有口径构建期报错
+                None
             }
             EgressConfig::Hysteria {
                 server,
@@ -4000,6 +4007,23 @@ fn build_egress_outputs(
                     *skip_cert_verify,
                     alpn.clone(),
                 ));
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Snell { server, port, psk } => {
+                // Snell v4（RIL-111）：记录流 TCP 段自写（obfs=none；评估
+                // 留证 protocol-backends.md#snell）；PSK/长度校验在 new 内
+                // （节点级失败不拖垮整份订阅）；请求 ClientID 恒零长度
+                // （官方 UserKey 缺省口径，配置面不暴露）；UDP 面未交付
+                // （catalog udp=false）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    SnellConnector::new(server.clone(), *port, psk.clone(), String::new())
+                        .with_context(|| format!("节点 {} 的 snell 配置无效", desc.name))?,
+                );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
                     connector.clone(),

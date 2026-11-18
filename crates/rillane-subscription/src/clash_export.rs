@@ -625,6 +625,16 @@ fn proxy_mapping(
             }
             Some(m)
         }
+        EgressConfig::Snell { server, port, psk } => {
+            // Snell v4（RIL-111）：version 显式落 4（本仓仅交付 v4，clash
+            // schema 兼容 v3——写死避免缺省漂移）
+            ins(&mut m, "type", "snell");
+            ins(&mut m, "server", server);
+            ins(&mut m, "port", *port as u64);
+            ins(&mut m, "psk", psk);
+            ins(&mut m, "version", 4);
+            Some(m)
+        }
         EgressConfig::Wireguard {
             endpoint,
             private_key,

@@ -2431,6 +2431,16 @@ pub enum EgressConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         alpn: Option<Vec<String>>,
     },
+    /// Snell v4 出口（RIL-111）：AES-128-GCM 记录流（Argon2id(psk, salt,
+    /// t=3, m=8KiB, p=1)[:16] 派生钥），TCP 段自写。仅 obfs=none（http/tls
+    /// 拨号期具名拒绝）、v4（v5/v6 名称拒绝）；UDP 面与协议内建复用未交付
+    /// （catalog udp=false）。请求 ClientID（官方 UserKey）恒为零长度——
+    /// 既有客户端配置面（Surge/clash）均不暴露该字段。
+    Snell {
+        server: String,
+        port: u16,
+        psk: String,
+    },
     Wireguard {
         endpoint: String,
         private_key: String,

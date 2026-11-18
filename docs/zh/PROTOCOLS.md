@@ -33,7 +33,8 @@
 | Hysteria（v1） | QUIC 上的 TCP 请求流 + UDP 数据报中继（自写面；官方 v1.3.5 线镜像，契约验收） | 载具限 `protocol: udp`（原生 UDP QUIC）——wechat/faketcp 与 obfs 包层传输拨号期点名拒绝，节点在 UDP 可达集时 UDP 面构建期同样判负；`up_mbps`/`down_mbps` 为 `0` 拨号期点名拒绝；Brutal 拥塞控制不交付（QUIC 缺省 CC，速率如实申报）；端口跳跃接受但不消费；ACL 路由、ACME、流量统计 API 不交付 |
 | TUIC | QUIC 上的 TCP stream（v5 Connect 走双向流，token 认证经 TLS keying-material exporter）；UDP 数据报面（v5 Packet over QUIC 不可靠数据报，按 assoc 独立服务端 socket，客户端分片/重组，镜像对端验收） | 仅 v5——v4 线格式无代码路径，按名拒绝；`congestion-controller` 非 `cubic` 拨号期点名拒绝（不静默降级）；无错误响应面——拒绝以流/QUIC 收束呈现 |
 | WireGuard | TCP、UDP 的用户态承载 | 部分平台目标是拒绝桩，交叉编译不能证明可用 |
-| 其他（Snell、Mieru 等） | 不列为当前可用 | 存在 schema、订阅字段或研究方向不代表已有连接器 |
+| Snell | Snell v4 TCP 记录流（AES-128-GCM 记录，钥 = Argon2id(psk, salt, t=3, m=8KiB, p=1)[:16]；首记录携 salt + 随机初始填充，填充/负载偶下标互换，零块 = 干净 EOF；自写面，官方 sing-snell 线镜像，镜像对端契约验收） | 仅 v4 + obfs=none——显式非 4 版本（v3 为不同帧格式）导入面点名拒绝；obfs http/tls 点名拒绝（携带节点不得静默按明记录误连）；无 UDP 面（catalog udp=false）；无服务端面；协议内建连接复用未交付；实机验收未做 |
+| 其他（Mieru 等） | 不列为当前可用 | 存在 schema、订阅字段或研究方向不代表已有连接器 |
 
 ## 可选扩展与边界
 

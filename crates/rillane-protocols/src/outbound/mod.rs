@@ -13,6 +13,7 @@ pub(crate) mod hysteria2;
 mod reality;
 mod shadowsocks;
 pub(crate) mod shadowtls;
+mod snell;
 mod socks5;
 mod trojan;
 mod tuic;
@@ -49,6 +50,7 @@ pub use reality::{
 };
 pub use shadowsocks::{ShadowsocksConnector, ShadowsocksUdpConnector};
 pub use shadowtls::ShadowsocksShadowTlsConnector;
+pub use snell::{SnellConnector, SnellStream};
 pub use socks5::{Socks5Connector, Socks5UdpConnector};
 pub use trojan::{TrojanConnector, TrojanUdpConnector};
 pub use tuic::{TuicConnector, TuicStream, TuicUdpConnector, TuicUdpRelay};
