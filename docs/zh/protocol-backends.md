@@ -592,6 +592,16 @@ armv7-ohos 桩）在对应小节如实记录。
 - 服务端面：不交付（具名）——rillane 入口面不编目 SSH 监听；验收打在本机真实 OpenSSH sshd（独立配置，端口 23411，探针钥料）
 - 版本边界：仅 SSH-2（russh 说 SSH-2，无 SSH-1 路径）。主机钥钉扎**必填**——无 `host_key` 节点构造期拒绝（不钉扎的 SSH 客户端默认首用即信，是本面按名拒绝的降级面）；指纹比对先剥可选 `SHA256:` 前缀。认证面：password / private-key 恰一选一，双带或缺一均构造期拒绝。direct-tcpip 目标寻址用 host 字符串原样（由 sshd 解析）——本面不查 fake-ip 池。
 
+## naive（NaiveProxy）
+
+- **结论**：**受阻——无可嵌入后端**（RIL-112，评估留证 2026-11-18；未交付任何面，无目录条目、无 IR 变体）。评估排查，全部载具落选并留证：
+  - crates.io（2026-11-18）：不存在 NaiveProxy 客户端 crate——`naive` 检索仅命中字符串查找 / 朴素贝叶斯 / 定时器类 crate，无一与代理相关。
+  - 官方 `naiveproxy`（klzgrad/naiveproxy，BSD-3-Clause，活跃——2026-11-01 有推送）是 **Chromium overlay**：其 `src/` 树即 Chromium 网络栈加构建脚本，客户端本体就是 Chromium 二进制。无法嵌入 Rust 工作区——C++ Chromium 网络栈构建（重型原生工具链 + 平台矩阵），与 libssh2 C 绑定、openssh 二进制同族落选理由，但重量远超。
+  - 维护中的 Go 生态同样不复刻协议：sing-box 的 naive 出站经 `cronet-go`（"Go bindings for naiveproxy"，CGo，非标准许可）内嵌 Chromium——`client *cronet.NaiveClient`。Go 侧也是扛着 C++ 栈走而非镜像线格式——线格式并非 sing-snell 那类小型自包含 spec 的有力旁证。
+  - 自写阶梯：**触发**（无可用后端）但**以具名伪装判定婉拒**。NaiveProxy 的首要目的是经 Chrome 同形 TLS/HTTP-2 指纹（ClientHello、ALPN、SETTINGS/HEADERS 顺序、C116123 填充）抗探测。纯 Rust TLS + h2 CONNECT 客户端对 forwardproxy 服务器线功能可用但指纹发散——交付了传输却静默丢掉协议存在的理由，与「relay 组映射成一致性哈希」同族（伪装成功即拒绝）。填充组件（C116123）是挂在 Chrome 栈上的指纹启发式，不是 sing-snell 记录那种自包含线 spec。
+- 版本 / 许可 / 平台 / 公共 API / 旁路 / 取消 / 统计 / 复用 / UDP / 服务端面：**不钉载**——无后端交付；无载具 crate、无线镜像、无连接器面。
+- 重开条件：crates.io 出现维护中的纯 Rust NaiveProxy 客户端且带可嵌入流面，或显式姿态决策接受指纹发散客户端作为留证降级（本仓现行姿态拒绝该类静默降级）。
+
 ## 公共传输面（跨协议共享）
 
 | 库 | 版本（要求 / lock 实测） | 许可 | 角色 |

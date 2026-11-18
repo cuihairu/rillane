@@ -270,6 +270,16 @@ Every admitted section carries these fields (the contract test checks each one; 
 - Server face: not delivered (named) — rillane's ingress face does not catalog an SSH listener; acceptance runs against the seat's real OpenSSH sshd (dedicated config, port 23411, probe key material)
 - Version boundary: SSH-2 only (russh speaks SSH-2; no SSH-1 path exists). Host-key pinning is REQUIRED — a node without `host_key` is refused at construction (an unpinned SSH client silently trusts first-use, which is a downgrade this face refuses by name); the fingerprint compares after stripping an optional `SHA256:` prefix. Auth faces: exactly one of password / private-key, carrying both or neither is refused at construction. Direct-tcpip target addressing uses the host string verbatim (the sshd resolves it) — fake-ip pools are not consulted on this face.
 
+## naive (NaiveProxy)
+
+- **Conclusion**: **blocked — no embeddable backend** (RIL-112, evaluation recorded 2026-11-18; nothing delivered, no catalog entry, no IR variant). Evaluation sweep, all carriers rejected with evidence:
+  - crates.io (2026-11-18): no NaiveProxy client crate exists — the `naive` search returns only string-search / Naive-Bayes / timer crates, none proxy-related.
+  - Official `naiveproxy` (klzgrad/naiveproxy, BSD-3-Clause, active — pushed 2026-11-01) is a **Chromium overlay**: its `src/` tree is Chromium's net stack plus build scripts, and the client IS a Chromium binary. Not embeddable in a Rust workspace — a C++ Chromium network-stack build (heavy native toolchain + platform matrix), the same rejection family as the libssh2 C bindings and the openssh binary, but far heavier.
+  - The maintained Go ecosystem does not reimplement the protocol either: sing-box's naive outbound embeds Chromium via `cronet-go` ("Go bindings for naiveproxy", CGo, nonstandard license) — `client *cronet.NaiveClient`. The Go world carries the C++ stack rather than mirroring the wire, which is strong evidence the wire is not a small self-contained spec.
+  - Self-write ladder: **triggered** (no usable backend) but **declined with a named masquerade judgment**. NaiveProxy's primary purpose is probing resistance via Chrome-identical TLS/HTTP-2 fingerprints (ClientHello, ALPN, SETTINGS/HEADERS ordering, C116123 padding). A plain-Rust TLS + h2 CONNECT client would be wire-functional against a forwardproxy server but fingerprint-divergent — it delivers the transport while silently dropping the protocol's reason to exist, the same refusal family as mapping relay groups to consistent-hashing (masquerading success is refused). The padding component (C116123) is a fingerprint heuristic tied to the Chrome stack, not a self-contained wire spec like sing-snell's records.
+- Version / License / Platforms / Public API / Bypass / Cancel / Stats / Reuse / UDP / Server face: **not pinned** — no backend delivered; no carrier crate, no wire mirror, no connector face.
+- Re-open condition: a maintained pure-Rust NaiveProxy client with an embeddable stream face appears on crates.io, or an explicit posture decision accepts a fingerprint-divergent client as a documented downgrade (this repository's current posture refuses that class of silent downgrade).
+
 ## Shared transport face (cross-protocol)
 
 | Library | Version (requirement / lock) | License | Role |
