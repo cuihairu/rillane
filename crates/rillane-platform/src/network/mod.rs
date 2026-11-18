@@ -37,9 +37,10 @@ pub mod linux;
 // 现有 TUN 数据面与逃逸表
 #[cfg(target_os = "linux")]
 pub mod takeover;
-// Linux 生命周期恢复（RIL-031）：崩溃日志（持久化 JSONL）+ 重启修复
-// + 网络切换恢复动作映射
-#[cfg(target_os = "linux")]
+// 生命周期恢复（RIL-031 OS 中立面 + RIL-035 Windows 复用）：崩溃日志
+// （持久化 JSONL）+ 网络切换恢复动作映射 OS 中立；Linux 执行入口
+// （recover/journaling_executor/handle_network_event）条目级门控在
+// 模块内，Windows 执行入口在 win_recovery（复用同一 journal）
 pub mod recovery;
 // Windows 接管面决策层（RIL-033 代码面）：事务/快照解析 OS-free——
 // Linux 验证席确定性可测；真机 IO（route print/netsh 真读、socket
@@ -52,6 +53,10 @@ pub mod win_net;
 // 命中回验缓存 OS-free；真机表/身份源 FFI（GetExtendedTcpTable/
 // OpenProcess 族）归机批次
 pub mod win_owner;
+// Windows 生命周期恢复执行面（RIL-035 代码面）：复用 recovery 的
+// journal/映射，Windows 载荷族解析器与谓词分叉；SCM/驱动依赖/签名
+// 真机面归机批次
+pub mod win_recovery;
 // TODO: 平台特定实现待完成（死稿，见 platform.rs 头部注记）
 // pub mod platform;
 
@@ -78,11 +83,14 @@ pub use ports::{
     NetworkEvent, NetworkEvents, PacketInput, PacketMeta, RouteTransaction, SocketBypass,
     SocketHandle, SocketInput, SystemChange, TransportProtocol,
 };
-#[cfg(target_os = "linux")]
+// 生命周期恢复 OS 中立面（journal 本体 + 事件→动作映射）
 pub use recovery::{
-    handle_network_event, journaling_executor, plan_for_event, recover, CrashJournal, JournalEntry,
-    JournalSnapshot, NetworkRecoveryAction, RecoveryReport, AUDIT_TARGET,
+    CrashJournal, JournalEntry, JournalSnapshot, NetworkRecoveryAction, RecoveryReport,
+    AUDIT_TARGET, plan_for_event,
 };
+// Linux 执行入口（RIL-031 形状：ip/nft 载荷族）
+#[cfg(target_os = "linux")]
+pub use recovery::{handle_network_event, journaling_executor, recover};
 pub use route::{
     BypassAction, BypassCondition, BypassRule, RouteDestination, RouteManager, RouteRule,
     RouteStats, RouteType, RoutingConfig, RoutingMode,

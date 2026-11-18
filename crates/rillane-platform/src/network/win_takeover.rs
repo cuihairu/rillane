@@ -280,8 +280,8 @@ impl RouteTransaction for WinRouteTransaction {
 }
 
 /// EEXIST 口径（route add 重复添加的两种真机文本：The object already
-/// exists / Element already exists）
-fn is_eexist(e: &io::Error) -> bool {
+/// exists / Element already exists；win_recovery 重放路径复用）
+pub fn is_eexist(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::AlreadyExists
         || e.to_string().contains("already exists")
         || e.to_string().contains("Already exists")
@@ -290,8 +290,8 @@ fn is_eexist(e: &io::Error) -> bool {
 /// 撤销幂等口径：目标不存在（route delete 未命中 / 接口已无）视为已
 /// 撤销——rollback 幂等的机制面（真机文本：The route deletion failed:
 /// The element could not be found / Element not found / The system
-/// cannot find the file specified）
-fn is_missing(e: &io::Error) -> bool {
+/// cannot find the file specified；win_recovery 撤销路径复用）
+pub fn is_missing(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::NotFound
         || e.to_string().contains("could not be found")
         || e.to_string().contains("not found")

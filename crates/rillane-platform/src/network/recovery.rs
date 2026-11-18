@@ -1,5 +1,10 @@
-//! Linux 生命周期恢复（RIL-031）：崩溃日志（持久化 JSONL）+ 重启修复
-//! + 网络切换恢复动作映射。
+//! 生命周期恢复（RIL-031，OS 中立面；RIL-035 Windows 面复用同一
+//! journal）：崩溃日志（持久化 JSONL）+ 重启修复 + 网络切换恢复动作
+//! 映射。journal 本体与事件→动作映射 OS 中立（ ungated）；三个执行
+//! 入口（recover/journaling_executor/handle_network_event）按平台解析
+//! 器与缺失谓词分叉，Linux 形状条目级门控在内核，Windows 形状在
+//! [`super::win_recovery`]（复用本模块 journal 类型与
+//! [`plan_for_event`]）。
 //!
 //! 与 RIL-018 内存态 [`SideEffectJournal`](crate::network::SideEffectJournal)
 //! 的分工：那份是单次运行内的变更账（优雅停机时进程内回滚——runtime
@@ -31,12 +36,19 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::network::{parse_step_payload, NetworkEvent, StepExecutor};
+use crate::network::NetworkEvent;
+
+// Linux 执行入口的平台依赖（解析器/谓词/执行器类型）——条目级门控，
+// 模块本体 OS 中立（RIL-035 Windows 面在 win_recovery.rs 复用 journal）
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+use crate::network::{parse_step_payload, StepExecutor};
 
 /// 审计日志 target（异常退出/恢复动作全部走这里，可按 target 过滤）。
 pub const AUDIT_TARGET: &str = "rillane::recovery";
@@ -209,6 +221,7 @@ impl CrashJournal {
 
 /// `io::Error` 是否「目标不存在」（同 takeover is_missing 文本口径：
 /// ip 输出 "No such..." / "Cannot find device"）。
+#[cfg(target_os = "linux")]
 fn is_missing(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::NotFound
         || e.to_string().contains("No such")
@@ -216,6 +229,7 @@ fn is_missing(e: &io::Error) -> bool {
 }
 
 /// `io::Error` 是否「目标已存在」（同 takeover is_eexist 文本口径）。
+#[cfg(target_os = "linux")]
 fn is_eexist(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::AlreadyExists || e.to_string().contains("File exists")
 }
@@ -223,6 +237,7 @@ fn is_eexist(e: &io::Error) -> bool {
 /// 重启修复：逆序撤销全部待办（最新先撤），收尾清账。
 /// 单条失败不吞不中断——失败进 `failed` 且**留账**（下次启动重试），
 /// 成功条目清掉；全部成功则账清零（重复启动无残留）。
+#[cfg(target_os = "linux")]
 pub fn recover(journal: &CrashJournal, exec: &StepExecutor) -> io::Result<RecoveryReport> {
     let snapshot = journal.pending();
     let mut report = RecoveryReport {
@@ -294,6 +309,7 @@ pub fn recover(journal: &CrashJournal, exec: &StepExecutor) -> io::Result<Recove
 /// 解析自 apply 载荷，无第二构造路径）；形状族之外的 argv 执行成功但
 /// 不记账（审计 warn 点名）；记账写盘失败不影响已成功的系统变更
 /// （warn 上报）。
+#[cfg(target_os = "linux")]
 pub fn journaling_executor(journal: Arc<CrashJournal>, inner: StepExecutor) -> StepExecutor {
     Arc::new(move |argv: &[String]| {
         inner(argv)?;
@@ -346,6 +362,7 @@ pub fn plan_for_event(event: &NetworkEvent) -> NetworkRecoveryAction {
 /// 处理一次网络事件：按映射执行恢复动作并返回审计名
 /// （`"reassert_routes"` / `"none"`）。路由重放：EEXIST = 已在位
 /// （成功）；其余失败逐条 warn（不中断后续条目）。
+#[cfg(target_os = "linux")]
 pub fn handle_network_event(
     journal: &CrashJournal,
     exec: &StepExecutor,
