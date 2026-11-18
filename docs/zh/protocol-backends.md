@@ -602,6 +602,16 @@ armv7-ohos 桩）在对应小节如实记录。
 - 版本 / 许可 / 平台 / 公共 API / 旁路 / 取消 / 统计 / 复用 / UDP / 服务端面：**不钉载**——无后端交付；无载具 crate、无线镜像、无连接器面。
 - 重开条件：crates.io 出现维护中的纯 Rust NaiveProxy 客户端且带可嵌入流面，或显式姿态决策接受指纹发散客户端作为留证降级（本仓现行姿态拒绝该类静默降级）。
 
+## tor
+
+- **结论**：库载具承接（RIL-114，评估 + 探针留证 2026-11-18；载具钉定 `arti-client`）。评估排查（2026-11-18，crates.io 仓库 + 缓存源码核读 + 真实网络探针）：Rust 的 Tor 生态就是 arti 栈本体——`arti-client` 0.48.0（MIT OR Apache-2.0，活跃，rust-version 1.92，本座工具链 1.100.0）暴露真正的可嵌入客户端面（`TorClient::create_bootstrapped` → `client.connect((host, port))` → `TorTcpStream`，AsyncRead/AsyncWrite）——这是所有语言里唯一的可嵌入 Tor 客户端库。落选姿态留证：sing-box 的 tor 出站是**托管 tor 进程**（github.com/cretz/bine 控制端口：torrc + DataDir + ProcessCreator，监护外部 `tor` 守护二进制）——与 `openssh` 二进制包装同族落选理由：是进程监护，不是库载具。C tor 本体是 C 工程（无法作为 Rust 库链接）。
+- 探针留证（本座，真实 Tor 网络，`/tmp/torprobe` 临时 crate，arti-client 0.48.0）：冷引导 25.6s，热（磁盘缓存）2.4s；真实电路连 `example.com:80` 完整 HTTP/1.0 GET → `HTTP/1.1 200 OK`（488 字节）往返；`isolated_client()` 每流隔离面已验证。引导经**通道级代理前置**完成，因为本座原始出网被防火墙拦截（全部直连 TCP 不通；仅局域网 HTTP 代理可达外网）：arti 0.48 原生支持每条通道经出站代理前置（`tor-chanmgr` `ProxyProtocol`：`socks5://`/`socks4a://`/`http://` CONNECT，仅 IP 主机，按 curl 代理 URI 语法解析，空串视为未设置）。这让 Tor 在前置网络上无需任何 bridge/PT 机械即可用——交付面将携带为可选 `proxy` 字段。
+- 探针验证过的坑（交付相关）：`TorTcpStream` 写后必须显式 `flush().await`——未 flush 的写只在本地缓冲、永不离开客户端（tor_proto 层追踪：BEGIN 已发、CONNECTED 已收、零 DATA 单元出站、出口约 15s 后关闭闲置流、读得 EOF）。`tokio::io::copy_bidirectional` 从不调 flush，在该流上**不可用**；交付的连接器必须每个方向跑显式的读→写→flush 泵。
+- **版本**：`arti-client` 0.48.0（requirement `0.48`），features `tokio` + `rustls` + `compression`，默认 features 关闭（默认拉 `native-tls`/OpenSSL——本仓纯 rustls）；rustls provider 经本仓补丁版 rustls fork 的特性并集解析
+- **许可**：MIT OR Apache-2.0——与本仓许可兼容
+- **平台**：纯 Rust；63 个直接依赖 crate 为第一方 tor-* 为主；仅在本座 linux-amd64 验证（交叉构建不作运行时证明，与 wireguard/russh 同措辞）
+- 交付字段（公共 API / 旁路 / 取消 / 统计 / 复用 / UDP / 服务端面）：交付时在实现提交中定稿（RIL-114）
+
 ## 公共传输面（跨协议共享）
 
 | 库 | 版本（要求 / lock 实测） | 许可 | 角色 |
