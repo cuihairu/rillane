@@ -62,6 +62,10 @@ base64 = "0.22"
 sha2 = "0.10"
 sha1 = "0.10"
 md-5 = "0.10"
+# Snell v4 记录密钥派生（outbound/snell.rs）：Argon2id(psk, salt, t=3, m=8KiB, p=1, 32B)[:16]
+# ——仅用作 KDF，PHC 口令串面（password-hash/getrandom）在此无用，故关默认特性
+# 只留 alloc（hash_password_into 的唯二 cfg 门控）
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 # QUIC Initial 解密（G0-3 sniff）：HKDF-SHA256 派生 Initial 密钥
 hkdf = "0.12"
 regex = "1.10"

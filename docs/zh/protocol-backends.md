@@ -520,6 +520,63 @@ armv7-ohos 桩）在对应小节如实记录。
 - **复用**：会话保持 + persistent_keepalive
 - UDP：数据报面（目录 udp=true）。
 
+## snell
+
+- **结论**：自写（RIL-111）——无可用 Rust 后端。评估扫查（2026-11-18，
+  crates.io 注册表 + GitHub 真源核验）：注册表 “snell” 查询唯一命中
+  `snells` 0.1.0（2021-11-26 发版、12.9KB、7 个版本全弃于 0.1.0、无
+  license 字段、累计下载约 500）——占位符，不含任何协议 API。活跃的
+  实现是 Go：sagernet/sing-snell（Apache-2.0/MIT，活跃维护）与闭源
+  上游 Surge——Rust 侧无可链接物。结论 = 自写，线格式以真源
+  sagernet/sing-snell master 为基准（2026-11-18 浅读：`snell.go` 常量、
+  `crypto.go` Argon2id/AES-128-GCM、`snellv4/record.go` 记录封帧、
+  `snellv4/client.go` 请求/应答面、`request.go` 负载布局、`address.go`
+  目标握手数据、`internal/reuse/reuse.go` 应答分发），并与 sing-box
+  `protocol/snell/outbound.go`（v4/v6 分派、UDP 走 TCP 连接）交叉核对
+- **版本**：仓库内实现（无第三方协议依赖）；加密载体 `argon2` 0.6.0
+  （要求 `0.6`，关默认特性只留 `alloc`——本面只用 KDF，PHC 口令串面
+  是死重）+ `aes-gcm` 0.10.3（工作区既有 pin）
+- **许可**：仓库许可（自写）；载体 argon2 MIT OR Apache-2.0，
+  aes-gcm MIT OR Apache-2.0
+- **平台**：全平台（纯 Rust；`argon2` 0.6.0 为 edition 2024 /
+  rust-version 1.85，本仓工具链 1.100.0，六平台面沿用 tokio
+  TcpStream 基座）
+- **公开 API**：`SnellConnector`
+  （crates/rillane-protocols/src/outbound/snell.rs）——线格式同文件：
+  记录封帧（`SnellStream`，7 字节明文头 + 16 字节 tag，首记录携
+  16 字节 salt 与初始填充，填充与负载密文按偶数下标互换）、请求负载
+  `{0x01, 0x05, len(userkey), userkey, 1 字节长(host), host, port u16 大端}`、
+  应答码 `0x00` 隧道 / `0x02` 错误（`{code u8, SockString 消息}`，
+  不得有尾随数据）；镜像对端按 `address.go` 的目标握手数据读请求
+  （CONNECT 目标是 host 串，字面 IP 亦然）
+- **旁路**：连接器同时拥有 TCP 拨号与记录加密——无底层 socket 旁路；
+  snell 是裸 TCP 承载、无传输组合面，故传输池/拨号策略组合不适用
+  （如实记录，口径同 wireguard 用户态承载）
+- **取消**：建立期检查 + 显式拨号超时；snell 会话无具名拆除——丢弃
+  TCP 连接即释放（对端在其记录读取面看到 EOF）
+- **统计**：协议无逐记录观测点；失败以 io::Error 经统一
+  EgressConnector 面透出（observed 口径）；流量统计沿用 FlowReport
+  上/下行字节（copy_bidirectional 口径）
+- **复用**：官方实现的连接器复用是协议本体（`CommandConnectV2`、
+  `snellv4/reuse.go`）——本段不交付（具名）；首段为一流程一 TCP 记录
+  上下文，无预热组合
+- UDP：本段不交付（目录 udp=false）——官方 UDP 面是
+  `snellv4/packet.go` 的 UDP-over-TCP 数据报面（`CommandUDP` 0x06 +
+  `UDPCommandForward` 0x01 + 字面 IP 的 `0x00` 族帧），列为后续阶段；
+  sing-box 的 snell 出口声明 UDP 走 TCP 连接，故本列是交付边界而非
+  协议缺失
+- 服务端面：不交付（具名）——rillane 入站面未编目 snell 监听；验收对
+  镜像对端，非真实 snell 服务器
+- 版本边界：仅 v4 + obfs=none。v5/v6 是另一握手族（sing-box 的 snell
+  出口只接受 version 4 与 6；`snellv6/{handshake,salt,profile,mixing}.go`
+  未镜像）——配置期具名拒绝，绝不静默降级。obfs `http`/`tls` 不交付
+  （它替换 TLS/HTTP 握手段，判负家族同 hysteria 的 salamander obfs）。
+  v4 UDP、连接器复用、填充 one-ratio 整形皆为具名边界：填充内容由
+  接收方不作校验（读取侧换回即丢弃），本客户端出均匀随机填充——官方
+  `fillPadding` 的 one-ratio 整形是指纹启发式而非线结构，具名判负。
+  镜像对端以 Rust 镜像官方 reader/writer 记录代码（验证席无 Go 工具
+  链）；Go 源码为线格式基准。
+
 ## 公共传输面（跨协议共享）
 
 | 库 | 版本（要求 / lock 实测） | 许可 | 角色 |
