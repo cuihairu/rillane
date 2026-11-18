@@ -35,6 +35,11 @@ pub mod schedule;
 pub mod scoring;
 pub mod session;
 pub mod session_trace;
+// 流媒体可用性与地区检测决策面（RIL-145 代码面）：结果分类（HTTP 200
+// 不等于播放）/TTL 缓存/作业配额取消/自动选组迟滞——OS-free 决策层；
+// 出口拨号探测执行器（EgressConnector 拨号测量形态，RIL-059 具名缺口
+// 同链）与真服务验证归后续批次
+pub mod streaming;
 pub mod trace;
 pub mod trace_svg;
 pub mod udp;
