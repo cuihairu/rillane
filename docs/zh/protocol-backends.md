@@ -630,6 +630,17 @@ armv7-ohos 桩）在对应小节如实记录。
 - 服务端面：不交付（具名）——onion service 是 arti 的独立特性（`onion-service-service`）；本仓入口面不编目 tor 监听
 - 版本边界：交付面仅 arti 客户端面——首段无 bridge/可插拔传输（可选 `proxy` 是经普通代理的通道级前置，与 bridge 是不同机制；在封锁 Tor 的网络上它未必够用——本席探针验证的正是这一面）。目标寻址 host 字符串原样（出口侧 DNS——本面不查 fake-ip 池，与 ssh 同措辞）。存储用 arti 缺省路径（`~/.cache/arti`、`~/.local/share/arti`）——探针验证的配置形状钉定 `[storage] permissions.denied = []`。flush 坑是承重的：未来任何把显式 flush 泵换成 `copy_bidirectional` 的重构都会重新引入探针追踪到的静默无数据失效面。
 
+## mieru
+
+- **结论**：**无后端——自写梯子开启**（RIL-116，评估留证 2026-11-18；尚无交付，无目录条目、无 IR 变体）。评估扫查：
+  - crates.io（2026-11-18）：`mieru` 查询**零**匹配——任何形态（客户端/服务端/线格式 crate）的 Rust 实现都不存在。
+  - 参考实现是 **enfein/mieru**（GPL-3.0，Go，活跃——v3.39.0 2026-10-23）：socks5/HTTP(S) 代理**应用**而非库——包二进制属 openssh/Chromium 拒绝族（进程包装，非可嵌入流面），且无论许可如何都无库面可链。
+  - 与 naive 不同，线格式**有完整规范**：参考仓 `docs/protocol.md` 详列钥生成（hashedPassword = SHA-256(password ‖ 0x00 ‖ username)；timeSalt = 8 字节 BE unix 时间按 2 分钟取整后的 SHA-256；PBKDF2-SHA256 64 轮 → 32 字节钥；客户端/服务端时钟差须 ≤ ±4 分钟，服务端最多试 3 个 timeSalt）、AEAD = XChaCha20-Poly1305（24 字节 nonce；末 4 字节被替换为 SHA-256(username ‖ nonce[0..16]) 截断以加速用户查找）、段布局 `[padding0][nonce 0|24][enc metadata 32][tag 16][padding1][enc payload][tag 16][padding2]`、TCP nonce 演化（nonce 每方向只出现一次，逐次加密 +1）、单分片上限 32768 字节（低熵模式 32 为 32764）、UDP 逐段 nonce、三种 metadata 类型（session / session-close / error）含 session ID、序号、状态码与 payload/suffix 长度、低熵填充/编码模式（docs/traffic-pattern.md）。自写因此从官方规范出发——与 tuic 自写从 EAimTY SPEC.md 出发同一姿态。
+  - 验收锚：参考仓发布 linux-amd64 发行二进制（`mieru_3.39.0_linux_amd64.tar.gz`）——GPL 对端**进程**是仓内合法的（ssh 项即对系统 OpenSSH sshd 验收），且真实部署服务端是更强的锚级别。真机对端验收（对 Go 服务端的成功/失败/取消/统计）在本席可行。
+  - 首段自写范围（具名）：仅 TCP 客户端面——钥调度、会话建立与目标寻址、最小填充的段封帧、XChaCha20-Poly1305 nonce 演化、EOF/半关闭语义；低熵模式、UDP 面、服务端面各自验收轮之前具名不交付。
+- 版本/许可/平台/公开 API/旁路/取消/统计/复用/UDP/服务端面：**暂不钉**——无后端交付；首段落库时钉定（许可将为仓库许可，自写）。
+- 复开条件：无需——自写梯子已开启，规范与对端锚俱在；本项按实现项（自写）推进。
+
 ## 公共传输面（跨协议共享）
 
 | 库 | 版本（要求 / lock 实测） | 许可 | 角色 |
