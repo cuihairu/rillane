@@ -265,6 +265,20 @@ pub const CATALOG: &[CatalogEntry] = &[
             license: "Apache-2.0",
         },
     },
+    CatalogEntry {
+        kind: "tor",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#tor",
+        },
+        // RIL-114：arti-client 嵌入式客户端面（逐流隔离，客户端流仅 TCP）；
+        // 服务端面（onion service）未交付
+        udp: false,
+        backend: Backend::Library {
+            crate_name: "arti-client",
+            version_req: "0.48",
+            license: "MIT OR Apache-2.0",
+        },
+    },
 ];
 
 /// 目录条目查询。
@@ -313,6 +327,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Tuic { .. } => "tuic",
         EgressConfig::Snell { .. } => "snell",
         EgressConfig::Ssh { .. } => "ssh",
+        EgressConfig::Tor { .. } => "tor",
         EgressConfig::Wireguard { .. } => "wireguard",
     }
 }
@@ -484,6 +499,9 @@ mod tests {
                 private_key: Some("/tmp/id_ed25519".into()),
                 private_key_passphrase: None,
                 host_key: "SHA256:RX6tz+xibncBQGQAVCfeUBJ+NgVjabphorAM/IGnFPU".into(),
+            },
+            EgressConfig::Tor {
+                proxy: Some("http://10.0.0.1:7897".into()),
             },
         ];
         assert_eq!(

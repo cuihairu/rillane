@@ -3569,6 +3569,62 @@ rules: []
     }
 
     #[test]
+    fn test_tor_type_refused_by_name_at_parse_and_skipped_at_export() {
+        // RIL-114 边界面：mihomo outbound schema 无 tor 类型（sing-box 同样
+        // 无 tor 出站——两系均以托管 tor 进程/外部客户端形态消费 Tor）。
+        // 导入面：ClashProxyType 枚举封闭无 catch-all，外来 tor 节点解析期
+        // 即具名失败（与所有目录外类型同姿态，不静默丢节点）；导出面：IR
+        // Tor 节点按 Reject 同口径具名跳过（skipped 清单可观测）。
+        let yaml_content = r#"
+proxies:
+  - name: "test-tor"
+    type: tor
+
+proxy-groups: []
+rules: []
+        "#;
+        let converter = ClashConverter::new();
+        let err = converter
+            .parse(yaml_content)
+            .expect_err("tor 类型应解析期拒绝");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("tor"), "应点名 tor: {msg}");
+
+        let config = rillane_config::RillaneConfig {
+            routing: rillane_config::RoutingConfig {
+                default_node: "rt-tor".into(),
+                ..Default::default()
+            },
+            egress: vec![rillane_config::EgressDescriptor {
+                name: "rt-tor".into(),
+                spec: EgressConfig::Tor {
+                    proxy: Some("http://10.0.0.1:7897".into()),
+                },
+            }],
+            ..serde_yaml::from_str(
+                "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+            )
+            .unwrap()
+        };
+        let (yaml, report) = crate::clash_export::ClashExporter.export(&config).unwrap();
+        assert!(
+            report.exported_proxies.is_empty(),
+            "tor 无 Clash 对应，不应产出节点: {report:?}"
+        );
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("rt-tor") && s.contains("tor")),
+            "skipped 清单应具名记载 tor 跳过: {report:?}"
+        );
+        assert!(
+            yaml.contains("proxies: []"),
+            "proxies 节点表不应含 tor 节点:\n{yaml}"
+        );
+    }
+
+    #[test]
     fn test_vmess_ws_opts_path_and_host_converted() {
         // 回归：Clash vmess/vless 的 ws 传输参数在规范里位于 `ws-opts` 块
         // （path / headers.Host），平铺 `path`/`host` 仅少数变体使用——结构体

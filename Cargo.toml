@@ -71,6 +71,13 @@ argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 # russh::keys 即同一 crate 再导出）
 russh = "0.65"
 ssh-key = "=0.7.0-rc.12"
+# Tor 出站（outbound/tor.rs，RIL-114）：arti-client 嵌入式客户端面（引导/电路/出口流）。
+# 默认特性拉 native-tls(OpenSSL)，本仓纯 rustls，故关默认只留 tokio+rustls+compression；
+# rustls provider 经本仓 [patch.crates-io] rustls fork 的特性并集解析。
+# tor-chanmgr 只为 ProxyProtocol（arti 自家的通道前置代理 URI 解析器）做构造期具名校验。
+arti-client = { version = "0.48", default-features = false, features = ["tokio", "rustls", "compression"] }
+tor-chanmgr = "0.48"
+tor-rtcompat = "0.48"
 # QUIC Initial 解密（G0-3 sniff）：HKDF-SHA256 派生 Initial 密钥
 hkdf = "0.12"
 regex = "1.10"

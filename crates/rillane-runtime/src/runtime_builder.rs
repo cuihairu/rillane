@@ -57,11 +57,11 @@ use rillane_protocols::{
     HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MixedIngress,
     ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress, ShadowsocksShadowTlsConnector,
     ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector, Socks5Connector, Socks5Ingress,
-    Socks5UdpConnector, SshConnector, TlsConnectorFactory, TlsFingerprint, TransportKey,
-    TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts,
-    TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress, VlessUdpConnector,
-    VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity, VmessUdpConnector, VmessUdpParts,
-    WireguardConnector, WireguardUdpConnector,
+    Socks5UdpConnector, SshConnector, TlsConnectorFactory, TlsFingerprint, TorConnector,
+    TransportKey, TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector,
+    TrojanUdpParts, TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress,
+    VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity,
+    VmessUdpConnector, VmessUdpParts, WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -3019,6 +3019,9 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::Tuic { server, .. }
         | EgressConfig::Snell { server, .. }
         | EgressConfig::Ssh { server, .. } => Some(server),
+        // Tor 是网络不是服务器：无 server/port 字段（同 Reject/Direct 的
+        // None 口径）
+        EgressConfig::Tor { .. } => None,
         EgressConfig::Wireguard { endpoint, .. } => Some(endpoint),
     }
 }
@@ -3314,6 +3317,12 @@ fn build_udp_connectors(
             EgressConfig::Ssh { .. } => {
                 // SSH UDP 判负（RIL-113）：direct-tcpip 仅 TCP 面——该节点
                 // UDP 需求由 scan_udp_capability 按既有口径构建期报错
+                None
+            }
+            EgressConfig::Tor { .. } => {
+                // Tor UDP 判负（RIL-114）：客户端出口流仅 TCP 面（数据报面
+                // 未交付）——该节点 UDP 需求由 scan_udp_capability 按既有
+                // 口径构建期报错
                 None
             }
             EgressConfig::Hysteria {
@@ -4061,6 +4070,23 @@ fn build_egress_outputs(
                         host_key.clone(),
                     )
                     .with_context(|| format!("节点 {} 的 ssh 配置无效", desc.name))?,
+                );
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Tor { proxy } => {
+                // Tor（RIL-114）：arti-client 嵌入式客户端面（评估留证
+                // protocol-backends.md#tor）；前置代理 URI 校验在 new 内
+                // （arti 自家 ProxyProtocol 解析器，节点级失败不拖垮整份
+                // 订阅）；共享客户端惰性引导 + 逐流隔离；UDP 面未交付
+                // （catalog udp=false）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    TorConnector::new(proxy.clone())
+                        .with_context(|| format!("节点 {} 的 tor 配置无效", desc.name))?,
                 );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),

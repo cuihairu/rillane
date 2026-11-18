@@ -120,7 +120,7 @@ fn hysteria2_node() -> EgressDescriptor {
 /// 回归由目录单测钉住）；目录外类型恒 Unknown（订阅转换/诊断面点名）。
 #[test]
 fn catalog_entries_all_admitted_with_evidence() {
-    assert_eq!(protocol_catalog::CATALOG.len(), 16, "全目录十六条");
+    assert_eq!(protocol_catalog::CATALOG.len(), 17, "全目录十七条");
     for e in protocol_catalog::CATALOG {
         let evidence = e
             .evidence()
@@ -195,6 +195,21 @@ fn catalog_entries_all_admitted_with_evidence() {
         ),
         "ssh 后端 = russh 库承载: {:?}",
         ssh.backend
+    );
+    // tor 具体口径（RIL-114）：arti-client 承载 + 无 UDP 面（客户端流仅 TCP）
+    let tor = protocol_catalog::entry_for("tor").expect("已编目");
+    assert!(!tor.udp, "RIL-114 客户端出口流仅 TCP，UDP 面未交付");
+    assert!(
+        matches!(
+            tor.backend,
+            protocol_catalog::Backend::Library {
+                crate_name: "arti-client",
+                version_req: "0.48",
+                license: "MIT OR Apache-2.0"
+            }
+        ),
+        "tor 后端 = arti-client 库承载: {:?}",
+        tor.backend
     );
     for unknown in ["mieru", "ss", ""] {
         assert_eq!(

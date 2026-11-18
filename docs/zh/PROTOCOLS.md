@@ -35,6 +35,7 @@
 | WireGuard | TCP、UDP 的用户态承载 | 部分平台目标是拒绝桩，交叉编译不能证明可用 |
 | Snell | Snell v4 TCP 记录流（AES-128-GCM 记录，钥 = Argon2id(psk, salt, t=3, m=8KiB, p=1)[:16]；首记录携 salt + 随机初始填充，填充/负载偶下标互换，零块 = 干净 EOF；自写面，官方 sing-snell 线镜像，镜像对端契约验收） | 仅 v4 + obfs=none——显式非 4 版本（v3 为不同帧格式）导入面点名拒绝；obfs http/tls 点名拒绝（携带节点不得静默按明记录误连）；无 UDP 面（catalog udp=false）；无服务端面；协议内建连接复用未交付；实机验收未做 |
 | SSH | SSH-2 direct-tcpip 通道流（russh 0.65.2 库承载；主机钥钉扎必填——握手回调内 SHA256 指纹比对，不符具名透出期望/实际；password / private-key 认证恰一选一，加密 OpenSSH 键携口令解码；每流一条 SSH 连接） | 无钉扎构建期拒绝（首用即信是具名拒绝的降级面，绝不静默）；认证双带/双缺构建期具名拒绝；无 UDP 面（direct-tcpip 仅 TCP，catalog udp=false）；通道跨流复用未交付；无服务端面；keepalive 未配置（长空闲收束依服务端 sshd 策略）；验收对真实 OpenSSH sshd 对端（握手/钉扎/认证/中继契约测试） |
+| Tor | arti-client 0.48.0 嵌入式客户端（每节点一枚共享 TorClient，首次流惰性引导 + 磁盘缓存；每流 `isolated_client()`——流间不共享电路；可选通道前置代理 `http://IP:port` / `socks5://IP:port` 供原始出网被拦的网络；显式读→写→flush 中继泵——TorTcpStream 写后不 flush 不出站） | 无 UDP 面（客户端流仅 TCP，catalog udp=false）；无服务端面（onion service 未交付）；无 bridge/可插拔传输（通道前置是另一机制，对封锁 Tor 的网络未必够用）；host 字符串原样——出口侧 DNS，不查 fake-ip 池；多 tor 节点各自引导；无 clash 导入/导出面（mihomo 无 tor 类型——外来 `type: tor` 解析期具名拒绝，IR tor 节点导出按具名跳过记载）；验收对真实 Tor 网络（经前置代理引导 + 双隔离流 + HTTP 200 往返） |
 | 其他（Mieru 等） | 不列为当前可用 | 存在 schema、订阅字段或研究方向不代表已有连接器 |
 
 ## 可选扩展与边界

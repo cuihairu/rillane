@@ -16,6 +16,7 @@ pub(crate) mod shadowtls;
 mod snell;
 mod socks5;
 mod ssh;
+mod tor;
 mod trojan;
 mod tuic;
 mod vision;
@@ -54,6 +55,7 @@ pub use shadowtls::ShadowsocksShadowTlsConnector;
 pub use snell::{SnellConnector, SnellStream};
 pub use socks5::{Socks5Connector, Socks5UdpConnector};
 pub use ssh::SshConnector;
+pub use tor::TorConnector;
 pub use trojan::{TrojanConnector, TrojanUdpConnector};
 pub use tuic::{TuicConnector, TuicStream, TuicUdpConnector, TuicUdpRelay};
 pub use vision::{

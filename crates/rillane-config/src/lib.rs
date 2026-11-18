@@ -2460,6 +2460,19 @@ pub enum EgressConfig {
         /// 主机钥 SHA256 指纹（`SHA256:` 前缀可带可不带，比对先剥前缀）
         host_key: String,
     },
+    /// Tor 出口（RIL-114）：arti-client 嵌入式客户端面——共享客户端惰性
+    /// 引导（缺省磁盘缓存 ~/.cache/arti + ~/.local/share/arti），逐流隔离
+    /// （isolated_client，流间不共享电路）。Tor 是网络不是服务器：无
+    /// server/port 字段，节点寻址面即引导配置本身。proxy 为可选通道前置
+    /// 代理 URI（http://IP:port / socks5://IP:port，主机须为 IP，空串视为
+    /// 未设置——arti 语义；原始出网被防火墙拦截的网络经此前置引导）。
+    /// UDP 面不交付（客户端流仅 TCP，catalog udp=false）；服务端面
+    /// （onion service）不交付。评估与交付边界见两语 protocol-backends.md
+    /// tor 段。
+    Tor {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proxy: Option<String>,
+    },
     Wireguard {
         endpoint: String,
         private_key: String,

@@ -663,6 +663,15 @@ fn proxy_mapping(
             ins(&mut m, "host-key", format!("SHA256:{host_key}"));
             Some(m)
         }
+        EgressConfig::Tor { .. } => {
+            // Tor（RIL-114）：mihomo outbound schema 无 tor 类型（sing-box
+            // 同样无 tor 出站——两系均以托管 tor 进程/外部客户端形态消费
+            // Tor），无对应可落键面，按 Reject 同口径具名跳过
+            report
+                .skipped
+                .push(format!("出口 {name}：tor 无 Clash 对应，跳过"));
+            None
+        }
         EgressConfig::Wireguard {
             endpoint,
             private_key,
