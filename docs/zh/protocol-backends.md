@@ -652,6 +652,16 @@ armv7-ohos 桩）在对应小节如实记录。
 - 版本/许可/平台/公开 API/旁路/取消/统计/复用/UDP/服务端面：**暂不钉**——无后端交付；首段落库时钉定（许可将为仓库许可，自写）。
 - 复开条件：无需——自写梯子已开启，规范与对端锚俱在；本项按实现项（自写）推进。
 
+## shadowquic（ShadowQUIC）
+
+- **结论**：**库承载——载具钉定为 `shadowquic`**（RIL-118，评估 + 探针留证 2026-11-18；连接器尚未交付——目录条目、IR 变体、runtime 三面随实现提交落库）。评估扫查（2026-11-18，crates.io + 缓存源码核验 + 进程内探针）：`shadowquic` 0.4.12（MIT，crates.io 创建 2026-02-09，约 4 万下载，隔数日一发版，最新 2026-11-16）是该协议自身的 Rust 实现，也是唯一实现——客户端（`ShadowQuicClient`）与服务端（`ShadowQuicServer`）皆为可嵌入库面，且直连连接器路径无需该 crate 的应用机械（`Manager`/SOCKS 挂具）：`ShadowQuicClient::new(cfg, resolver)` → `get_conn() -> SQConn`（QUIC 连接，带关闭连接替换的缓存）→ `squic::outbound::connect_tcp(&conn, SocksAddr) -> Unsplit`（打开双向流并预编码 `SQConnect(dst)` 请求，AsyncRead/AsyncWrite）。伴生 crate `shadowquic-macros`（同版本，线格式 derive 支持）随行。crates.io 无其他实现该协议的 crate；README 具名的客户端生态（nekobox、v2rayN）经同一线格式互操。
+- **许可**：MIT——与本仓许可兼容
+- **平台**：未声明 MSRV；工作区工具链 1.100.0 缺省特性（`shadowquic-quinn` + `sunnyquic-noq` + `ring` + `statistics`）编译干净；仅在本席 linux-amd64 验证（交叉编译不是运行时证明，与 wireguard/russh/arti 同措辞）
+- 探针留证（本席，`/tmp/sqprobe` 临时 crate，进程内客户端对库自身服务端面——anytls 验收姿态）：QUIC 握手冷 3.1ms（127.0.0.1），双向流打开 96µs，TCP 回声全栈字节精确往返 4.7ms（SQConnect 请求 → 服务端 accept → 中继到真实 TCP 回声对端），写半关闭被对端尊重，二次 `get_conn()` 0.64ms 且连接复用（0-RTT/连接缓存面）。认证 = username/password（`AuthUser`）；`jls_upstream` 是 SNI 伪装声明（JLS = 该 crate 自带的伪装 TLS client hello rustls fork）
+- 探针实证的收尾毛刺（交付相关）：后台任务仍在轮询时丢弃 QUIC 端点会在 crate 内 panic（"Quic endpoint closed"，`quinn_wrapper/wrapper.rs:486`）——交付的连接器必须在连接器生命周期内持有端点/连接，流存活期间绝不丢弃；取消路径显式关闭连接
+- 版本/公开 API/旁路/取消/统计/复用/UDP/服务端面：交付时钉定（库暴露两种 UDP 面——over-datagram 与 over-stream——及逐用户统计 API；rillane 交付哪个子集随连接器具名）
+- 复开条件：无需——载具已钉定；本项按实现项推进
+
 ## 公共传输面（跨协议共享）
 
 | 库 | 版本（要求 / lock 实测） | 许可 | 角色 |
