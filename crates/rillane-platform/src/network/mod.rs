@@ -41,6 +41,13 @@ pub mod takeover;
 // + 网络切换恢复动作映射
 #[cfg(target_os = "linux")]
 pub mod recovery;
+// Windows 接管面决策层（RIL-033 代码面）：事务/快照解析 OS-free——
+// Linux 验证席确定性可测；真机 IO（route print/netsh 真读、socket
+// 旁路真绑定、wireguard-nt）归 win_net（cfg windows，跨编译检查验证；
+// 运行期验收证据待真机——SSH 授权面恢复后归机批次）
+pub mod win_takeover;
+#[cfg(target_os = "windows")]
+pub mod win_net;
 // TODO: 平台特定实现待完成（死稿，见 platform.rs 头部注记）
 // pub mod platform;
 
