@@ -592,6 +592,17 @@ armv7-ohos 桩）在对应小节如实记录。
 - 服务端面：不交付（具名）——rillane 入口面不编目 SSH 监听；验收打在本机真实 OpenSSH sshd（独立配置，端口 23411，探针钥料）
 - 版本边界：仅 SSH-2（russh 说 SSH-2，无 SSH-1 路径）。主机钥钉扎**必填**——无 `host_key` 节点构造期拒绝（不钉扎的 SSH 客户端默认首用即信，是本面按名拒绝的降级面）；指纹比对先剥可选 `SHA256:` 前缀。认证面：password / private-key 恰一选一，双带或缺一均构造期拒绝。direct-tcpip 目标寻址用 host 字符串原样（由 sshd 解析）——本面不查 fake-ip 池。
 
+## shadowsocksr（ShadowsocksR）
+
+- **结论**：**受阻——无许可兼容后端**（RIL-115，评估留证 2026-11-18；未交付任何东西，无目录条目、无 IR 变体）。评估扫查，全部载具带证据拒绝：
+  - `ssr-client-rs` 0.1.1（crates.io，创建 2026-09-26，44 下载，MSRV 1.82，tarball 已核验）是全部生态中唯一真正的 SSR 客户端库：自称 ssr-n C 实现的字节兼容移植（28 种密码实现 21、14 protocol、6 obfs、TCP+UDP 中继），自报对自家 C 参考服务端的 e2e 矩阵——但 **GPL-3.0-or-later**。链入本 Apache-2.0 工作区是许可错配，无论维护状态如何都不可选（与 GPL trojan 族、yanked GPL tuic 族同一判定）。
+  - `ssr-native-rs`（同作者，GitHub，客户端+服务端）为 **GPL-3.0**——同理由拒绝。
+  - crates.io 扫查（2026-11-18，查询 `shadowsocksr`）：其余匹配无关——Clash API TUI 工具、eggress 应用的出口链 crate（**crates.io 许可字段全空**，非标许可族，与 corduit 同姿态）、引擎占位。GitHub 扫查（`shadowsocksr language:rust`）返回 MIT 桌面客户端应用（二进制应用，非可嵌入库 crate）、SSPanel manyuser 服务端后端（角色错位）、GPL 订阅转换器。主流维护的 Shadowsocks 族（shadowsocks/shadowsocks-rust 1.25.0）只实现 Shadowsocks 线格式——README 零 SSR 字样（2026-11-18 核验）；SSR 线（EVP_BytesToKey-MD5 KDF 派钥的传统流密码 + protocol/obfs 插件层）明确不在其范围。
+  - 自写梯子的真实对端景观：唯一库自身的验收锚（`ssr-n` C 服务端）不公开——crate 仓库 2026-09-25 移除了 vendored 上游源码（68 MB），GitHub 检索无该名的公开仓库（2026-11-18）。python 参考实现是 python2 时代（Debian 13 无 python2）。C 实现（shadowsocksr-native，GPL-3.0）可作外部对端**二进制**——GPL 对端进程是仓内合法的（ssh 项就是对系统 OpenSSH sshd 验收），可构建或预构建的 SSR 对端二进制原则上仍是可行的验收锚；本席本次未尝试此类构建，也未闻有维护中的 linux-amd64 构建。
+  - 自写梯子：**触发**（无可用后端），且原语层许可干净（RustCrypto `rc4`/`cfb-mode`/`aes` 加 EVP_BytesToKey(MD5) KDF 均 MIT/Apache）——代码量不是绑定约束，验收锚才是。线横跨三层插件（crypto；protocol——部署面是 auth_aes128_md5/sha1 与 auth_chain 族；obfs——http_simple 与 tls1.2_ticket_auth）加 UDP 面，逐项验收要求对真实对端的成功/失败/取消/统计；两边都自写就是「从未运行的自己对自己」交付族，本仓拒绝（与 naive 的指纹拒绝同判定族：交付了传输却静默丢掉协议存在的理由——此处即与部署中的旧服务端的兼容）。
+- 版本/许可/平台/公开 API/旁路/取消/统计/复用/UDP/服务端面：**不钉**——无后端交付；无载具 crate、无线镜像、无连接器面。
+- 复开条件：crates.io 出现维护中的许可兼容（MIT/Apache/BSD）SSR 客户端库，或验收席出现可运行的真实 SSR 服务端对端（预构建二进制，或 GPL 对端的干净构建——外部进程合法），届时自写梯子按实际可部署的 cipher/protocol/obfs 组合推进并补订阅往返字段样本。
+
 ## naive（NaiveProxy）
 
 - **结论**：**受阻——无可嵌入后端**（RIL-112，评估留证 2026-11-18；未交付任何面，无目录条目、无 IR 变体）。评估排查，全部载具落选并留证：
