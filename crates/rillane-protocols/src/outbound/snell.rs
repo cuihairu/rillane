@@ -174,6 +174,37 @@ struct RxState {
     plain: BytesMut,
     /// 干净收口（零块）；裸 EOF 不置位（报意外 EOF）
     eof: bool,
+    /// 对端应答分发状态（官方 `clientConn.readResponse` 惰性口径）
+    reply: ReplyState,
+    /// 应答分发武装位：仅客户端连接面置位（连接器 forward 与显式
+    /// read_reply）。服务器面（镜像对端、UDP 复用段）首条对端记录即
+    /// 数据，不持应答头，不武装不分发。
+    reply_armed: bool,
+    /// 错误应答消息装配缓冲（code 之后的 SockString 本体）
+    error_msg: Vec<u8>,
+}
+
+/// 对端应答（服务器首条记录明文头部）分发状态。
+///
+/// 官方客户端写侧不等待应答（`DialConn` 即 `writeRequest` 返回，上行
+/// 随发），应答于下行首读分发——官方 v4.1.1 服务器实测在建连/拨号后
+/// 不即发应答，先流上行再收应答即无死锁。
+enum ReplyState {
+    /// 应答码在途（首条对端记录未解出或明文未足）
+    Pending,
+    /// 错误应答装配中：code 已读，message 余 remaining 字节
+    ErrorPartial { code: u8, remaining: usize },
+    /// 隧道应答已分发（plain 余量即隧道数据）
+    Tunnel,
+    /// 具名失败待透出（错误应答装配完毕 / 意外应答码 / 尾随数据）
+    Failed(String),
+}
+
+/// 应答分发单步结果：Advanced = 已消费明文或已推进状态；NeedMore = 明文
+/// 不足，待下一记录补给。
+enum ReplyStep {
+    Advanced,
+    NeedMore,
 }
 
 impl<S> SnellStream<S> {
@@ -194,6 +225,9 @@ impl<S> SnellStream<S> {
                 raw: BytesMut::new(),
                 plain: BytesMut::new(),
                 eof: false,
+                reply: ReplyState::Pending,
+                reply_armed: false,
+                error_msg: Vec::new(),
             },
         }
     }
@@ -208,32 +242,107 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SnellStream<S> {
 
     /// 读首条应答并按 ParseReply 语义分发：隧道（余下字节即隧道数据，
     /// 留在读缓冲经正常读面交付）或错误（code + SockString 消息，尾随
-    /// 数据具名拒绝）。
+    /// 数据具名拒绝）。应答于下行首读同样经本机制惰性分发（`reply_step`）；
+    /// 本方法只是把分发驱动到定局，供显式握手确认方使用。
     pub(crate) async fn read_reply(&mut self) -> Result<()> {
-        let mut op = [0u8; 1];
-        self.read_exact(&mut op)
-            .await
-            .map_err(|e| anyhow!("Snell 应答读取失败: {e}"))?;
-        match op[0] {
-            REPLY_TUNNEL => Ok(()),
-            REPLY_ERROR => {
-                let mut code = [0u8; 1];
-                self.read_exact(&mut code).await?;
-                let mut len = [0u8; 1];
-                self.read_exact(&mut len).await?;
-                let mut message = vec![0u8; len[0] as usize];
-                if !message.is_empty() {
-                    self.read_exact(&mut message).await?;
+        self.rx.reply_armed = true;
+        std::future::poll_fn(|cx| {
+            loop {
+                match &self.rx.reply {
+                    ReplyState::Tunnel => return Poll::Ready(Ok(())),
+                    ReplyState::Failed(msg) => return Poll::Ready(Err(anyhow!("{msg}"))),
+                    _ => {}
                 }
-                // 官方 ReadServerError：code + 长度 + 消息之外不得有尾随
-                // 数据——此时读缓冲仅可能持本记录余量
-                if !self.rx.plain.is_empty() {
-                    bail!("Snell 错误应答携带尾随数据");
+                match self.reply_step() {
+                    Err(e) => return Poll::Ready(Err(anyhow!("{e}"))),
+                    Ok(ReplyStep::Advanced) => continue,
+                    Ok(ReplyStep::NeedMore) => {}
                 }
-                let message = String::from_utf8_lossy(&message).into_owned();
-                Err(anyhow!("Snell 服务器错误 {}: {message}", code[0]))
+                let outcome = self
+                    .poll_read_record(cx)
+                    .map_err(|e| anyhow!("Snell 记录读取失败: {e}"))?;
+                match outcome {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Some(payload)) => self.rx.plain.extend_from_slice(&payload),
+                    // 零块而应答未定：对端未给应答即收口，具名拒绝
+                    Poll::Ready(None) => {
+                        return Poll::Ready(Err(anyhow!("Snell 对端应答未至即零块收口")))
+                    }
+                }
             }
-            other => Err(anyhow!("Snell 意外应答码 {other:#04x}")),
+        })
+        .await
+    }
+
+    /// 应答分发状态判定。
+    fn reply_settled(&self) -> bool {
+        matches!(self.rx.reply, ReplyState::Tunnel | ReplyState::Failed(_))
+    }
+
+    /// 武装对端应答分发（客户端连接面专用：连接器在请求写出后调用，
+    /// 下行首读自首条对端记录明文头部剥应答）。
+    fn arm_reply(&mut self) {
+        self.rx.reply_armed = true;
+    }
+
+    /// 应答分发单步：从 plain 头部消费应答码/错误帧，推进 reply 状态。
+    /// Advanced = 消费或推进成功（调用方重走交付循环）；NeedMore = 明文
+    /// 不足待补给。错误应答具名失败经 Failed 态持久化（每次读透出）。
+    fn reply_step(&mut self) -> io::Result<ReplyStep> {
+        let RxState {
+            plain,
+            reply,
+            error_msg,
+            ..
+        } = &mut self.rx;
+        match reply {
+            ReplyState::Tunnel | ReplyState::Failed(_) => Ok(ReplyStep::Advanced),
+            ReplyState::Pending if plain.is_empty() => Ok(ReplyStep::NeedMore),
+            ReplyState::Pending => {
+                let op = plain[0];
+                if op == REPLY_TUNNEL {
+                    let _ = plain.split_to(1);
+                    *reply = ReplyState::Tunnel;
+                    return Ok(ReplyStep::Advanced);
+                }
+                if op != REPLY_ERROR {
+                    let e = format!("Snell 意外应答码 {op:#04x}");
+                    *reply = ReplyState::Failed(e.clone());
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, e));
+                }
+                if plain.len() < 3 {
+                    return Ok(ReplyStep::NeedMore);
+                }
+                let _ = plain.split_to(1);
+                let code = plain[0];
+                let len = plain[1] as usize;
+                let _ = plain.split_to(2);
+                *reply = ReplyState::ErrorPartial {
+                    code,
+                    remaining: len,
+                };
+                Ok(ReplyStep::Advanced)
+            }
+            ReplyState::ErrorPartial { code, remaining } => {
+                let n = (*remaining).min(plain.len());
+                if n > 0 {
+                    let part = plain.split_to(n);
+                    error_msg.extend_from_slice(&part);
+                    *remaining -= n;
+                }
+                if *remaining > 0 {
+                    return Ok(ReplyStep::NeedMore);
+                }
+                // 官方 ReadServerError：code + 长度 + 消息之外不得有尾随数据
+                let e = if !plain.is_empty() {
+                    "Snell 错误应答携带尾随数据".to_string()
+                } else {
+                    let message = String::from_utf8_lossy(error_msg).into_owned();
+                    format!("Snell 服务器错误 {code}: {message}")
+                };
+                *reply = ReplyState::Failed(e.clone());
+                Err(io::Error::new(io::ErrorKind::InvalidData, e))
+            }
         }
     }
 
@@ -259,6 +368,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SnellStream<S> {
             match Pin::new(&mut self.io).poll_read(cx, &mut rb)? {
                 Poll::Ready(()) => {
                     if rb.filled().is_empty() {
+                        // 我方已零块收口后的对端裸 FIN：官方 v4.1.1 实测
+                        // 客户端先收口路径对端永不为零块（server 日志有
+                        // SN_ENCRYPT_RESULT_ZERO_CHUNK 账，线上无字节——
+                        // 本席 10:26/10:28 差分钉死），按干净 EOF 收口。
+                        // 与 master eof.UnexpectedReader 严格语义的分叉，
+                        // 以官方二进制为准；对端先收口（zero_sent 未置）
+                        // 仍按意外 EOF 具名拒绝。
+                        if self.tx.zero_sent {
+                            self.rx.eof = true;
+                            continue;
+                        }
                         // 裸 TCP EOF：未经零块即收口 → 意外 EOF（官方
                         // eof.UnexpectedReader 语义；缓冲有残 = 记录截断）
                         return Poll::Ready(Err(io::Error::new(
@@ -465,6 +585,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for SnellStream<S> {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         loop {
+            // 应答惰性分发（官方 `clientConn.readResponse` 口径）：下行首读
+            // 时从首条对端记录明文头部剥应答码——隧道剥 1 字节后余量即隧道
+            // 数据；错误装配为具名失败透出。上行中继不经此处等待。仅武装
+            // 流（客户端连接面）分发；服务器面首条对端记录即数据。
+            if this.rx.reply_armed {
+                if let ReplyState::Failed(msg) = &this.rx.reply {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        msg.clone(),
+                    )));
+                }
+                if !this.reply_settled() {
+                    match this.reply_step() {
+                        Err(e) => return Poll::Ready(Err(e)),
+                        Ok(ReplyStep::Advanced) => continue,
+                        Ok(ReplyStep::NeedMore) => {}
+                    }
+                }
+            }
             // 已解密内容先交付
             if !this.rx.plain.is_empty() {
                 let n = this.rx.plain.len().min(buf.remaining());
@@ -473,6 +612,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for SnellStream<S> {
                 return Poll::Ready(Ok(()));
             }
             if this.rx.eof {
+                // 零块收口而应答未定（武装流）：对端未给应答即收口，具名拒绝
+                if this.rx.reply_armed && !this.reply_settled() {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Snell 对端应答未至即收口",
+                    )));
+                }
                 return Poll::Ready(Ok(()));
             }
             match this.poll_read_record(cx)? {
@@ -641,7 +787,13 @@ impl EgressConnector for SnellConnector {
             .write_request(&request)
             .await
             .context("Snell 请求写入失败")?;
-        stream.read_reply().await?;
+        // 武装对端应答惰性分发；应答不等待：官方客户端 DialConn 即
+        // writeRequest 返回，上行随发；
+        // 应答于下行首读经流内惰性分发（reply_step）。官方 v4.1.1 服务器
+        // 实测拨号后不即发应答（等待数据面首字节），先等应答再中继即死锁
+        // ——本席真机差分（server2.log：CONNECT 解出 + 拨号成功 + 应答
+        // 缺席）钉死此顺序。
+        stream.arm_reply();
 
         let (up, down) = tokio::io::copy_bidirectional_with_sizes(
             &mut flow.io,
@@ -1140,5 +1292,95 @@ mod tests {
         // 残缺负载拒绝
         assert!(parse_request(&req[..req.len() - 1]).is_err());
         assert!(parse_request(&[]).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // 真实对端：官方 snell-server（Surge 官方二进制，本席 127.0.0.1:23410）
+    // -----------------------------------------------------------------------
+
+    /// 官方对端常驻面：本席 /tmp/snellpeer snell-server v4.1.1（linux-amd64
+    /// 官方静态二进制，psk = SNELL_PEER_PSK，obfs=off）。RIL-111 此前仅对
+    /// 镜像对端（本仓 Rust 自写、与官方 sing-snell 源码逐帧对读）验收——
+    /// 本测试补官方二进制真机字节流面。
+    const SNELL_PEER_ADDR: (&str, u16) = ("127.0.0.1", 23410);
+    const SNELL_PEER_PSK: &str = "rillane-peer-psk-2026";
+
+    async fn snell_peer_ready() -> bool {
+        tokio::time::timeout(Duration::from_millis(500), async {
+            tokio::net::TcpStream::connect((SNELL_PEER_ADDR.0, SNELL_PEER_ADDR.1))
+                .await
+                .map(|_| ())
+        })
+        .await
+        .is_ok()
+    }
+
+    /// 官方对端全链：ConnectV2 请求（零长 userkey = 官方 UserKey 缺省口径）
+    /// → 上行先行不半关（官方对端应答惰性：拨号后不即发，等待数据面首字
+    /// 节；且官方零块 = 双向收口，半关回读面不可用——与镜像对端语义差记
+    /// 录在案）→ 下行回读全量（应答于下行首读经流内惰性分发）→ 全关收束。
+    /// 逐字节还原 + FlowReport 计数与镜像对端同口径。对端缺席记名跳过
+    /// （与 ssh 对端测试同口径）；跳过不计入验收——验收断言以本席真机
+    /// 运行为准。
+    #[tokio::test]
+    async fn real_official_snell_server_roundtrip() {
+        if !snell_peer_ready().await {
+            eprintln!(
+                "跳过：官方 snell-server 对端缺席 (127.0.0.1:23410，/tmp/snellpeer 常驻实例)"
+            );
+            return;
+        }
+        let (target_addr, _echo) = echo_target().await;
+        let connector = std::sync::Arc::new(
+            SnellConnector::new(
+                SNELL_PEER_ADDR.0.into(),
+                SNELL_PEER_ADDR.1,
+                SNELL_PEER_PSK.into(),
+                String::new(),
+            )
+            .expect("构造"),
+        );
+        let (flow, mut client) = make_flow(&target_addr.ip().to_string(), target_addr.port());
+
+        // 上行：文本 + 大块（> 1421 触发多记录切分），不半关——官方对端
+        // 零块 = 双向收口（本席实证：client 零块即 SN_ENCRYPT_RESULT_ZERO_
+        // CHUNK + Send shutdown req，下行随之关闭、UP: 10014 DOWN: 0），
+        // 半关回读面在官方语义下不可用，走请求 → 回读全量 → 全关。
+        // forward 与本段同任务串行，错误有序透出
+        let payload: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        let task_payload = payload.clone();
+        let task = tokio::spawn(async move {
+            let fw = connector.forward(flow);
+            tokio::pin!(fw);
+            // join 并行：读回侧在 fw 轮转下推进（串行即死锁——读阻塞在
+            // fw 连接之前）；回读毕 client 块尾 drop → 上行 EOF → 零块 →
+            // 官方双向收口 → forward 收束
+            let (report, got) = tokio::join!(fw, async {
+                client.write_all(b"official hello").await.expect("上行写");
+                client.write_all(&task_payload).await.expect("上行大块写");
+                let mut got = vec![0u8; 14 + task_payload.len()];
+                tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut got))
+                    .await
+                    .expect("下行超时（官方对端回放面）")
+                    .expect("下行读");
+                // 全关：client 显式 drop（async 块按借用捕获，块尾不发生
+                // drop）→ 上行 EOF → 零块 → 官方双向收口 → forward 收束
+                drop(client);
+                got
+            });
+            (report, got)
+        });
+        let (report, got) = tokio::time::timeout(Duration::from_secs(8), task)
+            .await
+            .expect("任务超时（官方对端应答/中继面）")
+            .expect("join");
+
+        let mut expected = b"official hello".to_vec();
+        expected.extend_from_slice(&payload);
+        assert_eq!(got, expected, "官方对端回环逐字节还原（含多记录切分）");
+
+        let report = report.expect("forward 成功");
+        assert_eq!(report.upstream as usize, expected.len(), "上行计数");
+        assert_eq!(report.downstream as usize, expected.len(), "下行计数");
     }
 }
