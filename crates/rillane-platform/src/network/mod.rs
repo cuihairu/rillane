@@ -48,6 +48,10 @@ pub mod recovery;
 pub mod win_takeover;
 #[cfg(target_os = "windows")]
 pub mod win_net;
+// Windows 进程归属决策面（RIL-034 代码面）：表驱动 OwnerResolver +
+// 命中回验缓存 OS-free；真机表/身份源 FFI（GetExtendedTcpTable/
+// OpenProcess 族）归机批次
+pub mod win_owner;
 // TODO: 平台特定实现待完成（死稿，见 platform.rs 头部注记）
 // pub mod platform;
 
