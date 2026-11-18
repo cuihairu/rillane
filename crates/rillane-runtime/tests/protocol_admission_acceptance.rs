@@ -120,7 +120,7 @@ fn hysteria2_node() -> EgressDescriptor {
 /// 回归由目录单测钉住）；目录外类型恒 Unknown（订阅转换/诊断面点名）。
 #[test]
 fn catalog_entries_all_admitted_with_evidence() {
-    assert_eq!(protocol_catalog::CATALOG.len(), 15, "全目录十五条");
+    assert_eq!(protocol_catalog::CATALOG.len(), 16, "全目录十六条");
     for e in protocol_catalog::CATALOG {
         let evidence = e
             .evidence()
@@ -180,6 +180,21 @@ fn catalog_entries_all_admitted_with_evidence() {
         ),
         "snell 后端 = 仓库自写: {:?}",
         sn.backend
+    );
+    // ssh 具体口径（RIL-113）：russh 承载 + 无 UDP 面（direct-tcpip 仅 TCP）
+    let ssh = protocol_catalog::entry_for("ssh").expect("已编目");
+    assert!(!ssh.udp, "RIL-113 direct-tcpip 仅 TCP，UDP 面未交付");
+    assert!(
+        matches!(
+            ssh.backend,
+            protocol_catalog::Backend::Library {
+                crate_name: "russh",
+                version_req: "0.65",
+                license: "Apache-2.0"
+            }
+        ),
+        "ssh 后端 = russh 库承载: {:?}",
+        ssh.backend
     );
     for unknown in ["mieru", "ss", ""] {
         assert_eq!(

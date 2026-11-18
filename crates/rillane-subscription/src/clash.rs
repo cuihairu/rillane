@@ -95,6 +95,7 @@ pub enum ClashProxyType {
     #[serde(rename = "socks5")]
     Socks5,
     Snell,
+    Ssh,
     Hysteria,
     Hysteria2,
     Tuic,
@@ -160,6 +161,18 @@ pub struct ClashProxy {
         alias = "obfs_opts"
     )]
     pub obfs_opts: Option<Value>,
+    /// SSH: 私钥解密口令（Clash 规范键 `private-key-passphrase`，mihomo
+    /// ssh schema——加密私钥（OpenSSH KDF）解码面；明文键忽略该字段）
+    #[serde(
+        default,
+        rename = "private-key-passphrase",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ssh_private_key_passphrase: Option<String>,
+    /// SSH: 主机钥 SHA256 指纹钉扎（Clash 规范键 `host-key`，mihomo 缺省
+    /// 首用即信——本仓钉扎必填：缺字段/裸空即无效节点按有效性过滤丢弃）
+    #[serde(default, rename = "host-key", skip_serializing_if = "Option::is_none")]
+    pub host_key: Option<String>,
     /// Hysteria: 载具协议（udp/wechat/faketcp；缺省 udp——仓内面仅交付原生
     /// UDP 上的 QUIC，其余载具拨号期具名拒绝，转换面不判负节点）
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,8 +260,14 @@ pub struct ClashProxy {
         skip_serializing_if = "Option::is_none"
     )]
     pub client_fingerprint: Option<String>,
-    /// Private key (for WireGuard)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Private key（WireGuard: 键材料；SSH: OpenSSH 私钥文件路径——
+    /// mihomo ssh schema 规范键为 kebab `private-key`，别名补齐两族读面，
+    /// snake 旧写法保留）
+    #[serde(
+        default,
+        alias = "private-key",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub private_key: Option<String>,
     /// Public key (for WireGuard)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2216,6 +2235,59 @@ impl ClashConverter {
                     psk,
                 })
             }
+            ClashProxyType::Ssh => {
+                // 主机钥钉扎必填（RIL-113 评估留证 protocol-backends.md#ssh）：
+                // mihomo 缺省首用即信，本仓按 TOFU 判负口径拒绝无钉扎节点
+                // （防中间人降级伪装成「能连」）
+                let host_key = proxy
+                    .host_key
+                    .clone()
+                    .filter(|h| !h.trim_start_matches("SHA256:").trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow!("SSH 缺少 host-key 钉扎（不钉扎首用即信是具名拒绝的降级面）")
+                    })?;
+                // 认证恰一选一：password 与 private-key 双带/双缺均点名拒绝
+                // （防静默取一边）；private-key 为 OpenSSH 格式文件路径
+                // （mihomo ssh schema 口径；与 WireGuard 同 YAML 键但语义为
+                // 路径而非键材料），加密键携 private-key-passphrase 解码
+                let has_password = proxy.password.as_deref().is_some_and(|p| !p.is_empty());
+                let has_key = proxy.private_key.as_deref().is_some_and(|k| !k.is_empty());
+                if has_password && has_key {
+                    return Err(anyhow!(
+                        "SSH 认证须 password 与 private-key 恰一选一，不得双带"
+                    ));
+                }
+                if !has_password && !has_key {
+                    return Err(anyhow!(
+                        "SSH 认证须 password 与 private-key 恰一选一，二者皆缺"
+                    ));
+                }
+                let username = proxy
+                    .username
+                    .clone()
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| anyhow!("SSH 缺少 username"))?;
+                Ok(EgressConfig::Ssh {
+                    server: proxy.server.clone(),
+                    port: proxy.port,
+                    username,
+                    password: if has_password {
+                        proxy.password.clone()
+                    } else {
+                        None
+                    },
+                    private_key: if has_key {
+                        proxy.private_key.clone()
+                    } else {
+                        None
+                    },
+                    private_key_passphrase: proxy
+                        .ssh_private_key_passphrase
+                        .clone()
+                        .filter(|p| !p.is_empty()),
+                    host_key,
+                })
+            }
         }
     }
 
@@ -2594,6 +2666,20 @@ impl ClashConverter {
             ClashProxyType::Hysteria2 => proxy.password.is_some(),
             ClashProxyType::Tuic => proxy.password.is_some() && proxy.uuid.is_some(),
             ClashProxyType::Snell => proxy.psk.is_some(),
+            // SSH：钉扎必填 + username 必填 + 认证恰一选一（异或——双带/
+            // 双缺均判负，与转换面具名拒绝同口径）
+            ClashProxyType::Ssh => {
+                !proxy
+                    .host_key
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim_start_matches("SHA256:")
+                    .trim()
+                    .is_empty()
+                    && proxy.username.as_deref().is_some_and(|u| !u.is_empty())
+                    && proxy.password.as_deref().is_some_and(|p| !p.is_empty())
+                        != proxy.private_key.as_deref().is_some_and(|k| !k.is_empty())
+            }
             ClashProxyType::Wireguard => {
                 proxy.private_key.is_some()
                     && proxy.public_key.is_some()
@@ -2615,6 +2701,7 @@ impl ClashConverter {
             ClashProxyType::Https => "HTTPS",
             ClashProxyType::Socks5 => "SOCKS5",
             ClashProxyType::Snell => "Snell",
+            ClashProxyType::Ssh => "SSH",
             ClashProxyType::Hysteria => "Hysteria",
             ClashProxyType::Hysteria2 => "Hysteria2",
             ClashProxyType::Tuic => "TUIC",
@@ -3297,6 +3384,187 @@ rules: []
                 .any(|(n, r)| n == "snell-edge" && r.contains("有效性")),
             "丢弃须可见: {:?}",
             report.dropped_nodes
+        );
+    }
+
+    #[test]
+    fn test_ssh_publickey_converted_to_egress() {
+        // RIL-113：host-key 钉扎 + private-key 认证 → Ssh IR（恰一面；
+        // passphrase 省略 = 明文键）
+        let yaml_content = r#"
+proxies:
+  - name: "test-ssh"
+    type: ssh
+    server: ssh.example.com
+    port: 22
+    username: cui
+    private-key: /tmp/id_ed25519
+    host-key: SHA256:RX6tz+xibncBQGQAVCfeUBJ+NgVjabphorAM/IGnFPU
+
+proxy-groups: []
+rules: []
+        "#;
+        let converter = ClashConverter::new();
+        let clash_config = converter.parse(yaml_content).unwrap();
+        let rillane_config = converter.convert_to_rillane(&clash_config).unwrap();
+        let ssh = rillane_config
+            .egress
+            .iter()
+            .find(|e| e.name == "test-ssh")
+            .expect("ssh egress");
+        match &ssh.spec {
+            EgressConfig::Ssh {
+                server,
+                port,
+                username,
+                password,
+                private_key,
+                private_key_passphrase,
+                host_key,
+            } => {
+                assert_eq!(server, "ssh.example.com");
+                assert_eq!(*port, 22);
+                assert_eq!(username, "cui");
+                assert_eq!(password, &None);
+                assert_eq!(private_key, &Some("/tmp/id_ed25519".to_string()));
+                assert_eq!(private_key_passphrase, &None);
+                assert_eq!(
+                    host_key,
+                    "SHA256:RX6tz+xibncBQGQAVCfeUBJ+NgVjabphorAM/IGnFPU"
+                );
+            }
+            other => panic!("unexpected egress config: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ssh_boundary_configs_refused_by_name() {
+        let base = |extra: &str| {
+            format!(
+                r#"
+proxies:
+  - name: "ssh-edge"
+    type: ssh
+    server: ssh.example.com
+    port: 22
+    username: cui
+    password: "hunter2"
+    host-key: SHA256:RX6tz+xibncBQGQAVCfeUBJ+NgVjabphorAM/IGnFPU
+{}
+proxy-groups: []
+rules: []
+"#,
+                extra
+            )
+        };
+        // 认证双带：有效性判负（异或面）→ 默认过滤丢弃可见；过滤关闭时
+        // 转换面具名拒绝（防御面，类型已支持 → 配置级错误为硬错误，
+        // RIL-093/G1-6）
+        let converter = ClashConverter::new();
+        let clash_config = converter
+            .parse(&base("    private-key: /tmp/id_ed25519\n"))
+            .unwrap();
+        let mut report = Default::default();
+        let out = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut report)
+            .unwrap();
+        assert!(out.is_empty(), "双带节点不得产出");
+        assert!(
+            report
+                .dropped_nodes
+                .iter()
+                .any(|(n, r)| n == "ssh-edge" && r.contains("有效性")),
+            "丢弃须可见: {:?}",
+            report.dropped_nodes
+        );
+        let no_filter = ClashConverter::new().with_filtering(false);
+        let err = no_filter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut Default::default())
+            .expect_err("过滤关闭时双带须点名拒绝");
+        assert!(err.to_string().contains("恰一"), "实际: {err:#}");
+
+        // 缺 host-key 钉扎：先被有效性校验拦下（过滤默认开）——节点丢弃
+        // 且损失可见，不得静默产出首用即信配置
+        let clash_config = converter
+            .parse(&base("").replace(
+                "    host-key: SHA256:RX6tz+xibncBQGQAVCfeUBJ+NgVjabphorAM/IGnFPU\n",
+                "",
+            ))
+            .unwrap();
+        let mut report = Default::default();
+        let out = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut report)
+            .unwrap();
+        assert!(out.is_empty(), "缺钉扎节点不得产出");
+        assert!(
+            report
+                .dropped_nodes
+                .iter()
+                .any(|(n, r)| n == "ssh-edge" && r.contains("有效性")),
+            "丢弃须可见: {:?}",
+            report.dropped_nodes
+        );
+
+        // 认证双缺：有效性判负（异或面）→ 丢弃可见
+        let clash_config = converter
+            .parse(&base("").replace("    password: \"hunter2\"\n", ""))
+            .unwrap();
+        let mut report = Default::default();
+        let out = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut report)
+            .unwrap();
+        assert!(out.is_empty(), "双缺节点不得产出");
+        assert!(
+            report
+                .dropped_nodes
+                .iter()
+                .any(|(n, r)| n == "ssh-edge" && r.contains("有效性")),
+            "丢弃须可见: {:?}",
+            report.dropped_nodes
+        );
+    }
+
+    #[test]
+    fn test_ssh_export_roundtrip_fields() {
+        // RIL-113 导出面：IR → clash yaml 认证面按现值落键，host-key 恒带
+        // SHA256: 前缀；None 认证面不落键
+        let config = rillane_config::RillaneConfig {
+            routing: rillane_config::RoutingConfig {
+                default_node: "rt-ssh".into(),
+                ..Default::default()
+            },
+            egress: vec![rillane_config::EgressDescriptor {
+                name: "rt-ssh".into(),
+                spec: EgressConfig::Ssh {
+                    server: "ssh.example.com".into(),
+                    port: 2222,
+                    username: "cui".into(),
+                    password: None,
+                    private_key: Some("/tmp/id_ed25519".into()),
+                    private_key_passphrase: Some("pp".into()),
+                    host_key: "RX6tz+xibncBQGQAVCfeUBJ+NgVjabphorAM/IGnFPU".into(),
+                },
+            }],
+            ..serde_yaml::from_str(
+                "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+            )
+            .unwrap()
+        };
+        let (yaml, report) = crate::clash_export::ClashExporter.export(&config).unwrap();
+        assert_eq!(report.exported_proxies, vec!["rt-ssh"], "{report:?}");
+        for needle in [
+            "type: ssh",
+            "username: cui",
+            "private-key: /tmp/id_ed25519",
+            "private-key-passphrase: pp",
+            "host-key: SHA256:RX6tz+xibncBQGQAVCfeUBJ+NgVjabphorAM/IGnFPU",
+            "port: 2222",
+        ] {
+            assert!(yaml.contains(needle), "导出须含 {needle}:\n{yaml}");
+        }
+        assert!(
+            !yaml.split("rt-ssh:").last().unwrap().contains("password:"),
+            "None 认证面不落键:\n{yaml}"
         );
     }
 

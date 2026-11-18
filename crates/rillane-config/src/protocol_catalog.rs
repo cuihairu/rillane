@@ -251,6 +251,20 @@ pub const CATALOG: &[CatalogEntry] = &[
             path: "crates/rillane-protocols/src/outbound/snell.rs",
         },
     },
+    CatalogEntry {
+        kind: "ssh",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#ssh",
+        },
+        // RIL-113：russh 客户端面（direct-tcpip 仅 TCP）；协议内建通道复用
+        // 与服务端面未交付
+        udp: false,
+        backend: Backend::Library {
+            crate_name: "russh",
+            version_req: "0.65",
+            license: "Apache-2.0",
+        },
+    },
 ];
 
 /// 目录条目查询。
@@ -298,6 +312,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Hysteria2 { .. } => "hysteria2",
         EgressConfig::Tuic { .. } => "tuic",
         EgressConfig::Snell { .. } => "snell",
+        EgressConfig::Ssh { .. } => "ssh",
         EgressConfig::Wireguard { .. } => "wireguard",
     }
 }
@@ -460,6 +475,15 @@ mod tests {
                 server: "203.0.113.12".into(),
                 port: 6160,
                 psk: "pw".into(),
+            },
+            EgressConfig::Ssh {
+                server: "203.0.113.13".into(),
+                port: 22,
+                username: "cui".into(),
+                password: None,
+                private_key: Some("/tmp/id_ed25519".into()),
+                private_key_passphrase: None,
+                host_key: "SHA256:RX6tz+xibncBQGQAVCfeUBJ+NgVjabphorAM/IGnFPU".into(),
             },
         ];
         assert_eq!(

@@ -2441,6 +2441,25 @@ pub enum EgressConfig {
         port: u16,
         psk: String,
     },
+    /// SSH-2 出口（RIL-113）：russh 客户端面——主机钥钉扎必填（不钉扎
+    /// 首用即信是具名拒绝的降级面）+ 认证恰一选一 + direct-tcpip 通道流。
+    /// private_key 为 OpenSSH 格式文件路径，加密键须携口令解码（无口令
+    /// 具名拒绝）。UDP 面不交付（direct-tcpip 仅 TCP，catalog udp=false）；
+    /// 协议内建通道复用与服务端面未交付。评估与交付边界见两语
+    /// protocol-backends.md ssh 段。
+    Ssh {
+        server: String,
+        port: u16,
+        username: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        private_key: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        private_key_passphrase: Option<String>,
+        /// 主机钥 SHA256 指纹（`SHA256:` 前缀可带可不带，比对先剥前缀）
+        host_key: String,
+    },
     Wireguard {
         endpoint: String,
         private_key: String,

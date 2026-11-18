@@ -635,6 +635,34 @@ fn proxy_mapping(
             ins(&mut m, "version", 4);
             Some(m)
         }
+        EgressConfig::Ssh {
+            server,
+            port,
+            username,
+            password,
+            private_key,
+            private_key_passphrase,
+            host_key,
+        } => {
+            // SSH-2（RIL-113）：认证面按恰一选一现值落键（password 或
+            // private-key + private-key-passphrase）；host_key 恒带前缀落
+            // `SHA256:`（mihomo schema 同形）
+            ins(&mut m, "type", "ssh");
+            ins(&mut m, "server", server);
+            ins(&mut m, "port", *port as u64);
+            ins(&mut m, "username", username);
+            if let Some(p) = password {
+                ins(&mut m, "password", p);
+            }
+            if let Some(k) = private_key {
+                ins(&mut m, "private-key", k);
+            }
+            if let Some(pp) = private_key_passphrase {
+                ins(&mut m, "private-key-passphrase", pp);
+            }
+            ins(&mut m, "host-key", format!("SHA256:{host_key}"));
+            Some(m)
+        }
         EgressConfig::Wireguard {
             endpoint,
             private_key,

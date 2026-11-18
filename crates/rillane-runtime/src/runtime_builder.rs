@@ -57,10 +57,10 @@ use rillane_protocols::{
     HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MixedIngress,
     ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress, ShadowsocksShadowTlsConnector,
     ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector, Socks5Connector, Socks5Ingress,
-    Socks5UdpConnector, TlsConnectorFactory, TlsFingerprint, TransportKey, TransportPool,
-    TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts, TuicConnector,
-    TuicUdpConnector, VlessConnector, VlessIngress, VlessUdpConnector, VlessUdpParts,
-    VmessConnector, VmessIngress, VmessSecurity, VmessUdpConnector, VmessUdpParts,
+    Socks5UdpConnector, SshConnector, TlsConnectorFactory, TlsFingerprint, TransportKey,
+    TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts,
+    TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress, VlessUdpConnector,
+    VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity, VmessUdpConnector, VmessUdpParts,
     WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
@@ -3017,7 +3017,8 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::Hysteria2 { server, .. }
         | EgressConfig::ShadowsocksShadowTls { server, .. }
         | EgressConfig::Tuic { server, .. }
-        | EgressConfig::Snell { server, .. } => Some(server),
+        | EgressConfig::Snell { server, .. }
+        | EgressConfig::Ssh { server, .. } => Some(server),
         EgressConfig::Wireguard { endpoint, .. } => Some(endpoint),
     }
 }
@@ -3308,6 +3309,11 @@ fn build_udp_connectors(
                 // Snell UDP 判负（RIL-111）：TCP 段自写面仅交付；官方 UDP
                 // over TCP 数据报面未交付——该节点 UDP 需求由
                 // scan_udp_capability 按既有口径构建期报错
+                None
+            }
+            EgressConfig::Ssh { .. } => {
+                // SSH UDP 判负（RIL-113）：direct-tcpip 仅 TCP 面——该节点
+                // UDP 需求由 scan_udp_capability 按既有口径构建期报错
                 None
             }
             EgressConfig::Hysteria {
@@ -4023,6 +4029,38 @@ fn build_egress_outputs(
                 let connector: Arc<dyn EgressConnector> = Arc::new(
                     SnellConnector::new(server.clone(), *port, psk.clone(), String::new())
                         .with_context(|| format!("节点 {} 的 snell 配置无效", desc.name))?,
+                );
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Ssh {
+                server,
+                port,
+                username,
+                password,
+                private_key,
+                private_key_passphrase,
+                host_key,
+            } => {
+                // SSH-2（RIL-113）：russh 客户端面（评估留证
+                // protocol-backends.md#ssh）；主机钥钉扎必填 + 认证恰一选一
+                // 在 new 内校验（节点级失败不拖垮整份订阅）；UDP 面未交付
+                // （catalog udp=false）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    SshConnector::new(
+                        server.clone(),
+                        *port,
+                        username.clone(),
+                        password.clone(),
+                        private_key.clone(),
+                        private_key_passphrase.clone(),
+                        host_key.clone(),
+                    )
+                    .with_context(|| format!("节点 {} 的 ssh 配置无效", desc.name))?,
                 );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
