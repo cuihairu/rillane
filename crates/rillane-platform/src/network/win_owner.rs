@@ -37,8 +37,7 @@ use std::{
 };
 
 use super::owner::{
-    ConnectionKey, OwnerCapability, OwnerResolution, OwnerResolver, ProcessIdentity,
-    UnknownReason,
+    ConnectionKey, OwnerCapability, OwnerResolution, OwnerResolver, ProcessIdentity, UnknownReason,
 };
 
 /// Windows 连接表探针结果（真实现 = GetExtendedTcpTable/GetExtendedUdpTable
@@ -229,7 +228,9 @@ mod tests {
     fn key_tcp(local_port: u16) -> ConnectionKey {
         ConnectionKey::new(
             TransportProtocol::Tcp,
-            format!("127.0.0.1:{local_port}").parse::<SocketAddr>().unwrap(),
+            format!("127.0.0.1:{local_port}")
+                .parse::<SocketAddr>()
+                .unwrap(),
             "93.184.216.34:443".parse().unwrap(),
         )
     }
@@ -237,7 +238,9 @@ mod tests {
     fn key_udp(local_port: u16) -> ConnectionKey {
         ConnectionKey::new(
             TransportProtocol::Udp,
-            format!("127.0.0.1:{local_port}").parse::<SocketAddr>().unwrap(),
+            format!("127.0.0.1:{local_port}")
+                .parse::<SocketAddr>()
+                .unwrap(),
             "8.8.8.8:53".parse().unwrap(),
         )
     }
@@ -339,7 +342,10 @@ mod tests {
         // deadline 纪律先于缓存：过截止 → DeadlineExceeded，探针零调用
         let before = fs.table_calls.load(Ordering::SeqCst);
         let r3 = resolver.resolve(&k, Instant::now() - Duration::from_secs(1));
-        assert_eq!(r3, OwnerResolution::Unknown(UnknownReason::DeadlineExceeded));
+        assert_eq!(
+            r3,
+            OwnerResolution::Unknown(UnknownReason::DeadlineExceeded)
+        );
         assert_eq!(fs.table_calls.load(Ordering::SeqCst), before);
     }
 
@@ -477,7 +483,10 @@ mod tests {
         ms.store(1_000_000 + 500, Ordering::SeqCst);
         let before_id = fs.identity_calls.load(Ordering::SeqCst);
         resolver.resolve(&k, Instant::now() + Duration::from_secs(1));
-        assert!(fs.identity_calls.load(Ordering::SeqCst) > before_id, "过期后身份源重查");
+        assert!(
+            fs.identity_calls.load(Ordering::SeqCst) > before_id,
+            "过期后身份源重查"
+        );
 
         // 容量双界：满 2 后插入第 3 条驱逐最旧
         fs.bind(key_tcp(44001), 82, 1_700_000_000_000);

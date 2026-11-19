@@ -19,8 +19,8 @@
 //! 预设规则即普通规则：全局/直连选路模式下面向暂停清单（`mode_override_preview`）
 //! 与既有规则同口径，不是硬性安全边界。
 
-use crate::{MatchCondition, RouteRule, RoutingConfig};
 use crate::region_preset::REGION_RULE_PREFIX;
+use crate::{MatchCondition, RouteRule, RoutingConfig};
 
 /// 模板版本（in-tree 域名表随版本发布，来源可查）
 pub const AI_PRESET_VERSION: u32 = 1;
@@ -169,24 +169,29 @@ mod tests {
         assert_eq!(rules.len(), 4);
         assert_eq!(rules[0].name, AI_OPENAI_RULE);
         assert_eq!(rules[1].name, AI_ANTHROPIC_RULE);
-        let suffix_of = |r: &RouteRule| r
-            .matches
-            .iter()
-            .flat_map(|m| match m {
-                MatchCondition::Any { conditions } => conditions.clone(),
-                _ => vec![],
-            })
-            .any(|c| matches!(c, MatchCondition::DomainSuffix { .. }));
-        let keyword_of = |r: &RouteRule| r
-            .matches
-            .iter()
-            .flat_map(|m| match m {
-                MatchCondition::Any { conditions } => conditions.clone(),
-                _ => vec![],
-            })
-            .any(|c| matches!(c, MatchCondition::DomainKeyword { .. }));
+        let suffix_of = |r: &RouteRule| {
+            r.matches
+                .iter()
+                .flat_map(|m| match m {
+                    MatchCondition::Any { conditions } => conditions.clone(),
+                    _ => vec![],
+                })
+                .any(|c| matches!(c, MatchCondition::DomainSuffix { .. }))
+        };
+        let keyword_of = |r: &RouteRule| {
+            r.matches
+                .iter()
+                .flat_map(|m| match m {
+                    MatchCondition::Any { conditions } => conditions.clone(),
+                    _ => vec![],
+                })
+                .any(|c| matches!(c, MatchCondition::DomainKeyword { .. }))
+        };
         assert!(suffix_of(&rules[0]) && keyword_of(&rules[0]), "openai 面");
-        assert!(suffix_of(&rules[1]) && keyword_of(&rules[1]), "anthropic 面");
+        assert!(
+            suffix_of(&rules[1]) && keyword_of(&rules[1]),
+            "anthropic 面"
+        );
         assert!(!suffix_of(&rules[2]), "gemini 为 full 精确面");
         assert!(!suffix_of(&rules[3]), "other 为 full 精确面");
     }
@@ -210,7 +215,10 @@ mod tests {
         assert_eq!(again, (4, 4), "同目标重 on = 摘旧插新，规则面零差异");
         assert_eq!(r.rules.len(), snapshot_len);
         assert_eq!(r.rules.iter().filter(|x| x.name == "user-web").count(), 1);
-        assert!(r.rules.iter().all(|x| !is_ai_preset_rule(&x.name) || x.target == "ai-proxy"));
+        assert!(r
+            .rules
+            .iter()
+            .all(|x| !is_ai_preset_rule(&x.name) || x.target == "ai-proxy"));
 
         let _ = r.apply_ai_preset("other-group");
         assert!(
@@ -260,10 +268,16 @@ mod tests {
         });
         with_region.apply_ai_preset("p");
         let names: Vec<_> = with_region.rules.iter().map(|r| r.name.as_str()).collect();
-        let ai_first = names.iter().position(|n| n.starts_with(AI_RULE_PREFIX)).unwrap();
+        let ai_first = names
+            .iter()
+            .position(|n| n.starts_with(AI_RULE_PREFIX))
+            .unwrap();
         let region_first = names.iter().position(|n| n.starts_with("region-")).unwrap();
         assert_eq!(&names[..ai_first], &["user-first"][..], "用户规则仍在前");
-        assert!(ai_first < region_first, "模板须在泛化区域规则之前: {names:?}");
+        assert!(
+            ai_first < region_first,
+            "模板须在泛化区域规则之前: {names:?}"
+        );
 
         let mut no_region = RoutingConfig::default();
         no_region.rules.push(RouteRule {
@@ -275,7 +289,11 @@ mod tests {
         });
         no_region.apply_ai_preset("p");
         assert_eq!(no_region.rules.len(), 5);
-        assert_eq!(no_region.rules.last().unwrap().name, AI_OTHER_RULE, "无区域规则追加尾部");
+        assert_eq!(
+            no_region.rules.last().unwrap().name,
+            AI_OTHER_RULE,
+            "无区域规则追加尾部"
+        );
     }
 
     /// 模板往返零损失（验收锚点）：合入 → YAML 导出 → 回读，规则面逐字节等价

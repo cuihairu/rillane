@@ -555,7 +555,9 @@ impl ConfigTxService {
             ));
         }
         let mut inner = self.inner.lock().expect("配置事务锁不可 poisoned");
-        let ConfigTxInner { proposals, live, .. } = &mut *inner;
+        let ConfigTxInner {
+            proposals, live, ..
+        } = &mut *inner;
         let declared = live.config.routing.groups.iter().any(|g| g.name == target)
             || live.config.egress.iter().any(|e| e.name == target);
         if !declared {
@@ -589,7 +591,9 @@ impl ConfigTxService {
         now_ms: u64,
     ) -> Result<AiPresetOutcome, TxError> {
         let mut inner = self.inner.lock().expect("配置事务锁不可 poisoned");
-        let ConfigTxInner { proposals, live, .. } = &mut *inner;
+        let ConfigTxInner {
+            proposals, live, ..
+        } = &mut *inner;
         let mut scratch = live.config.routing.clone();
         let removed = scratch.remove_ai_preset();
         Self::ai_preset_commit_locked(

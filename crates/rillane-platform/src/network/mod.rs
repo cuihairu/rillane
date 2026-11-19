@@ -46,9 +46,9 @@ pub mod recovery;
 // Linux 验证席确定性可测；真机 IO（route print/netsh 真读、socket
 // 旁路真绑定、wireguard-nt）归 win_net（cfg windows，跨编译检查验证；
 // 运行期验收证据待真机——SSH 授权面恢复后归机批次）
-pub mod win_takeover;
 #[cfg(target_os = "windows")]
 pub mod win_net;
+pub mod win_takeover;
 // Windows 进程归属决策面（RIL-034 代码面）：表驱动 OwnerResolver +
 // 命中回验缓存 OS-free；真机表/身份源 FFI（GetExtendedTcpTable/
 // OpenProcess 族）归机批次
@@ -85,8 +85,8 @@ pub use ports::{
 };
 // 生命周期恢复 OS 中立面（journal 本体 + 事件→动作映射）
 pub use recovery::{
-    CrashJournal, JournalEntry, JournalSnapshot, NetworkRecoveryAction, RecoveryReport,
-    AUDIT_TARGET, plan_for_event,
+    plan_for_event, CrashJournal, JournalEntry, JournalSnapshot, NetworkRecoveryAction,
+    RecoveryReport, AUDIT_TARGET,
 };
 // Linux 执行入口（RIL-031 形状：ip/nft 载荷族）
 #[cfg(target_os = "linux")]

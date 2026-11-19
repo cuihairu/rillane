@@ -224,11 +224,8 @@ impl ControlPlane {
             Ok(v) => v,
             Err(r) => return r,
         };
-        match service.create_ai_preset_removal(
-            &body.owner,
-            body.ttl_ms,
-            crate::config_tx::now_ms(),
-        ) {
+        match service.create_ai_preset_removal(&body.owner, body.ttl_ms, crate::config_tx::now_ms())
+        {
             Ok(outcome) => json_v1(
                 if outcome.proposal.is_some() {
                     StatusCode::CREATED
@@ -6701,9 +6698,8 @@ mod tests {
     #[tokio::test]
     async fn routing_ai_target_switch_replaces_template() {
         let cp = cp_with_config_tx(None).await;
-        let on_body = |target: &str| {
-            format!(r#"{{"owner":"cli:ai","target":"{target}","ttl_ms":60000}}"#)
-        };
+        let on_body =
+            |target: &str| format!(r#"{{"owner":"cli:ai","target":"{target}","ttl_ms":60000}}"#);
 
         // 首次合入（target=auto）并应用
         let (s, v) = post_config(&cp, "/routing/ai", &on_body("auto")).await;

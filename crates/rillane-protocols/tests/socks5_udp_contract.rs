@@ -119,7 +119,10 @@ async fn handle_control(mut control: TcpStream, mode: PeerMode, eof_tx: watch::S
                 .expect("BND.ADDR");
         }
         PeerMode::EchoDomainBnd => {
-            control.write_all(&[0x05, 0x00, 0x00, 0x03]).await.expect("BND 头");
+            control
+                .write_all(&[0x05, 0x00, 0x00, 0x03])
+                .await
+                .expect("BND 头");
             control.write_all(&[9u8]).await.expect("BND.LEN");
             control.write_all(b"localhost").await.expect("BND.ADDR");
         }

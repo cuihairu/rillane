@@ -134,13 +134,20 @@ pub fn dns_block_to_resolver_config(
 /// ——①域名形式 DoT 上游存在而引导组未声明：连接期走系统解析器（TUN
 /// include 下可能回环/泄漏）；②DoH 上游（URL host 恒走系统栈，引导面
 /// 本版本不覆盖 reqwest 传输）。每次构建各至多一条（进程级去重）。
-fn warn_bootstrap_gaps(domestic: &[DnsUpstream], trusted: &[DnsUpstream], bootstrap: &[DnsUpstream]) {
+fn warn_bootstrap_gaps(
+    domestic: &[DnsUpstream],
+    trusted: &[DnsUpstream],
+    bootstrap: &[DnsUpstream],
+) {
     static DOT_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     static DOH_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    let has_domain_dot = domestic.iter().chain(trusted).any(|u| {
-        matches!(u, DnsUpstream::Dot { host, .. } if host.parse::<std::net::IpAddr>().is_err())
-    });
-    let has_doh = domestic.iter().chain(trusted).any(|u| matches!(u, DnsUpstream::Doh { .. }));
+    let has_domain_dot = domestic.iter().chain(trusted).any(
+        |u| matches!(u, DnsUpstream::Dot { host, .. } if host.parse::<std::net::IpAddr>().is_err()),
+    );
+    let has_doh = domestic
+        .iter()
+        .chain(trusted)
+        .any(|u| matches!(u, DnsUpstream::Doh { .. }));
     if has_domain_dot && bootstrap.is_empty() && DOT_WARNED.set(()).is_ok() {
         warn!(
             target: "rillane::network",
@@ -658,7 +665,10 @@ mod tests {
         let out = dns_block_to_resolver_config(&cfg, &[]).expect("转换应成功");
         assert_eq!(out.bootstrap.len(), 2);
         assert!(
-            matches!(out.bootstrap[0], rillane_platform::network::dns_engine::DnsUpstream::Udp(_)),
+            matches!(
+                out.bootstrap[0],
+                rillane_platform::network::dns_engine::DnsUpstream::Udp(_)
+            ),
             "UDP 引导应落 Udp 形态"
         );
         assert!(
@@ -681,4 +691,3 @@ mod tests {
         assert_eq!(snap.rules, 0);
     }
 }
-

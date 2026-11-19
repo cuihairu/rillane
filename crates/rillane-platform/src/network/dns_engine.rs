@@ -986,7 +986,6 @@ impl DnsResolver {
         }
     }
 
-
     /// 清空缓存
     pub fn clear_cache(&self) {
         if let Some(cache) = &self.cache {
@@ -1204,10 +1203,7 @@ async fn query_upstream(
         DnsUpstream::Dot { host, port, sni } => {
             let id = ids.fetch_add(1, Ordering::Relaxed);
             let packet = encode_query(id, domain, qtype).map_err(|e| format!("编码失败:{e}"))?;
-            let io = DotIo {
-                tls,
-                egress_mark,
-            };
+            let io = DotIo { tls, egress_mark };
             dot_exchange(host, *port, sni, &packet, id, timeout, &io, bootstrap).await
         }
         DnsUpstream::Doh { url } => {
@@ -1358,14 +1354,17 @@ async fn bootstrap_lookup(
                         encode_query(id, host, qtype).map_err(|e| format!("编码失败:{e}"))?;
                     let peer = format!("{h}:{port}");
                     let tcp = connect_peer_marked(&peer, io.egress_mark).await?;
-                    let recv =
-                        tokio::time::timeout(timeout, dot_io_exchange(io, sni, tcp, &packet, &peer))
-                            .await
-                            .map_err(|_| format!("{peer} 超时（{timeout:?}）"))??;
+                    let recv = tokio::time::timeout(
+                        timeout,
+                        dot_io_exchange(io, sni, tcp, &packet, &peer),
+                    )
+                    .await
+                    .map_err(|_| format!("{peer} 超时（{timeout:?}）"))??;
                     decode_checked(recv, id, &peer)
                 }
                 DnsUpstream::Doh { url } => {
-                    let packet = encode_query(0, host, qtype).map_err(|e| format!("编码失败:{e}"))?;
+                    let packet =
+                        encode_query(0, host, qtype).map_err(|e| format!("编码失败:{e}"))?;
                     doh_exchange(url, &packet, timeout, &io.tls.doh).await
                 }
             };
@@ -1739,7 +1738,10 @@ async fn handle_dns_query(
             } else if let (Some(table), DnsRecordType::A) = (fake_ip.as_ref(), q.qtype) {
                 // 例外命中（RIL-142）：跳过池分配，照常真实解析（虚拟
                 // 应答不覆盖显式例外面）
-                if fake_ip_exceptions.as_ref().is_some_and(|x| x.matches(&q.domain)) {
+                if fake_ip_exceptions
+                    .as_ref()
+                    .is_some_and(|x| x.matches(&q.domain))
+                {
                     debug!("fake-ip 例外命中：{} 回真实解析", q.domain);
                     resolve_and_reply(sock, peer, &q, &resolver).await;
                     return;
@@ -1774,7 +1776,10 @@ async fn handle_dns_query(
                 // 缺席（range6 无）→ NoV6Pool 显式回落真实解析（存量零
                 // 差异，不伪造地址）；v6 池满全钉住 → SERVFAIL（同 v4
                 // 口径，绝不转手在用地址）
-                if fake_ip_exceptions.as_ref().is_some_and(|x| x.matches(&q.domain)) {
+                if fake_ip_exceptions
+                    .as_ref()
+                    .is_some_and(|x| x.matches(&q.domain))
+                {
                     debug!("fake-ip 例外命中：{} 回真实解析", q.domain);
                     resolve_and_reply(sock, peer, &q, &resolver).await;
                     return;
@@ -1820,7 +1825,6 @@ async fn handle_dns_query(
         debug!("DNS 回包失败：{e}");
     }
 }
-
 
 /// 真实解析 + 回写（既有 else 分支抽出共用：例外命中 / v6 池缺席
 /// 回落 / 非 fake-ip 面三类路径同口径——Ok 应答 / NXDOMAIN / SERVFAIL）。
@@ -2993,9 +2997,7 @@ mod tests {
                     domain: d.to_string(),
                     rtype: DnsRecordType::Aaaa,
                     ttl: 60,
-                    data: DnsAnswerData::Aaaa(
-                        "2001:db8::42".parse().unwrap(),
-                    ),
+                    data: DnsAnswerData::Aaaa("2001:db8::42".parse().unwrap()),
                 }],
             )
         })
@@ -3006,7 +3008,8 @@ mod tests {
         };
         let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
         // v4 池在场、无 v6 池（存量 fake-ip 面原样）
-        let table = Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/15").unwrap());
+        let table =
+            Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/15").unwrap());
         let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
@@ -3035,17 +3038,17 @@ mod tests {
         let DnsAnswerData::Aaaa(ip6) = resp.answers[0].data else {
             panic!("应为 AAAA 应答");
         };
-        assert_eq!(ip6, "2001:db8::42".parse::<Ipv6Addr>().unwrap(), "上游真实应答原样回写");
+        assert_eq!(
+            ip6,
+            "2001:db8::42".parse::<Ipv6Addr>().unwrap(),
+            "上游真实应答原样回写"
+        );
         assert_eq!(
             hits.load(Ordering::SeqCst),
             1,
             "v6 池缺席应触上游（真实解析）"
         );
-        assert_eq!(
-            table.len(),
-            0,
-            "AAAA 查询不写 v4 池"
-        );
+        assert_eq!(table.len(), 0, "AAAA 查询不写 v4 池");
 
         drop(tx);
         let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
@@ -3061,7 +3064,8 @@ mod tests {
             ..base_cfg()
         };
         let resolver = Arc::new(DnsResolver::new(cfg).unwrap());
-        let table = Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/30").unwrap());
+        let table =
+            Arc::new(rillane_core::fake_ip::FakeIpTable::from_cidr("198.18.0.0/30").unwrap());
         let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
@@ -3110,11 +3114,7 @@ mod tests {
 
         // 池分配面只记非例外域名（例外查询零占用）
         assert_eq!(table.len(), 1, "例外域名不入池");
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            1,
-            "仅例外查询触上游"
-        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "仅例外查询触上游");
 
         drop(tx);
         let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
@@ -3441,7 +3441,6 @@ mod tests {
         let a = r.resolve("dot.test", DnsRecordType::A).await.unwrap();
         assert_eq!(a[0].data, DnsAnswerData::A(Ipv4Addr::new(10, 1, 2, 3)));
     }
-
 
     /// RIL-144 引导排他面（验收「防止解析依赖循环及 TUN 重捕获」+「失败
     /// 不无提示回系统 DNS」）：①DoT 域名 host 经引导组落地为 127.0.0.1

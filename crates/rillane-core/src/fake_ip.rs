@@ -272,7 +272,9 @@ impl FakeIpTable {
         let capacity = 1u64 << self.host_bits;
         let offset = (self.cursor.fetch_add(1, Ordering::Relaxed) % capacity) as u32;
         let ip = Ipv4Addr::from(self.base.wrapping_add(offset));
-        state.forward.insert((key.clone(), Family::V4 as u8), IpAddr::V4(ip));
+        state
+            .forward
+            .insert((key.clone(), Family::V4 as u8), IpAddr::V4(ip));
         state.reverse.insert(
             IpAddr::V4(ip),
             Binding {
@@ -362,7 +364,8 @@ impl FakeIpTable {
                             pinned: false,
                         },
                     );
-                    self.family_cursor(family).store(start + step + 1, Ordering::Relaxed);
+                    self.family_cursor(family)
+                        .store(start + step + 1, Ordering::Relaxed);
                     return Ok(addr);
                 }
                 None => {
@@ -376,7 +379,8 @@ impl FakeIpTable {
                             pinned: false,
                         },
                     );
-                    self.family_cursor(family).store(start + step + 1, Ordering::Relaxed);
+                    self.family_cursor(family)
+                        .store(start + step + 1, Ordering::Relaxed);
                     return Ok(addr);
                 }
             }
@@ -484,11 +488,7 @@ impl FakeIpExceptions {
         Self {
             suffixes: entries
                 .iter()
-                .map(|e| {
-                    e.trim()
-                        .trim_matches('.')
-                        .to_ascii_lowercase()
-                })
+                .map(|e| e.trim().trim_matches('.').to_ascii_lowercase())
                 .filter(|e| !e.is_empty())
                 .collect(),
         }
@@ -746,7 +746,9 @@ mod tests {
             .expect("v6 池");
 
         // v6 分配稳定 + 全在 v6 池段
-        let a6 = t.alloc_v6_with_generation("dual.example", "g").expect("v6 分配");
+        let a6 = t
+            .alloc_v6_with_generation("dual.example", "g")
+            .expect("v6 分配");
         let a6_again = t
             .alloc_v6_with_generation("DUAL.EXAMPLE", "g")
             .expect("同域名（大小写不敏感）");
@@ -763,13 +765,11 @@ mod tests {
         );
 
         // v4 分配照常且与 v6 互不相交（族隔离）
-        let a4 = t.alloc_with_generation("dual.example", "g").expect("v4 分配");
+        let a4 = t
+            .alloc_with_generation("dual.example", "g")
+            .expect("v4 分配");
         assert!(t.in_range(&a4), "v4 落 v4 池段");
-        assert_ne!(
-            IpAddr::from(a4),
-            IpAddr::from(a6),
-            "两族地址空间不相交"
-        );
+        assert_ne!(IpAddr::from(a4), IpAddr::from(a6), "两族地址空间不相交");
         assert_eq!(
             t.reverse_with_context_ip(&IpAddr::V4(a4)).map(|c| c.domain),
             Some("dual.example".to_string()),
@@ -787,11 +787,7 @@ mod tests {
             Some("dual.example"),
             "带括号 v6 字面量回填"
         );
-        assert_eq!(
-            reverse_host(&t, "fe80::1"),
-            None,
-            "非池 v6 原样放行"
-        );
+        assert_eq!(reverse_host(&t, "fe80::1"), None, "非池 v6 原样放行");
     }
 
     /// RIL-142：v6 池缺席时 v6 分配显式 `NoV6Pool`（稳定码机器口径；
@@ -842,7 +838,10 @@ mod tests {
         assert!(!x.matches("notexample.com"), "非全标签不命中");
         assert!(!x.matches("other.dev"), "缺席不命中");
         assert_eq!(x.len(), 2, "空条目剔除");
-        assert!(!FakeIpExceptions::new(&[]).matches("anything.example"), "空表恒不命中");
+        assert!(
+            !FakeIpExceptions::new(&[]).matches("anything.example"),
+            "空表恒不命中"
+        );
     }
 
     /// RIL-142：v6 池钉住/回绕/耗尽语义与 v4 逐字一致（族独立判定）。

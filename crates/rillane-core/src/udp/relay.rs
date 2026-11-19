@@ -162,12 +162,13 @@ impl LocalRelay {
 
     /// 以给定地址表拨号（resolve_all 的注入点：测试固定地址顺序复现
     /// RFC 6724 首址布局，不依赖 hosts 文件排布）
-    pub(crate) async fn connect_addrs(
-        target: &FlowTarget,
-        addrs: Vec<SocketAddr>,
-    ) -> Result<Self> {
+    pub(crate) async fn connect_addrs(target: &FlowTarget, addrs: Vec<SocketAddr>) -> Result<Self> {
         if addrs.is_empty() {
-            anyhow::bail!("目标解析失败: {}:{}（解析结果为空）", target.host, target.port);
+            anyhow::bail!(
+                "目标解析失败: {}:{}（解析结果为空）",
+                target.host,
+                target.port
+            );
         }
         let mut attempts: Vec<(SocketAddr, String)> = Vec::new();
         for (i, addr) in addrs.iter().enumerate() {
@@ -238,18 +239,15 @@ impl LocalRelay {
                     st.active = i;
                     return Ok((socket, true));
                 }
-                Some(_) => {}                       // 他人已推进：弃本 socket 沿用当前
+                Some(_) => {} // 他人已推进：弃本 socket 沿用当前
                 None if st.active == act => {
                     // 全部试尽：sticky 显式错误（穷尽后仍带全量尝试清单）
-                    let text = exhaustion_text(
-                        &self.target,
-                        &st.attempts,
-                        "出口 UDP 面按序回退穷尽",
-                    );
+                    let text =
+                        exhaustion_text(&self.target, &st.attempts, "出口 UDP 面按序回退穷尽");
                     st.exhausted = Some(text.clone());
                     anyhow::bail!("{text}");
                 }
-                None => {}                          // 他人已推进：回循环顶部复查
+                None => {} // 他人已推进：回循环顶部复查
             }
         }
     }
@@ -660,11 +658,7 @@ mod tests {
             .expect("回退后往返不得超时（不静默黑洞）")
             .expect("下行应经回退面送达");
         assert_eq!(&buf[..n], b"blackhole-probe", "补发数据报应往返");
-        assert_eq!(
-            relay.active_addr(),
-            echo,
-            "活跃面应已切换到可达地址"
-        );
+        assert_eq!(relay.active_addr(), echo, "活跃面应已切换到可达地址");
     }
 
     /// RIL-154 穷尽面：所有解析地址运行期均 refused → 显式错误携带完整

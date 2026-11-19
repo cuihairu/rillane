@@ -173,10 +173,7 @@ impl StreamingProbeService {
     /// 空服务（时钟取真系统钟；测试用 [`with_now`](Self::with_now) 注入）
     pub fn new(services: Vec<StreamingService>, max_active: usize, ttl: Duration) -> Self {
         Self {
-            services: services
-                .into_iter()
-                .map(|s| (s.name.clone(), s))
-                .collect(),
+            services: services.into_iter().map(|s| (s.name.clone(), s)).collect(),
             results: BTreeMap::new(),
             running: BTreeMap::new(),
             max_active,
@@ -500,19 +497,18 @@ mod tests {
                 4096,
             )
             .unwrap();
-        assert_eq!(
-            v,
-            ProbeVerdict::Available {
-                region: None
-            }
-        );
+        assert_eq!(v, ProbeVerdict::Available { region: None });
         assert_eq!(
             s.status("svc-a", "exit-1"),
             StreamingStatus::Fresh(ProbeVerdict::Available { region: None })
         );
         assert_eq!(s.probe_bytes("svc-a", "exit-1"), Some((512, 4096)));
         // 未知作业回报显式拒绝
-        assert_eq!(s.complete(job, &ProbeEvidence::default(), 0, 0).unwrap_err(), CODE_STREAMING_JOB_UNKNOWN);
+        assert_eq!(
+            s.complete(job, &ProbeEvidence::default(), 0, 0)
+                .unwrap_err(),
+            CODE_STREAMING_JOB_UNKNOWN
+        );
     }
 
     #[test]
@@ -531,7 +527,10 @@ mod tests {
             800,
         )
         .unwrap();
-        assert!(matches!(s.status("svc-b", "exit-2"), StreamingStatus::Fresh(_)));
+        assert!(matches!(
+            s.status("svc-b", "exit-2"),
+            StreamingStatus::Fresh(_)
+        ));
 
         // TTL 过界 → 过期（不是失败——证据老化单独成态）：换新注入钟
         // 并推到 TTL 之外
@@ -651,7 +650,12 @@ mod tests {
             SwitchDecision::Stay
         );
         assert_eq!(
-            policy.decide(&mut st, &ProbeVerdict::Restricted { reason: "geo".into() }),
+            policy.decide(
+                &mut st,
+                &ProbeVerdict::Restricted {
+                    reason: "geo".into()
+                }
+            ),
             SwitchDecision::SwitchTo(String::new()),
             "连续失败达阈值 → 建议切走（目标由路由面定）"
         );

@@ -8,8 +8,8 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub mod apply;
 pub mod ai_preset;
+pub mod apply;
 pub mod approval;
 pub mod contract;
 pub mod generations;
@@ -651,7 +651,9 @@ impl FakeIpConfig {
         let pool_base = u32::from(ip);
         let pool_mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(u32::MAX);
         for (name, net, net_prefix) in RESERVED {
-            let net_mask = u32::MAX.checked_shl(32 - u32::from(*net_prefix)).unwrap_or(u32::MAX);
+            let net_mask = u32::MAX
+                .checked_shl(32 - u32::from(*net_prefix))
+                .unwrap_or(u32::MAX);
             // 重叠判定：两段各取「两侧网络的基准地址」比较——池基址落网内
             // 或网基址落池内即重叠
             let pool_in_net = pool_base & net_mask == *net & net_mask;
@@ -670,12 +672,13 @@ impl FakeIpConfig {
     /// 文档段 2001:db8::/32。ULA（fc00::/7）允许（canonical fake-v6 空间，
     /// 建议选非家庭内网子网——文档明示）。
     fn validate_range6(range6: &str) -> Result<()> {
-        let (ip_part, prefix_part) = range6.split_once('/').ok_or_else(|| {
-            anyhow::anyhow!("network.dns.fake_ip.range6 缺前缀长度:{range6:?}")
-        })?;
-        let ip: std::net::Ipv6Addr = ip_part.trim().parse().map_err(|_| {
-            anyhow::anyhow!("network.dns.fake_ip.range6 地址须为 IPv6:{ip_part:?}")
-        })?;
+        let (ip_part, prefix_part) = range6
+            .split_once('/')
+            .ok_or_else(|| anyhow::anyhow!("network.dns.fake_ip.range6 缺前缀长度:{range6:?}"))?;
+        let ip: std::net::Ipv6Addr = ip_part
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("network.dns.fake_ip.range6 地址须为 IPv6:{ip_part:?}"))?;
         let prefix: u32 = prefix_part.trim().parse().map_err(|_| {
             anyhow::anyhow!("network.dns.fake_ip.range6 前缀须为数字:{prefix_part:?}")
         })?;
@@ -904,7 +907,10 @@ impl DnsBlockConfig {
         // / DoH 具名拒绝（防环是本面的存在理由，形态放宽即自我否定）。
         for b in &self.bootstrap {
             let t = b.trim();
-            if let Some(rest) = t.strip_prefix("tls://").or_else(|| t.strip_prefix("dot://")) {
+            if let Some(rest) = t
+                .strip_prefix("tls://")
+                .or_else(|| t.strip_prefix("dot://"))
+            {
                 let (host, has_port, port) = match rest.rsplit_once(':') {
                     Some((h, ps)) => match ps.parse::<u16>() {
                         Ok(p) => (h, true, p),
@@ -3335,13 +3341,8 @@ selections:
             "fd00::1/8",
             "fd00::",
         ] {
-            let err = base(range6)
-                .validate()
-                .expect_err(range6);
-            assert!(
-                err.to_string().contains("range6"),
-                "{range6}: {err}"
-            );
+            let err = base(range6).validate().expect_err(range6);
+            assert!(err.to_string().contains("range6"), "{range6}: {err}");
         }
     }
 

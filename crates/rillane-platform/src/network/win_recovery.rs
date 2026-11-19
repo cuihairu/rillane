@@ -35,7 +35,9 @@ use tracing::warn;
 use super::recovery::{
     plan_for_event, CrashJournal, JournalEntry, NetworkRecoveryAction, RecoveryReport, AUDIT_TARGET,
 };
-use super::win_takeover::{is_eexist, is_missing, parse_win_step_payload, WinAppliedStep, WinStepExecutor};
+use super::win_takeover::{
+    is_eexist, is_missing, parse_win_step_payload, WinAppliedStep, WinStepExecutor,
+};
 use crate::network::NetworkEvent;
 
 /// 重启修复（Windows 载荷族）：逆序撤销全部待办（最新先撤），收尾
@@ -260,8 +262,12 @@ mod tests {
     #[test]
     fn win_recover_undoes_in_reverse_and_reports_honestly() {
         let (_dir, journal) = temp_journal("undo");
-        journal.append_route_step(&step_route().argv().join(" ")).unwrap();
-        journal.append_route_step(&step_dns().argv().join(" ")).unwrap();
+        journal
+            .append_route_step(&step_route().argv().join(" "))
+            .unwrap();
+        journal
+            .append_route_step(&step_dns().argv().join(" "))
+            .unwrap();
         let (exec, log) = recording();
         let report = recover_windows(&journal, &exec).unwrap();
         // 逆序：最新（DNS）先撤
@@ -283,11 +289,15 @@ mod tests {
     #[test]
     fn win_recover_missing_target_is_already_gone_and_failure_retained() {
         let (_dir, journal) = temp_journal("missing");
-        journal.append_route_step(&step_route().argv().join(" ")).unwrap();
+        journal
+            .append_route_step(&step_route().argv().join(" "))
+            .unwrap();
         // route delete 未命中 → Windows 真机文本 → 幂等已撤销
         let exec: WinStepExecutor = Arc::new(|argv: &[String]| {
             if argv[0] == "route" && argv[1] == "delete" {
-                Err(err("The route deletion failed: The element could not be found."))
+                Err(err(
+                    "The route deletion failed: The element could not be found.",
+                ))
             } else {
                 Ok(())
             }
@@ -300,7 +310,8 @@ mod tests {
 
         // 真失败：留账重试
         let (_d2, j2) = temp_journal("retain");
-        j2.append_route_step(&step_route().argv().join(" ")).unwrap();
+        j2.append_route_step(&step_route().argv().join(" "))
+            .unwrap();
         let exec2: WinStepExecutor = Arc::new(|_: &[String]| Err(err("拒绝执行")));
         let r2 = recover_windows(&j2, &exec2).unwrap();
         assert_eq!(r2.failed.len(), 1);
@@ -344,8 +355,7 @@ mod tests {
         // Windows 形状成功 → 记账
         journalled(&step_route().argv()).unwrap();
         // 形状族外（Linux ip 载荷）执行成功但不记账（无 undo 构造路径）
-        journalled(&["ip".to_string(), "route".to_string(), "replace".to_string()])
-            .unwrap();
+        journalled(&["ip".to_string(), "route".to_string(), "replace".to_string()]).unwrap();
         // Windows 形状执行失败 → 不记账（失败不产生系统变更）
         let failing: WinStepExecutor = Arc::new(|_: &[String]| Err(err("拒绝执行")));
         let journalled2 = win_journaling_executor(
@@ -368,8 +378,12 @@ mod tests {
     #[test]
     fn win_network_event_reassert_replays_routes_skips_dns_hijack() {
         let (_dir, journal) = temp_journal("reassert");
-        journal.append_route_step(&step_route().argv().join(" ")).unwrap();
-        journal.append_route_step(&step_dns().argv().join(" ")).unwrap();
+        journal
+            .append_route_step(&step_route().argv().join(" "))
+            .unwrap();
+        journal
+            .append_route_step(&step_dns().argv().join(" "))
+            .unwrap();
 
         // 出口丢失/DNS 变化 → 不动系统态（执行器不该被调到）
         let noop_exec: WinStepExecutor =

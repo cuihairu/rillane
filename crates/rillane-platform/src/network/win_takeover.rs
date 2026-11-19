@@ -156,11 +156,9 @@ pub fn parse_win_step_payload(payload: &str) -> Result<WinAppliedStep> {
                 interface_index: index.parse().map_err(|_| bad())?,
             }
         }
-        ["netsh", "interface", "ip", "set", "dnsservers", name, "source=static", address, "register=primary", "validate=no"] => {
-            let interface = name
-                .strip_prefix("name=")
-                .ok_or_else(bad)?
-                .to_string();
+        ["netsh", "interface", "ip", "set", "dnsservers", name, "source=static", address, "register=primary", "validate=no"] =>
+        {
+            let interface = name.strip_prefix("name=").ok_or_else(bad)?.to_string();
             let address: IpAddr = address
                 .strip_prefix("address=")
                 .ok_or_else(bad)?
@@ -330,9 +328,7 @@ pub struct WinNetSnapshot {
 impl WinNetSnapshot {
     /// 主出口身份（首条默认路由的接口地址；None = 无默认路由）
     pub fn primary_iface_id(&self) -> Option<String> {
-        self.default_routes
-            .first()
-            .map(|r| r.interface.to_string())
+        self.default_routes.first().map(|r| r.interface.to_string())
     }
 
     /// 旁路原语计划面（RIL-032 实证：出站 socket 显式 bind 物理口 IP
@@ -485,7 +481,9 @@ mod tests {
     /// 记录 argv 序的假执行器（可编程第 n 次失败）
     type RecordedCalls = Arc<std::sync::Mutex<Vec<Vec<String>>>>;
 
-    fn recording_exec(fail_at: Option<usize>) -> (WinStepExecutor, RecordedCalls, Arc<AtomicUsize>) {
+    fn recording_exec(
+        fail_at: Option<usize>,
+    ) -> (WinStepExecutor, RecordedCalls, Arc<AtomicUsize>) {
         let calls: Arc<std::sync::Mutex<Vec<Vec<String>>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let calls2 = calls.clone();
@@ -510,13 +508,29 @@ mod tests {
         assert_eq!(
             r.argv(),
             vec![
-                "route", "add", "198.18.0.0", "mask", "255.254.0.0", "192.168.5.1", "metric",
-                "5", "if", "12"
+                "route",
+                "add",
+                "198.18.0.0",
+                "mask",
+                "255.254.0.0",
+                "192.168.5.1",
+                "metric",
+                "5",
+                "if",
+                "12"
             ]
         );
         assert_eq!(
             r.undo_argv(),
-            vec!["route", "delete", "198.18.0.0", "mask", "255.254.0.0", "if", "12"]
+            vec![
+                "route",
+                "delete",
+                "198.18.0.0",
+                "mask",
+                "255.254.0.0",
+                "if",
+                "12"
+            ]
         );
         assert!(r.eexist_ok());
 
@@ -524,15 +538,29 @@ mod tests {
         assert_eq!(
             d.argv(),
             vec![
-                "netsh", "interface", "ip", "set", "dnsservers", "name=Wi-Fi",
-                "source=static", "address=127.0.0.1", "register=primary", "validate=no"
+                "netsh",
+                "interface",
+                "ip",
+                "set",
+                "dnsservers",
+                "name=Wi-Fi",
+                "source=static",
+                "address=127.0.0.1",
+                "register=primary",
+                "validate=no"
             ]
         );
         assert_eq!(
             d.undo_argv(),
             vec![
-                "netsh", "interface", "ip", "set", "dnsservers", "name=Wi-Fi",
-                "source=dhcp", "validate=no"
+                "netsh",
+                "interface",
+                "ip",
+                "set",
+                "dnsservers",
+                "name=Wi-Fi",
+                "source=dhcp",
+                "validate=no"
             ]
         );
         assert!(!d.eexist_ok());
@@ -718,7 +746,10 @@ Default gateway:      192.168.5.1
         let routes = parse_route_print_ipv4(fixture);
         assert_eq!(routes.len(), 2, "仅 0.0.0.0/0 行；输出序=优先序不过重排");
         assert_eq!(routes[0].gateway, "192.168.5.1".parse::<IpAddr>().unwrap());
-        assert_eq!(routes[0].interface, "192.168.5.117".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            routes[0].interface,
+            "192.168.5.117".parse::<IpAddr>().unwrap()
+        );
         assert_eq!(routes[0].metric, 25);
         assert_eq!(routes[0].if_index, None);
         assert_eq!(routes[1].gateway, "192.168.6.1".parse::<IpAddr>().unwrap());
@@ -738,9 +769,16 @@ If        Metric Network Destination      Gateway
         assert_eq!(routes.len(), 2);
         assert_eq!(routes[0].if_index, 12);
         assert_eq!(routes[0].metric, 25);
-        assert_eq!(routes[0].gateway, "fe80::1".parse::<IpAddr>().unwrap(), "%zone 剥离");
+        assert_eq!(
+            routes[0].gateway,
+            "fe80::1".parse::<IpAddr>().unwrap(),
+            "%zone 剥离"
+        );
         assert_eq!(routes[1].if_index, 9);
-        assert_eq!(routes[1].gateway, "2001:db8:ffff::1".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            routes[1].gateway,
+            "2001:db8:ffff::1".parse::<IpAddr>().unwrap()
+        );
     }
 
     #[test]
@@ -765,15 +803,14 @@ Configuration for interface \"以太网\"
             ],
             "静态与 DHCP 两形状同收；none/表头/标签行自然滤除；序保真"
         );
-        assert!(parse_netsh_dnsservers("Configuration for interface \"X\"\n    (none)\n").is_empty());
+        assert!(
+            parse_netsh_dnsservers("Configuration for interface \"X\"\n    (none)\n").is_empty()
+        );
     }
 
     // ---- 事件差分（与 Linux NetSnapshot 同配对纪律）----
 
-    fn snap(
-        iface: Option<&str>,
-        dns: &[&str],
-    ) -> WinNetSnapshot {
+    fn snap(iface: Option<&str>, dns: &[&str]) -> WinNetSnapshot {
         let default_routes = iface
             .map(|ip| {
                 vec![WinDefaultRoute {
@@ -829,7 +866,10 @@ Configuration for interface \"以太网\"
 
         // 解析器序变化：独立 SystemDnsChanged（路由不变则仅此一件）
         let dns_changed = snap(Some("192.168.5.117"), &["10.0.0.53"]);
-        assert_eq!(dns_changed.diff_events(&a), vec![NetworkEvent::SystemDnsChanged]);
+        assert_eq!(
+            dns_changed.diff_events(&a),
+            vec![NetworkEvent::SystemDnsChanged]
+        );
 
         // 路由 + 解析器同变：路由事件在前、DNS 殿后
         let both = snap(Some("192.168.6.14"), &["10.0.0.53"]);
