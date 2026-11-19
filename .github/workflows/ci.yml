@@ -53,6 +53,16 @@ jobs:
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+    - name: Purge stale zstd-sys extraction
+      # 2026-11-17 起连红的根因之一：runner 本地 registry 里 zstd-sys 的解包
+      # 产物被截断（zstd.h 注释中途 EOF → "unterminated comment"），cargo 的
+      # checksum 只护 .crate 下载、信任已解包目录，损坏跨 run 存活。删 src 与
+      # .crate 缓存强制重新下载解包（重新过 checksum）；产物完好时为空操作，
+      # 下一轮 cache save 会把健康状态写回。
+      run: |
+        rm -rf ~/.cargo/registry/src/*/zstd-sys-* 2>/dev/null || true
+        rm -rf ~/.cargo/registry/cache/*/zstd-sys-* 2>/dev/null || true
+
     - name: Check formatting
       run: cargo fmt --all -- --check
 
@@ -129,6 +139,12 @@ jobs:
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+    - name: Purge stale zstd-sys extraction
+      # 同 test job 同步注：截断的解包产物在 coverage 面同样炸 zstd-sys 构建。
+      run: |
+        rm -rf ~/.cargo/registry/src/*/zstd-sys-* 2>/dev/null || true
+        rm -rf ~/.cargo/registry/cache/*/zstd-sys-* 2>/dev/null || true
+
     - name: Generate coverage report
       # 行覆盖率硬门禁：低于 80% 直接失败本 job（本地同命令必须先绿再推）。
       # 只做上传不做门禁等于没有门禁——报告再好看也不会拦住倒退。
@@ -163,7 +179,16 @@ jobs:
       # 定向 ignore（逐条核实非误报，新告警出现时按条目处理）：
       # - RUSTSEC-2024-0370 postgres：tokio-postgres 生态无 1.x 迁移、已停维护；仅订阅同步面使用，待换 sqlx
       # - RUSTSEC-2026-0486 rustix xattr unsound：零长 buffer 误标初始化；随 rustix 1.x 升级跟进
-      run: cargo audit --ignore RUSTSEC-2024-0370 --ignore RUSTSEC-2026-0486
+      # - RUSTSEC-2023-0071 rsa 0.9 Marvin 时序侧信道：修复面 >=0.10 semver
+      #   不兼容，上游 ssh-key-fork-arti 0.6.7（arti 0.48 key 面）钉 rsa 0.9；
+      #   本仓纯传递依赖（无直接调用），随 arti 上游跟进
+      # - RUSTSEC-2026-0387 crypto-bigint 0.5.5 恒时操作时序可变性：修复面
+      #   >=0.7.6 同被 rsa 0.9 → crypto-bigint 0.5 链钉死（同一上游约束），
+      #   锁内另有的 0.7.11 不受此告警影响；随上游跟进
+      # - RUSTSEC-2026-0459 libsqlite3-sys 0.38.2（SQLite CVE-2026-119375）：
+      #   修复面 >=0.39 与 rusqlite 0.40（tor-dirmgr 0.48 钉）semver 不兼容；
+      #   仅 tor 目录缓存 DB 面，随 arti 上游跟进
+      run: cargo audit --ignore RUSTSEC-2024-0370 --ignore RUSTSEC-2026-0486 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2026-0459
 
   msrv:
     name: Check MSRV
