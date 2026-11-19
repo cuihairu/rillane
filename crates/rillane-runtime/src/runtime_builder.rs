@@ -59,9 +59,10 @@ use rillane_protocols::{
     ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector,
     Socks5Connector, Socks5Ingress, Socks5UdpConnector, SshConnector, TlsConnectorFactory,
     TlsFingerprint, TorConnector, TransportKey, TransportPool, TrojanConnector, TrojanIngress,
-    TrojanUdpConnector, TrojanUdpParts, TuicConnector, TuicUdpConnector, VlessConnector,
-    VlessIngress, VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity,
-    VmessUdpConnector, VmessUdpParts, WireguardConnector, WireguardUdpConnector,
+    TrojanUdpConnector, TrojanUdpParts, TrustTunnelConnector, TrustTunnelUdpConnector,
+    TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress, VlessUdpConnector,
+    VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity, VmessUdpConnector, VmessUdpParts,
+    WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -3020,6 +3021,7 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::Snell { server, .. }
         | EgressConfig::ShadowQuic { server, .. }
         | EgressConfig::Mieru { server, .. }
+        | EgressConfig::TrustTunnel { server, .. }
         | EgressConfig::Ssh { server, .. } => Some(server),
         // Tor 是网络不是服务器：无 server/port 字段（同 Reject/Direct 的
         // None 口径）
@@ -3328,6 +3330,33 @@ fn build_udp_connectors(
                 // MULTIPLEXING_OFF 同形）；UDP 载具未交付——该节点 UDP 需求
                 // 由 scan_udp_capability 按既有口径构建期报错
                 None
+            }
+            EgressConfig::TrustTunnel {
+                server,
+                port,
+                username,
+                password,
+                sni,
+                skip_cert_verify,
+                tls_fingerprint,
+            } => {
+                // TrustTunnel UDP 面（RIL-119）：官方 PROTOCOL.md v1.0 自写
+                // `_udp2` 单流复用（评估与探针留证 protocol-backends.md
+                // #trusttunnel）；构建期校验同 TCP 面（new 内）
+                let mut conn = TrustTunnelUdpConnector::new(
+                    server.clone(),
+                    *port,
+                    username.clone(),
+                    password.clone(),
+                    sni.clone(),
+                    *skip_cert_verify,
+                    parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
+                )
+                .with_context(|| format!("节点 {} 的 trusttunnel 配置无效", desc.name))?;
+                if let Some(factory) = tls_factory.as_ref() {
+                    conn = conn.with_factory(factory.clone());
+                }
+                Some(Arc::new(conn))
             }
             EgressConfig::Ssh { .. } => {
                 // SSH UDP 判负（RIL-113）：direct-tcpip 仅 TCP 面——该节点
@@ -4114,6 +4143,41 @@ fn build_egress_outputs(
                     MieruConnector::new(server.clone(), *port, username.clone(), password.clone())
                         .with_context(|| format!("节点 {} 的 mieru 配置无效", desc.name))?,
                 );
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::TrustTunnel {
+                server,
+                port,
+                username,
+                password,
+                sni,
+                skip_cert_verify,
+                tls_fingerprint,
+            } => {
+                // TrustTunnel（RIL-119）：官方 PROTOCOL.md v1.0 自写客户端面
+                // ——TLS(ALPN h2) + HTTP/2 CONNECT + Basic 认证（评估与探针
+                // 留证 protocol-backends.md#trusttunnel）。TCP 面 CONNECT
+                // 直达目标；UDP 面 `_udp2` 复用（UDP 工厂臂交付）。空用户名/
+                // 密码/服务器校验归 new 内（节点级失败不拖垮整份订阅）
+                let mut connector = TrustTunnelConnector::new(
+                    server.clone(),
+                    *port,
+                    username.clone(),
+                    password.clone(),
+                    sni.clone(),
+                    *skip_cert_verify,
+                    parse_egress_fingerprint(tls_fingerprint, &desc.name)?,
+                )
+                .with_context(|| format!("节点 {} 的 trusttunnel 配置无效", desc.name))?;
+                if let Some(factory) = tls_factory.as_ref() {
+                    connector = connector.with_factory(factory.clone());
+                }
+                let connector: Arc<dyn EgressConnector> = Arc::new(connector);
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
                     connector.clone(),

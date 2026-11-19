@@ -97,6 +97,7 @@ pub enum ClashProxyType {
     Snell,
     ShadowQuic,
     Mieru,
+    TrustTunnel,
     Ssh,
     Hysteria,
     Hysteria2,
@@ -260,6 +261,22 @@ pub struct ClashProxy {
     /// wire 连接交付，复用面未交付，容忍读取不落行为）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multiplexing: Option<String>,
+    /// TrustTunnel: H3/QUIC 载具开关（Clash 规范键 `quic`，mihomo
+    /// trusttunnel schema 缺省 false——本仓仅交付 TCP 载具，显式 true
+    /// 导入点名拒绝，防静默按 TCP 误连致隧道必败；缺省/显式 false 同形
+    /// 透传）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quic: Option<bool>,
+    /// TrustTunnel: 证书名校验开关（Clash 规范键 `name-cert-verify`，
+    /// mihomo trusttunnel schema——false = 降级不校验语义；spec 要求证书
+    /// 校验必开，显式 false 导入点名拒绝）
+    #[serde(
+        default,
+        rename = "name-cert-verify",
+        alias = "name_cert_verify",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub name_cert_verify: Option<bool>,
     /// 加密（用于 VMess）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypt: Option<String>,
@@ -2346,6 +2363,54 @@ impl ClashConverter {
                     password,
                 })
             }
+            ClashProxyType::TrustTunnel => {
+                let username = proxy
+                    .username
+                    .clone()
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| anyhow!("TrustTunnel 缺少 username"))?;
+                let password = proxy
+                    .password
+                    .clone()
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| anyhow!("TrustTunnel 缺少 password"))?;
+                // 载具边界（RIL-119 评估留证 protocol-backends.md#trusttunnel）：
+                // 仅交付 TCP 载具；显式 quic: true 点名拒绝（防静默按 TCP
+                // 误连致隧道必败）。缺省/显式 false 同形透传
+                if proxy.quic == Some(true) {
+                    return Err(anyhow!(
+                        "TrustTunnel quic: true 未交付（H3/QUIC 载具仅 TCP）"
+                    ));
+                }
+                // 证书名校验：spec 要求校验必开，name-cert-verify: false =
+                // 降级不校验语义——点名拒绝（与 host-key 钉扎同防降级面）
+                if proxy.name_cert_verify == Some(false) {
+                    return Err(anyhow!(
+                        "TrustTunnel name-cert-verify: false 未交付（spec 要求证书校验必开）"
+                    ));
+                }
+                // ALPN：spec 钉死 h2（TLS 必协商 h2）——带表但不含 h2 的
+                // 配置必败，点名拒绝；缺省或含 h2 同形（端点按 spec 择 h2）
+                if !proxy.alpn.is_empty() && !proxy.alpn.iter().any(|a| a == "h2") {
+                    return Err(anyhow!(
+                        "TrustTunnel alpn {:?} 未交付（spec 钉死 h2）",
+                        proxy.alpn
+                    ));
+                }
+                // 复用三键（max-connections/min-streams/max-streams）与
+                // health-check / congestion-controller / bbr-profile 容忍
+                // 读取不落行为：TCP 载具每流单连接（与 mihomo 复用关闭
+                // 缺省同形），QUIC 载具键随 quic=false 不生效
+                Ok(EgressConfig::TrustTunnel {
+                    server: proxy.server.clone(),
+                    port: proxy.port,
+                    username,
+                    password,
+                    sni: proxy.servername.clone(),
+                    skip_cert_verify: proxy.skip_cert_verify,
+                    tls_fingerprint: proxy.client_fingerprint.clone(),
+                })
+            }
             ClashProxyType::Ssh => {
                 // 主机钥钉扎必填（RIL-113 评估留证 protocol-backends.md#ssh）：
                 // mihomo 缺省首用即信，本仓按 TOFU 判负口径拒绝无钉扎节点
@@ -2791,6 +2856,14 @@ impl ClashConverter {
                 proxy.username.as_deref().is_some_and(|u| !u.is_empty())
                     && proxy.password.as_deref().is_some_and(|p| !p.is_empty())
             }
+            // TrustTunnel：认证面恰 username/password（缺失即无效节点按
+            // 有效性过滤丢弃）。quic: true / name-cert-verify: false /
+            // alpn 缺 h2 不在此判——凭据齐全的边界节点须抵达转换面具名
+            // 拒绝（防静默按有效性丢弃掩埋真实原因），与 mieru 同姿态
+            ClashProxyType::TrustTunnel => {
+                proxy.username.as_deref().is_some_and(|u| !u.is_empty())
+                    && proxy.password.as_deref().is_some_and(|p| !p.is_empty())
+            }
             // SSH：钉扎必填 + username 必填 + 认证恰一选一（异或——双带/
             // 双缺均判负，与转换面具名拒绝同口径）
             ClashProxyType::Ssh => {
@@ -2828,6 +2901,7 @@ impl ClashConverter {
             ClashProxyType::Snell => "Snell",
             ClashProxyType::ShadowQuic => "ShadowQUIC",
             ClashProxyType::Mieru => "Mieru",
+            ClashProxyType::TrustTunnel => "TrustTunnel",
             ClashProxyType::Ssh => "SSH",
             ClashProxyType::Hysteria => "Hysteria",
             ClashProxyType::Hysteria2 => "Hysteria2",

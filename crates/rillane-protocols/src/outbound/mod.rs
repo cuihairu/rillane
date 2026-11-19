@@ -20,6 +20,7 @@ mod socks5;
 mod ssh;
 mod tor;
 mod trojan;
+mod trusttunnel;
 mod tuic;
 mod vision;
 mod vless;
@@ -61,6 +62,7 @@ pub use socks5::{Socks5Connector, Socks5UdpConnector};
 pub use ssh::SshConnector;
 pub use tor::TorConnector;
 pub use trojan::{TrojanConnector, TrojanUdpConnector};
+pub use trusttunnel::{TrustTunnelConnector, TrustTunnelUdpConnector};
 pub use tuic::{TuicConnector, TuicStream, TuicUdpConnector, TuicUdpRelay};
 pub use vision::{
     is_complete_tls_record, padding_len, relay, vision_flow_addons, FrameBuilder, FrameDecoder,

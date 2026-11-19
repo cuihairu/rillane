@@ -2487,6 +2487,29 @@ pub enum EgressConfig {
         username: String,
         password: String,
     },
+    /// TrustTunnel 出口（RIL-119）：官方 PROTOCOL.md v1.0 自写客户端面
+    /// ——TLS（ALPN h2，证书校验必开）+ HTTP/2 CONNECT + Basic 认证
+    /// （评估与探针留证 protocol-backends.md#trusttunnel）。TCP 面 CONNECT
+    /// 直达目标（authority = host:port）；UDP 面 CONNECT 保留伪主机
+    /// `_udp2` 单流复用（spec §6）。quic: true（H3/QUIC 载具）导入期具名
+    /// 拒绝；复用三键（max-connections/min-streams/max-streams）与
+    /// health-check 容忍读取不落行为（每流单连接同形）；name-cert-verify
+    /// 仅接受 true（false = 降级不校验语义，拒绝）。ICMP 与服务器面不
+    /// 交付。凭据错误在 CONNECT 应答期暴露（407 具名失败）。评估与交付
+    /// 边界见两语 protocol-backends.md trusttunnel 段。
+    TrustTunnel {
+        server: String,
+        port: u16,
+        username: String,
+        password: String,
+        /// SNI（缺省回落 server；spec 要求证书校验且 SNI 必发）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sni: Option<String>,
+        #[serde(default)]
+        skip_cert_verify: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tls_fingerprint: Option<String>,
+    },
     /// SSH-2 出口（RIL-113）：russh 客户端面——主机钥钉扎必填（不钉扎
     /// 首用即信是具名拒绝的降级面）+ 认证恰一选一 + direct-tcpip 通道流。
     /// private_key 为 OpenSSH 格式文件路径，加密键须携口令解码（无口令

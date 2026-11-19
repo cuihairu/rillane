@@ -694,6 +694,36 @@ fn proxy_mapping(
             ins(&mut m, "transport", "tcp");
             Some(m)
         }
+        EgressConfig::TrustTunnel {
+            server,
+            port,
+            username,
+            password,
+            sni,
+            skip_cert_verify,
+            tls_fingerprint,
+        } => {
+            // TrustTunnel（RIL-119）：键形随 mihomo trusttunnel schema。
+            // quic 不落键（缺省 false 同形——H3/QUIC 载具未交付）；udp
+            // 不落键（UDP 面按路由需求交付，节点级 udp 开关非 IR 字段）；
+            // 复用三键/health-check 不落键（每流单连接 = mihomo 复用关闭
+            // 缺省同形）；name-cert-verify 不落键（本仓恒 true = 缺省）
+            ins(&mut m, "type", "trusttunnel");
+            ins(&mut m, "server", server);
+            ins(&mut m, "port", *port as u64);
+            ins(&mut m, "username", username);
+            ins(&mut m, "password", password);
+            if let Some(s) = sni {
+                ins(&mut m, "sni", s);
+            }
+            if *skip_cert_verify {
+                ins(&mut m, "skip-cert-verify", true);
+            }
+            if let Some(fp) = tls_fingerprint {
+                ins(&mut m, "client-fingerprint", fp);
+            }
+            Some(m)
+        }
         EgressConfig::Ssh {
             server,
             port,
@@ -1465,6 +1495,108 @@ mod tests {
                 password: "pw".into(),
             },
             "mi-rt 往返等值"
+        );
+    }
+
+    /// TrustTunnel 导出往返（RIL-119）：键形落 mihomo trusttunnel schema
+    /// （SNI/skip-cert-verify/client-fingerprint 现值落键；quic/name-cert-
+    /// verify/复用三键缺省不落键），且导出 YAML 经 ClashConverter 再解析
+    /// 回 TrustTunnel IR 字段等值（真往返证据——含显式 quic: true 与
+    /// name-cert-verify: false 的导入具名拒绝旁证）
+    #[test]
+    fn trusttunnel_export_roundtrips_via_reparse() {
+        let cfg = ProjectConfig {
+            egress: vec![EgressDescriptor {
+                name: "tt-rt".into(),
+                spec: EgressConfig::TrustTunnel {
+                    server: "tt.example.com".into(),
+                    port: 443,
+                    username: "u".into(),
+                    password: "pw".into(),
+                    sni: Some("camo.example.com".into()),
+                    skip_cert_verify: true,
+                    tls_fingerprint: Some("chrome".into()),
+                },
+            }],
+            ..serde_yaml::from_str(
+                "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+            )
+            .unwrap()
+        };
+        let (yaml, report) = ClashExporter.export(&cfg).unwrap();
+        assert_eq!(report.exported_proxies, vec!["tt-rt"], "{yaml}");
+        assert!(yaml.contains("type: trusttunnel"), "{yaml}");
+        assert!(yaml.contains("sni: camo.example.com"), "{yaml}");
+        assert!(yaml.contains("skip-cert-verify: true"), "{yaml}");
+        assert!(yaml.contains("client-fingerprint: chrome"), "{yaml}");
+        assert!(!yaml.contains("quic"), "QUIC 载具未交付不落键: {yaml}");
+        assert!(
+            !yaml.contains("name-cert-verify"),
+            "证书校验恒开（缺省同形）不落键: {yaml}"
+        );
+        assert!(
+            !yaml.contains("max-connections"),
+            "复用面每流单连接（缺省同形）不落键: {yaml}"
+        );
+
+        // 再解析回 IR：字段等值（真往返）
+        let parsed = ClashConverter::new().parse(&yaml).unwrap();
+        let rillane = ClashConverter::new().convert_to_rillane(&parsed).unwrap();
+        assert_eq!(
+            rillane.egress[0].spec,
+            EgressConfig::TrustTunnel {
+                server: "tt.example.com".into(),
+                port: 443,
+                username: "u".into(),
+                password: "pw".into(),
+                sni: Some("camo.example.com".into()),
+                skip_cert_verify: true,
+                tls_fingerprint: Some("chrome".into()),
+            },
+            "tt-rt 往返等值"
+        );
+    }
+
+    /// TrustTunnel 导入边界（RIL-119）：quic: true（H3/QUIC 载具）与
+    /// name-cert-verify: false（降级不校验）导入点名拒绝；alpn 不含 h2
+    /// 点名拒绝（spec 钉死 h2）
+    #[test]
+    fn trusttunnel_import_boundary_named_rejects() {
+        let base = |extra: &str| {
+            format!(
+                "proxies:\n  - name: tt\n    type: trusttunnel\n    server: tt.example.com\n    port: 443\n    username: u\n    password: pw\n{extra}proxy-groups: []\nrules: []\n"
+            )
+        };
+        for (yaml, needle) in [
+            (base("    quic: true\n"), "quic"),
+            (base("    name-cert-verify: false\n"), "name-cert-verify"),
+            (base("    alpn:\n      - h3\n"), "alpn"),
+        ] {
+            let err = ClashConverter::new()
+                .convert_to_rillane(&ClashConverter::new().parse(&yaml).unwrap())
+                .expect_err(needle);
+            assert!(
+                format!("{err:#}").contains(needle),
+                "具名拒绝应含 {needle}: {err:#}"
+            );
+        }
+        // 缺省（quic/name-cert-verify/alpn 全缺省）与 udp: true 均透传
+        let ok = base("    udp: true\n");
+        let rillane = ClashConverter::new()
+            .convert_to_rillane(&ClashConverter::new().parse(&ok).unwrap())
+            .expect("udp: true 缺省面透传");
+        assert_eq!(
+            rillane.egress[0].spec,
+            EgressConfig::TrustTunnel {
+                server: "tt.example.com".into(),
+                port: 443,
+                username: "u".into(),
+                password: "pw".into(),
+                sni: None,
+                skip_cert_verify: false,
+                tls_fingerprint: None,
+            },
+            "缺省面透传"
         );
     }
 

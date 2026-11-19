@@ -278,6 +278,19 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "trusttunnel",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#trusttunnel",
+        },
+        // RIL-119：官方 PROTOCOL.md v1.0 自写客户端面（Apache-2.0 端点
+        // 仓二进制黑盒对端）；TCP + UDP 两面交付，H3/QUIC 载具与 ICMP/
+        // 服务器面不交付
+        udp: true,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/trusttunnel.rs",
+        },
+    },
+    CatalogEntry {
         kind: "ssh",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#ssh",
@@ -354,6 +367,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Snell { .. } => "snell",
         EgressConfig::ShadowQuic { .. } => "shadowquic",
         EgressConfig::Mieru { .. } => "mieru",
+        EgressConfig::TrustTunnel { .. } => "trusttunnel",
         EgressConfig::Ssh { .. } => "ssh",
         EgressConfig::Tor { .. } => "tor",
         EgressConfig::Wireguard { .. } => "wireguard",
@@ -536,6 +550,15 @@ mod tests {
                 username: "u".into(),
                 password: "pw".into(),
             },
+            EgressConfig::TrustTunnel {
+                server: "203.0.113.16".into(),
+                port: 443,
+                username: "u".into(),
+                password: "pw".into(),
+                sni: Some("tt.example.test".into()),
+                skip_cert_verify: false,
+                tls_fingerprint: None,
+            },
             EgressConfig::Ssh {
                 server: "203.0.113.13".into(),
                 port: 22,
@@ -603,7 +626,7 @@ mod tests {
     /// UDP 能力列与构建期扫描口径一致（§3.1 支持集）。
     #[test]
     fn admitted_requires_evidence_and_backend() {
-        const UDP_SUPPORTED: [&str; 12] = [
+        const UDP_SUPPORTED: [&str; 13] = [
             "direct",
             "shadowsocks",
             "wireguard",
@@ -616,6 +639,7 @@ mod tests {
             "hysteria",
             "hysteria2",
             "tuic",
+            "trusttunnel",
         ];
         for e in CATALOG {
             match e.registration {
