@@ -2995,508 +2995,6 @@ impl RoutingConfig {
     }
 }
 
-#[cfg(test)]
-mod geo_db_tests {
-    use super::*;
-
-    fn base_yaml() -> &'static str {
-        "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: null\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n"
-    }
-
-    #[test]
-    fn routing_geo_db_fields_parse_and_serialize() {
-        let yaml = "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: null\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n  geoip_db: /data/geoip.mmdb\n  geosite_db: /data/geosite.dat\n";
-        let cfg: RillaneConfig = serde_yaml::from_str(yaml).expect("应解析");
-        assert_eq!(
-            cfg.routing.geoip_db.as_deref(),
-            Some(std::path::Path::new("/data/geoip.mmdb"))
-        );
-        assert_eq!(
-            cfg.routing.geosite_db.as_deref(),
-            Some(std::path::Path::new("/data/geosite.dat"))
-        );
-        let rendered = serde_yaml::to_string(&cfg).unwrap();
-        let reparsed: RillaneConfig = serde_yaml::from_str(&rendered).unwrap();
-        assert_eq!(reparsed.routing.geoip_db, cfg.routing.geoip_db);
-        assert_eq!(reparsed.routing.geosite_db, cfg.routing.geosite_db);
-    }
-
-    /// RIL-014：源端口/协议/规则集引用条件与声明面、规则集库的 serde
-    /// 往返——标签 snake_case（src_port/rule_set_ref/proto），库平铺为
-    /// 名字→条件映射；空库/空声明不落盘（skip_serializing_if）。
-    #[test]
-    fn ruleset_and_port_conditions_roundtrip() {
-        let yaml = "default_node: direct\n\
-             groups: []\n\
-             rules:\n\
-             \x20 - name: r1\n\
-             \x20   matches:\n\
-             \x20     - type: src_port\n\
-             \x20       values: [80, 443]\n\
-             \x20     - type: proto\n\
-             \x20       protocols: [TCP]\n\
-             \x20     - type: rule_set_ref\n\
-             \x20       name: ads\n\
-             \x20   target: proxy\n\
-             rule_providers:\n\
-             \x20 ads:\n\
-             \x20   type: http\n\
-             \x20   behavior: domain\n\
-             \x20   url: https://x.invalid/a.yaml\n\
-             \x20   interval_secs: 86400\n\
-             rule_sets:\n\
-             \x20 ads:\n\
-             \x20   conditions:\n\
-             \x20     - type: domain_suffix\n\
-             \x20       values: [ads.example]\n";
-        let cfg: RoutingConfig = serde_yaml::from_str(yaml).expect("应解析");
-        assert_eq!(cfg.rules.len(), 1);
-        assert_eq!(
-            cfg.rules[0].matches[0],
-            MatchCondition::SrcPort {
-                values: vec![80, 443]
-            }
-        );
-        assert_eq!(
-            cfg.rules[0].matches[1],
-            MatchCondition::Proto {
-                protocols: vec!["TCP".to_string()]
-            }
-        );
-        assert_eq!(
-            cfg.rules[0].matches[2],
-            MatchCondition::RuleSetRef {
-                name: "ads".to_string()
-            }
-        );
-        let decl = cfg.rule_providers.get("ads").expect("声明解析");
-        assert_eq!(decl.interval_secs, Some(86400));
-        assert_eq!(decl.provider_type, "http");
-        let entry = cfg.rule_sets.get("ads").expect("库载荷解析");
-        assert_eq!(
-            entry.conditions[0],
-            MatchCondition::DomainSuffix {
-                values: vec!["ads.example".to_string()]
-            }
-        );
-
-        // 往返：序列化再解析语义不变（逐字段——RoutingConfig 未派生整体相等）
-        let text = serde_yaml::to_string(&cfg).expect("序列化");
-        let back: RoutingConfig = serde_yaml::from_str(&text).expect("往返解析");
-        assert_eq!(back.rules, cfg.rules, "规则面往返语义不变");
-        assert_eq!(back.rule_providers.len(), 1);
-        assert_eq!(
-            back.rule_providers.get("ads").map(|d| d.interval_secs),
-            Some(Some(86400))
-        );
-        assert_eq!(
-            back.rule_sets.get("ads").map(|e| e.conditions.clone()),
-            Some(cfg.rule_sets.get("ads").expect("库非空").conditions.clone())
-        );
-        // 空库/空声明不落盘
-        let empty = RoutingConfig::default();
-        let empty_text = serde_yaml::to_string(&empty).expect("序列化");
-        assert!(
-            !empty_text.contains("rule_sets:") && !empty_text.contains("rule_providers:"),
-            "空面不落盘: {empty_text}"
-        );
-    }
-
-    /// RIL-009：proxy-provider 声明、provider 成员、provider 节点库的
-    /// serde 往返——声明 interval 秒口径原样、库平铺为 名字→节点集；空面
-    /// 不落盘。悬空 provider 引用由 `RoutingConfig::validate` 构建期拦截。
-    #[test]
-    fn proxy_provider_and_member_roundtrip() {
-        let yaml = r#"
-default_node: direct
-groups:
-  - name: pgroup
-    strategy: fixed
-    members:
-      - { type: provider, name: remote }
-rules: []
-proxy_providers:
-  remote:
-    type: http
-    url: https://provider.example.com/sub.yaml
-    interval_secs: 3600
-    health_check:
-      enable: true
-      interval_secs: 300
-provider_nodes:
-  remote:
-    nodes: [node-a]
-"#;
-        let mut cfg: RoutingConfig = serde_yaml::from_str(yaml).expect("应解析");
-        let decl = cfg.proxy_providers.get("remote").expect("provider 声明");
-        assert_eq!(decl.provider_type, "http");
-        assert_eq!(decl.interval_secs, Some(3600), "interval 秒口径原样");
-        assert_eq!(
-            decl.health_check.as_ref().and_then(|h| h.interval_secs),
-            Some(300),
-            "health-check 周期须保留"
-        );
-        assert_eq!(
-            cfg.groups[0].members,
-            vec![GroupMember::Provider {
-                name: "remote".to_string()
-            }]
-        );
-        assert_eq!(
-            cfg.provider_nodes.nodes("remote"),
-            vec!["node-a".to_string()]
-        );
-
-        // 往返：序列化再解析语义不变（须在清空声明前）
-        let text = serde_yaml::to_string(&cfg).expect("序列化");
-        let back: RoutingConfig = serde_yaml::from_str(&text).expect("往返解析");
-        assert_eq!(
-            back.proxy_providers
-                .get("remote")
-                .and_then(|d| d.interval_secs),
-            Some(3600),
-            "声明 interval 往返语义不变"
-        );
-        assert_eq!(
-            back.groups[0].members, cfg.groups[0].members,
-            "provider 成员往返语义不变"
-        );
-        assert_eq!(
-            back.provider_nodes.nodes("remote"),
-            cfg.provider_nodes.nodes("remote"),
-            "节点库往返语义不变"
-        );
-
-        // 引用已声明 → 校验通过；清空声明 → 悬空引用构建期点名拦截
-        cfg.validate().expect("已声明引用应通过校验");
-        cfg.proxy_providers.clear();
-        let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("remote"), "悬空引用须点名: {err}");
-
-        // 空面不落盘
-        let empty_text = serde_yaml::to_string(&RoutingConfig::default()).expect("序列化");
-        assert!(
-            !empty_text.contains("proxy_providers:") && !empty_text.contains("provider_nodes:"),
-            "空面不落盘: {empty_text}"
-        );
-    }
-    /// RIL-011：组循环构建期点名拒绝（A→B→A、自环 A→A、以及经加权组
-    /// 的环）；悬空组引用同遍历拒绝；合法链（A→B→节点）放行。
-    #[test]
-    fn group_cycles_and_dangling_refs_rejected() {
-        let yaml = |groups: &str| {
-            format!(
-                r#"
-default_node: direct
-groups:
-{groups}
-rules: []
-"#
-            )
-        };
-        // 二元环
-        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
-            "  - name: a
-    strategy: fixed
-    members: [{ type: group, name: b }]
-  - name: b
-    strategy: fixed
-    members: [{ type: group, name: a }]",
-        ))
-        .expect("应解析");
-        let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("组循环"), "{err}");
-        assert!(
-            err.contains('a') && err.contains('b'),
-            "环路径须点名: {err}"
-        );
-
-        // 自环
-        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
-            "  - name: a
-    strategy: fixed
-    members: [{ type: group, name: a }]",
-        ))
-        .expect("应解析");
-        let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("组循环") && err.contains("a → a"), "{err}");
-
-        // 经加权组的环（WeightedGroup 同样参与图）
-        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
-            "  - name: a
-    strategy: fixed
-    members: [{ type: weighted_group, name: b, weight: 2 }]
-  - name: b
-    strategy: fixed
-    members: [{ type: group, name: a }]",
-        ))
-        .expect("应解析");
-        let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("组循环"), "加权组环须被拒: {err}");
-
-        // 悬空组引用
-        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
-            "  - name: a
-    strategy: fixed
-    members: [{ type: group, name: ghost }]",
-        ))
-        .expect("应解析");
-        let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("未声明的组") && err.contains("ghost"), "{err}");
-
-        // 合法链放行
-        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
-            "  - name: a
-    strategy: fixed
-    members: [{ type: group, name: b }]
-  - name: b
-    strategy: fixed
-    members: [n1]",
-        ))
-        .expect("应解析");
-        cfg.validate().expect("合法链应通过");
-    }
-
-    /// RIL-011：用户选择面 serde——组名须已声明（键面校验），往返语义
-    /// 不变，空面不落盘。
-    #[test]
-    fn selections_roundtrip_and_key_validation() {
-        let yaml = r#"
-default_node: direct
-groups:
-  - name: pick
-    strategy: fixed
-    members: [n1, n2]
-rules: []
-selections:
-  pick: n2
-"#;
-        let cfg: RoutingConfig = serde_yaml::from_str(yaml).expect("应解析");
-        assert_eq!(cfg.selections.get("pick").map(String::as_str), Some("n2"));
-        cfg.validate().expect("已声明组的选择应通过校验");
-
-        // 往返
-        let back: RoutingConfig =
-            serde_yaml::from_str(&serde_yaml::to_string(&cfg).expect("序列化")).expect("读回");
-        assert_eq!(back.selections, cfg.selections, "选择面往返语义不变");
-
-        // 键面校验：未声明组的选择构建期点名拒绝
-        let bad: RoutingConfig = serde_yaml::from_str(
-            r#"
-default_node: direct
-groups:
-  - name: pick
-    strategy: fixed
-    members: [n1]
-rules: []
-selections:
-  typo-group: n1
-"#,
-        )
-        .expect("应解析");
-        let err = bad.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("未声明的组") && err.contains("typo-group"),
-            "{err}"
-        );
-
-        // 空面不落盘
-        let empty_text = serde_yaml::to_string(&RoutingConfig::default()).expect("序列化");
-        assert!(
-            !empty_text.contains("selections:"),
-            "空选择面不落盘: {empty_text}"
-        );
-    }
-
-    #[test]
-    fn routing_geo_db_absent_defaults_to_none() {
-        let cfg: RillaneConfig =
-            serde_yaml::from_str(base_yaml()).expect("无 geoip_db/geosite_db 应可解析");
-        assert_eq!(cfg.routing.geoip_db, None);
-        assert_eq!(cfg.routing.geosite_db, None);
-    }
-
-    #[test]
-    fn load_from_path_resolves_relative_geo_db() {
-        let dir = std::env::temp_dir().join(format!("rillane-cfg-geo-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("rillane.yaml");
-        let yaml = "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: null\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n  geoip_db: geoip.mmdb\n  geosite_db: ../geosite.dat\n";
-        std::fs::write(&path, yaml).unwrap();
-        let cfg = RillaneConfig::load_from_path(&path).unwrap();
-        assert_eq!(
-            cfg.routing.geoip_db.as_deref(),
-            Some(dir.join("geoip.mmdb").as_path())
-        );
-        assert_eq!(
-            cfg.routing.geosite_db.as_deref(),
-            Some(dir.parent().unwrap().join("geosite.dat").as_path())
-        );
-    }
-
-    #[test]
-    fn resolve_geo_db_clamps_relative_paths_at_root() {
-        assert_eq!(
-            resolve_geo_db(Path::new("../../../geoip.mmdb"), Path::new("/etc/rillane")),
-            Path::new("/geoip.mmdb")
-        );
-        assert_eq!(
-            resolve_geo_db(
-                Path::new("databases/../../geoip.mmdb"),
-                Path::new("/etc/rillane")
-            ),
-            Path::new("/etc/geoip.mmdb")
-        );
-        assert_eq!(
-            resolve_geo_db(Path::new("../../geoip.mmdb"), Path::new("conf")),
-            Path::new("../geoip.mmdb")
-        );
-    }
-
-    /// RIL-142：fake_ip 块 serde 形态——range6/exceptions 在场可解析、
-    /// 未声明的可选键不落盘（skip_serializing_if）；块在场缺省启用、
-    /// range 缺省 RFC 2544 基准段。
-    #[test]
-    fn fake_ip_dual_stack_and_exceptions_parse_roundtrip() {
-        let yaml = "mode: tun\ndns:\n  enabled: true\n  domestic: [\"223.5.5.5:53\"]\n  fake_ip:\n    range: 198.18.0.0/15\n    range6: fc00::/8\n    exceptions: [example.com, internal.corp]\n";
-        let nb: NetworkBlockConfig = serde_yaml::from_str(yaml).expect("应解析");
-        let dns = nb.dns.as_ref().expect("dns 块应在场");
-        let fake = dns.fake_ip.as_ref().expect("fake_ip 块应在场");
-        assert!(fake.enabled);
-        assert_eq!(fake.range, "198.18.0.0/15");
-        assert_eq!(fake.range6.as_deref(), Some("fc00::/8"));
-        assert_eq!(
-            fake.exceptions,
-            vec!["example.com".to_string(), "internal.corp".to_string()]
-        );
-        // 未声明的可选键不落盘
-        let minimal: FakeIpConfig = serde_yaml::from_str("{}").expect("空块应解析");
-        assert!(minimal.enabled);
-        assert_eq!(minimal.range, "198.18.0.0/15");
-        assert!(minimal.range6.is_none());
-        assert!(minimal.exceptions.is_empty());
-        let rendered = serde_yaml::to_string(&minimal).unwrap();
-        assert!(!rendered.contains("range6") && !rendered.contains("exceptions"));
-        // 未知键拒绝（deny_unknown_fields：拼错立刻报）
-        assert!(serde_yaml::from_str::<FakeIpConfig>("rang: 198.18.0.0/15").is_err());
-    }
-
-    /// RIL-142：v4 池段值域校验——缺前缀/非 IPv4/前缀越界（>30）/主机位
-    /// 未清零，全部校验期拒绝；缺省段本身合法。
-    #[test]
-    fn fake_ip_validate_rejects_illegal_v4_ranges() {
-        let ok = || FakeIpConfig {
-            enabled: true,
-            range: "198.18.0.0/15".to_string(),
-            range6: None,
-            exceptions: Vec::new(),
-        };
-        assert!(ok().validate().is_ok());
-        for (range, why) in [
-            ("198.18.0.0", "缺前缀"),
-            ("not-an-ip/15", "非 IPv4"),
-            ("198.18.0.0/31", "前缀越界"),
-            ("198.18.1.0/15", "主机位未清"),
-            ("198.18.0.0/0", "前缀越界"),
-        ] {
-            let mut bad = ok();
-            bad.range = range.to_string();
-            let err = bad.validate().expect_err(why);
-            assert!(
-                err.to_string().contains("network.dns.fake_ip.range"),
-                "{why}: {err}"
-            );
-        }
-    }
-
-    /// RIL-142：池段与保留网络段重叠即拒绝——池落网内（10/8、回环、
-    /// 文档段）与网落池内（0.0.0.0/1 覆盖 10/8）两个方向都拦。
-    #[test]
-    fn fake_ip_validate_rejects_reserved_v4_conflicts() {
-        for range in [
-            "10.0.0.0/8",
-            "127.0.0.0/8",
-            "192.168.0.0/16",
-            "169.254.0.0/16",
-            "192.0.2.0/24",
-            "0.0.0.0/1",
-        ] {
-            let fake = FakeIpConfig {
-                enabled: true,
-                range: range.to_string(),
-                range6: None,
-                exceptions: Vec::new(),
-            };
-            let err = fake.validate().expect_err(range);
-            assert!(err.to_string().contains("保留网络段"), "{range}: {err}");
-        }
-    }
-
-    /// RIL-142：range6 校验——ULA 段允许（canonical fake-v6 空间）；
-    /// 回环/链路本地/文档段拒绝；前缀越界（>126）与主机位未清拒绝。
-    #[test]
-    fn fake_ip_validate_range6_rules() {
-        let base = |range6: &str| FakeIpConfig {
-            enabled: true,
-            range: "198.18.0.0/15".to_string(),
-            range6: Some(range6.to_string()),
-            exceptions: Vec::new(),
-        };
-        assert!(base("fc00::/8").validate().is_ok());
-        assert!(base("fd00::/64").validate().is_ok());
-        for range6 in [
-            "::1/128",
-            "fe80::/10",
-            "2001:db8::/32",
-            "fd00::/127",
-            "fd00::1/8",
-            "fd00::",
-        ] {
-            let err = base(range6).validate().expect_err(range6);
-            assert!(err.to_string().contains("range6"), "{range6}: {err}");
-        }
-    }
-
-    /// RIL-142：exceptions 值域（空条目/带前后点拒绝）与 is_exception
-    /// 全标签后缀语义——命中本域与子域、不命中 `notexample.com`、
-    /// 尾点与大小写归一、裸 `com` 不命中 `example.com` 后缀。
-    #[test]
-    fn fake_ip_exceptions_hygiene_and_full_label_matching() {
-        let base = |exceptions: Vec<String>| FakeIpConfig {
-            enabled: true,
-            range: "198.18.0.0/15".to_string(),
-            range6: None,
-            exceptions,
-        };
-        assert!(base(vec!["".to_string()]).validate().is_err());
-        assert!(base(vec![".example.com".to_string()]).validate().is_err());
-        assert!(base(vec!["example.com.".to_string()]).validate().is_err());
-
-        let fake = base(vec!["example.com".to_string(), "Corp.Internal".to_string()]);
-        assert!(fake.is_exception("example.com"));
-        assert!(fake.is_exception("a.example.com"));
-        assert!(fake.is_exception("deep.a.example.com"));
-        assert!(!fake.is_exception("notexample.com"));
-        assert!(!fake.is_exception("com"));
-        assert!(fake.is_exception("EXAMPLE.COM."));
-        assert!(fake.is_exception("x.CORP.internal."));
-    }
-
-    /// RIL-142：DnsBlockConfig.validate 门控——fake_ip.enabled=false 容忍
-    /// 半配置（不触发值域深检），enabled=true 才深检并浮出错误。
-    #[test]
-    fn fake_ip_validation_gated_by_enabled_flag() {
-        let yaml_enabled = "enabled: true\ndomestic: [\"223.5.5.5:53\"]\nfake_ip:\n  enabled: true\n  range: 10.0.0.0/8\n";
-        let on: DnsBlockConfig = serde_yaml::from_str(yaml_enabled).expect("应解析");
-        let err = on.validate().expect_err("保留段冲突应被拒");
-        assert!(err.to_string().contains("保留网络段"), "{err}");
-
-        let yaml_disabled = "enabled: true\ndomestic: [\"223.5.5.5:53\"]\nfake_ip:\n  enabled: false\n  range: 10.0.0.0/8\n";
-        let off: DnsBlockConfig = serde_yaml::from_str(yaml_disabled).expect("应解析");
-        off.validate().expect("disabled fake_ip 容忍半配置");
-    }
-}
-
 /// 递归校验逻辑组合条件内的 `DomainRegex` pattern（Any/Not 嵌套）。
 fn validate_condition_regex(cond: &MatchCondition, rule_name: &str) -> anyhow::Result<()> {
     match cond {
@@ -4123,5 +3621,507 @@ impl RuleSetLibrary {
 
     pub fn is_empty(&self) -> bool {
         self.sets.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod geo_db_tests {
+    use super::*;
+
+    fn base_yaml() -> &'static str {
+        "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: null\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n"
+    }
+
+    #[test]
+    fn routing_geo_db_fields_parse_and_serialize() {
+        let yaml = "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: null\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n  geoip_db: /data/geoip.mmdb\n  geosite_db: /data/geosite.dat\n";
+        let cfg: RillaneConfig = serde_yaml::from_str(yaml).expect("应解析");
+        assert_eq!(
+            cfg.routing.geoip_db.as_deref(),
+            Some(std::path::Path::new("/data/geoip.mmdb"))
+        );
+        assert_eq!(
+            cfg.routing.geosite_db.as_deref(),
+            Some(std::path::Path::new("/data/geosite.dat"))
+        );
+        let rendered = serde_yaml::to_string(&cfg).unwrap();
+        let reparsed: RillaneConfig = serde_yaml::from_str(&rendered).unwrap();
+        assert_eq!(reparsed.routing.geoip_db, cfg.routing.geoip_db);
+        assert_eq!(reparsed.routing.geosite_db, cfg.routing.geosite_db);
+    }
+
+    /// RIL-014：源端口/协议/规则集引用条件与声明面、规则集库的 serde
+    /// 往返——标签 snake_case（src_port/rule_set_ref/proto），库平铺为
+    /// 名字→条件映射；空库/空声明不落盘（skip_serializing_if）。
+    #[test]
+    fn ruleset_and_port_conditions_roundtrip() {
+        let yaml = "default_node: direct\n\
+             groups: []\n\
+             rules:\n\
+             \x20 - name: r1\n\
+             \x20   matches:\n\
+             \x20     - type: src_port\n\
+             \x20       values: [80, 443]\n\
+             \x20     - type: proto\n\
+             \x20       protocols: [TCP]\n\
+             \x20     - type: rule_set_ref\n\
+             \x20       name: ads\n\
+             \x20   target: proxy\n\
+             rule_providers:\n\
+             \x20 ads:\n\
+             \x20   type: http\n\
+             \x20   behavior: domain\n\
+             \x20   url: https://x.invalid/a.yaml\n\
+             \x20   interval_secs: 86400\n\
+             rule_sets:\n\
+             \x20 ads:\n\
+             \x20   conditions:\n\
+             \x20     - type: domain_suffix\n\
+             \x20       values: [ads.example]\n";
+        let cfg: RoutingConfig = serde_yaml::from_str(yaml).expect("应解析");
+        assert_eq!(cfg.rules.len(), 1);
+        assert_eq!(
+            cfg.rules[0].matches[0],
+            MatchCondition::SrcPort {
+                values: vec![80, 443]
+            }
+        );
+        assert_eq!(
+            cfg.rules[0].matches[1],
+            MatchCondition::Proto {
+                protocols: vec!["TCP".to_string()]
+            }
+        );
+        assert_eq!(
+            cfg.rules[0].matches[2],
+            MatchCondition::RuleSetRef {
+                name: "ads".to_string()
+            }
+        );
+        let decl = cfg.rule_providers.get("ads").expect("声明解析");
+        assert_eq!(decl.interval_secs, Some(86400));
+        assert_eq!(decl.provider_type, "http");
+        let entry = cfg.rule_sets.get("ads").expect("库载荷解析");
+        assert_eq!(
+            entry.conditions[0],
+            MatchCondition::DomainSuffix {
+                values: vec!["ads.example".to_string()]
+            }
+        );
+
+        // 往返：序列化再解析语义不变（逐字段——RoutingConfig 未派生整体相等）
+        let text = serde_yaml::to_string(&cfg).expect("序列化");
+        let back: RoutingConfig = serde_yaml::from_str(&text).expect("往返解析");
+        assert_eq!(back.rules, cfg.rules, "规则面往返语义不变");
+        assert_eq!(back.rule_providers.len(), 1);
+        assert_eq!(
+            back.rule_providers.get("ads").map(|d| d.interval_secs),
+            Some(Some(86400))
+        );
+        assert_eq!(
+            back.rule_sets.get("ads").map(|e| e.conditions.clone()),
+            Some(cfg.rule_sets.get("ads").expect("库非空").conditions.clone())
+        );
+        // 空库/空声明不落盘
+        let empty = RoutingConfig::default();
+        let empty_text = serde_yaml::to_string(&empty).expect("序列化");
+        assert!(
+            !empty_text.contains("rule_sets:") && !empty_text.contains("rule_providers:"),
+            "空面不落盘: {empty_text}"
+        );
+    }
+
+    /// RIL-009：proxy-provider 声明、provider 成员、provider 节点库的
+    /// serde 往返——声明 interval 秒口径原样、库平铺为 名字→节点集；空面
+    /// 不落盘。悬空 provider 引用由 `RoutingConfig::validate` 构建期拦截。
+    #[test]
+    fn proxy_provider_and_member_roundtrip() {
+        let yaml = r#"
+default_node: direct
+groups:
+  - name: pgroup
+    strategy: fixed
+    members:
+      - { type: provider, name: remote }
+rules: []
+proxy_providers:
+  remote:
+    type: http
+    url: https://provider.example.com/sub.yaml
+    interval_secs: 3600
+    health_check:
+      enable: true
+      interval_secs: 300
+provider_nodes:
+  remote:
+    nodes: [node-a]
+"#;
+        let mut cfg: RoutingConfig = serde_yaml::from_str(yaml).expect("应解析");
+        let decl = cfg.proxy_providers.get("remote").expect("provider 声明");
+        assert_eq!(decl.provider_type, "http");
+        assert_eq!(decl.interval_secs, Some(3600), "interval 秒口径原样");
+        assert_eq!(
+            decl.health_check.as_ref().and_then(|h| h.interval_secs),
+            Some(300),
+            "health-check 周期须保留"
+        );
+        assert_eq!(
+            cfg.groups[0].members,
+            vec![GroupMember::Provider {
+                name: "remote".to_string()
+            }]
+        );
+        assert_eq!(
+            cfg.provider_nodes.nodes("remote"),
+            vec!["node-a".to_string()]
+        );
+
+        // 往返：序列化再解析语义不变（须在清空声明前）
+        let text = serde_yaml::to_string(&cfg).expect("序列化");
+        let back: RoutingConfig = serde_yaml::from_str(&text).expect("往返解析");
+        assert_eq!(
+            back.proxy_providers
+                .get("remote")
+                .and_then(|d| d.interval_secs),
+            Some(3600),
+            "声明 interval 往返语义不变"
+        );
+        assert_eq!(
+            back.groups[0].members, cfg.groups[0].members,
+            "provider 成员往返语义不变"
+        );
+        assert_eq!(
+            back.provider_nodes.nodes("remote"),
+            cfg.provider_nodes.nodes("remote"),
+            "节点库往返语义不变"
+        );
+
+        // 引用已声明 → 校验通过；清空声明 → 悬空引用构建期点名拦截
+        cfg.validate().expect("已声明引用应通过校验");
+        cfg.proxy_providers.clear();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("remote"), "悬空引用须点名: {err}");
+
+        // 空面不落盘
+        let empty_text = serde_yaml::to_string(&RoutingConfig::default()).expect("序列化");
+        assert!(
+            !empty_text.contains("proxy_providers:") && !empty_text.contains("provider_nodes:"),
+            "空面不落盘: {empty_text}"
+        );
+    }
+    /// RIL-011：组循环构建期点名拒绝（A→B→A、自环 A→A、以及经加权组
+    /// 的环）；悬空组引用同遍历拒绝；合法链（A→B→节点）放行。
+    #[test]
+    fn group_cycles_and_dangling_refs_rejected() {
+        let yaml = |groups: &str| {
+            format!(
+                r#"
+default_node: direct
+groups:
+{groups}
+rules: []
+"#
+            )
+        };
+        // 二元环
+        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
+            "  - name: a
+    strategy: fixed
+    members: [{ type: group, name: b }]
+  - name: b
+    strategy: fixed
+    members: [{ type: group, name: a }]",
+        ))
+        .expect("应解析");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("组循环"), "{err}");
+        assert!(
+            err.contains('a') && err.contains('b'),
+            "环路径须点名: {err}"
+        );
+
+        // 自环
+        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
+            "  - name: a
+    strategy: fixed
+    members: [{ type: group, name: a }]",
+        ))
+        .expect("应解析");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("组循环") && err.contains("a → a"), "{err}");
+
+        // 经加权组的环（WeightedGroup 同样参与图）
+        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
+            "  - name: a
+    strategy: fixed
+    members: [{ type: weighted_group, name: b, weight: 2 }]
+  - name: b
+    strategy: fixed
+    members: [{ type: group, name: a }]",
+        ))
+        .expect("应解析");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("组循环"), "加权组环须被拒: {err}");
+
+        // 悬空组引用
+        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
+            "  - name: a
+    strategy: fixed
+    members: [{ type: group, name: ghost }]",
+        ))
+        .expect("应解析");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("未声明的组") && err.contains("ghost"), "{err}");
+
+        // 合法链放行
+        let cfg: RoutingConfig = serde_yaml::from_str(&yaml(
+            "  - name: a
+    strategy: fixed
+    members: [{ type: group, name: b }]
+  - name: b
+    strategy: fixed
+    members: [n1]",
+        ))
+        .expect("应解析");
+        cfg.validate().expect("合法链应通过");
+    }
+
+    /// RIL-011：用户选择面 serde——组名须已声明（键面校验），往返语义
+    /// 不变，空面不落盘。
+    #[test]
+    fn selections_roundtrip_and_key_validation() {
+        let yaml = r#"
+default_node: direct
+groups:
+  - name: pick
+    strategy: fixed
+    members: [n1, n2]
+rules: []
+selections:
+  pick: n2
+"#;
+        let cfg: RoutingConfig = serde_yaml::from_str(yaml).expect("应解析");
+        assert_eq!(cfg.selections.get("pick").map(String::as_str), Some("n2"));
+        cfg.validate().expect("已声明组的选择应通过校验");
+
+        // 往返
+        let back: RoutingConfig =
+            serde_yaml::from_str(&serde_yaml::to_string(&cfg).expect("序列化")).expect("读回");
+        assert_eq!(back.selections, cfg.selections, "选择面往返语义不变");
+
+        // 键面校验：未声明组的选择构建期点名拒绝
+        let bad: RoutingConfig = serde_yaml::from_str(
+            r#"
+default_node: direct
+groups:
+  - name: pick
+    strategy: fixed
+    members: [n1]
+rules: []
+selections:
+  typo-group: n1
+"#,
+        )
+        .expect("应解析");
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("未声明的组") && err.contains("typo-group"),
+            "{err}"
+        );
+
+        // 空面不落盘
+        let empty_text = serde_yaml::to_string(&RoutingConfig::default()).expect("序列化");
+        assert!(
+            !empty_text.contains("selections:"),
+            "空选择面不落盘: {empty_text}"
+        );
+    }
+
+    #[test]
+    fn routing_geo_db_absent_defaults_to_none() {
+        let cfg: RillaneConfig =
+            serde_yaml::from_str(base_yaml()).expect("无 geoip_db/geosite_db 应可解析");
+        assert_eq!(cfg.routing.geoip_db, None);
+        assert_eq!(cfg.routing.geosite_db, None);
+    }
+
+    #[test]
+    fn load_from_path_resolves_relative_geo_db() {
+        let dir = std::env::temp_dir().join(format!("rillane-cfg-geo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rillane.yaml");
+        let yaml = "control:\n  api_bind: 127.0.0.1:9090\n  uds_path: null\n  admin_token: null\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n  geoip_db: geoip.mmdb\n  geosite_db: ../geosite.dat\n";
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = RillaneConfig::load_from_path(&path).unwrap();
+        assert_eq!(
+            cfg.routing.geoip_db.as_deref(),
+            Some(dir.join("geoip.mmdb").as_path())
+        );
+        assert_eq!(
+            cfg.routing.geosite_db.as_deref(),
+            Some(dir.parent().unwrap().join("geosite.dat").as_path())
+        );
+    }
+
+    #[test]
+    fn resolve_geo_db_clamps_relative_paths_at_root() {
+        assert_eq!(
+            resolve_geo_db(Path::new("../../../geoip.mmdb"), Path::new("/etc/rillane")),
+            Path::new("/geoip.mmdb")
+        );
+        assert_eq!(
+            resolve_geo_db(
+                Path::new("databases/../../geoip.mmdb"),
+                Path::new("/etc/rillane")
+            ),
+            Path::new("/etc/geoip.mmdb")
+        );
+        assert_eq!(
+            resolve_geo_db(Path::new("../../geoip.mmdb"), Path::new("conf")),
+            Path::new("../geoip.mmdb")
+        );
+    }
+
+    /// RIL-142：fake_ip 块 serde 形态——range6/exceptions 在场可解析、
+    /// 未声明的可选键不落盘（skip_serializing_if）；块在场缺省启用、
+    /// range 缺省 RFC 2544 基准段。
+    #[test]
+    fn fake_ip_dual_stack_and_exceptions_parse_roundtrip() {
+        let yaml = "mode: tun\ndns:\n  enabled: true\n  domestic: [\"223.5.5.5:53\"]\n  fake_ip:\n    range: 198.18.0.0/15\n    range6: fc00::/8\n    exceptions: [example.com, internal.corp]\n";
+        let nb: NetworkBlockConfig = serde_yaml::from_str(yaml).expect("应解析");
+        let dns = nb.dns.as_ref().expect("dns 块应在场");
+        let fake = dns.fake_ip.as_ref().expect("fake_ip 块应在场");
+        assert!(fake.enabled);
+        assert_eq!(fake.range, "198.18.0.0/15");
+        assert_eq!(fake.range6.as_deref(), Some("fc00::/8"));
+        assert_eq!(
+            fake.exceptions,
+            vec!["example.com".to_string(), "internal.corp".to_string()]
+        );
+        // 未声明的可选键不落盘
+        let minimal: FakeIpConfig = serde_yaml::from_str("{}").expect("空块应解析");
+        assert!(minimal.enabled);
+        assert_eq!(minimal.range, "198.18.0.0/15");
+        assert!(minimal.range6.is_none());
+        assert!(minimal.exceptions.is_empty());
+        let rendered = serde_yaml::to_string(&minimal).unwrap();
+        assert!(!rendered.contains("range6") && !rendered.contains("exceptions"));
+        // 未知键拒绝（deny_unknown_fields：拼错立刻报）
+        assert!(serde_yaml::from_str::<FakeIpConfig>("rang: 198.18.0.0/15").is_err());
+    }
+
+    /// RIL-142：v4 池段值域校验——缺前缀/非 IPv4/前缀越界（>30）/主机位
+    /// 未清零，全部校验期拒绝；缺省段本身合法。
+    #[test]
+    fn fake_ip_validate_rejects_illegal_v4_ranges() {
+        let ok = || FakeIpConfig {
+            enabled: true,
+            range: "198.18.0.0/15".to_string(),
+            range6: None,
+            exceptions: Vec::new(),
+        };
+        assert!(ok().validate().is_ok());
+        for (range, why) in [
+            ("198.18.0.0", "缺前缀"),
+            ("not-an-ip/15", "非 IPv4"),
+            ("198.18.0.0/31", "前缀越界"),
+            ("198.18.1.0/15", "主机位未清"),
+            ("198.18.0.0/0", "前缀越界"),
+        ] {
+            let mut bad = ok();
+            bad.range = range.to_string();
+            let err = bad.validate().expect_err(why);
+            assert!(
+                err.to_string().contains("network.dns.fake_ip.range"),
+                "{why}: {err}"
+            );
+        }
+    }
+
+    /// RIL-142：池段与保留网络段重叠即拒绝——池落网内（10/8、回环、
+    /// 文档段）与网落池内（0.0.0.0/1 覆盖 10/8）两个方向都拦。
+    #[test]
+    fn fake_ip_validate_rejects_reserved_v4_conflicts() {
+        for range in [
+            "10.0.0.0/8",
+            "127.0.0.0/8",
+            "192.168.0.0/16",
+            "169.254.0.0/16",
+            "192.0.2.0/24",
+            "0.0.0.0/1",
+        ] {
+            let fake = FakeIpConfig {
+                enabled: true,
+                range: range.to_string(),
+                range6: None,
+                exceptions: Vec::new(),
+            };
+            let err = fake.validate().expect_err(range);
+            assert!(err.to_string().contains("保留网络段"), "{range}: {err}");
+        }
+    }
+
+    /// RIL-142：range6 校验——ULA 段允许（canonical fake-v6 空间）；
+    /// 回环/链路本地/文档段拒绝；前缀越界（>126）与主机位未清拒绝。
+    #[test]
+    fn fake_ip_validate_range6_rules() {
+        let base = |range6: &str| FakeIpConfig {
+            enabled: true,
+            range: "198.18.0.0/15".to_string(),
+            range6: Some(range6.to_string()),
+            exceptions: Vec::new(),
+        };
+        assert!(base("fc00::/8").validate().is_ok());
+        assert!(base("fd00::/64").validate().is_ok());
+        for range6 in [
+            "::1/128",
+            "fe80::/10",
+            "2001:db8::/32",
+            "fd00::/127",
+            "fd00::1/8",
+            "fd00::",
+        ] {
+            let err = base(range6).validate().expect_err(range6);
+            assert!(err.to_string().contains("range6"), "{range6}: {err}");
+        }
+    }
+
+    /// RIL-142：exceptions 值域（空条目/带前后点拒绝）与 is_exception
+    /// 全标签后缀语义——命中本域与子域、不命中 `notexample.com`、
+    /// 尾点与大小写归一、裸 `com` 不命中 `example.com` 后缀。
+    #[test]
+    fn fake_ip_exceptions_hygiene_and_full_label_matching() {
+        let base = |exceptions: Vec<String>| FakeIpConfig {
+            enabled: true,
+            range: "198.18.0.0/15".to_string(),
+            range6: None,
+            exceptions,
+        };
+        assert!(base(vec!["".to_string()]).validate().is_err());
+        assert!(base(vec![".example.com".to_string()]).validate().is_err());
+        assert!(base(vec!["example.com.".to_string()]).validate().is_err());
+
+        let fake = base(vec!["example.com".to_string(), "Corp.Internal".to_string()]);
+        assert!(fake.is_exception("example.com"));
+        assert!(fake.is_exception("a.example.com"));
+        assert!(fake.is_exception("deep.a.example.com"));
+        assert!(!fake.is_exception("notexample.com"));
+        assert!(!fake.is_exception("com"));
+        assert!(fake.is_exception("EXAMPLE.COM."));
+        assert!(fake.is_exception("x.CORP.internal."));
+    }
+
+    /// RIL-142：DnsBlockConfig.validate 门控——fake_ip.enabled=false 容忍
+    /// 半配置（不触发值域深检），enabled=true 才深检并浮出错误。
+    #[test]
+    fn fake_ip_validation_gated_by_enabled_flag() {
+        let yaml_enabled = "enabled: true\ndomestic: [\"223.5.5.5:53\"]\nfake_ip:\n  enabled: true\n  range: 10.0.0.0/8\n";
+        let on: DnsBlockConfig = serde_yaml::from_str(yaml_enabled).expect("应解析");
+        let err = on.validate().expect_err("保留段冲突应被拒");
+        assert!(err.to_string().contains("保留网络段"), "{err}");
+
+        let yaml_disabled = "enabled: true\ndomestic: [\"223.5.5.5:53\"]\nfake_ip:\n  enabled: false\n  range: 10.0.0.0/8\n";
+        let off: DnsBlockConfig = serde_yaml::from_str(yaml_disabled).expect("应解析");
+        off.validate().expect("disabled fake_ip 容忍半配置");
     }
 }

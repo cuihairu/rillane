@@ -515,354 +515,6 @@ impl VisionWritePolicy {
 }
 
 // ---------------------------------------------------------------------------
-// 单元测试
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const UUID: [u8; UUID_LEN] = [0xa7u8; 16];
-
-    #[test]
-    fn vision_flow_addons_bytes() {
-        // Vision：protobuf Addons{Flow=1} —— 0x0A 0x10 + 16 字节串
-        let addons = vision_flow_addons(Some(FLOW_VISION)).expect("vision addons");
-        assert_eq!(addons.len(), 18);
-        assert_eq!(&addons[..2], &[0x0a, 0x10]);
-        assert_eq!(&addons[2..], FLOW_VISION.as_bytes());
-        // 无 flow：OptLen=0（空段）
-        assert!(vision_flow_addons(None).unwrap().is_empty());
-        assert!(vision_flow_addons(Some("")).unwrap().is_empty());
-        // 其他取值点名拒绝（不静默降级）
-        let err = vision_flow_addons(Some("xtls-rprx-direct")).unwrap_err();
-        assert!(format!("{err:#}").contains("未实现"), "{err:#}");
-    }
-
-    #[test]
-    fn padding_len_bounds() {
-        // 长填充（content < 900）：rand(0..500)+900-content ≥ 1
-        for content in [0usize, 1, 500, 899] {
-            let p = padding_len(content, true, &DEFAULT_TESTSEED);
-            assert!(p >= 1, "content={content} 长填充下限");
-            assert!(p <= 900 + 500 - content, "content={content} 长填充上限");
-        }
-        // 短填充（非长路径）：rand(0..256)
-        for content in [900usize, 1024, 2000] {
-            let p = padding_len(content, false, &DEFAULT_TESTSEED);
-            assert!(p < 256, "content={content} 短填充上限");
-        }
-        // 上限收束：2048 - 21 - content
-        let p = padding_len(2027, false, &DEFAULT_TESTSEED);
-        assert!(p == 0, "content=2027 时上限为 0");
-    }
-
-    #[test]
-    fn frame_roundtrip_single() {
-        let mut b = FrameBuilder::new(UUID);
-        let frame = b.frame(COMMAND_PADDING_CONTINUE, b"hello vision", true);
-        // 首帧前置 UUID（前缀断言而非定长切片：次帧短填充路径帧长
-        // 9+rand(0..256)，rand < 7 时不足 16B，[..16] 切片会越界）
-        assert!(frame.starts_with(&UUID), "首帧前置 UUID");
-        let mut d = FrameDecoder::new(UUID);
-        let signal = d.push(&frame);
-        assert_eq!(signal, VisionSignal::Frames, "Continue 帧后仍在帧态");
-        assert_eq!(d.take(), b"hello vision");
-        // 次帧不再前置 UUID
-        let frame2 = b.frame(COMMAND_PADDING_END, b"tail", false);
-        assert!(!frame2.starts_with(&UUID), "次帧无 UUID 前置");
-        let signal = d.push(&frame2);
-        assert_eq!(signal, VisionSignal::Plain, "End 后收束");
-        assert_eq!(d.take(), b"tail");
-        assert!(!d.direct());
-    }
-
-    #[test]
-    fn frame_direct_switch_with_leftover() {
-        let mut b = FrameBuilder::new(UUID);
-        let head = b.frame(COMMAND_PADDING_DIRECT, b"begin", false);
-        let mut frame = head;
-        frame.extend_from_slice(b"raw-stream"); // Direct 帧后同段裸流量
-        let mut d = FrameDecoder::new(UUID);
-        let signal = d.push(&frame);
-        assert_eq!(signal, VisionSignal::Direct);
-        assert!(d.direct());
-        assert_eq!(d.take(), b"beginraw-stream", "Direct 帧内容 + 剩余裸流量");
-        // 后续推送全部按裸流量放行
-        let signal = d.push(b"more-raw");
-        assert_eq!(signal, VisionSignal::Direct);
-        assert_eq!(d.take(), b"more-raw");
-    }
-
-    #[test]
-    fn frame_split_pushes_and_continue_chain() {
-        let mut b = FrameBuilder::new(UUID);
-        let f1 = b.frame(COMMAND_PADDING_CONTINUE, b"AAAA", true);
-        let f2 = b.frame(COMMAND_PADDING_CONTINUE, b"BB", false);
-        let f3 = b.frame(COMMAND_PADDING_END, b"C", false);
-        let mut all = Vec::new();
-        all.extend_from_slice(&f1);
-        all.extend_from_slice(&f2);
-        all.extend_from_slice(&f3);
-
-        let mut d = FrameDecoder::new(UUID);
-        let mut decoded = Vec::new();
-        // 首帧整段推送（UUID 门控要求首段 ≥21B，xray 同口径）；
-        // 余下按 3 字节撕开推送（状态机跨段续拼）
-        let gate = all.len().min(f1.len());
-        let mut signal = d.push(&all[..gate]);
-        decoded.extend_from_slice(&d.take());
-        for piece in all[gate..].chunks(3) {
-            let s = d.push(piece);
-            decoded.extend_from_slice(&d.take());
-            signal = s;
-        }
-        assert_eq!(decoded, b"AAAABBC");
-        assert_eq!(signal, VisionSignal::Plain);
-    }
-
-    #[test]
-    fn frame_uuid_gate_mismatch_is_plain() {
-        let mut d = FrameDecoder::new(UUID);
-        let payload = [0u8; 40]; // ≥21B 但前缀非本 UUID
-        let signal = d.push(&payload);
-        assert_eq!(signal, VisionSignal::Plain);
-        assert_eq!(d.take(), payload);
-        // 后续照旧直通
-        let signal = d.push(b"x");
-        assert_eq!(signal, VisionSignal::Plain);
-        assert_eq!(d.take(), b"x");
-    }
-
-    #[test]
-    fn frame_uuid_gate_short_first_chunk_is_plain() {
-        let mut d = FrameDecoder::new(UUID);
-        let signal = d.push(&UUID[..8]); // <21B：xray 同口径整段放行
-        assert_eq!(signal, VisionSignal::Plain);
-        assert_eq!(d.take(), &UUID[..8]);
-    }
-
-    #[test]
-    fn filter_tls13_arms_xtls() {
-        // 内层 ClientHello → ServerHello(带 TLS1.3 supported_versions) →
-        // ApplicationData 完整记录 → Direct
-        let mut f = InnerTlsFilter::new();
-        let mut ch = vec![0x16, 0x03, 0x01, 0x00, 0x50, 0x01];
-        ch.resize(0x55, 0u8);
-        f.observe(&ch);
-        assert!(f.is_tls());
-        assert!(!f.is_tls12_or_above());
-        // ServerHello：24B 记录（len=0x0018），体含 supported_versions 扩展
-        let mut sh = vec![0x16, 0x03, 0x03, 0x00, 0x18, 0x02];
-        sh.extend_from_slice(&[0u8; 9]);
-        sh.extend_from_slice(&TLS13_SUPPORTED_VERSIONS);
-        sh.resize(0x1d, 0u8);
-        f.observe(&sh);
-        assert!(f.is_tls12_or_above());
-        assert!(f.enable_xtls());
-        // 完整 ApplicationData 记录
-        let app = {
-            let body = vec![0u8; 100];
-            let mut r = vec![0x17, 0x03, 0x03];
-            r.extend_from_slice(&(body.len() as u16).to_be_bytes());
-            r.extend_from_slice(&body);
-            r
-        };
-        assert!(is_complete_tls_record(&app));
-    }
-
-    #[test]
-    fn filter_tls12_does_not_arm() {
-        let mut f = InnerTlsFilter::new();
-        let mut sh = vec![0x16, 0x03, 0x03, 0x00, 0x20, 0x02];
-        sh.resize(0x25, 0u8); // 无 supported_versions TLS1.3 扩展
-        f.observe(&sh);
-        assert!(f.is_tls12_or_above());
-        assert!(!f.enable_xtls(), "TLS1.2 不置位 EnableXtls");
-    }
-
-    #[test]
-    fn filter_non_tls_exhausts_window() {
-        let mut f = InnerTlsFilter::new();
-        for _ in 0..7 {
-            f.observe(&[0xde, 0xad, 0xbe, 0xef]);
-        }
-        assert!(!f.is_tls());
-        assert!(f.exhausted(), "7 包后窗口将尽（<=1）");
-    }
-
-    #[test]
-    fn complete_record_check() {
-        let mut rec = vec![0x17, 0x03, 0x03, 0x00, 0x04, 1, 2, 3, 4];
-        assert!(is_complete_tls_record(&rec));
-        // 两记录相接
-        let second = rec.clone();
-        rec.extend_from_slice(&second);
-        assert!(is_complete_tls_record(&rec));
-        // 非应用数据首字节
-        assert!(!is_complete_tls_record(&[0x16, 0x03, 0x03, 0x00, 0x00]));
-        // 截断（长度越界）
-        rec.truncate(7);
-        assert!(!is_complete_tls_record(&rec));
-        // 空输入：无记录
-        assert!(!is_complete_tls_record(&[]));
-    }
-
-    #[test]
-    fn policy_marker_once_then_payload_path() {
-        let mut p = VisionWritePolicy::new(UUID);
-        // 伪装帧：空内容 Continue 长填充，只发一次
-        let m1 = p.on_marker().expect("首标记帧");
-        let VisionWriteAction::PaddedFrame(f) = m1 else {
-            panic!("标记应为填充帧");
-        };
-        assert_eq!(&f[..16], &UUID);
-        assert_eq!(f[16], COMMAND_PADDING_CONTINUE);
-        assert_eq!(&f[17..19], &0u16.to_be_bytes(), "空内容");
-        assert!(p.on_marker().is_none(), "标记只发一次");
-
-        // 非 TLS 上行：Continue……直到过滤窗尽 → End
-        //（标记帧已消耗一次性 UUID，载荷帧无前置 → 命令在 [0]）
-        let mut saw_end = false;
-        for i in 0..10 {
-            let action = p.on_payload(&[0x42; 100]);
-            let VisionWriteAction::PaddedFrame(frame) = action else {
-                panic!("帧 {i} 应为填充帧");
-            };
-            if frame[0] == COMMAND_PADDING_END {
-                saw_end = true;
-                assert_eq!(&frame[1..3], &100u16.to_be_bytes());
-                break;
-            }
-            assert_eq!(frame[0], COMMAND_PADDING_CONTINUE);
-        }
-        assert!(saw_end, "非 TLS 流量应在过滤窗尽时以 End 收束");
-        // 收束后 End 面：字节留在外层 TLS 之内（PlainTls，非裸传）
-        assert!(!p.padding_active());
-        assert!(matches!(
-            p.on_payload(b"tail"),
-            VisionWriteAction::PlainTls(_)
-        ));
-    }
-
-    #[test]
-    fn policy_tls13_direct_switch() {
-        let mut p = VisionWritePolicy::new(UUID);
-        // 内层 TLS1.3 握手面喂入过滤窗
-        let mut ch = vec![0x16, 0x03, 0x01, 0x00, 0x50, 0x01];
-        ch.resize(0x55, 0u8);
-        let a = p.on_payload(&ch);
-        assert!(matches!(a, VisionWriteAction::PaddedFrame(_)));
-        let mut sh = vec![0x16, 0x03, 0x03, 0x00, 0x18, 0x02];
-        sh.extend_from_slice(&[0u8; 9]);
-        sh.extend_from_slice(&TLS13_SUPPORTED_VERSIONS);
-        sh.resize(0x1d, 0u8);
-        let a = p.on_payload(&sh);
-        assert!(matches!(a, VisionWriteAction::PaddedFrame(_)));
-        // 完整 ApplicationData 记录 → Direct 帧
-        let mut app_body = vec![0x99u8; 100];
-        app_body.insert(0, 0x17);
-        let mut app = vec![0x17, 0x03, 0x03];
-        app.extend_from_slice(&(100u16).to_be_bytes());
-        app.extend_from_slice(&app_body[1..]);
-        let action = p.on_payload(&app);
-        let VisionWriteAction::PaddedFrame(frame) = action else {
-            panic!("应发出收束填充帧");
-        };
-        // 第二帧（UUID 已随首帧消耗）→ 命令在 [0]
-        assert_eq!(frame[0], COMMAND_PADDING_DIRECT, "TLS1.3 内层 → Direct");
-        assert!(!p.padding_active());
-        assert!(p.direct_switched());
-        // 切换后裸传
-        assert!(matches!(p.on_payload(b"raw"), VisionWriteAction::Raw(_)));
-    }
-
-    #[test]
-    fn policy_tls12_end_switch() {
-        let mut p = VisionWritePolicy::new(UUID);
-        let mut sh = vec![0x16, 0x03, 0x03, 0x00, 0x20, 0x02];
-        sh.resize(0x25, 0u8);
-        let a = p.on_payload(&sh);
-        assert!(matches!(a, VisionWriteAction::PaddedFrame(_)));
-        // TLS1.2 的 ApplicationData 完整记录 → End（留在外层 TLS 内）
-        let app = vec![0x17, 0x03, 0x03, 0x00, 0x02, 1, 2];
-        let action = p.on_payload(&app);
-        let VisionWriteAction::PaddedFrame(frame) = action else {
-            panic!("应发出收束填充帧");
-        };
-        // 第二帧（UUID 已随首帧消耗）→ 命令在 [0]
-        assert_eq!(frame[0], COMMAND_PADDING_END, "TLS1.2 内层 → End");
-        assert!(!p.padding_active());
-        assert!(!p.direct_switched());
-        assert!(matches!(
-            p.on_payload(b"still-tls"),
-            VisionWriteAction::PlainTls(_)
-        ));
-    }
-
-    /// 面级 EOF 收束：对端握手后直接丢弃连接（不发 close_notify）——
-    /// read_tls_into 须在时限内返回 Ok(0)（对端 EOF 口径）；此前实现
-    /// 在「TCP 已 EOF、rustls 恒 WouldBlock」态下 wake 自旋烧 CPU 悬挂。
-    #[tokio::test]
-    async fn face_surfaces_eof_when_peer_closes_without_close_notify() {
-        use std::time::Duration;
-        use tokio::time::timeout;
-
-        use rustls::pki_types::pem::PemObject;
-        use rustls::pki_types::CertificateDer;
-
-        use crate::fingerprint::TlsFingerprint;
-        use crate::outbound::reality::handshake;
-        use crate::tls::{profile_client_config, tls_crypto_provider};
-
-        let certified =
-            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("自签");
-        let certs: Vec<CertificateDer<'static>> =
-            rustls::pki_types::CertificateDer::pem_slice_iter(certified.cert.pem().as_bytes())
-                .collect::<Result<_, _>>()
-                .expect("证书 PEM");
-        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(
-            certified.key_pair.serialize_pem().as_bytes(),
-        )
-        .expect("私钥");
-        let server_config = rustls::ServerConfig::builder_with_provider(tls_crypto_provider())
-            .with_safe_default_protocol_versions()
-            .expect("版本")
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .expect("服务端装配");
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().unwrap();
-        // 服务端：握手完成后立即丢弃（无 close_notify——TCP FIN 直接收束）
-        tokio::spawn(async move {
-            if let Ok((tcp, _)) = listener.accept().await {
-                let conn = rustls::ServerConnection::new(std::sync::Arc::new(server_config))
-                    .expect("服务端连接");
-                let _tls = handshake(tcp, conn).await;
-                // drop：不发 close_notify
-            }
-        });
-
-        let tcp = TcpStream::connect(addr).await.expect("dial");
-        let config = profile_client_config(true, None, TlsFingerprint::None).expect("客户端装配");
-        let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("SNI");
-        let conn = rustls::ClientConnection::new(config, server_name).expect("客户端连接");
-        let (tcp, conn) = handshake(tcp, conn).await.expect("TLS 握手").into_parts();
-        let mut face = VisionTlsFace::new(tcp, conn);
-
-        let mut buf = [0u8; 16];
-        let n = timeout(Duration::from_secs(2), face.read_tls_into(&mut buf))
-            .await
-            .expect("面读须收束（不得 WouldBlock 自旋悬挂）")
-            .expect("面读不报错");
-        assert_eq!(n, 0, "对端 EOF 面须以 0 字节呈现");
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Vision TLS 面：逐记录精确喂入的 rustls 客户端连接（direct 直传无损切换
 // 的关键——裸流量绝不会误入 rustls 内部缓冲）
 // ---------------------------------------------------------------------------
@@ -1431,4 +1083,352 @@ pub async fn relay(
         }
     })
     .await
+}
+
+// ---------------------------------------------------------------------------
+// 单元测试
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const UUID: [u8; UUID_LEN] = [0xa7u8; 16];
+
+    #[test]
+    fn vision_flow_addons_bytes() {
+        // Vision：protobuf Addons{Flow=1} —— 0x0A 0x10 + 16 字节串
+        let addons = vision_flow_addons(Some(FLOW_VISION)).expect("vision addons");
+        assert_eq!(addons.len(), 18);
+        assert_eq!(&addons[..2], &[0x0a, 0x10]);
+        assert_eq!(&addons[2..], FLOW_VISION.as_bytes());
+        // 无 flow：OptLen=0（空段）
+        assert!(vision_flow_addons(None).unwrap().is_empty());
+        assert!(vision_flow_addons(Some("")).unwrap().is_empty());
+        // 其他取值点名拒绝（不静默降级）
+        let err = vision_flow_addons(Some("xtls-rprx-direct")).unwrap_err();
+        assert!(format!("{err:#}").contains("未实现"), "{err:#}");
+    }
+
+    #[test]
+    fn padding_len_bounds() {
+        // 长填充（content < 900）：rand(0..500)+900-content ≥ 1
+        for content in [0usize, 1, 500, 899] {
+            let p = padding_len(content, true, &DEFAULT_TESTSEED);
+            assert!(p >= 1, "content={content} 长填充下限");
+            assert!(p <= 900 + 500 - content, "content={content} 长填充上限");
+        }
+        // 短填充（非长路径）：rand(0..256)
+        for content in [900usize, 1024, 2000] {
+            let p = padding_len(content, false, &DEFAULT_TESTSEED);
+            assert!(p < 256, "content={content} 短填充上限");
+        }
+        // 上限收束：2048 - 21 - content
+        let p = padding_len(2027, false, &DEFAULT_TESTSEED);
+        assert!(p == 0, "content=2027 时上限为 0");
+    }
+
+    #[test]
+    fn frame_roundtrip_single() {
+        let mut b = FrameBuilder::new(UUID);
+        let frame = b.frame(COMMAND_PADDING_CONTINUE, b"hello vision", true);
+        // 首帧前置 UUID（前缀断言而非定长切片：次帧短填充路径帧长
+        // 9+rand(0..256)，rand < 7 时不足 16B，[..16] 切片会越界）
+        assert!(frame.starts_with(&UUID), "首帧前置 UUID");
+        let mut d = FrameDecoder::new(UUID);
+        let signal = d.push(&frame);
+        assert_eq!(signal, VisionSignal::Frames, "Continue 帧后仍在帧态");
+        assert_eq!(d.take(), b"hello vision");
+        // 次帧不再前置 UUID
+        let frame2 = b.frame(COMMAND_PADDING_END, b"tail", false);
+        assert!(!frame2.starts_with(&UUID), "次帧无 UUID 前置");
+        let signal = d.push(&frame2);
+        assert_eq!(signal, VisionSignal::Plain, "End 后收束");
+        assert_eq!(d.take(), b"tail");
+        assert!(!d.direct());
+    }
+
+    #[test]
+    fn frame_direct_switch_with_leftover() {
+        let mut b = FrameBuilder::new(UUID);
+        let head = b.frame(COMMAND_PADDING_DIRECT, b"begin", false);
+        let mut frame = head;
+        frame.extend_from_slice(b"raw-stream"); // Direct 帧后同段裸流量
+        let mut d = FrameDecoder::new(UUID);
+        let signal = d.push(&frame);
+        assert_eq!(signal, VisionSignal::Direct);
+        assert!(d.direct());
+        assert_eq!(d.take(), b"beginraw-stream", "Direct 帧内容 + 剩余裸流量");
+        // 后续推送全部按裸流量放行
+        let signal = d.push(b"more-raw");
+        assert_eq!(signal, VisionSignal::Direct);
+        assert_eq!(d.take(), b"more-raw");
+    }
+
+    #[test]
+    fn frame_split_pushes_and_continue_chain() {
+        let mut b = FrameBuilder::new(UUID);
+        let f1 = b.frame(COMMAND_PADDING_CONTINUE, b"AAAA", true);
+        let f2 = b.frame(COMMAND_PADDING_CONTINUE, b"BB", false);
+        let f3 = b.frame(COMMAND_PADDING_END, b"C", false);
+        let mut all = Vec::new();
+        all.extend_from_slice(&f1);
+        all.extend_from_slice(&f2);
+        all.extend_from_slice(&f3);
+
+        let mut d = FrameDecoder::new(UUID);
+        let mut decoded = Vec::new();
+        // 首帧整段推送（UUID 门控要求首段 ≥21B，xray 同口径）；
+        // 余下按 3 字节撕开推送（状态机跨段续拼）
+        let gate = all.len().min(f1.len());
+        let mut signal = d.push(&all[..gate]);
+        decoded.extend_from_slice(&d.take());
+        for piece in all[gate..].chunks(3) {
+            let s = d.push(piece);
+            decoded.extend_from_slice(&d.take());
+            signal = s;
+        }
+        assert_eq!(decoded, b"AAAABBC");
+        assert_eq!(signal, VisionSignal::Plain);
+    }
+
+    #[test]
+    fn frame_uuid_gate_mismatch_is_plain() {
+        let mut d = FrameDecoder::new(UUID);
+        let payload = [0u8; 40]; // ≥21B 但前缀非本 UUID
+        let signal = d.push(&payload);
+        assert_eq!(signal, VisionSignal::Plain);
+        assert_eq!(d.take(), payload);
+        // 后续照旧直通
+        let signal = d.push(b"x");
+        assert_eq!(signal, VisionSignal::Plain);
+        assert_eq!(d.take(), b"x");
+    }
+
+    #[test]
+    fn frame_uuid_gate_short_first_chunk_is_plain() {
+        let mut d = FrameDecoder::new(UUID);
+        let signal = d.push(&UUID[..8]); // <21B：xray 同口径整段放行
+        assert_eq!(signal, VisionSignal::Plain);
+        assert_eq!(d.take(), &UUID[..8]);
+    }
+
+    #[test]
+    fn filter_tls13_arms_xtls() {
+        // 内层 ClientHello → ServerHello(带 TLS1.3 supported_versions) →
+        // ApplicationData 完整记录 → Direct
+        let mut f = InnerTlsFilter::new();
+        let mut ch = vec![0x16, 0x03, 0x01, 0x00, 0x50, 0x01];
+        ch.resize(0x55, 0u8);
+        f.observe(&ch);
+        assert!(f.is_tls());
+        assert!(!f.is_tls12_or_above());
+        // ServerHello：24B 记录（len=0x0018），体含 supported_versions 扩展
+        let mut sh = vec![0x16, 0x03, 0x03, 0x00, 0x18, 0x02];
+        sh.extend_from_slice(&[0u8; 9]);
+        sh.extend_from_slice(&TLS13_SUPPORTED_VERSIONS);
+        sh.resize(0x1d, 0u8);
+        f.observe(&sh);
+        assert!(f.is_tls12_or_above());
+        assert!(f.enable_xtls());
+        // 完整 ApplicationData 记录
+        let app = {
+            let body = vec![0u8; 100];
+            let mut r = vec![0x17, 0x03, 0x03];
+            r.extend_from_slice(&(body.len() as u16).to_be_bytes());
+            r.extend_from_slice(&body);
+            r
+        };
+        assert!(is_complete_tls_record(&app));
+    }
+
+    #[test]
+    fn filter_tls12_does_not_arm() {
+        let mut f = InnerTlsFilter::new();
+        let mut sh = vec![0x16, 0x03, 0x03, 0x00, 0x20, 0x02];
+        sh.resize(0x25, 0u8); // 无 supported_versions TLS1.3 扩展
+        f.observe(&sh);
+        assert!(f.is_tls12_or_above());
+        assert!(!f.enable_xtls(), "TLS1.2 不置位 EnableXtls");
+    }
+
+    #[test]
+    fn filter_non_tls_exhausts_window() {
+        let mut f = InnerTlsFilter::new();
+        for _ in 0..7 {
+            f.observe(&[0xde, 0xad, 0xbe, 0xef]);
+        }
+        assert!(!f.is_tls());
+        assert!(f.exhausted(), "7 包后窗口将尽（<=1）");
+    }
+
+    #[test]
+    fn complete_record_check() {
+        let mut rec = vec![0x17, 0x03, 0x03, 0x00, 0x04, 1, 2, 3, 4];
+        assert!(is_complete_tls_record(&rec));
+        // 两记录相接
+        let second = rec.clone();
+        rec.extend_from_slice(&second);
+        assert!(is_complete_tls_record(&rec));
+        // 非应用数据首字节
+        assert!(!is_complete_tls_record(&[0x16, 0x03, 0x03, 0x00, 0x00]));
+        // 截断（长度越界）
+        rec.truncate(7);
+        assert!(!is_complete_tls_record(&rec));
+        // 空输入：无记录
+        assert!(!is_complete_tls_record(&[]));
+    }
+
+    #[test]
+    fn policy_marker_once_then_payload_path() {
+        let mut p = VisionWritePolicy::new(UUID);
+        // 伪装帧：空内容 Continue 长填充，只发一次
+        let m1 = p.on_marker().expect("首标记帧");
+        let VisionWriteAction::PaddedFrame(f) = m1 else {
+            panic!("标记应为填充帧");
+        };
+        assert_eq!(&f[..16], &UUID);
+        assert_eq!(f[16], COMMAND_PADDING_CONTINUE);
+        assert_eq!(&f[17..19], &0u16.to_be_bytes(), "空内容");
+        assert!(p.on_marker().is_none(), "标记只发一次");
+
+        // 非 TLS 上行：Continue……直到过滤窗尽 → End
+        //（标记帧已消耗一次性 UUID，载荷帧无前置 → 命令在 [0]）
+        let mut saw_end = false;
+        for i in 0..10 {
+            let action = p.on_payload(&[0x42; 100]);
+            let VisionWriteAction::PaddedFrame(frame) = action else {
+                panic!("帧 {i} 应为填充帧");
+            };
+            if frame[0] == COMMAND_PADDING_END {
+                saw_end = true;
+                assert_eq!(&frame[1..3], &100u16.to_be_bytes());
+                break;
+            }
+            assert_eq!(frame[0], COMMAND_PADDING_CONTINUE);
+        }
+        assert!(saw_end, "非 TLS 流量应在过滤窗尽时以 End 收束");
+        // 收束后 End 面：字节留在外层 TLS 之内（PlainTls，非裸传）
+        assert!(!p.padding_active());
+        assert!(matches!(
+            p.on_payload(b"tail"),
+            VisionWriteAction::PlainTls(_)
+        ));
+    }
+
+    #[test]
+    fn policy_tls13_direct_switch() {
+        let mut p = VisionWritePolicy::new(UUID);
+        // 内层 TLS1.3 握手面喂入过滤窗
+        let mut ch = vec![0x16, 0x03, 0x01, 0x00, 0x50, 0x01];
+        ch.resize(0x55, 0u8);
+        let a = p.on_payload(&ch);
+        assert!(matches!(a, VisionWriteAction::PaddedFrame(_)));
+        let mut sh = vec![0x16, 0x03, 0x03, 0x00, 0x18, 0x02];
+        sh.extend_from_slice(&[0u8; 9]);
+        sh.extend_from_slice(&TLS13_SUPPORTED_VERSIONS);
+        sh.resize(0x1d, 0u8);
+        let a = p.on_payload(&sh);
+        assert!(matches!(a, VisionWriteAction::PaddedFrame(_)));
+        // 完整 ApplicationData 记录 → Direct 帧
+        let mut app_body = vec![0x99u8; 100];
+        app_body.insert(0, 0x17);
+        let mut app = vec![0x17, 0x03, 0x03];
+        app.extend_from_slice(&(100u16).to_be_bytes());
+        app.extend_from_slice(&app_body[1..]);
+        let action = p.on_payload(&app);
+        let VisionWriteAction::PaddedFrame(frame) = action else {
+            panic!("应发出收束填充帧");
+        };
+        // 第二帧（UUID 已随首帧消耗）→ 命令在 [0]
+        assert_eq!(frame[0], COMMAND_PADDING_DIRECT, "TLS1.3 内层 → Direct");
+        assert!(!p.padding_active());
+        assert!(p.direct_switched());
+        // 切换后裸传
+        assert!(matches!(p.on_payload(b"raw"), VisionWriteAction::Raw(_)));
+    }
+
+    #[test]
+    fn policy_tls12_end_switch() {
+        let mut p = VisionWritePolicy::new(UUID);
+        let mut sh = vec![0x16, 0x03, 0x03, 0x00, 0x20, 0x02];
+        sh.resize(0x25, 0u8);
+        let a = p.on_payload(&sh);
+        assert!(matches!(a, VisionWriteAction::PaddedFrame(_)));
+        // TLS1.2 的 ApplicationData 完整记录 → End（留在外层 TLS 内）
+        let app = vec![0x17, 0x03, 0x03, 0x00, 0x02, 1, 2];
+        let action = p.on_payload(&app);
+        let VisionWriteAction::PaddedFrame(frame) = action else {
+            panic!("应发出收束填充帧");
+        };
+        // 第二帧（UUID 已随首帧消耗）→ 命令在 [0]
+        assert_eq!(frame[0], COMMAND_PADDING_END, "TLS1.2 内层 → End");
+        assert!(!p.padding_active());
+        assert!(!p.direct_switched());
+        assert!(matches!(
+            p.on_payload(b"still-tls"),
+            VisionWriteAction::PlainTls(_)
+        ));
+    }
+
+    /// 面级 EOF 收束：对端握手后直接丢弃连接（不发 close_notify）——
+    /// read_tls_into 须在时限内返回 Ok(0)（对端 EOF 口径）；此前实现
+    /// 在「TCP 已 EOF、rustls 恒 WouldBlock」态下 wake 自旋烧 CPU 悬挂。
+    #[tokio::test]
+    async fn face_surfaces_eof_when_peer_closes_without_close_notify() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::CertificateDer;
+
+        use crate::fingerprint::TlsFingerprint;
+        use crate::outbound::reality::handshake;
+        use crate::tls::{profile_client_config, tls_crypto_provider};
+
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("自签");
+        let certs: Vec<CertificateDer<'static>> =
+            rustls::pki_types::CertificateDer::pem_slice_iter(certified.cert.pem().as_bytes())
+                .collect::<Result<_, _>>()
+                .expect("证书 PEM");
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(
+            certified.key_pair.serialize_pem().as_bytes(),
+        )
+        .expect("私钥");
+        let server_config = rustls::ServerConfig::builder_with_provider(tls_crypto_provider())
+            .with_safe_default_protocol_versions()
+            .expect("版本")
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("服务端装配");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().unwrap();
+        // 服务端：握手完成后立即丢弃（无 close_notify——TCP FIN 直接收束）
+        tokio::spawn(async move {
+            if let Ok((tcp, _)) = listener.accept().await {
+                let conn = rustls::ServerConnection::new(std::sync::Arc::new(server_config))
+                    .expect("服务端连接");
+                let _tls = handshake(tcp, conn).await;
+                // drop：不发 close_notify
+            }
+        });
+
+        let tcp = TcpStream::connect(addr).await.expect("dial");
+        let config = profile_client_config(true, None, TlsFingerprint::None).expect("客户端装配");
+        let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("SNI");
+        let conn = rustls::ClientConnection::new(config, server_name).expect("客户端连接");
+        let (tcp, conn) = handshake(tcp, conn).await.expect("TLS 握手").into_parts();
+        let mut face = VisionTlsFace::new(tcp, conn);
+
+        let mut buf = [0u8; 16];
+        let n = timeout(Duration::from_secs(2), face.read_tls_into(&mut buf))
+            .await
+            .expect("面读须收束（不得 WouldBlock 自旋悬挂）")
+            .expect("面读不报错");
+        assert_eq!(n, 0, "对端 EOF 面须以 0 字节呈现");
+    }
 }
