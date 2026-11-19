@@ -1311,13 +1311,17 @@ mod tests {
     const SNELL_PEER_PSK: &str = "rillane-peer-psk-2026";
 
     async fn snell_peer_ready() -> bool {
+        // 对端缺席判据必须穿透 timeout 外壳看 connect 本身：timeout 对「立即
+        // 拒连」包成 Ok(Err(refused))，外层 is_ok() 恒真——此前判据只对挂死
+        // （防火墙黑洞）跳过，拒连面直接放行进 exchange 即 EOF 崩（无对端
+        // 的 CI runner 上必红）。unwrap_or(false) = 挂死超时也判缺席。
         tokio::time::timeout(Duration::from_millis(500), async {
             tokio::net::TcpStream::connect((SNELL_PEER_ADDR.0, SNELL_PEER_ADDR.1))
                 .await
-                .map(|_| ())
+                .is_ok()
         })
         .await
-        .is_ok()
+        .unwrap_or(false)
     }
 
     /// 官方对端全链：ConnectV2 请求（零长 userkey = 官方 UserKey 缺省口径）
