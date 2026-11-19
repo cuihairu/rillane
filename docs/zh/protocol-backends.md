@@ -641,17 +641,6 @@ armv7-ohos 桩）在对应小节如实记录。
 - 版本/许可/平台/公开 API/旁路/取消/统计/复用/UDP/服务端面：**不钉**——无后端交付；无载具 crate、无线镜像、无连接器面。
 - 复开条件：出现字节级线格式规范、非 GPL 参考实现、或维护中的许可兼容 Rust sudoku 协议库——三者任一即解锁梯子。
 
-
-
-- **结论**：**无后端——自写梯子开启**（RIL-116，评估留证 2026-11-18；尚无交付，无目录条目、无 IR 变体）。评估扫查：
-  - crates.io（2026-11-18）：`mieru` 查询**零**匹配——任何形态（客户端/服务端/线格式 crate）的 Rust 实现都不存在。
-  - 参考实现是 **enfein/mieru**（GPL-3.0，Go，活跃——v3.39.0 2026-10-23）：socks5/HTTP(S) 代理**应用**而非库——包二进制属 openssh/Chromium 拒绝族（进程包装，非可嵌入流面），且无论许可如何都无库面可链。
-  - 与 naive 不同，线格式**有完整规范**：参考仓 `docs/protocol.md` 详列钥生成（hashedPassword = SHA-256(password ‖ 0x00 ‖ username)；timeSalt = 8 字节 BE unix 时间按 2 分钟取整后的 SHA-256；PBKDF2-SHA256 64 轮 → 32 字节钥；客户端/服务端时钟差须 ≤ ±4 分钟，服务端最多试 3 个 timeSalt）、AEAD = XChaCha20-Poly1305（24 字节 nonce；末 4 字节被替换为 SHA-256(username ‖ nonce[0..16]) 截断以加速用户查找）、段布局 `[padding0][nonce 0|24][enc metadata 32][tag 16][padding1][enc payload][tag 16][padding2]`、TCP nonce 演化（nonce 每方向只出现一次，逐次加密 +1）、单分片上限 32768 字节（低熵模式 32 为 32764）、UDP 逐段 nonce、三种 metadata 类型（session / session-close / error）含 session ID、序号、状态码与 payload/suffix 长度、低熵填充/编码模式（docs/traffic-pattern.md）。自写因此从官方规范出发——与 tuic 自写从 EAimTY SPEC.md 出发同一姿态。
-  - 验收锚：参考仓发布 linux-amd64 发行二进制（`mieru_3.39.0_linux_amd64.tar.gz`）——GPL 对端**进程**是仓内合法的（ssh 项即对系统 OpenSSH sshd 验收），且真实部署服务端是更强的锚级别。真机对端验收（对 Go 服务端的成功/失败/取消/统计）在本席可行。
-  - 首段自写范围（具名）：仅 TCP 客户端面——钥调度、会话建立与目标寻址、最小填充的段封帧、XChaCha20-Poly1305 nonce 演化、EOF/半关闭语义；低熵模式、UDP 面、服务端面各自验收轮之前具名不交付。
-- 版本/许可/平台/公开 API/旁路/取消/统计/复用/UDP/服务端面：**暂不钉**——无后端交付；首段落库时钉定（许可将为仓库许可，自写）。
-- 复开条件：无需——自写梯子已开启，规范与对端锚俱在；本项按实现项（自写）推进。
-
 ## shadowquic
 
 - **结论**：**库承载——`shadowquic` 0.4.12 连接器交付（RIL-118，交付 2026-11-18）**。评估扫查（2026-11-18，crates.io + 缓存源码核验 + 进程内探针）：`shadowquic`（MIT，crates.io 创建 2026-02-09，约 4 万下载，隔数日一发版，最新 2026-11-16）是该协议自身的 Rust 实现，也是唯一实现——客户端（`ShadowQuicClient`）与服务端（`ShadowQuicServer`）皆为可嵌入库面，且直连连接器路径无需该 crate 的应用机械（`Manager`/SOCKS 挂具）：`ShadowQuicClient::new(cfg, resolver)` → `get_conn()`（地址解析 → QUIC 连接——直连路径逐流新建 QUIC 连接，zero_rtt 启用时握手 0-RTT 复用（探针实测二次 `get_conn()` 0.64ms）；客户端内 `prepare_conn` 的连接缓存属应用机械面，直连路径不经）→ `squic::outbound::connect_tcp(&conn, SocksAddr) -> Unsplit`（打开双向流并预编码 `SQConnect(dst)` 请求，AsyncRead/AsyncWrite）。伴生 crate `shadowquic-macros`（同版本，线格式 derive 支持）随行。crates.io 无其他实现该协议的 crate；README 具名的客户端生态（nekobox、v2rayN）经同一线格式互操。
@@ -684,6 +673,18 @@ armv7-ohos 桩）在对应小节如实记录。
 - UDP：未交付（catalog udp=false）——官方 UDP 载具（QUIC 上的 mieru 数据报面）未实现；mihomo `transport: udp` 导入具名拒绝（防静默按 TCP 误连致隧道必败），`udp` 键容忍读取
 - 服务端面：未交付（具名）——mita 仅作外部验收对端，rillane 入站面未编目 mieru 监听
 - 版本边界：仅 TCP 载具 + 标准握手（HANDSHAKE_STANDARD）；multiplexing 复用面、UDP 载具、端口区间键形（`port-range` 导入具名拒绝）、协议内建 ACK/窗口流控（连接器声明 win=u16::MAX、不回 ACK——小流捕获未出现 ACK 段，读取侧容忍跳过）皆为具名边界；元数据时间戳字段服务端不严格校验（容忍面，捕获实证）——连接器发分钟精度当前值
+
+## trusttunnel
+
+- **结论**：**无可用后端——自写梯子开启**（RIL-119，评估留证 2026-11-18；尚无交付，无目录条目、无 IR 变体）。评估扫查：
+  - crates.io（2026-11-18）：`trusttunnel` 查询**零**匹配——任何形态（客户端/服务端/线格式 crate）的 Rust 协议实现都不存在。
+  - 参考实现家族 TrustTunnel org（AdGuard VPN 开源，活跃——端点仓推送 2026-11-18）：**端点仓 TrustTunnel/TrustTunnel**（Rust，~3.6k 星，Apache-2.0）是 VPN **服务端应用**——其 `lib` crate（0.1.0，path-dep 未发行）是端点侧库面（tls_listener/tls_demultiplexer/tcp_forwarder/udp_forwarder/icmp_forwarder/socks5_forwarder 等——**只有终结侧，无客户端拨号 API**），且依赖栈对嵌入极不友好（build-dep `cc` + 仓内 C 源 net_utils.c、`boring` BoringSSL、`quiche` boringssl 载具——cmake/Go 构建链；`http 0.2`/`h2 0.3` 与本仓 `http 1.x`/`h2 0.4` semver 冲突）；**客户端仓 TrustTunnel/TrustTunnelClient 是 C++**（CMake/conan，Rust 侧仅 settings/deeplink-ffi/setup_wizard 小件）——库承载无 Rust 面可链。三仓许可皆 Apache-2.0（与 mieru GPL 拒绝族相反——许可不设障，对端二进制甚至可本席源码构建）。
+  - 线格式**有完整官方规范**：端点仓 `PROTOCOL.md` v1.0（2025-12-24，自述「使独立实现可与现有 TrustTunnel 客户端/端点互操作」）。TCP 面 = TLS（≥1.2，SNI 必发、**证书校验必须**）+ ALPN h2 的 **HTTP/2 CONNECT**（`:authority` = host:port，IPv6 加方括号；必发 `user-agent: <platform> <app>` 与 `proxy-authorization: Basic`）——200 即双向字节流、407 即认证失败（具名族）、其余非 200 一律连接失败；流关闭即连接拆除（END_STREAM 优雅 / RST abrupt）。UDP 面 = CONNECT 伪主机 `_udp2` 单流复用，上行包 `[len u32 BE][src 16B][sport u16][dst 16B][dport u16][appname-len u8][appname][payload]`（IPv4 零填充 16B——首 12B 全零且非 ::1 判 v4）、下行包**无 appname 字段**，端点按 4 元组跟踪（闲置 120s）。保留伪主机 `_icmp`（ICMP 复用——VPN 概念，非代理出口面）、`_check`（健康检查流）；HTTP/3（QUIC，ALPN h3）载具同有规范但本仓不选（见范围）。自写从官方规范出发——与 tuic/mieru 同姿态。
+  - 生态佐证：mihomo 已编 `type: trusttunnel`（Meta-Docs schema：server/port/username/password + TLS 面字段 sni/alpn/skip-cert-verify/name-cert-verify/client-fingerprint + health-check/udp + `quic: true`（H3 载具）/congestion-controller/bbr-profile + 复用旋钮 max-connections/min-streams/max-streams）；Surge（实验）与 Shadowrocket（商业）亦已支持——clash 订阅双向面有 schema 可落。
+  - 验收锚：端点仓发行 linux-x86_64 预构建二进制（`trusttunnel-linux-x86_64.tar.gz`）——Apache-2.0 对端**进程**仓内合法且强于 mieru 案（许可兼容、自签证书面 + Basic 凭据 + 本席回环完全可行；源码亦可本席构建备用）。真机对端验收（对官方端点的成功/失败/取消/统计）在本席可行。
+  - 首段自写范围（具名）：TCP 客户端面（rustls ALPN h2 + h2 CONNECT 载具——工作区既有 h2 0.4/tokio-rustls 0.26，无新依赖）+ UDP 数据报面（每关联一条 `_udp2` 流、共享 h2 会话、连接器伪造稳定伪源地址按 4 元组回拼）；`quic: true`（H3 载具）导入具名拒绝；复用旋钮（max-connections/min-streams/max-streams）与 health-check 键容忍读取不落行为；ICMP 面不交付（VPN 概念非代理出口）；服务端面不交付（端点是独立应用，mita 口径同例）。
+- 版本/许可/平台/公开 API/旁路/取消/统计/复用/UDP/服务端面：**暂不钉**——无后端交付；首段落库时钉定（许可将为仓库许可，自写；TLS 面用工作区既有 rustls/tokio-rustls，h2 载具用工作区既有 h2 0.4）。
+- 复开条件：无需——自写梯子已开启，官方规范与许可兼容对端锚俱在；本项按实现项（自写）推进。
 
 ## 公共传输面（跨协议共享）
 
