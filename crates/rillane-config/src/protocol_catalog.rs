@@ -266,6 +266,18 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "mieru",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#mieru",
+        },
+        // RIL-116：官方 protocol.md 自写 TCP 客户端面（GPL 源未读——纯
+        // spec + 官方二进制黑盒对端）；UDP 载具与服务端面未交付
+        udp: false,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/mieru.rs",
+        },
+    },
+    CatalogEntry {
         kind: "ssh",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#ssh",
@@ -341,6 +353,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Tuic { .. } => "tuic",
         EgressConfig::Snell { .. } => "snell",
         EgressConfig::ShadowQuic { .. } => "shadowquic",
+        EgressConfig::Mieru { .. } => "mieru",
         EgressConfig::Ssh { .. } => "ssh",
         EgressConfig::Tor { .. } => "tor",
         EgressConfig::Wireguard { .. } => "wireguard",
@@ -517,6 +530,12 @@ mod tests {
                 zero_rtt: None,
                 udp_over_stream: None,
             },
+            EgressConfig::Mieru {
+                server: "203.0.113.15".into(),
+                port: 23420,
+                username: "u".into(),
+                password: "pw".into(),
+            },
             EgressConfig::Ssh {
                 server: "203.0.113.13".into(),
                 port: 22,
@@ -570,7 +589,7 @@ mod tests {
                 }
             }
         }
-        for unknown in ["mieru", "ss", "trojan-go", ""] {
+        for unknown in ["ss", "trojan-go", ""] {
             assert_eq!(
                 admission(unknown),
                 Admission::Unknown,

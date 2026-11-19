@@ -54,8 +54,8 @@ use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
     Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts,
-    HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MixedIngress,
-    ShadowQuicConnector, ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress,
+    HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MieruConnector,
+    MixedIngress, ShadowQuicConnector, ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress,
     ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector,
     Socks5Connector, Socks5Ingress, Socks5UdpConnector, SshConnector, TlsConnectorFactory,
     TlsFingerprint, TorConnector, TransportKey, TransportPool, TrojanConnector, TrojanIngress,
@@ -3019,6 +3019,7 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::Tuic { server, .. }
         | EgressConfig::Snell { server, .. }
         | EgressConfig::ShadowQuic { server, .. }
+        | EgressConfig::Mieru { server, .. }
         | EgressConfig::Ssh { server, .. } => Some(server),
         // Tor 是网络不是服务器：无 server/port 字段（同 Reject/Direct 的
         // None 口径）
@@ -3320,6 +3321,12 @@ fn build_udp_connectors(
                 // 的两种 UDP 中继面（over-datagram / over-stream）未交付
                 // ——该节点 UDP 需求由 scan_udp_capability 按既有口径
                 // 构建期报错
+                None
+            }
+            EgressConfig::Mieru { .. } => {
+                // Mieru UDP 判负（RIL-116）：TCP 载具仅交付（官方默认
+                // MULTIPLEXING_OFF 同形）；UDP 载具未交付——该节点 UDP 需求
+                // 由 scan_udp_capability 按既有口径构建期报错
                 None
             }
             EgressConfig::Ssh { .. } => {
@@ -4085,6 +4092,27 @@ fn build_egress_outputs(
                         zero_rtt.unwrap_or(false),
                     )
                     .with_context(|| format!("节点 {} 的 shadowquic 配置无效", desc.name))?,
+                );
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Mieru {
+                server,
+                port,
+                username,
+                password,
+            } => {
+                // Mieru（RIL-116）：官方 protocol.md 自写 TCP 客户端面
+                // （评估与探针留证 protocol-backends.md#mieru）。空用户名/
+                // 密码/服务器校验归 new 内（节点级失败不拖垮整份订阅）；
+                // UDP 载具未交付（catalog udp=false）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    MieruConnector::new(server.clone(), *port, username.clone(), password.clone())
+                        .with_context(|| format!("节点 {} 的 mieru 配置无效", desc.name))?,
                 );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),

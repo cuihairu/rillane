@@ -2474,6 +2474,19 @@ pub enum EgressConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         udp_over_stream: Option<bool>,
     },
+    /// Mieru 出口（RIL-116）：官方 protocol.md 自写 TCP 客户端面
+    /// （PBKDF2-SHA256 2 分钟时间盐钥 + XChaCha20Poly1305 段流 + 隧道内
+    /// SOCKS5 请求/回复——评估与探针留证 protocol-backends.md#mieru）。
+    /// 仅 TCP 载具；UDP 载具与服务端面未交付（catalog udp=false）；
+    /// multiplexing/udp 键容忍读取不落行为（官方默认即 MULTIPLEXING_OFF
+    /// 同形：每流一条 wire 连接）。凭据错误在 openSessionResponse 钉钥
+    /// 期暴露（连接期具名失败）。
+    Mieru {
+        server: String,
+        port: u16,
+        username: String,
+        password: String,
+    },
     /// SSH-2 出口（RIL-113）：russh 客户端面——主机钥钉扎必填（不钉扎
     /// 首用即信是具名拒绝的降级面）+ 认证恰一选一 + direct-tcpip 通道流。
     /// private_key 为 OpenSSH 格式文件路径，加密键须携口令解码（无口令

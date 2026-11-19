@@ -10,6 +10,7 @@ mod http;
 mod httpupgrade;
 pub(crate) mod hysteria;
 pub(crate) mod hysteria2;
+mod mieru;
 mod reality;
 mod shadowquic;
 mod shadowsocks;
@@ -46,6 +47,7 @@ pub use hysteria::{HysteriaConnector, HysteriaUdpConnector, HysteriaUdpRelay, Hy
 pub use hysteria2::{
     Hysteria2Connector, Hysteria2UdpConnector, Hysteria2UdpRelay, UdpSessionStats,
 };
+pub use mieru::MieruConnector;
 pub use reality::{
     derive_auth_key, extract_client_random, extract_session_id, extract_x25519_key_share,
     handshake, hmac_cert_tag, open_session_id, seal_session_id, zero_session_id_slot,

@@ -675,6 +675,25 @@ fn proxy_mapping(
             }
             Some(m)
         }
+        EgressConfig::Mieru {
+            server,
+            port,
+            username,
+            password,
+        } => {
+            // Mieru（RIL-116）：键形随 mihomo mieru schema。transport 落
+            // 显式 "tcp"（本仓仅 TCP 载具——落缺省同形键留显式记录）；
+            // multiplexing 不落键（本仓按官方默认 MULTIPLEXING_OFF 同形
+            // 交付，复用面未交付，缺省不落即等价）；udp 不落键（UDP 载具
+            // 未交付）
+            ins(&mut m, "type", "mieru");
+            ins(&mut m, "server", server);
+            ins(&mut m, "port", *port as u64);
+            ins(&mut m, "username", username);
+            ins(&mut m, "password", password);
+            ins(&mut m, "transport", "tcp");
+            Some(m)
+        }
         EgressConfig::Ssh {
             server,
             port,
@@ -1403,6 +1422,49 @@ mod tests {
                 udp_over_stream: None,
             },
             "sq-def 缺省面往返等值"
+        );
+    }
+
+    /// Mieru 导出往返（RIL-116）：键形落 mihomo mieru schema（transport
+    /// 显式 "tcp"——本仓仅 TCP 载具），且导出 YAML 经 ClashConverter 再
+    /// 解析回 Mieru IR 字段等值（真往返证据——multiplexing/udp 复用与
+    /// UDP 载具面未交付，缺省不落键）
+    #[test]
+    fn mieru_export_roundtrips_via_reparse() {
+        let cfg = ProjectConfig {
+            egress: vec![EgressDescriptor {
+                name: "mi-rt".into(),
+                spec: EgressConfig::Mieru {
+                    server: "mi.example.com".into(),
+                    port: 23420,
+                    username: "u".into(),
+                    password: "pw".into(),
+                },
+            }],
+            ..serde_yaml::from_str(
+                "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+            )
+            .unwrap()
+        };
+        let (yaml, report) = ClashExporter.export(&cfg).unwrap();
+        assert_eq!(report.exported_proxies, vec!["mi-rt"], "{yaml}");
+        assert!(yaml.contains("type: mieru"), "{yaml}");
+        assert!(yaml.contains("transport: tcp"), "{yaml}");
+        assert!(!yaml.contains("multiplexing"), "复用面未交付不落键: {yaml}");
+        assert!(!yaml.contains("udp"), "UDP 载具未交付不落键: {yaml}");
+
+        // 再解析回 IR：字段等值（真往返）
+        let parsed = ClashConverter::new().parse(&yaml).unwrap();
+        let rillane = ClashConverter::new().convert_to_rillane(&parsed).unwrap();
+        assert_eq!(
+            rillane.egress[0].spec,
+            EgressConfig::Mieru {
+                server: "mi.example.com".into(),
+                port: 23420,
+                username: "u".into(),
+                password: "pw".into(),
+            },
+            "mi-rt 往返等值"
         );
     }
 

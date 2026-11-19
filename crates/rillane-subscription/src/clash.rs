@@ -96,6 +96,7 @@ pub enum ClashProxyType {
     Socks5,
     Snell,
     ShadowQuic,
+    Mieru,
     Ssh,
     Hysteria,
     Hysteria2,
@@ -249,6 +250,16 @@ pub struct ClashProxy {
         alias = "quic_versions"
     )]
     pub quic_versions: Option<Vec<String>>,
+    /// Mieru: 载具传输（Clash 规范键 `transport`，mihomo mieru schema
+    /// tcp/udp——本仓仅交付 TCP 载具，显式 udp 导入点名拒绝；缺省 tcp
+    /// 同形透传）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// Mieru: 多路复用级别（Clash 规范键 `multiplexing`，mihomo mieru
+    /// schema MULTIPLEXING_OFF/HIGH/LOW——本仓按官方默认 OFF 同形每流一
+    /// wire 连接交付，复用面未交付，容忍读取不落行为）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiplexing: Option<String>,
     /// 加密（用于 VMess）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypt: Option<String>,
@@ -2302,6 +2313,39 @@ impl ClashConverter {
                     udp_over_stream: proxy.udp_over_stream,
                 })
             }
+            ClashProxyType::Mieru => {
+                let username = proxy
+                    .username
+                    .clone()
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| anyhow!("Mieru 缺少 username"))?;
+                let password = proxy
+                    .password
+                    .clone()
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| anyhow!("Mieru 缺少 password"))?;
+                // 载具边界（RIL-116 评估留证 protocol-backends.md#mieru）：
+                // 仅交付 TCP 载具；显式 udp 点名拒绝（防静默按 TCP 误连致
+                // 隧道必败）。缺省/显式 tcp 同形透传
+                if let Some(t) = &proxy.transport {
+                    if !t.eq_ignore_ascii_case("tcp") {
+                        return Err(anyhow!("Mieru transport {t} 未交付（仅 TCP 载具）"));
+                    }
+                }
+                // 端口区间键形（mihomo `port-range`，alias 入 mport）：
+                // 单端口交付面，携带即点名拒绝
+                if proxy.mport.is_some() {
+                    return Err(anyhow!("Mieru port-range 端口区间未交付（仅单端口）"));
+                }
+                // multiplexing 键容忍读取不落行为（官方默认 MULTIPLEXING_OFF
+                // 同形——每流一条 wire 连接；复用面未交付）
+                Ok(EgressConfig::Mieru {
+                    server: proxy.server.clone(),
+                    port: proxy.port,
+                    username,
+                    password,
+                })
+            }
             ClashProxyType::Ssh => {
                 // 主机钥钉扎必填（RIL-113 评估留证 protocol-backends.md#ssh）：
                 // mihomo 缺省首用即信，本仓按 TOFU 判负口径拒绝无钉扎节点
@@ -2739,6 +2783,14 @@ impl ClashConverter {
                 proxy.username.as_deref().is_some_and(|u| !u.is_empty())
                     && proxy.password.as_deref().is_some_and(|p| !p.is_empty())
             }
+            // Mieru：认证面恰 username/password（缺失即无效节点按有效性
+            // 过滤丢弃）。transport 显式 udp / 端口区间键形不在此判——
+            // 凭据齐全的边界节点须抵达转换面具名拒绝（防静默按有效性
+            // 丢弃掩埋真实原因），与 quic-versions 边界同姿态
+            ClashProxyType::Mieru => {
+                proxy.username.as_deref().is_some_and(|u| !u.is_empty())
+                    && proxy.password.as_deref().is_some_and(|p| !p.is_empty())
+            }
             // SSH：钉扎必填 + username 必填 + 认证恰一选一（异或——双带/
             // 双缺均判负，与转换面具名拒绝同口径）
             ClashProxyType::Ssh => {
@@ -2775,6 +2827,7 @@ impl ClashConverter {
             ClashProxyType::Socks5 => "SOCKS5",
             ClashProxyType::Snell => "Snell",
             ClashProxyType::ShadowQuic => "ShadowQUIC",
+            ClashProxyType::Mieru => "Mieru",
             ClashProxyType::Ssh => "SSH",
             ClashProxyType::Hysteria => "Hysteria",
             ClashProxyType::Hysteria2 => "Hysteria2",
@@ -3575,6 +3628,98 @@ rules: []
                 .dropped_nodes
                 .iter()
                 .any(|(n, r)| n == "sq-edge" && r.contains("有效性")),
+            "丢弃须可见: {:?}",
+            report.dropped_nodes
+        );
+    }
+
+    #[test]
+    fn test_mieru_converted_to_egress() {
+        // RIL-116：mieru 键形（username/password/transport tcp +
+        // multiplexing 容忍读取）→ Mieru IR
+        let yaml_content = r#"
+proxies:
+  - name: "test-mi"
+    type: mieru
+    server: mi.example.com
+    port: 23420
+    username: "u"
+    password: "hunter2"
+    transport: tcp
+    multiplexing: MULTIPLEXING_OFF
+
+proxy-groups: []
+rules: []
+        "#;
+        let converter = ClashConverter::new();
+        let clash_config = converter.parse(yaml_content).unwrap();
+        let rillane_config = converter.convert_to_rillane(&clash_config).unwrap();
+        let mi = rillane_config
+            .egress
+            .iter()
+            .find(|e| e.name == "test-mi")
+            .expect("mieru egress");
+        assert_eq!(
+            mi.spec,
+            EgressConfig::Mieru {
+                server: "mi.example.com".into(),
+                port: 23420,
+                username: "u".into(),
+                password: "hunter2".into(),
+            },
+            "mieru IR 等值（multiplexing 容忍读取不落 IR）"
+        );
+    }
+
+    #[test]
+    fn test_mieru_boundary_configs_refused_by_name() {
+        // 类型已支持 → 配置级错误为硬错误（宽松模式亦整体拒绝，RIL-093/G1-6）
+        let base = |extra: &str| {
+            format!(
+                r#"
+proxies:
+  - name: "mi-edge"
+    type: mieru
+    server: mi.example.com
+    port: 23420
+    username: "u"
+    password: "hunter2"
+{}
+proxy-groups: []
+rules: []
+"#,
+                extra
+            )
+        };
+        let converter = ClashConverter::new();
+        // transport udp（UDP 载具未交付）具名拒绝
+        let clash_config = converter.parse(&base("    transport: udp\n")).unwrap();
+        let err = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut Default::default())
+            .expect_err("transport udp 须拒绝");
+        assert!(err.to_string().contains("TCP"), "实际: {err:#}");
+        // port-range 端口区间键形（alias 入 mport）具名拒绝
+        let clash_config = converter
+            .parse(&base("    port-range: 23420-23430\n"))
+            .unwrap();
+        let err = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut Default::default())
+            .expect_err("port-range 须拒绝");
+        assert!(err.to_string().contains("单端口"), "实际: {err:#}");
+        // 缺 password：先被有效性校验拦下（过滤默认开）——节点丢弃且损失可见
+        let clash_config = converter
+            .parse(&base("").replace(r#"    password: "hunter2""#, ""))
+            .unwrap();
+        let mut report = Default::default();
+        let out = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut report)
+            .unwrap();
+        assert!(out.is_empty(), "缺 password 节点不得产出");
+        assert!(
+            report
+                .dropped_nodes
+                .iter()
+                .any(|(n, r)| n == "mi-edge" && r.contains("有效性")),
             "丢弃须可见: {:?}",
             report.dropped_nodes
         );

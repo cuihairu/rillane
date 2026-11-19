@@ -669,6 +669,22 @@ armv7-ohos 桩）在对应小节如实记录。
 - 服务端面：未交付（具名）——库的 `ShadowQuicServer` 仅作进程内验收镜像对端（anytls 同姿态）
 - 版本边界：QUIC 版本族仅 v1——mihomo `quic-versions` 键缺省 `[v1]`；显式非 v1（v2 为不同线格式族）导入期具名拒绝。mihomo 私有调参键（`up`/`down` brutal、`cwnd`、`bbr-profile`、`recv-window` 族、`max-datagram-frame-size`、`max-open-streams`、`disable-mtu-discovery`）不入 IR——具名边界
 
+## mieru
+
+- **结论**：自写（RIL-116，交付 2026-11-18）——仅以官方 protocol.md 文档面为实现真源，**GPL 源码未读未派生**（ssh/snell 先例口径：官方 GPL 参考二进制作外部黑盒对端合法，源码不进仓）。crates.io 无该协议的 Rust 实现（评估扫查 2026-11-18：`mieru`/`mita`/相关查询零命中协议 crate）。线格式全部经官方参考二进制 **mieru/mita v3.39.0 的 wire 捕获逐字节 AEAD 验证钉定**（本席常驻对端 `/tmp/mierupeer`：mita 服务端 127.0.0.1:23420 + mieru 客户端 daemon（socks5 11080）+ 被动字节日志中继，捕获留证 `cap2/`；两段干净探针会话，c2s/s2c 双向）——密钥排程、盐取整、nonce 形、计数方向、段框架、负载段省略规则、SOCKS5 隧道内载荷、关闭握手次序皆为捕获实证，非文档推断
+- **版本**：仓库内实现（无第三方协议依赖）；加密载体 `chacha20poly1305` 0.10（XChaCha20Poly1305 无条件导出——24 字节 nonce AEAD，官方 protocol.md 口径）+ 工作区既有 `hmac`/`sha2`（PBKDF2-SHA256 手写单块面）
+- **许可**：仓库许可（自写）；载体 chacha20poly1305/hmac/sha2 MIT OR Apache-2.0——官方实现 GPL-3.0 仅作黑盒对端，不进依赖树
+- **平台**：全平台（纯 Rust，tokio TcpStream 基座，六平台面无平台门）
+- **公开 API**：`MieruConnector`（crates/rillane-protocols/src/outbound/mieru.rs）——线格式同文件。密钥 = PBKDF2-SHA256(hashedPassword, timeSalt, 64, 32)，hashedPassword = SHA-256(password ‖ 0x00 ‖ username)（官方 `mieru describe config` 回显钉定向量），timeSalt = SHA-256(be64(round_2min(unix)))，round_2min 半分钟向上取整；接收侧 3 盐候选 [R−120, R, R+120]（跨分钟会话容忍 ±4 分钟窗口）逐试钉定。nonce 24B = 随机 20B + SHA-256(username ‖ nonce[0..16])[0..4] 用户定位标记（双向捕获偏移 0 命中）；计数器随每次加密大端 +1（payload tag 于 meta nonce +1 命中、小端失配——捕获钉定），实现取尾 8 字节口径（捕获的计数范围区分不了全 24 位与尾 64 位，真实计数永不达 2^64，两种宽度逐字节同形）。段框架 = [nonce 仅每方向首段][meta 密文 32][tag 16][padding1 仅数据段][payload 密文][tag 仅 plen>0][padding2]——**plen=0 时 payload 段整个不存在**（捕获实证：openSessionResponse 134B = 24+48+62 padding2）。openSessionRequest 载荷 = 原样 SOCKS5 请求字节（捕获向量 `05 01 00 03 0e "api.github.com" 01bb` / `05 01 00 01 7f000001 46a0`）；**mita 把 SOCKS5 回复以首个 dataS2C 载荷原样注入隧道**（BND.ADDR/BND.PORT = 目标连接结果）——连接器消化该回复（VER/REP/ATYP 解析，REP≠0 具名拒绝——目标不可达浮出，绝不漏回复字节进隧道）后即纯目标字节面。关闭握手：双侧各发 closeSessionRequest(4) + 回 closeSessionResponse(5)，顺序容忍（conn1 服务端先关、conn2 客户端先关捕获均实证）；连接器 poll_shutdown 发 4（协议半关，**不发 TCP FIN**——回程 5/4 还要写回）+ 读侧见对端 4 即回 5 并 EOF
+- **旁路**：连接器同时拥有 TCP 拨号与段加密——无底层 socket 旁路；mieru 是裸 TCP 承载（无传输组合面），传输池/拨号策略组合不适用（snell 同口径如实记录）
+- **取消**：分阶段拨号超时（连接 15s、openSessionResponse 15s）；凭据错误在首段钉钥期具名失败（盐候选逐试 + nonce 标记校验）；关闭握手为协议具名拆除（双向 4/5），wire TCP 随流 drop 收口
+- **统计**：FlowReport 上/下行字节（copy_bidirectional 语义）；协议无逐段观测点，失败以 io::Error 经统一 EgressConnector 面透出（observed 口径）
+- **复用**：官方默认即 MULTIPLEXING_OFF 同形——每流一条 wire 连接、每连接新 nonce（捕获两连接 nonce 相异实证）；协议内建多路复用面未交付（具名）；无预热组合。mihomo `multiplexing` 键导入容忍读取不落行为
+- 验收（本席实机）：`connector_roundtrip_via_in_process_echo`（进程内镜像服务器回环——镜像侧实现同一捕获钉定线格式的服务端面：盐候选钉钥 + SOCKS5 隧道内回复 + 双向关闭握手；文本 + 10KB 越段界逐字节还原 + FlowReport 对账）、`tunnel_socks5_rep_nonzero_fail_named`（REP≠0 具名拒绝）、`wrong_credentials_fail_named`（错凭据快速具名失败不悬挂）、`real_official_mita_server_roundtrip`（**官方 mita v3.39.0 实机对端**——缺席记名跳过；用户 ril116，allowLoopbackIP，回声上游，"official hello" + 10KB 逐字节还原）。向量测试钉定密钥排程（官方 describe config 回显）、段元数据线格式（捕获 hex 逐字段解码 + 重编码等值）、socks5 请求构造（捕获向量）、盐取整边界（半分钟向上）
+- UDP：未交付（catalog udp=false）——官方 UDP 载具（QUIC 上的 mieru 数据报面）未实现；mihomo `transport: udp` 导入具名拒绝（防静默按 TCP 误连致隧道必败），`udp` 键容忍读取
+- 服务端面：未交付（具名）——mita 仅作外部验收对端，rillane 入站面未编目 mieru 监听
+- 版本边界：仅 TCP 载具 + 标准握手（HANDSHAKE_STANDARD）；multiplexing 复用面、UDP 载具、端口区间键形（`port-range` 导入具名拒绝）、协议内建 ACK/窗口流控（连接器声明 win=u16::MAX、不回 ACK——小流捕获未出现 ACK 段，读取侧容忍跳过）皆为具名边界；元数据时间戳字段服务端不严格校验（容忍面，捕获实证）——连接器发分钟精度当前值
+
 ## 公共传输面（跨协议共享）
 
 | 库 | 版本（要求 / lock 实测） | 许可 | 角色 |

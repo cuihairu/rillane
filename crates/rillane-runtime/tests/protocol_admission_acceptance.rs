@@ -120,7 +120,7 @@ fn hysteria2_node() -> EgressDescriptor {
 /// 回归由目录单测钉住）；目录外类型恒 Unknown（订阅转换/诊断面点名）。
 #[test]
 fn catalog_entries_all_admitted_with_evidence() {
-    assert_eq!(protocol_catalog::CATALOG.len(), 18, "全目录十八条");
+    assert_eq!(protocol_catalog::CATALOG.len(), 19, "全目录十九条");
     for e in protocol_catalog::CATALOG {
         let evidence = e
             .evidence()
@@ -227,7 +227,7 @@ fn catalog_entries_all_admitted_with_evidence() {
         "shadowquic 后端 = shadowquic 库承载: {:?}",
         sq.backend
     );
-    for unknown in ["mieru", "ss", ""] {
+    for unknown in ["ss", ""] {
         assert_eq!(
             protocol_catalog::admission(unknown),
             protocol_catalog::Admission::Unknown,

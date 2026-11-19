@@ -124,6 +124,8 @@ time = "0.3"
 # VMess AEAD（RustCrypto 面：GCM/ChaCha20Poly1305/SHAKE128/ECB 单块/IEEE CRC32）
 aes = "0.8"
 aes-gcm = "0.10"
+# chacha20poly1305 0.10：XChaCha20Poly1305 无条件导出（Mieru 出站
+# outbound/mieru.rs 用其 24 字节 nonce AEAD——官方 protocol.md 口径）
 chacha20poly1305 = "0.10"
 sha3 = "0.10"
 crc32fast = "1.4"
