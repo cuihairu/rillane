@@ -164,6 +164,7 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn now_minutes() -> u32 {
     (now_unix() / 60) as u32
 }
@@ -284,7 +285,7 @@ pub(crate) fn decode_meta(raw: &[u8; META_LEN]) -> Result<Meta> {
     let timestamp = be_u32(&raw[2..6]);
     let session_id = be_u32(&raw[6..10]);
     let seq = be_u32(&raw[10..14]);
-    if matches!(ptype, 2 | 3 | 4 | 5) {
+    if matches!(ptype, 2..=5) {
         let (status, payload_len, suffix_len) =
             (raw[14], u16::from_be_bytes([raw[15], raw[16]]), raw[17]);
         return Ok(Meta::Session(SessionMeta {

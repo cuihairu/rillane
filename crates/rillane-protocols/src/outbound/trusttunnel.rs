@@ -240,7 +240,7 @@ impl DialConfig {
     /// CONNECT 一条流并校验 200（authority = host:port 或保留伪主机）。
     /// 407 = 认证具名失败族；其余非 200 = 连接失败（spec §5.2）。
     async fn connect_stream(&self, authority: &str) -> Result<(SendStream<Bytes>, RecvStream)> {
-        let mut client = self.dial_h2_client().await?;
+        let client = self.dial_h2_client().await?;
         let uri = Uri::builder()
             .authority(authority)
             .build()

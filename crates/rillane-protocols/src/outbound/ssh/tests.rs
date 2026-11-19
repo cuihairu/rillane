@@ -188,8 +188,10 @@ fn constructor_requires_pin_and_exactly_one_auth() {
 
 /// 整链回环（公钥认证）：sshd 握手 → 钉扎命中 → publickey 认证 →
 /// direct-tcpip 通道 → 双向转发逐字节还原（含多写大块）+ 字节计数。
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn real_sshd_roundtrip_publickey_auth() {
+    #[allow(clippy::await_holding_lock)]
     let _serial = PEER_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     if !peer_ready() {
         eprintln!("跳过：真实 sshd 对端缺席 (127.0.0.1:23411)");
@@ -237,8 +239,10 @@ async fn real_sshd_roundtrip_publickey_auth() {
 
 /// 整链回环（加密私钥 + 口令解码）：OpenSSH KDF 加密键携口令解码后
 /// 同面走通。
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn real_sshd_roundtrip_encrypted_key() {
+    #[allow(clippy::await_holding_lock)]
     let _serial = PEER_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     if !peer_ready() {
         eprintln!("跳过：真实 sshd 对端缺席 (127.0.0.1:23411)");
@@ -282,8 +286,10 @@ async fn real_sshd_roundtrip_encrypted_key() {
 
 /// 钉扎不符：连接期拒绝且具名透出期望/实际指纹（观测槽跨 handler
 /// 消费留存）。
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn wrong_host_key_pin_refused_with_named_error() {
+    #[allow(clippy::await_holding_lock)]
     let _serial = PEER_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     if !peer_ready() {
         eprintln!("跳过：真实 sshd 对端缺席 (127.0.0.1:23411)");
@@ -310,8 +316,10 @@ async fn wrong_host_key_pin_refused_with_named_error() {
 
 /// 错密码：真实 sshd 服务端拒绝（PasswordAuthentication yes）→ 认证
 /// 被拒具名透出。
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn wrong_password_refused_by_real_sshd() {
+    #[allow(clippy::await_holding_lock)]
     let _serial = PEER_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     if !peer_ready() {
         eprintln!("跳过：真实 sshd 对端缺席 (127.0.0.1:23411)");
@@ -335,8 +343,10 @@ async fn wrong_password_refused_by_real_sshd() {
 
 /// 加密键口令面：无口令具名拒绝；错口令解码失败具名拒绝（两例均在
 /// 连接 + 钉扎命中后、认证前发生，需真实对端）。
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn encrypted_key_passphrase_faces_named_refusal() {
+    #[allow(clippy::await_holding_lock)]
     let _serial = PEER_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     if !peer_ready() {
         eprintln!("跳过：真实 sshd 对端缺席 (127.0.0.1:23411)");
@@ -381,8 +391,10 @@ async fn encrypted_key_passphrase_faces_named_refusal() {
 
 /// 取消面 + 资源释放：转发任务中途撤销 → direct-tcpip 通道收束
 /// （echo 对端读到 EOF 退出）——通道与 SSH 连接不悬挂。
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn cancel_mid_relay_closes_channel_and_releases_peer() {
+    #[allow(clippy::await_holding_lock)]
     let _serial = PEER_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     if !peer_ready() {
         eprintln!("跳过：真实 sshd 对端缺席 (127.0.0.1:23411)");
@@ -429,8 +441,10 @@ async fn cancel_mid_relay_closes_channel_and_releases_peer() {
 }
 
 /// 私钥文件缺失：读取失败具名透出（连接 + 钉扎命中后到达）。
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn missing_key_file_named_refusal() {
+    #[allow(clippy::await_holding_lock)]
     let _serial = PEER_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     if !peer_ready() {
         eprintln!("跳过：真实 sshd 对端缺席 (127.0.0.1:23411)");

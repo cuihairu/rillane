@@ -37,7 +37,9 @@ use std::{
 };
 
 use aes_gcm::{aead::Aead, Aes128Gcm, KeyInit, Nonce};
-use anyhow::{anyhow, bail, Context as _, Result};
+#[cfg(test)]
+use anyhow::anyhow;
+use anyhow::{bail, Context as _, Result};
 use argon2::{Algorithm, Argon2, Params, Version};
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -244,6 +246,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SnellStream<S> {
     /// 留在读缓冲经正常读面交付）或错误（code + SockString 消息，尾随
     /// 数据具名拒绝）。应答于下行首读同样经本机制惰性分发（`reply_step`）；
     /// 本方法只是把分发驱动到定局，供显式握手确认方使用。
+    #[cfg(test)]
     pub(crate) async fn read_reply(&mut self) -> Result<()> {
         self.rx.reply_armed = true;
         std::future::poll_fn(|cx| {
@@ -737,6 +740,7 @@ fn build_request(userkey: &str, host: &str, port: u16) -> Result<Vec<u8>> {
 /// 服务端面本段未交付，连接器侧无需读入站请求——仅镜像测试对端与布局
 /// 向量测试取用，故以 `cfg(test)` 圈定，非测试构建不留死码。
 #[cfg(test)]
+#[allow(dead_code)] // anyhow!/bail! 宏在测试体外的本函数中展开为 anyhow 路径
 fn parse_request(payload: &[u8]) -> Result<(Vec<u8>, String, u16)> {
     let bad = || anyhow!("Snell 请求负载非法");
     if payload.len() < 3 {

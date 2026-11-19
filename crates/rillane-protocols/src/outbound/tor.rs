@@ -173,12 +173,12 @@ impl EgressConnector for TorConnector {
         "tor"
     }
 
-    async fn forward(&self, mut flow: Flow) -> Result<FlowReport> {
+    async fn forward(&self, flow: Flow) -> Result<FlowReport> {
         let client = self.client().await?;
         // 逐流隔离：流间不共享电路（隔离客户端共享目录信息，无重复引导）
         let iso = client.isolated_client();
         let target = format!("{}:{}", flow.target.host, flow.target.port);
-        let mut stream = tokio::time::timeout(
+        let stream = tokio::time::timeout(
             TOR_STREAM_TIMEOUT,
             iso.connect((flow.target.host.as_str(), flow.target.port)),
         )

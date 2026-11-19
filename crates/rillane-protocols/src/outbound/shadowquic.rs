@@ -95,6 +95,8 @@ pub struct ShadowQuicConnector {
 impl ShadowQuicConnector {
     /// 构建期校验（配置错误在启动时暴露，而非首个连接时）：认证面非空、
     /// 拥塞控制在支持集内、ALPN 非空表。
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         server: String,
         port: u16,
