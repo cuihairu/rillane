@@ -78,6 +78,11 @@ ssh-key = "=0.7.0-rc.12"
 arti-client = { version = "0.48", default-features = false, features = ["tokio", "rustls", "compression"] }
 tor-chanmgr = "0.48"
 tor-rtcompat = "0.48"
+# tor-dirmgr→rusqlite 默认链系统 libsqlite3（-lsqlite3）：无头/交叉面无该系统库即链接炸
+# （2026-11-19 CI coverage 腿 6 个测试目标 `unable to find library -lsqlite3`）。直挂
+# bundled 特性让 libsqlite3-sys 从源码编 SQLite，链接不再依赖宿主机安装面，交叉目标
+# 同步受益；版本对齐锁内 0.38，仅特性面变更
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
 # QUIC Initial 解密（G0-3 sniff）：HKDF-SHA256 派生 Initial 密钥
 hkdf = "0.12"
 regex = "1.10"
