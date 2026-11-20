@@ -1583,7 +1583,7 @@ vless://eyJ2IjogIjIiLCAicHMiOiAiIn0=
         assert_eq!(p.host.as_deref(), Some("cdn.example.com"));
         assert_eq!(p.servername.as_deref(), Some("sni.example.com"));
         assert!(p.skip_cert_verify);
-        assert!(p.alpn.contains(&"h2".to_string()));
+        assert!(p.alpn.iter().any(|a| a == "h2"));
         assert!(p.tls);
 
         // VLESS

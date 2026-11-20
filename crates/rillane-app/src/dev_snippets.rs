@@ -324,8 +324,8 @@ mod tests {
         // 更新 → ± 并存
         let cur = "Host a\n    ProxyCommand old\n";
         let d = diff_preview(Some(cur), desired);
-        assert!(d.contains(&"+     ProxyCommand x".to_string()));
-        assert!(d.contains(&"-     ProxyCommand old".to_string()));
+        assert!(d.iter().any(|l| l.contains("ProxyCommand x")));
+        assert!(d.iter().any(|l| l.contains("ProxyCommand old")));
     }
 
     /// 写入计划：备份命名、幂等标记判定
