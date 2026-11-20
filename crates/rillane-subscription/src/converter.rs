@@ -1637,7 +1637,7 @@ vless://eyJ2IjogIjIiLCAicHMiOiAiIn0=
         assert_eq!(p.obfs_param.as_deref(), Some("ob"));
         assert_eq!(p.servername.as_deref(), Some("sni.example.com"));
         assert!(p.skip_cert_verify);
-        assert!(p.alpn.contains(&"h3".to_string()));
+        assert!(p.alpn.iter().any(|i| i == "h3"));
     }
 
     #[test]
