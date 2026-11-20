@@ -757,7 +757,7 @@ impl DomainPattern {
                     false
                 }
             }
-            DomainPattern::List { domains } => domains.contains(&domain.to_string()),
+            DomainPattern::List { domains } => domains.iter().any(|d| d == domain),
             DomainPattern::Wildcard { pattern } => {
                 // 简单的通配符实现 (只支持 * )
                 let pattern_parts: Vec<&str> = pattern.split('*').collect();

@@ -363,7 +363,7 @@ impl DomainPattern {
                     false
                 }
             }
-            DomainPattern::List { domains } => domains.contains(&domain.to_string()),
+            DomainPattern::List { domains } => domains.iter().any(|d| d == domain),
             DomainPattern::Wildcard { pattern } => {
                 let pattern_parts: Vec<&str> = pattern.split('*').collect();
                 if pattern_parts.len() == 2 {
