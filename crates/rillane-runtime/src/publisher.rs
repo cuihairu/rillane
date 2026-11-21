@@ -578,7 +578,7 @@ mod tests {
         // reclaim：孤儿清除 + retained 收敛到 1（最新退役）
         let removed = coord.reclaim(1).expect("reclaim");
         assert!(
-            removed.contains(&"orphan-gid".to_string()),
+            removed.iter().any(|i| i == "orphan-gid"),
             "孤儿清除: {removed:?}"
         );
         assert!(

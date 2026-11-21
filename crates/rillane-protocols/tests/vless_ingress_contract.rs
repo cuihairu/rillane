@@ -324,7 +324,7 @@ async fn tcp_roundtrip_carries_metadata_and_stats() {
     assert_eq!(ctx.target.port, echo.port());
     assert_eq!(ctx.target.proto, TargetProto::Tcp);
     assert!(
-        ctx.metadata.tags.contains(&"ingress:vless".to_string()),
+        ctx.metadata.tags.iter().any(|i| i == "ingress:vless"),
         "入口标签缺失：{:?}",
         ctx.metadata.tags
     );

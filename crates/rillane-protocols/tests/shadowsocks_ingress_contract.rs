@@ -276,7 +276,7 @@ async fn tcp_roundtrip_carries_metadata_and_stats() {
         assert!(
             ctx.metadata
                 .tags
-                .contains(&"ingress:shadowsocks".to_string()),
+                .iter().any(|i| i == "ingress:shadowsocks"),
             "入口标签缺失：{:?}",
             ctx.metadata.tags
         );
