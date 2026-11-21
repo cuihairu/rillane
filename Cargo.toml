@@ -39,7 +39,7 @@ bytes = "1.0"
 # proto-ipv4=IPv4 报文面（medium-ip 不隐含之，缺则 Ipv4Address/IpCidr 编译面不在）、
 # async=socket waker 注册（register_recv/send_waker 受 cfg(feature="async") 门控，
 # §2.9 SmolTcpStream 双缓冲唤醒面的支撑）
-smoltcp = { version = "0.14", features = ["std", "medium-ip", "socket-tcp", "proto-ipv4", "async"] }
+smoltcp = { version = "0.14", features = ["std", "medium-ip", "socket-tcp", "socket-udp", "socket-dns", "proto-ipv4", "async"] }
 tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "signal", "sync", "time", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }

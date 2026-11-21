@@ -43,6 +43,9 @@ tokio-rustls.workspace = true
 rustls.workspace = true
 webpki-roots.workspace = true
 
+# OpenConnect CSTP layer-3 bridge (userspace IP stack)
+smoltcp.workspace = true
+
 # SOCKS5 client
 tokio-socks.workspace = true
 

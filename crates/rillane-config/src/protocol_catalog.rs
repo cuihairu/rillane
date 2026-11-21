@@ -305,6 +305,20 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "openconnect",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#openconnect",
+        },
+        // RIL-121：CSTP 自写客户端面（真实对端 = apt ocserv 1.3.0，本地
+        // /home/cui/ocpeer；线格式对照 OpenConnect 源码 cstp.c/auth.c 核
+        // 读）；TCP 面交付（用户态 smoltcp 三层桥 + 隧道 DNS），UDP/QUIC
+        // 应用面、DTLS 数据面与系统 TUN 路线未交付
+        udp: false,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/openconnect.rs",
+        },
+    },
+    CatalogEntry {
         kind: "ssh",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#ssh",
@@ -383,6 +397,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Mieru { .. } => "mieru",
         EgressConfig::TrustTunnel { .. } => "trusttunnel",
         EgressConfig::Masque { .. } => "masque",
+        EgressConfig::OpenConnect { .. } => "openconnect",
         EgressConfig::Ssh { .. } => "ssh",
         EgressConfig::Tor { .. } => "tor",
         EgressConfig::Wireguard { .. } => "wireguard",
@@ -580,6 +595,14 @@ mod tests {
                 sni: Some("masque.example.test".into()),
                 skip_cert_verify: false,
                 uri_template: None,
+            },
+            EgressConfig::OpenConnect {
+                server: "203.0.113.20".into(),
+                port: 443,
+                username: "demo".into(),
+                password: "demo".into(),
+                sni: Some("openconnect.example.test".into()),
+                skip_cert_verify: false,
             },
             EgressConfig::Ssh {
                 server: "203.0.113.13".into(),

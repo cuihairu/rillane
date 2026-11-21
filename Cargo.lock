@@ -5978,6 +5978,7 @@ dependencies = [
  "sha3 0.10.9",
  "shadowquic",
  "shadowsocks",
+ "smoltcp 0.14.0",
  "ssh-key",
  "subtle",
  "thiserror 1.0.69",

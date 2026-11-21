@@ -12,6 +12,7 @@ pub(crate) mod hysteria;
 pub(crate) mod hysteria2;
 mod masque;
 mod mieru;
+mod openconnect;
 mod reality;
 mod shadowquic;
 mod shadowsocks;
@@ -50,6 +51,7 @@ pub use hysteria2::{
     Hysteria2Connector, Hysteria2UdpConnector, Hysteria2UdpRelay, UdpSessionStats,
 };
 pub use masque::{MasqueConnector, MasqueUdpConnector, MasqueUdpRelay, MasqueUdpStats};
+pub use openconnect::OpenConnectConnector;
 pub use mieru::MieruConnector;
 pub use reality::{
     derive_auth_key, extract_client_random, extract_session_id, extract_x25519_key_share,

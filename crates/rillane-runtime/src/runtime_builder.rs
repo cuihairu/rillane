@@ -55,7 +55,8 @@ use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
     Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts,
     HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MasqueConnector,
-    MasqueUdpConnector, MieruConnector, MixedIngress, ShadowQuicConnector, ShadowTlsIngress,
+    MasqueUdpConnector, MieruConnector, MixedIngress, OpenConnectConnector, ShadowQuicConnector,
+    ShadowTlsIngress,
     ShadowsocksConnector, ShadowsocksIngress, ShadowsocksShadowTlsConnector,
     ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector, Socks5Connector, Socks5Ingress,
     Socks5UdpConnector, SshConnector, TlsConnectorFactory, TlsFingerprint, TorConnector,
@@ -3023,6 +3024,7 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::Mieru { server, .. }
         | EgressConfig::TrustTunnel { server, .. }
         | EgressConfig::Masque { server, .. }
+        | EgressConfig::OpenConnect { server, .. }
         | EgressConfig::Ssh { server, .. } => Some(server),
         // Tor 是网络不是服务器：无 server/port 字段（同 Reject/Direct 的
         // None 口径）
@@ -3378,6 +3380,13 @@ fn build_udp_connectors(
                 )
                 .with_context(|| format!("节点 {} 的 masque 配置无效", desc.name))?;
                 Some(Arc::new(conn))
+            }
+            EgressConfig::OpenConnect { .. } => {
+                // OpenConnect UDP 判负（RIL-121）：CSTP 是三层 IP 隧道——UDP
+                // 应用面走 IP 隧道由用户态 smoltcp 栈承载，但本仓未交付
+                // UDP 应用面（catalog udp=false）；节点级 UDP 需求由
+                // scan_udp_capability 按既有口径构建期报错
+                None
             }
             EgressConfig::Ssh { .. } => {
                 // SSH UDP 判负（RIL-113）：direct-tcpip 仅 TCP 面——该节点
@@ -4226,6 +4235,36 @@ fn build_egress_outputs(
                         uri_template.clone(),
                     )
                     .with_context(|| format!("节点 {} 的 masque 配置无效", desc.name))?,
+                );
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::OpenConnect {
+                server,
+                port,
+                username,
+                password,
+                sni,
+                skip_cert_verify,
+            } => {
+                // OpenConnect（RIL-121）：CSTP 三层 VPN 自写客户端面——TCP
+                // 面用户态 smoltcp 三层桥 + 隧道 DNS（评估与真机对端留证
+                // protocol-backends.md#openconnect）；UDP 应用面归 UDP 工厂
+                // 臂（判负）。构建期校验归 new 内（节点级失败不拖垮整份订阅）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    OpenConnectConnector::new(
+                        server.clone(),
+                        *port,
+                        username.clone(),
+                        password.clone(),
+                        sni.clone(),
+                        *skip_cert_verify,
+                    )
+                    .with_context(|| format!("节点 {} 的 openconnect 配置无效", desc.name))?,
                 );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),

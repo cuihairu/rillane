@@ -2534,6 +2534,29 @@ pub enum EgressConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         uri_template: Option<String>,
     },
+    /// OpenConnect 出口（RIL-121）：Cisco AnyConnect（CSTP）三层 VPN 客户端
+    /// 面——rustls TLS + HTTP/1.1 控制通道（表单认证 POST /auth 两步 →
+    /// CONNECT /CSCOSSLC/tunnel）+ CSTP 帧流（每帧一个原始 IP 包）；目标
+    /// 连接由用户态 smoltcp 三层桥拨出（隧道端 phy = CSTP DATA 帧），DNS
+    /// 经隧道 X-CSTP-DNS 服务器解析。评估与验收对端（apt ocserv 1.3.0，
+    /// 本地 /home/cui/ocpeer，线格式对照 OpenConnect 源码核读）留证
+    /// protocol-backends.md#openconnect。仅交付 TCP 应用面（UDP/QUIC 应用
+    /// 面不交付——catalog udp=false；DTLS 数据面与系统 TUN 路线未交付）。
+    /// 订阅边界：mihomo/Clash 无 openconnect 出站类型——导入目录外（按
+    /// 既有类型级不支持口径报损失）、导出具名跳过（rillane-subscription
+    /// 样本）。DTLS 与系统 TUN 路线未交付不留字段。评估与交付边界见两语
+    /// protocol-backends.md openconnect 段。
+    OpenConnect {
+        server: String,
+        port: u16,
+        username: String,
+        password: String,
+        /// SNI（缺省回落 server）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sni: Option<String>,
+        #[serde(default)]
+        skip_cert_verify: bool,
+    },
     /// SSH-2 出口（RIL-113）：russh 客户端面——主机钥钉扎必填（不钉扎
     /// 首用即信是具名拒绝的降级面）+ 认证恰一选一 + direct-tcpip 通道流。
     /// private_key 为 OpenSSH 格式文件路径，加密键须携口令解码（无口令
