@@ -56,8 +56,12 @@ pub mod win_tun;
 pub mod win_takeover;
 // Windows 进程归属决策面（RIL-034 代码面）：表驱动 OwnerResolver +
 // 命中回验缓存 OS-free；真机表/身份源 FFI（GetExtendedTcpTable/
-// OpenProcess 族）归机批次
+// OpenProcess 族）见 win_owner_ffi
 pub mod win_owner;
+// Windows 进程归属真机 IO 面（RIL-034 机批次）：iphlpapi 表探针 +
+// kernel32 身份源 FFI，装配进 WinOwnerResolver::with_real_sources()
+#[cfg(target_os = "windows")]
+pub mod win_owner_ffi;
 // Windows 生命周期恢复执行面（RIL-035 代码面）：复用 recovery 的
 // journal/映射，Windows 载荷族解析器与谓词分叉；SCM/驱动依赖/签名
 // 真机面归机批次

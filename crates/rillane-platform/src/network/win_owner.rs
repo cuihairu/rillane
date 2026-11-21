@@ -111,6 +111,17 @@ impl WinOwnerResolver {
         self
     }
 
+    /// 真机装配（RIL-034 机批次）：iphlpapi 表探针 + kernel32 身份源
+    /// （`win_owner_ffi` 模块头：错误映射与字节序注记；真机证据归
+    /// `examples/win_owner_probe.rs` 机批次）
+    #[cfg(windows)]
+    pub fn with_real_sources() -> Self {
+        Self::new(
+            super::win_owner_ffi::real_table_probe(),
+            super::win_owner_ffi::real_identity_source(),
+        )
+    }
+
     /// 当前缓存条目数（测试观察有界性用）
     pub fn cache_len(&self) -> usize {
         self.cache.lock().map(|c| c.len()).unwrap_or(0)
