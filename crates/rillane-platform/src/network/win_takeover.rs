@@ -495,9 +495,13 @@ fn parse_netsh_show_interfaces(text: &str) -> Vec<WinIfInterface> {
         if cols.len() < 5 {
             continue;
         }
-        let (Ok(idx), Ok(_met), Ok(_mtu)) =
-            (cols[0].parse::<u32>(), cols[1].parse::<u32>(), cols[2].parse::<u32>())
-        else { continue };
+        let (Ok(idx), Ok(_met), Ok(_mtu)) = (
+            cols[0].parse::<u32>(),
+            cols[1].parse::<u32>(),
+            cols[2].parse::<u32>(),
+        ) else {
+            continue;
+        };
         let Some(pos) = cols.iter().position(|c| states.contains(c)) else {
             continue;
         };
@@ -561,7 +565,11 @@ pub fn parse_netsh_ipv6_addresses(text: &str) -> Vec<V6IfAddress> {
         let Some(last) = line.split_whitespace().next_back() else {
             continue;
         };
-        let Some(ip) = last.split('%').next().and_then(|a| a.parse::<IpAddr>().ok()) else {
+        let Some(ip) = last
+            .split('%')
+            .next()
+            .and_then(|a| a.parse::<IpAddr>().ok())
+        else {
             continue;
         };
         let IpAddr::V6(v6) = ip else {
@@ -671,8 +679,13 @@ mod tests {
             Some("240e:3a1:1234:abcd::1".to_string()),
             "全球单播优先于链路本地"
         );
-        snap.v6_if_addresses.retain(|a| a.kind == V6AddrKind::LinkLocal);
-        assert_eq!(snap.escape_bind_ip_v6(), None, "仅链路本地不可 bind——None 不猜");
+        snap.v6_if_addresses
+            .retain(|a| a.kind == V6AddrKind::LinkLocal);
+        assert_eq!(
+            snap.escape_bind_ip_v6(),
+            None,
+            "仅链路本地不可 bind——None 不猜"
+        );
         snap.default_routes_v6.clear();
         assert_eq!(snap.escape_bind_ip_v6(), None, "无 ::/0 如实无 v6 出口");
     }

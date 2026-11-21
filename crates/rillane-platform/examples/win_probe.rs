@@ -35,8 +35,8 @@ fn main() {
 mod probe {
     use std::io::{Read, Write as _};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-    use std::sync::{Arc, Mutex as SecMutex};
     use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex as SecMutex};
     use std::time::{Duration, Instant};
 
     use rillane_platform::network::ipcodec::internet_checksum;
@@ -44,14 +44,14 @@ mod probe {
         CapturePort, CapturedInput, IpProtocol as IpProto, RouteTransaction, SystemChange,
     };
     use rillane_platform::network::win_net::{
-    adapter_if_index, bind_escape_udp, connect_escape_tcp, win_step_executor,
-};
+        adapter_if_index, bind_escape_udp, connect_escape_tcp, win_step_executor,
+    };
     use rillane_platform::network::win_takeover::{
         parse_netsh_ipv4_interfaces, parse_netsh_ipv6_addresses, parse_route_print_ipv4,
         parse_route_print_ipv6, win_step_payload, WinAppliedStep, WinRouteTransaction,
     };
     use rillane_platform::network::win_tun::{
-        last_error, WintunApi, WintunDevice, WinTunCapturePort,
+        last_error, WinTunCapturePort, WintunApi, WintunDevice,
     };
 
     const ADAPTER: &str = "rillane-probe";
@@ -63,16 +63,21 @@ mod probe {
     const DNS_UPSTREAM: &str = "223.5.5.5:53";
 
     fn say(section: &str, ok: bool, detail: &str) {
-        println!("PROBE {section} {} {detail}", if ok { "OK" } else { "FAIL" });
-        sections().lock().expect("汇总锁").push((section.to_string(), ok));
+        println!(
+            "PROBE {section} {} {detail}",
+            if ok { "OK" } else { "FAIL" }
+        );
+        sections()
+            .lock()
+            .expect("汇总锁")
+            .push((section.to_string(), ok));
         let _ = std::io::stdout().flush();
     }
 
     /// 段结果汇总（OVERALL 由它派生——任何段 FAIL 都必须让 OVERALL FAIL，
     /// 不得只打印不记账）
     fn sections() -> &'static SecMutex<Vec<(String, bool)>> {
-        static S: std::sync::OnceLock<SecMutex<Vec<(String, bool)>>> =
-            std::sync::OnceLock::new();
+        static S: std::sync::OnceLock<SecMutex<Vec<(String, bool)>>> = std::sync::OnceLock::new();
         S.get_or_init(|| SecMutex::new(Vec::new()))
     }
 
@@ -116,11 +121,7 @@ mod probe {
 
     pub(crate) fn main() {
         let diag_mode = std::env::args().any(|a| a == "diag");
-        let result = if diag_mode {
-            diag()
-        } else {
-            probe()
-        };
+        let result = if diag_mode { diag() } else { probe() };
         cleanup_quiet();
         let guard = sections().lock().expect("汇总锁");
         let failed: Vec<String> = guard
@@ -144,9 +145,8 @@ mod probe {
     /// LastError + 驱动版本 + netsh 口径 If 索引——三者并排才能定位
     /// 「环 API 可用但适配器未真正上线」这类分层故障。
     fn diag() -> Result<(), String> {
-        let api = Arc::new(
-            WintunApi::load("wintun.dll").map_err(|e| format!("load wintun.dll: {e}"))?,
-        );
+        let api =
+            Arc::new(WintunApi::load("wintun.dll").map_err(|e| format!("load wintun.dll: {e}"))?);
         say(
             "DIAG-VERSION",
             api.running_driver_version() != 0,
@@ -165,14 +165,9 @@ mod probe {
             luid != 0,
             &format!("luid=0x{luid:016X} if_index={}", device.if_index()),
         );
-        let ifs = parse_netsh_ipv4_interfaces(&run(&[
-            "netsh",
-            "interface",
-            "ipv4",
-            "show",
-            "interfaces",
-        ])
-        .unwrap_or_default());
+        let ifs = parse_netsh_ipv4_interfaces(
+            &run(&["netsh", "interface", "ipv4", "show", "interfaces"]).unwrap_or_default(),
+        );
         let row = ifs.iter().find(|i| i.name == ADAPTER);
         say("DIAG-NETSH", row.is_some(), &format!("netsh_row={row:?}"));
         say(
@@ -239,10 +234,13 @@ mod probe {
         say(
             "P1-LOAD",
             true,
-            &format!("wintun.dll loaded, driver_version_at_load=0x{:08X}", api.running_driver_version()),
+            &format!(
+                "wintun.dll loaded, driver_version_at_load=0x{:08X}",
+                api.running_driver_version()
+            ),
         );
-        let device =
-            WintunDevice::create(&api, ADAPTER, TUNNEL_TYPE).map_err(|e| format!("P1 create: {e}"))?;
+        let device = WintunDevice::create(&api, ADAPTER, TUNNEL_TYPE)
+            .map_err(|e| format!("P1 create: {e}"))?;
         // If 索引以 OS 权威口径（netsh）为准，LUID 低 24 位作回退——
         // 真机实证新建 Wintun 适配器 LUID 的 If 索引位可为 0，route add
         // 报「指定的接口不存在」（见 win_net::adapter_if_index 注记）。
@@ -277,7 +275,9 @@ mod probe {
         say(
             "P1-DRIVER",
             version_after_session != 0,
-            &format!("running_driver_version=0x{version_after_session:08X} (0.14 = 0x00140000 风格编码)"),
+            &format!(
+                "running_driver_version=0x{version_after_session:08X} (0.14 = 0x00140000 风格编码)"
+            ),
         );
 
         // ---------------- P2 路由 + 真实流进共享内核 ----------------
@@ -289,7 +289,11 @@ mod probe {
             interface_index: if_index,
         };
         win_step_executor()(&step.argv()).map_err(|e| format!("P2 route add: {e}"))?;
-        say("P2-ROUTE", true, &format!("capture route up: {CAPTURE_NET}/{CAPTURE_MASK} if {if_index}"));
+        say(
+            "P2-ROUTE",
+            true,
+            &format!("capture route up: {CAPTURE_NET}/{CAPTURE_MASK} if {if_index}"),
+        );
 
         // 真实外部应用：ping.exe（内核 TCP/ICMP 栈产出——非探针伪造）
         let mut ping = Command::new("ping")
@@ -310,7 +314,8 @@ mod probe {
                     if p.meta.protocol == IpProto::Icmp {
                         icmp_requests += 1;
                         if let Some(reply) = icmp_echo_reply(&p.packet) {
-                            port.send(&reply).map_err(|e| format!("P2 send reply: {e}"))?;
+                            port.send(&reply)
+                                .map_err(|e| format!("P2 send reply: {e}"))?;
                         }
                     }
                     if p.packet.windows(marker.len()).any(|w| w == marker) {
@@ -408,7 +413,8 @@ mod probe {
         }
         let apply_failed = txn.apply().is_err();
         std::thread::sleep(Duration::from_millis(300));
-        let route_absent = !capture_route_present(&run(&["route", "print", "-4"]).unwrap_or_default());
+        let route_absent =
+            !capture_route_present(&run(&["route", "print", "-4"]).unwrap_or_default());
         let rollback_ok = txn.rollback().is_ok() && txn.rollback().is_ok();
         say(
             "P4-COMPENSATE",
@@ -425,7 +431,11 @@ mod probe {
         cleanup_quiet();
         std::thread::sleep(Duration::from_millis(300));
         let adapter_gone = current_if_index().is_none();
-        say("P5-CLEANUP", adapter_gone, &format!("adapter absent={adapter_gone}, route deleted"));
+        say(
+            "P5-CLEANUP",
+            adapter_gone,
+            &format!("adapter absent={adapter_gone}, route deleted"),
+        );
         Ok(())
     }
 
@@ -521,7 +531,12 @@ mod probe {
                         if let Ok(pkt) = reply {
                             syn_ack_sent = port.send(&pkt).is_ok();
                         }
-                    } else if seg.ack && !seg.syn && !seg.fin && !seg.payload.is_empty() && !http_sent {
+                    } else if seg.ack
+                        && !seg.syn
+                        && !seg.fin
+                        && !seg.payload.is_empty()
+                        && !http_sent
+                    {
                         saw_get = seg.payload.windows(4).any(|w| w == b"GET ");
                         let out = build_tcp_packet(
                             resp_ip,

@@ -171,19 +171,26 @@ mod probe {
     }
 
     fn p0_self_tcp(resolver: &WinOwnerResolver) -> Result<String, String> {
-        let listener =
-            TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind: {e}"))?;
-        let lp = listener.local_addr().map_err(|e| format!("addr: {e}"))?.port();
-        let cli =
-            TcpStream::connect(("127.0.0.1", lp)).map_err(|e| format!("connect: {e}"))?;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind: {e}"))?;
+        let lp = listener
+            .local_addr()
+            .map_err(|e| format!("addr: {e}"))?
+            .port();
+        let cli = TcpStream::connect(("127.0.0.1", lp)).map_err(|e| format!("connect: {e}"))?;
         let (accepted, _) = listener.accept().map_err(|e| format!("accept: {e}"))?;
         let ephem = cli.local_addr().map_err(|e| format!("addr: {e}"))?.port();
-        let key = tcp_key(ephem, format!("127.0.0.1:{lp}").parse::<SocketAddr>().unwrap());
+        let key = tcp_key(
+            ephem,
+            format!("127.0.0.1:{lp}").parse::<SocketAddr>().unwrap(),
+        );
         // 自归属不经过 helper——pid 对照用自身 pid
         let got = expect_known(resolver.resolve(&key, deadline()), std::process::id())?;
         let _ = accepted;
         // 反方向键（listener 侧为 local）同归自身 pid——方向不错认
-        let rev = tcp_key(lp, format!("127.0.0.1:{ephem}").parse::<SocketAddr>().unwrap());
+        let rev = tcp_key(
+            lp,
+            format!("127.0.0.1:{ephem}").parse::<SocketAddr>().unwrap(),
+        );
         match resolver.resolve(&rev, deadline()) {
             OwnerResolution::Known(id) if id.pid == std::process::id() => {}
             other => return Err(format!("reverse resolve={other:?} (want own pid)")),
@@ -192,9 +199,11 @@ mod probe {
     }
 
     fn p1_multiproc(resolver: &WinOwnerResolver) -> Result<String, String> {
-        let listener =
-            TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind: {e}"))?;
-        let lp = listener.local_addr().map_err(|e| format!("addr: {e}"))?.port();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind: {e}"))?;
+        let lp = listener
+            .local_addr()
+            .map_err(|e| format!("addr: {e}"))?
+            .port();
         let remote = format!("127.0.0.1:{lp}").parse::<SocketAddr>().unwrap();
         let mut helpers = Vec::new();
         let mut streams = Vec::new();
@@ -297,7 +306,10 @@ mod probe {
         match resolver.resolve(&key, deadline()) {
             OwnerResolution::Known(id) if id.pid == b.0.id() && id.pid != pid_a => {
                 kill_now(&mut b);
-                Ok(format!("A pid={pid_a} -> B pid={} (cache flipped)", b.0.id()))
+                Ok(format!(
+                    "A pid={pid_a} -> B pid={} (cache flipped)",
+                    b.0.id()
+                ))
             }
             other => Err(format!("B resolve={other:?} want pid {}", b.0.id())),
         }
@@ -307,15 +319,14 @@ mod probe {
     /// 内核口径观察，不作 PASS 准据（P4 UDP 已证缓存翻正机制）
     fn p4b_tcp_rebind_info(resolver: &WinOwnerResolver) -> String {
         let outcome = (|| -> Result<String, String> {
-            let listener =
-                TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind: {e}"))?;
-            let lp = listener.local_addr().map_err(|e| format!("addr: {e}"))?.port();
+            let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind: {e}"))?;
+            let lp = listener
+                .local_addr()
+                .map_err(|e| format!("addr: {e}"))?
+                .port();
             let remote = format!("127.0.0.1:{lp}").parse::<SocketAddr>().unwrap();
-            let (mut c, fixed) = spawn_helper(&[
-                "hold-conn",
-                &remote.to_string(),
-                &TCP_FIXED.to_string(),
-            ])?;
+            let (mut c, fixed) =
+                spawn_helper(&["hold-conn", &remote.to_string(), &TCP_FIXED.to_string()])?;
             let (_s, _) = listener.accept().map_err(|e| format!("accept: {e}"))?;
             let key = tcp_key(fixed, remote);
             let pid_c = match resolver.resolve(&key, deadline()) {
@@ -324,11 +335,8 @@ mod probe {
             };
             kill_now(&mut c);
             std::thread::sleep(Duration::from_millis(300));
-            let (mut d, _) = spawn_helper(&[
-                "hold-conn",
-                &remote.to_string(),
-                &TCP_FIXED.to_string(),
-            ])?;
+            let (mut d, _) =
+                spawn_helper(&["hold-conn", &remote.to_string(), &TCP_FIXED.to_string()])?;
             let (_s2, _) = listener.accept().map_err(|e| format!("accept2: {e}"))?;
             match resolver.resolve(&key, deadline()) {
                 OwnerResolution::Known(id) if id.pid == d.0.id() => {
@@ -384,7 +392,9 @@ mod probe {
             .and_then(|v| v.parse().ok())
             .ok_or("RIL034_PPL_PID missing (run.ps1 must inject it for std run)")?;
         if ident(ppl).is_some() {
-            return Err(format!("identity({ppl}) readable under std token — denial NOT observed"));
+            return Err(format!(
+                "identity({ppl}) readable under std token — denial NOT observed"
+            ));
         }
         Ok(format!(
             "self=ok ppl({ppl})=denied (OpenProcess err=5, see stderr)"
@@ -397,15 +407,15 @@ mod probe {
     ) -> Result<String, String> {
         let kt = tcp_key(
             UNBOUND_A,
-            format!("127.0.0.1:{UNBOUND_B}").parse::<SocketAddr>().unwrap(),
+            format!("127.0.0.1:{UNBOUND_B}")
+                .parse::<SocketAddr>()
+                .unwrap(),
         );
         let ku = udp_key(UNBOUND_B);
         for (name, k) in [("tcp", &kt), ("udp", &ku)] {
             match direct(k) {
                 rillane_platform::network::win_owner::TableProbe::Absent => {}
-                other => {
-                    return Err(format!("{name} unbound probe={other:?} (port collision?)"))
-                }
+                other => return Err(format!("{name} unbound probe={other:?} (port collision?)")),
             }
             match resolver.resolve(k, deadline()) {
                 OwnerResolution::Unknown(UnknownReason::NotFound) => {}
@@ -429,7 +439,11 @@ mod probe {
         let port = sock.local_addr().map(|a| a.port()).unwrap_or(0);
         match resolver.resolve(&udp_key(port), deadline()) {
             OwnerResolution::Known(id) => {
-                println!("STD-UDP-SELF pid={} own={}", id.pid, id.pid == std::process::id())
+                println!(
+                    "STD-UDP-SELF pid={} own={}",
+                    id.pid,
+                    id.pid == std::process::id()
+                )
             }
             OwnerResolution::Unknown(r) => println!("STD-UDP-SELF unknown {r:?}"),
             OwnerResolution::Unsupported => println!("STD-UDP-SELF unsupported"),
@@ -451,10 +465,17 @@ mod probe {
         };
         let _accepted = listener.accept();
         let ephem = cli.local_addr().map(|a| a.port()).unwrap_or(0);
-        let key = tcp_key(ephem, format!("127.0.0.1:{lp}").parse::<SocketAddr>().unwrap());
+        let key = tcp_key(
+            ephem,
+            format!("127.0.0.1:{lp}").parse::<SocketAddr>().unwrap(),
+        );
         match resolver.resolve(&key, deadline()) {
             OwnerResolution::Known(id) => {
-                println!("STD-TCP-SELF pid={} own={}", id.pid, id.pid == std::process::id())
+                println!(
+                    "STD-TCP-SELF pid={} own={}",
+                    id.pid,
+                    id.pid == std::process::id()
+                )
             }
             OwnerResolution::Unknown(r) => println!("STD-TCP-SELF unknown {r:?}"),
             OwnerResolution::Unsupported => println!("STD-TCP-SELF unsupported"),
@@ -468,7 +489,10 @@ mod probe {
             ),
             None => println!("STD-IDENTITY-SELF none"),
         }
-        if let Some(ppl) = std::env::var("RIL034_PPL_PID").ok().and_then(|v| v.parse::<u32>().ok()) {
+        if let Some(ppl) = std::env::var("RIL034_PPL_PID")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+        {
             match ident(ppl) {
                 Some(_) => println!("STD-PPL denied=false (identity readable!)"),
                 None => println!("STD-PPL denied=true"),
@@ -493,37 +517,47 @@ mod probe {
             .ok_or("usage: hold-conn <remote> [local_port]")?;
         let local = args.get(3).and_then(|s| s.parse::<u16>().ok());
         // 固定本地口场景（TIME_WAIT 残留窗口）：SO_REUSEADDR 重绑重试
+        // （失败不 `?` 一错即出——200ms 间隔重试，attempt 用尽才报错）
         let mut attempts = if local.is_some() { 10 } else { 1 };
-        while attempts > 0 {
+        let conn = loop {
             attempts -= 1;
-            let conn = match local {
+            // 立即调用闭包收住 `?`（只逃内层，不逃 hold_conn——重试语义）
+            let attempt: Result<TcpStream, String> = (|| match local {
                 Some(lp) => {
                     let addr = SocketAddr::from(([127, 0, 0, 1], lp));
-                    let sock = socket2::Socket::new(
-                        socket2::Domain::IPV4,
-                        socket2::Type::STREAM,
-                        None,
-                    )
-                    .map_err(|e| format!("socket: {e}"))?;
-                    sock.set_reuse_address(true).map_err(|e| format!("reuse: {e}"))?;
-                    sock.bind(&addr.into()).map_err(|e| {
-                        format!("bind {addr}: {e} (attempts left {attempts})")
-                    })?;
-                    sock.connect(&remote.into()).map_err(|e| format!("connect: {e}"))?;
-                    TcpStream::from(sock)
+                    let sock =
+                        socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)
+                            .map_err(|e| format!("socket: {e}"))?;
+                    sock.set_reuse_address(true)
+                        .map_err(|e| format!("reuse: {e}"))?;
+                    sock.bind(&addr.into())
+                        .map_err(|e| format!("bind {addr}: {e} (attempts left {attempts})"))?;
+                    sock.connect(&remote.into())
+                        .map_err(|e| format!("connect: {e}"))?;
+                    Ok(TcpStream::from(sock))
                 }
-                None => TcpStream::connect(remote).map_err(|e| format!("connect: {e}"))?,
-            };
-            let lp = conn.local_addr().map_err(|e| format!("addr: {e}"))?.port();
-            println!("PORT {lp}");
-            std::thread::sleep(Duration::from_secs(300)); // 父进程收尾即 kill
-            return Ok(());
-        }
-        Err("hold-conn exhausted bind attempts".to_string())
+                None => TcpStream::connect(remote).map_err(|e| format!("connect: {e}")),
+            })();
+            match attempt {
+                Ok(c) => break c,
+                Err(e) if attempts > 0 => {
+                    eprintln!("hold-conn retry (attempts left {attempts}): {e}");
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        let lp = conn.local_addr().map_err(|e| format!("addr: {e}"))?.port();
+        println!("PORT {lp}");
+        std::thread::sleep(Duration::from_secs(300)); // 父进程收尾即 kill
+        Ok(())
     }
 
     fn hold_udp(args: &[String]) -> Result<(), String> {
-        let port: u16 = args.get(2).and_then(|s| s.parse().ok()).ok_or("usage: hold-udp <port>")?;
+        let port: u16 = args
+            .get(2)
+            .and_then(|s| s.parse().ok())
+            .ok_or("usage: hold-udp <port>")?;
         let sock = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], port)))
             .map_err(|e| format!("bind {port}: {e}"))?;
         let bound = sock.local_addr().map_err(|e| format!("addr: {e}"))?.port();
@@ -559,7 +593,11 @@ mod probe {
     }
 
     fn main_sequence() {
-        println!("PROBE P0-SNAPSHOT INFO pid={} unix_ms={}", std::process::id(), unix_ms());
+        println!(
+            "PROBE P0-SNAPSHOT INFO pid={} unix_ms={}",
+            std::process::id(),
+            unix_ms()
+        );
         let resolver = WinOwnerResolver::with_real_sources();
         let direct = real_table_probe();
 
@@ -577,7 +615,10 @@ mod probe {
 
         let r = p4_reuse(&resolver);
         say("P4-REUSE", r.is_ok(), &r.unwrap_or_else(|e| e));
-        println!("PROBE P4b-TCP-REBIND INFO {}", p4b_tcp_rebind_info(&resolver));
+        println!(
+            "PROBE P4b-TCP-REBIND INFO {}",
+            p4b_tcp_rebind_info(&resolver)
+        );
 
         println!("PROBE P5-INFO {}", p5_elevated_info());
 
@@ -586,7 +627,12 @@ mod probe {
 
         let failed: Vec<String> = sections()
             .lock()
-            .map(|l| l.iter().filter(|(_, ok)| !ok).map(|(n, _)| n.clone()).collect())
+            .map(|l| {
+                l.iter()
+                    .filter(|(_, ok)| !ok)
+                    .map(|(n, _)| n.clone())
+                    .collect()
+            })
             .unwrap_or_default();
         if failed.is_empty() {
             println!("PROBE OVERALL OK all sections passed");

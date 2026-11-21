@@ -58,7 +58,8 @@ extern "system" {
 }
 
 // wintun.h 全签名（0.14.1；stdcall/x64 = system ABI）
-type CreateAdapterFn = unsafe extern "system" fn(*const u16, *const u16, *const c_void) -> AdapterHandle;
+type CreateAdapterFn =
+    unsafe extern "system" fn(*const u16, *const u16, *const c_void) -> AdapterHandle;
 type OpenAdapterFn = unsafe extern "system" fn(*const u16) -> AdapterHandle;
 type CloseAdapterFn = unsafe extern "system" fn(AdapterHandle);
 type GetAdapterLuidFn = unsafe extern "system" fn(AdapterHandle, *mut u64);
@@ -148,7 +149,10 @@ impl WintunApi {
     }
 
     fn wide(name: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(name).encode_wide().chain(std::iter::once(0)).collect()
+        std::ffi::OsStr::new(name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 }
 
@@ -174,8 +178,7 @@ impl WintunDevice {
     pub fn create(api: &Arc<WintunApi>, name: &str, tunnel_type: &str) -> io::Result<Self> {
         let n = WintunApi::wide(name);
         let t = WintunApi::wide(tunnel_type);
-        let adapter =
-            unsafe { (api.exports.create_adapter)(n.as_ptr(), t.as_ptr(), ptr::null()) };
+        let adapter = unsafe { (api.exports.create_adapter)(n.as_ptr(), t.as_ptr(), ptr::null()) };
         if adapter.is_null() {
             return Err(io::Error::last_os_error());
         }
@@ -283,7 +286,10 @@ impl WintunSession {
         if packet.is_empty() || packet.len() as u64 > WINTUN_MAX_IP_PACKET_SIZE as u64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("包长 {} 出界 (1, {WINTUN_MAX_IP_PACKET_SIZE}]", packet.len()),
+                format!(
+                    "包长 {} 出界 (1, {WINTUN_MAX_IP_PACKET_SIZE}]",
+                    packet.len()
+                ),
             ));
         }
         let slot =

@@ -153,28 +153,36 @@ fn port_at(buf: &[u8], off: usize) -> u16 {
 }
 
 fn v4_sockaddr(buf: &[u8], addr_off: usize, port_off: usize) -> SocketAddr {
-    SocketAddr::V4(SocketAddrV4::new(ipv4_at(buf, addr_off), port_at(buf, port_off)))
+    SocketAddr::V4(SocketAddrV4::new(
+        ipv4_at(buf, addr_off),
+        port_at(buf, port_off),
+    ))
 }
 
 fn v6_sockaddr(buf: &[u8], addr_off: usize, port_off: usize) -> SocketAddr {
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&buf[addr_off..addr_off + 16]);
-    SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(bytes), port_at(buf, port_off), 0, 0))
+    SocketAddr::V6(SocketAddrV6::new(
+        Ipv6Addr::from(bytes),
+        port_at(buf, port_off),
+        0,
+        0,
+    ))
 }
 
 /// 单次表读取：空缓冲探尺寸（122→按返回尺寸扩）重试，上限 5 次。
 /// `bOrder=FALSE`——全行扫描自匹配，不依赖排序。
-fn read_table(
-    get_fn: GetExtendedTableFn,
-    table_class: u32,
-    af: u32,
-) -> Result<Vec<u8>, u32> {
+fn read_table(get_fn: GetExtendedTableFn, table_class: u32, af: u32) -> Result<Vec<u8>, u32> {
     let mut buf: Vec<u8> = Vec::new();
     for _ in 0..5 {
         let mut size = buf.len() as u32;
         let rc = unsafe {
             get_fn(
-                if buf.is_empty() { ptr::null_mut() } else { buf.as_mut_ptr() as *mut c_void },
+                if buf.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    buf.as_mut_ptr() as *mut c_void
+                },
                 &mut size,
                 0,
                 af,
@@ -346,9 +354,8 @@ pub fn real_identity_source() -> WinIdentitySource {
         let mut exit = FileTime { low: 0, high: 0 };
         let mut kernel = FileTime { low: 0, high: 0 };
         let mut user = FileTime { low: 0, high: 0 };
-        let times_ok = unsafe {
-            GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user)
-        };
+        let times_ok =
+            unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
         let started_at_unix_ms = if times_ok != 0 {
             filetime_unix_ms(&creation)
         } else {
@@ -370,9 +377,9 @@ pub fn real_identity_source() -> WinIdentitySource {
         } else {
             None
         };
-        let process_name = executable_path.as_ref().map(|p| {
-            p.rsplit(['\\', '/']).next().unwrap_or(p).to_string()
-        });
+        let process_name = executable_path
+            .as_ref()
+            .map(|p| p.rsplit(['\\', '/']).next().unwrap_or(p).to_string());
         Some(ProcessIdentity {
             pid,
             started_at_unix_ms,

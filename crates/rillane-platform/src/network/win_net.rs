@@ -75,9 +75,8 @@ pub fn read_net_snapshot() -> Result<WinNetSnapshot> {
     };
     let v4 = parse_route_print_ipv4(&out(&["route", "print", "-4"])?);
     let v6_routes = parse_route_print_ipv6(&out(&["route", "print", "-6"])?);
-    let v6_addrs = parse_netsh_ipv6_addresses(&out(&[
-        "netsh", "interface", "ipv6", "show", "addresses",
-    ])?);
+    let v6_addrs =
+        parse_netsh_ipv6_addresses(&out(&["netsh", "interface", "ipv6", "show", "addresses"])?);
     let dns = parse_netsh_dnsservers(&out(&["netsh", "interface", "ip", "show", "dnsservers"])?);
     Ok(WinNetSnapshot {
         default_routes: v4,
