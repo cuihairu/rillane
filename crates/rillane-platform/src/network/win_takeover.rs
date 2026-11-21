@@ -321,6 +321,13 @@ pub struct WinDefaultRoute {
 pub struct WinNetSnapshot {
     /// 默认路由序（route print 输出序 = 系统优先序；空 = 无默认路由）
     pub default_routes: Vec<WinDefaultRoute>,
+    /// IPv6 默认路由序（route print -6 输出序；空 = 无 ::/0——主机若未开
+    /// v6 互联网出口如实无默认路由，不伪造 v6 出口）
+    pub default_routes_v6: Vec<WinV6DefaultRoute>,
+    /// 全接口 IPv6 地址（netsh interface ipv6 show addresses 逐接口输出序；
+    /// 用于 ::/0 主出口时按 If 索引查接口地址作出口身份——v6 route 行
+    /// 无接口地址列，这是 v6 身份的唯一确定性来源）
+    pub v6_if_addresses: Vec<V6IfAddress>,
     /// 全接口解析器地址序（netsh dnsservers 逐接口按输出序拼接）
     pub dns_servers: Vec<IpAddr>,
 }
@@ -336,6 +343,19 @@ impl WinNetSnapshot {
     /// 在 win_net.rs）。无默认路由 = None（不猜物理口）。
     pub fn escape_bind_ip(&self) -> Option<IpAddr> {
         self.default_routes.first().map(|r| r.interface)
+    }
+
+    /// v6 主出口身份（首个 ::/0 路由的 If 索引 → 该接口地址；链路本地
+    /// 不可作出站 bind 目标——无全局单播地址时 None 如实不猜）。
+    pub fn escape_bind_ip_v6(&self) -> Option<IpAddr> {
+        let primary = self.default_routes_v6.first()?;
+        // 只取全球单播：链路本地不可作出站 bind 目标（scoped 地址，%zone
+        // 已剥离不可路由）、回环不通网——都宁可 None 也不猜。
+        self.v6_if_addresses
+            .iter()
+            .filter(|a| a.if_index == primary.if_index)
+            .find(|a| a.kind == V6AddrKind::Global)
+            .map(|a| a.address)
     }
 
     /// 差分 → 网络事件（self = 新，prev = 旧）。与 Linux NetSnapshot
@@ -438,6 +458,131 @@ pub fn parse_route_print_ipv6(text: &str) -> Vec<WinV6DefaultRoute> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// v6 接口面（route print -6 只有 If 索引没有接口地址列——出口身份由
+// netsh interface ipv6 show interfaces/addresses 按 If 索引组合；RIL-033
+// 机批次真机形状夹具钉死：块头 `Interface 13: 以太网`，行首 If 索引，
+// 地址带 %zone 作用域号须剥离后解析，分类 Global/LinkLocal/Other）
+// ---------------------------------------------------------------------------
+
+/// netsh 接口索引行（v4/v6 show interfaces 同形）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WinIfInterface {
+    /// If 索引
+    pub if_index: u32,
+    /// 接口名（netsh 显示名；非路由身份——路由行不带名）
+    pub name: String,
+}
+
+/// 解析 `netsh interface ipv{4,6} show interfaces` 输出：块头 `Idx Met
+/// MTU State Name` + 分隔线后逐行 `13 20 1500 connected 以太网`；状态
+/// 词集显式枚举（connected/disconnected），其后即接口名（可含空格）；
+/// 表头/分隔线/不可识别行跳过不猜；输出序保真。
+pub fn parse_netsh_ipv4_interfaces(text: &str) -> Vec<WinIfInterface> {
+    parse_netsh_show_interfaces(text)
+}
+
+/// 解析 `netsh interface ipv6 show interfaces` 输出（与 v4 同形）
+pub fn parse_netsh_ipv6_interfaces(text: &str) -> Vec<WinIfInterface> {
+    parse_netsh_show_interfaces(text)
+}
+
+fn parse_netsh_show_interfaces(text: &str) -> Vec<WinIfInterface> {
+    let states = ["connected", "disconnected"];
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        let (Ok(idx), Ok(_met), Ok(_mtu)) =
+            (cols[0].parse::<u32>(), cols[1].parse::<u32>(), cols[2].parse::<u32>())
+        else { continue };
+        let Some(pos) = cols.iter().position(|c| states.contains(c)) else {
+            continue;
+        };
+        let name = cols[pos + 1..].join(" ");
+        if name.is_empty() {
+            continue;
+        }
+        out.push(WinIfInterface {
+            if_index: idx,
+            name,
+        });
+    }
+    out
+}
+
+/// 接口 IPv6 地址分类（出站 bind 可用性由它决定）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V6AddrKind {
+    /// 全局单播（可作出站 bind 目标）
+    Global,
+    /// 回环 ::1
+    Loopback,
+    /// 链路本地 fe80::/10（不可作出站 bind 目标——None 兜底不用它）
+    LinkLocal,
+    /// 其它（唯一地址/组播等——不作出口身份）
+    Other,
+}
+
+/// 接口 IPv6 地址（带 If 索引身份）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V6IfAddress {
+    /// If 索引（路由行 v6 侧的接口身份）
+    pub if_index: u32,
+    /// 地址（%zone 已剥离）
+    pub address: IpAddr,
+    /// 分类
+    pub kind: V6AddrKind,
+}
+
+/// 解析 `netsh interface ipv6 show addresses` 输出：逐接口块（块头
+/// `Interface 13: 以太网`——If 索引即本块身份），表头/分隔线后逐行
+/// `<DAD-Type> <DAD-State> infinite infinite <addr>`；地址 %zone
+/// （%13）剥离后解析，解析失败行跳过不猜；::1 归 Loopback、fe80::/10
+/// 归 LinkLocal、其余可解析归 Global；块头不可解析接口号时地址不
+/// 归属（丢弃）——身份不可得就不造。
+pub fn parse_netsh_ipv6_addresses(text: &str) -> Vec<V6IfAddress> {
+    let mut out = Vec::new();
+    let mut cur: Option<u32> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Interface ") {
+            let head = rest.split(':').next().unwrap_or("").trim();
+            cur = head.parse().ok();
+            continue;
+        }
+        if line.starts_with("Addr Type") || line.starts_with("---------") {
+            continue;
+        }
+        let Some(if_index) = cur else { continue };
+        // 地址在行末列（Addr Type/DAD State/Valid/Pref 五列形状——
+        // 取末 token，%zone 剥离后解析；非地址行自然滤除）
+        let Some(last) = line.split_whitespace().next_back() else {
+            continue;
+        };
+        let Some(ip) = last.split('%').next().and_then(|a| a.parse::<IpAddr>().ok()) else {
+            continue;
+        };
+        let IpAddr::V6(v6) = ip else {
+            continue;
+        };
+        let kind = if v6.is_loopback() {
+            V6AddrKind::Loopback
+        } else if v6.segments()[0] & 0xffc0 == 0xfe80 {
+            V6AddrKind::LinkLocal
+        } else {
+            V6AddrKind::Global
+        };
+        out.push(V6IfAddress {
+            if_index,
+            address: ip,
+            kind,
+        });
+    }
+    out
+}
+
 /// 解析 `netsh interface ip show dnsservers` 输出：逐接口配置块收集
 /// 解析器地址（静态与 DHCP 提供两形状同收——快照只关心当下生效的
 /// 解析器序）。真机两形状：首服务器跟在标签行后（`…DNS Servers:
@@ -459,6 +604,78 @@ pub fn parse_netsh_dnsservers(text: &str) -> Vec<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RIL-033 机批次：netsh show interfaces 真机形状（imac 实录）——
+    /// If 索引/名含空格/中文名/disconnected 状态行全收
+    #[test]
+    fn netsh_if_parsers_take_real_machine_shape() {
+        let text = "\nIdx     Met         MTU          State                Name\n---  ----------  ----------  ------------  ---------------------------\n  1          75  4294967295  connected     Loopback Pseudo-Interface 1\n 13          20        1500  connected     以太网\n 42           5        1420  connected     wg-meshlet\n 20          25        1500  disconnected  WLAN\n 18          35        2800  connected     ZeroTier One [db64858fedb29f06]\n";
+        let ifs = parse_netsh_ipv6_interfaces(text);
+        assert_eq!(ifs.len(), 5, "表头与分隔线不收");
+        assert_eq!(ifs[0].if_index, 1);
+        assert_eq!(ifs[0].name, "Loopback Pseudo-Interface 1");
+        assert_eq!(ifs[1].if_index, 13);
+        assert_eq!(ifs[1].name, "以太网");
+        assert_eq!(ifs[4].name, "ZeroTier One [db64858fedb29f06]");
+        // v4 同形同解析器
+        assert_eq!(parse_netsh_ipv4_interfaces(text)[2].name, "wg-meshlet");
+        // 不可识别行（表头复述/空行）不产出
+        assert!(parse_netsh_ipv6_interfaces("Idx Met MTU State Name\n").is_empty());
+    }
+
+    /// RIL-033 机批次：netsh v6 addresses 真机形状（imac 实录）——块头
+    /// If 索引、%zone 剥离、::1/fe80 分类；全球单播（真机无 v6 互联网
+    /// 出口——夹具补 240e 全球地址行钉分类面）
+    #[test]
+    fn netsh_v6_addresses_zones_and_kinds() {
+        let text = "\nInterface 1: Loopback Pseudo-Interface 1\n\nAddr Type  DAD State   Valid Life Pref. Life Address\n---------  ----------- ---------- ---------- ------------------------\nOther      Preferred     infinite   infinite ::1\n\nInterface 13: 以太网\n\nAddr Type  DAD State   Valid Life Pref. Life Address\n---------  ----------- ---------- ---------- ------------------------\nOther      Preferred     infinite   infinite fe80::8574:720b:b70d:87a7%13\nOther      Preferred     infinite   infinite 240e:3a1:1234:abcd::1\n";
+        let addrs = parse_netsh_ipv6_addresses(text);
+        assert_eq!(addrs.len(), 3);
+        assert_eq!(addrs[0].if_index, 1);
+        assert_eq!(addrs[0].kind, V6AddrKind::Loopback);
+        assert_eq!(
+            addrs[1].address.to_string(),
+            "fe80::8574:720b:b70d:87a7",
+            "%zone 必须剥离后可解析"
+        );
+        assert_eq!(addrs[1].kind, V6AddrKind::LinkLocal);
+        assert_eq!(addrs[2].kind, V6AddrKind::Global);
+    }
+
+    /// RIL-033 机批次：v6 出口身份——有 ::/0 且接口有全球单播 → 给全球
+    /// 地址；仅链路本地 → None（不猜不可 bind 的目标）；无 ::/0 → None
+    /// （imac 实况：无 v6 默认路由如实 None）
+    #[test]
+    fn v6_escape_bind_prefers_global_and_refuses_linklocal() {
+        let route = |if_index| WinV6DefaultRoute {
+            if_index,
+            metric: 5,
+            gateway: "fe80::1".parse().unwrap(),
+        };
+        let addr = |if_index, ip: &str, kind| V6IfAddress {
+            if_index,
+            address: ip.parse().unwrap(),
+            kind,
+        };
+        let mut snap = WinNetSnapshot {
+            default_routes: Vec::new(),
+            default_routes_v6: vec![route(13)],
+            v6_if_addresses: vec![
+                addr(13, "fe80::8574:720b:b70d:87a7", V6AddrKind::LinkLocal),
+                addr(13, "240e:3a1:1234:abcd::1", V6AddrKind::Global),
+            ],
+            dns_servers: Vec::new(),
+        };
+        assert_eq!(
+            snap.escape_bind_ip_v6().map(|a| a.to_string()),
+            Some("240e:3a1:1234:abcd::1".to_string()),
+            "全球单播优先于链路本地"
+        );
+        snap.v6_if_addresses.retain(|a| a.kind == V6AddrKind::LinkLocal);
+        assert_eq!(snap.escape_bind_ip_v6(), None, "仅链路本地不可 bind——None 不猜");
+        snap.default_routes_v6.clear();
+        assert_eq!(snap.escape_bind_ip_v6(), None, "无 ::/0 如实无 v6 出口");
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn route_step() -> WinAppliedStep {
@@ -823,6 +1040,8 @@ Configuration for interface \"以太网\"
             .unwrap_or_default();
         WinNetSnapshot {
             default_routes,
+            default_routes_v6: Vec::new(),
+            v6_if_addresses: Vec::new(),
             dns_servers: dns.iter().map(|s| s.parse().unwrap()).collect(),
         }
     }

@@ -48,6 +48,11 @@ pub mod recovery;
 // 运行期验收证据待真机——SSH 授权面恢复后归机批次）
 #[cfg(target_os = "windows")]
 pub mod win_net;
+// Windows 数据面（RIL-033 机批次）：Wintun 用户态会话 = Windows TUN
+// 等价物（wireguard-nt 无用户态收发包 API——纯内核实现，选型事实
+// 见模块头注记）；实现 RIL-004 CapturePort
+#[cfg(target_os = "windows")]
+pub mod win_tun;
 pub mod win_takeover;
 // Windows 进程归属决策面（RIL-034 代码面）：表驱动 OwnerResolver +
 // 命中回验缓存 OS-free；真机表/身份源 FFI（GetExtendedTcpTable/

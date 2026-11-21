@@ -14,9 +14,12 @@
 //!
 //! 纯函数、无 IO、无平台依赖——单测任何环境可跑（§4.1 无特权面）。
 
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::{bail, Result};
+
+use super::ports::{IpProtocol, PacketMeta};
 
 /// RFC 1071 互联网校验和（ones-complement）：偶数对齐求和、奇数补 0、
 /// 折返进位、取反。含校验和字段在内的整段求和应得 0xFFFF（验证口径）。
@@ -454,6 +457,81 @@ fn tcp_checksum_v4(s: Ipv4Addr, d: Ipv4Addr, tcp: &[u8]) -> u16 {
     buf.extend_from_slice(&(tcp.len() as u16).to_be_bytes());
     buf.extend_from_slice(tcp);
     internet_checksum(&buf)
+}
+
+// ---------------------------------------------------------------------------
+// L3 整包元数据解析（RIL-033 自 takeover 搬移：OS-free 纯函数，Linux/
+// Windows 捕获端口共用）
+// ---------------------------------------------------------------------------
+
+/// 从 L3 整包解析 IP 三元组（双栈）：IPv4（IHL 弹性头长）与 IPv6（固定
+/// 40 字节主头）→ PacketMeta。协议映射 6→Tcp、17→Udp（QUIC/DNS 同面
+/// 原样过）、1/58→Icmp、其余→Other(号)。坏版本/截断头显式报错不猜。
+pub fn parse_packet_meta(packet: &[u8]) -> io::Result<PacketMeta> {
+    let bad = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, msg.to_string());
+    if packet.is_empty() {
+        return Err(bad("空包"));
+    }
+    match packet[0] >> 4 {
+        4 => {
+            if packet.len() < 20 {
+                return Err(bad("IPv4 头截断"));
+            }
+            let ihl = (packet[0] & 0x0f) as usize * 4;
+            if ihl < 20 || ihl > packet.len() {
+                return Err(bad("IPv4 IHL 越界"));
+            }
+            let src = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+            let dst = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+            Ok(PacketMeta {
+                src: src.into(),
+                dst: dst.into(),
+                protocol: map_ip_proto(packet[9]),
+            })
+        }
+        6 => {
+            if packet.len() < 40 {
+                return Err(bad("IPv6 头截断"));
+            }
+            let u16_at = |i: usize| u16::from_be_bytes([packet[i], packet[i + 1]]);
+            let src = Ipv6Addr::new(
+                u16_at(8),
+                u16_at(10),
+                u16_at(12),
+                u16_at(14),
+                u16_at(16),
+                u16_at(18),
+                u16_at(20),
+                u16_at(22),
+            );
+            let dst = Ipv6Addr::new(
+                u16_at(24),
+                u16_at(26),
+                u16_at(28),
+                u16_at(30),
+                u16_at(32),
+                u16_at(34),
+                u16_at(36),
+                u16_at(38),
+            );
+            Ok(PacketMeta {
+                src: src.into(),
+                dst: dst.into(),
+                protocol: map_ip_proto(packet[6]),
+            })
+        }
+        v => Err(bad(&format!("未知 IP 版本 {v}"))),
+    }
+}
+
+/// 协议号 → 中立枚举（v4/v6 共用：58 = ICMPv6）
+fn map_ip_proto(n: u8) -> IpProtocol {
+    match n {
+        6 => IpProtocol::Tcp,
+        17 => IpProtocol::Udp,
+        1 | 58 => IpProtocol::Icmp,
+        other => IpProtocol::Other(other),
+    }
 }
 
 #[cfg(test)]

@@ -33,7 +33,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::mem::ManuallyDrop;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 use std::os::unix::io::FromRawFd;
 use std::process::Command;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -44,8 +44,8 @@ use nix::libc;
 
 use crate::network::linux::AppliedStep;
 use crate::network::ports::{
-    CapturePort, CapturedInput, IpProtocol, NetworkEvent, NetworkEvents, PacketInput, PacketMeta,
-    RouteTransaction, SocketBypass, SocketHandle, SystemChange,
+    CapturePort, CapturedInput, NetworkEvent, NetworkEvents, PacketInput, RouteTransaction,
+    SocketBypass, SocketHandle, SystemChange,
 };
 use crate::network::tun::TunProvider;
 
@@ -53,75 +53,10 @@ use crate::network::tun::TunProvider;
 /// 个环豁免机制，不引入第二 mark 语义）
 pub const TAKEOVER_FWMARK: u32 = 0x5E45;
 
-/// 从 L3 整包解析 IP 三元组（双栈）：IPv4（IHL 弹性头长）与 IPv6（固定
-/// 40 字节主头）→ PacketMeta。协议映射 6→Tcp、17→Udp（QUIC/DNS 同面
-/// 原样过）、1/58→Icmp、其余→Other(号)。坏版本/截断头显式报错不猜。
-pub fn parse_packet_meta(packet: &[u8]) -> io::Result<PacketMeta> {
-    let bad = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, msg.to_string());
-    if packet.is_empty() {
-        return Err(bad("空包"));
-    }
-    match packet[0] >> 4 {
-        4 => {
-            if packet.len() < 20 {
-                return Err(bad("IPv4 头截断"));
-            }
-            let ihl = (packet[0] & 0x0f) as usize * 4;
-            if ihl < 20 || ihl > packet.len() {
-                return Err(bad("IPv4 IHL 越界"));
-            }
-            let src = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
-            let dst = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-            Ok(PacketMeta {
-                src: src.into(),
-                dst: dst.into(),
-                protocol: map_ip_proto(packet[9]),
-            })
-        }
-        6 => {
-            if packet.len() < 40 {
-                return Err(bad("IPv6 头截断"));
-            }
-            let u16_at = |i: usize| u16::from_be_bytes([packet[i], packet[i + 1]]);
-            let src = Ipv6Addr::new(
-                u16_at(8),
-                u16_at(10),
-                u16_at(12),
-                u16_at(14),
-                u16_at(16),
-                u16_at(18),
-                u16_at(20),
-                u16_at(22),
-            );
-            let dst = Ipv6Addr::new(
-                u16_at(24),
-                u16_at(26),
-                u16_at(28),
-                u16_at(30),
-                u16_at(32),
-                u16_at(34),
-                u16_at(36),
-                u16_at(38),
-            );
-            Ok(PacketMeta {
-                src: src.into(),
-                dst: dst.into(),
-                protocol: map_ip_proto(packet[6]),
-            })
-        }
-        v => Err(bad(&format!("未知 IP 版本 {v}"))),
-    }
-}
-
-/// 协议号 → 中立枚举（v4/v6 共用：58 = ICMPv6）
-fn map_ip_proto(n: u8) -> IpProtocol {
-    match n {
-        6 => IpProtocol::Tcp,
-        17 => IpProtocol::Udp,
-        1 | 58 => IpProtocol::Icmp,
-        other => IpProtocol::Other(other),
-    }
-}
+/// 从 L3 整包解析 IP 三元组（双栈）——纯编解码已归 [`crate::network::
+/// ipcodec`]（OS-free；Windows win_tun 数据面同用，RIL-033 机批次搬移
+/// 至编解码模块），此处保留同径重导出以兼容既有调用面。
+pub use crate::network::ipcodec::parse_packet_meta;
 
 /// 捕获端口用量（MTU 守卫与解析失败的可见计数——不当零不当坏）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -594,6 +529,9 @@ impl RouteTransaction for LinuxRouteTransaction {
 mod tests {
     use super::*;
     use std::os::unix::io::IntoRawFd;
+
+    use crate::network::ports::IpProtocol;
+    use std::net::Ipv6Addr;
 
     // ---- 包构造助手（测试用，不进生产面）----
 
