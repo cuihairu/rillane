@@ -691,9 +691,11 @@ armv7-ohos 桩）在对应小节如实记录。
 - 服务端面：未交付（具名）——trusttunnel_endpoint 仅作外部验收对端；`_icmp`（VPN 概念，非代理出口面）与 `_check`（端点策略面）保留伪主机不交付
 - 版本边界：HTTP/2 初始窗口取 h2 crate 缺省（spec 131072 是官方客户端取值非线格式约束——流控自协商）；H3/QUIC 载具（spec 有完整规范）不交付；ICMP 面不交付
 
-## masque（MASQUE / CONNECT-UDP）
+## masque
 
-- **结论**：**评估留证——规范钉定、载具在册、验收对端已定位为可本席自建，尚未交付**（RIL-120，评估 2026-11-19；未交付任何面，无目录条目、无 IR 变体、无连接器面，勾选保持关闭）。与 shadowsocksr/naive 的受阻族**不同**：此处不缺后端也不缺规范——规范面完整可读（RFC 9298《Proxying UDP in HTTP》，Standards Track 2022-08；RFC 9297《HTTP Datagrams》——自 rfc-editor 取全文并逐节核读），HTTP/3 载具**已在仓**（quinn 0.11.9 / quinn-proto 0.11.19 / h3 0.0.8 / h3-quinn 0.0.10；Hysteria2 已在同一载具上交付 HTTP/3 流面），验收锚**已定位**：`quic-go/masque-go`（MIT，活跃，v0.6.0）含 `cmd/proxy` 服务端面。唯一未闭合的环节是交付本身。
+MASQUE / CONNECT-UDP（RFC 9298 / 9297）——HTTP/3 数据报能力代理客户端面。
+
+- **结论**：**已交付**（RIL-120；在仓内 HTTP/3 载具上自写客户端面，零新增依赖；两面均通过仓内 h3 镜像对端验收，UDP 面另通过本席自构的真实 `quic-go/masque-go` `cmd/proxy` 对端验收）。下述评估钉定（规范、载具、对端）贯穿交付全程——无需重新评估。交付范围：`crates/rillane-protocols/src/outbound/masque.rs`（`MasqueConfig` / `MasqueConnector` TCP 面 / `MasqueUdpConnector` + `MasqueUdpRelay` + `MasqueUdpStats` UDP 面）；配置 IR `EgressConfig::Masque { server, port, sni, skip_cert_verify, uri_template }`；目录条目（RFC 9298 CONNECT-UDP 代理客户端面，`udp: true`）；runtime_builder 接线（UDP 关联臂 + TCP 转发臂）；订阅边界（mihomo `type: masque` 为密钥隧道——异协议族——导入=具名拒绝，导出=具名跳过）。
 - 规范钉定（RFC 9298 / 9297 逐节口径，交付面直接照此实现）：
   - 请求（§3.4，HTTP/2 与 HTTP/3 同形）：HTTP Extended CONNECT——`:method = CONNECT`、`:protocol = connect-udp`、`:authority` = UDP 代理 authority、`:scheme`/`:path` 取 URI 模板展开结果，并带 `capsule-protocol = ?1`。缺省 URI 模板 `https://$PROXY_HOST:$PROXY_PORT/.well-known/masque/udp/{target_host}/{target_port}/`（§2；Well-Known URI 见 §8.2）。
   - 目标地址形态（§2/§3）：`target_host` = DNS 名 / IPv4 字面 / IPv6 字面（**冒号必须百分号编码**，如 `2001%3Adb8%3A%3A42`）；IPv6 scoped zone id **不支持**；`target_port` = 1..65535；两者均不得为空。DNS 名由**代理**解析，解析失败须以 4xx + `Proxy-Status`（`dns_error`）拒绝（§3.1）。
@@ -708,9 +710,9 @@ armv7-ohos 桩）在对应小节如实记录。
   - 本席取该对端的通路取证：GitHub REST API 经本席**代理**出口 IP（共享代理 13.230.254.187）未认证限额已耗尽（全 403），但**直连** `api.github.com` 可用（`/rate_limit` 200、59/60 余量、1.3s）；`raw.githubusercontent.com` 无论直连还是经代理都返回损坏的 404（对照组 `tokio-rs/tokio/main/LICENSE-MIT` 确定存在亦 404），故**文件内容须经 API `contents` 端点（base64）取**——本段引用的 go.mod / README / cmd/proxy/main.go 即该口径取回。
   - crates.io sparse index：`masque` / `masque-quic` / `masque-proxy` / `masque-client` / `quic-masque` / `h3-masque` / `masque-connector` 全 404——**Rust 侧无 MASQUE 库落点**，故载具只能自写（h3 + quinn 已在仓）。注意：先前记忆的 `miekg/masque-quic` 经 API 核实**不存在**（404），真实名是 `quic-go/masque-go`。
   - 工具链：本席原无 Go（`go version` 不存在），Go module proxy 可达（`golang.org/x/net` 200、`github.com/quic-go/quic-go` 正常返回版本列表）；已下载 **go1.26.11.linux-amd64.tar.gz**（64M，sha256 `9849f4e0…710ec` 与 go.dev 公布值逐字一致）满足 `go.mod` 的 `go 1.26.0` 要求——**对端可本席构建**（无预构建发布资产，须自构）。
-  - 待交付面：TCP = HTTP/3 无 `:protocol` 的 CONNECT（RFC 9298 不覆盖 TCP，该面由同族 draft 规范；masque-go 代理侧只注册 URI 模板路径处理器，**未注册通用 CONNECT 处理器**——故 TCP 面的真实对端验收可能不可得，须以仓内镜像对端验收 + 具名边界记录）；UDP = `:protocol = connect-udp` + QUIC DATAGRAM 帧（`Quarter Stream ID` + `Context ID` 0 + 原始 UDP 字节）+ `capsule-protocol: ?1`。
-- 版本 / 许可 / 平台 / 公开 API / 旁路 / 取消 / 统计 / 复用 / UDP / 服务端面：**不钉载**——未交付；无目录条目、无连接器面。规范与载具结论已在上钉定，重开时无需重新评估。
-- 复开条件：**已满足**（对端源码可得、载具在册、Go 1.26.11 已就位）——待交付即按上述钉定实现：TCP = HTTP/3 无 `:protocol` 的 CONNECT；UDP = `:protocol = connect-udp` + QUIC DATAGRAM 帧（Context ID 0 + 原始 UDP 字节），验收对端 = 本席自构 `quic-go/masque-go` `cmd/proxy`（MIT 对端进程，仓内合法），并补订阅往返字段样本。
+  - 已交付面：TCP = HTTP/3 无 `:protocol` 的 CONNECT（RFC 9298 不覆盖 TCP，该面由同族 draft 规范；masque-go 代理侧只注册 URI 模板路径处理器，**未注册通用 CONNECT 处理器**——故 TCP 面以仓内镜像对端验收 + 具名边界记录）；UDP = `:protocol = connect-udp` + QUIC DATAGRAM 帧（`Quarter Stream ID` + `Context ID` 0 + 原始 UDP 字节）+ `capsule-protocol: ?1`，经仓内 h3 镜像对端与真实 `quic-go/masque-go` `cmd/proxy` 对端双重验收。
+- **版本 / 许可 / 平台 / 公开 API / 旁路 / 取消 / 统计 / 复用 / UDP / 服务端面**：按下述钉定交付——**公开 API** = `MasqueConnector` / `MasqueUdpConnector` / `MasqueUdpRelay` / `MasqueUdpStats`（crates/rillane-protocols/src/outbound/masque.rs，自 `rillane_protocols` 再导出）；**旁路** = 客户端不解析目标主机（由代理解析——`target_host` `.invalid` 保留域往返实证平台旁路）；**取消** = 关联丢弃/转发任务中止即释放对端连接（镜像 `closed` 计数）；**统计** = `MasqueUdpStats` datagrams_sent / datagrams_recv / datagrams_dropped；**复用** = 每关联一条 QUIC 连接（无连接复用池交付）；**UDP** = 已交付（`udp: true`，RFC 9298 CONNECT-UDP）；**服务端面** = 未交付（具名——入口侧不在本项范围，RIL-120 为客户端面）。**版本 / 许可 / 平台**：无外部库——载具为仓内 h3 0.0.8 + h3-quinn 0.0.10 + quinn 0.11.9 / quinn-proto 0.11.19（零新增依赖）；对照 RFC 自写；真实对端（`quic-go/masque-go` v0.6.0，MIT，本席自构）仅作进程内验收对端。
+- 复开条件：**已交付——无复开待办**。上述评估钉定（规范、载具、对端）贯穿交付全程；剩余具名边界（服务端面、连接复用池、mihomo 密钥隧道等价性）为独立事项，不构成本项复开。
 
 ## 公共传输面（跨协议共享）
 

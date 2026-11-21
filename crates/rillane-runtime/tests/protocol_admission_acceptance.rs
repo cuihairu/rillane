@@ -120,7 +120,7 @@ fn hysteria2_node() -> EgressDescriptor {
 /// 回归由目录单测钉住）；目录外类型恒 Unknown（订阅转换/诊断面点名）。
 #[test]
 fn catalog_entries_all_admitted_with_evidence() {
-    assert_eq!(protocol_catalog::CATALOG.len(), 20, "全目录二十条");
+    assert_eq!(protocol_catalog::CATALOG.len(), 21, "全目录二十一条");
     for e in protocol_catalog::CATALOG {
         let evidence = e
             .evidence()
@@ -226,6 +226,20 @@ fn catalog_entries_all_admitted_with_evidence() {
         ),
         "shadowquic 后端 = shadowquic 库承载: {:?}",
         sq.backend
+    );
+    // masque 具体口径（RIL-120）：RFC 9298 CONNECT-UDP 自写客户端面
+    // （TCP + UDP 两面交付；连接复用池与 mihomo 密钥隧道面未交付）
+    let mq = protocol_catalog::entry_for("masque").expect("已编目");
+    assert!(mq.udp, "RIL-120 CONNECT-UDP 数据报面已交付");
+    assert!(
+        matches!(
+            mq.backend,
+            protocol_catalog::Backend::InTree {
+                path: "crates/rillane-protocols/src/outbound/masque.rs"
+            }
+        ),
+        "masque 后端 = 仓库自写: {:?}",
+        mq.backend
     );
     for unknown in ["ss", ""] {
         assert_eq!(

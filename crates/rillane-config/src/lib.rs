@@ -2510,6 +2510,30 @@ pub enum EgressConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         tls_fingerprint: Option<String>,
     },
+    /// MASQUE 出口（RIL-120）：RFC 9298 CONNECT-UDP 代理客户端面——QUIC
+    /// (h3) 载具，TCP 面 = HTTP/3 CONNECT（无 :protocol，RFC 9114 §4.4），
+    /// UDP 面 = :protocol=connect-udp + QUIC DATAGRAM 帧（Context ID 0 +
+    /// 原样 UDP 字节）。评估与真机对端（quic-go/masque-go v0.6.0）留证
+    /// protocol-backends.md#masque。uri_template 为 RFC 9298 §3.1 URI
+    /// 模板（须含 {target_host}/{target_port}；缺省 = RFC 缺省路径 + 节点
+    /// authority；模板 authority 可异于拨号地址——前置代理/公共域名场景）。
+    /// 订阅边界：mihomo `type: masque` 是密钥型客户端隧道（CONNECT-IP/L4
+    /// proxy，private-key/public-key/ip/ipv6），与本面（RFC 9298 代理客户
+    /// 端）不同协议族——导入具名拒绝、导出具名跳过（rillane-subscription
+    /// 双向样本）。连接复用池与 mihomo 密钥隧道面未交付不留字段。评估与
+    /// 交付边界见两语 protocol-backends.md masque 段。
+    Masque {
+        server: String,
+        port: u16,
+        /// SNI（缺省回落 server）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sni: Option<String>,
+        #[serde(default)]
+        skip_cert_verify: bool,
+        /// RFC 9298 §3.1 URI 模板（缺省 = RFC 缺省路径 + 节点 authority）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uri_template: Option<String>,
+    },
     /// SSH-2 出口（RIL-113）：russh 客户端面——主机钥钉扎必填（不钉扎
     /// 首用即信是具名拒绝的降级面）+ 认证恰一选一 + direct-tcpip 通道流。
     /// private_key 为 OpenSSH 格式文件路径，加密键须携口令解码（无口令

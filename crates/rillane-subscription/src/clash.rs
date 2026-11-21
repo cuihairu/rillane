@@ -98,6 +98,7 @@ pub enum ClashProxyType {
     ShadowQuic,
     Mieru,
     TrustTunnel,
+    Masque,
     Ssh,
     Hysteria,
     Hysteria2,
@@ -1638,10 +1639,13 @@ impl ConversionReport {
 /// 丢弃+报告处理，不再让单个节点炸掉整个导入；已支持类型的配置级错误——
 /// 如 reality 缺 public-key——仍点名硬错误，不降级成静默丢节点，G1-6 保持）。
 ///
-/// RIL-111 后枚举全类型均有换算臂（snell 是最后一个补齐的）——保留本
-/// 函数面位以承载未来类型级不支持的登记点。
-fn is_supported_proxy_type(_proxy_type: ClashProxyType) -> bool {
-    true
+/// RIL-111 后枚举类型均有换算臂（snell 是最后一个补齐的）；RIL-120 起
+/// masque 回归类型级不支持——mihomo `type: masque` 是密钥型客户端隧道
+/// （CONNECT-IP/L4 proxy），与本仓 RFC 9298 CONNECT-UDP 代理客户端面不同
+/// 协议族，映射即静默误连（防降级面）。类型级不支持的节点按丢弃+报告处理
+/// （RIL-093：不炸掉整个导入，原因点名进损失清单）。
+fn is_supported_proxy_type(proxy_type: ClashProxyType) -> bool {
+    !matches!(proxy_type, ClashProxyType::Masque)
 }
 
 /// Clash 配置转换器
@@ -2411,6 +2415,17 @@ impl ClashConverter {
                     tls_fingerprint: proxy.client_fingerprint.clone(),
                 })
             }
+            ClashProxyType::Masque => {
+                // 具名拒绝（RIL-120 订阅边界）：mihomo `type: masque` 是
+                // 密钥型客户端隧道（CONNECT-IP/L4 proxy——private-key/
+                // public-key/ip/ipv6/network h3|h2|h3-l4proxy），与本仓
+                // RFC 9298 CONNECT-UDP 代理客户端面不同协议族；密钥隧道
+                // 未交付，绝不映射成同名协议静默误连
+                Err(anyhow!(
+                    "MASQUE 密钥型客户端隧道（CONNECT-IP/L4，private-key/public-key）未交付\
+                     ——与本仓 RFC 9298 CONNECT-UDP 代理客户端面不同协议族，类型级不支持"
+                ))
+            }
             ClashProxyType::Ssh => {
                 // 主机钥钉扎必填（RIL-113 评估留证 protocol-backends.md#ssh）：
                 // mihomo 缺省首用即信，本仓按 TOFU 判负口径拒绝无钉扎节点
@@ -2864,6 +2879,11 @@ impl ClashConverter {
                 proxy.username.as_deref().is_some_and(|u| !u.is_empty())
                     && proxy.password.as_deref().is_some_and(|p| !p.is_empty())
             }
+            // MASQUE：类型级不支持（RIL-120 具名拒绝——mihomo 密钥型客户端
+            // 隧道，非本仓 RFC 9298 代理客户端面）。有效性仍按 server/port
+            // 齐备判定，使节点抵达转换面具名拒绝而非被有效性丢弃掩埋真实
+            // 原因（与 mieru/trusttunnel 同姿态）
+            ClashProxyType::Masque => !proxy.server.is_empty() && proxy.port != 0,
             // SSH：钉扎必填 + username 必填 + 认证恰一选一（异或——双带/
             // 双缺均判负，与转换面具名拒绝同口径）
             ClashProxyType::Ssh => {
@@ -2902,6 +2922,7 @@ impl ClashConverter {
             ClashProxyType::ShadowQuic => "ShadowQUIC",
             ClashProxyType::Mieru => "Mieru",
             ClashProxyType::TrustTunnel => "TrustTunnel",
+            ClashProxyType::Masque => "MASQUE",
             ClashProxyType::Ssh => "SSH",
             ClashProxyType::Hysteria => "Hysteria",
             ClashProxyType::Hysteria2 => "Hysteria2",
