@@ -51,9 +51,9 @@ pub mod win_net;
 // Windows 数据面（RIL-033 机批次）：Wintun 用户态会话 = Windows TUN
 // 等价物（wireguard-nt 无用户态收发包 API——纯内核实现，选型事实
 // 见模块头注记）；实现 RIL-004 CapturePort
+pub mod win_takeover;
 #[cfg(target_os = "windows")]
 pub mod win_tun;
-pub mod win_takeover;
 // Windows 进程归属决策面（RIL-034 代码面）：表驱动 OwnerResolver +
 // 命中回验缓存 OS-free；真机表/身份源 FFI（GetExtendedTcpTable/
 // OpenProcess 族）见 win_owner_ffi
@@ -66,6 +66,12 @@ pub mod win_owner_ffi;
 // journal/映射，Windows 载荷族解析器与谓词分叉；SCM/驱动依赖/签名
 // 真机面归机批次
 pub mod win_recovery;
+// Windows 服务管理（SCM）真机面（RIL-035 机批次）：advapi32 动态
+// 解析客户端（安装/启动/停止/卸载/失败动作）+ 服务端（调度器/
+// handler/状态回报）；真机「服务崩溃→SCM 重启→恢复」验收驱动在
+// examples/win_service_probe.rs
+#[cfg(target_os = "windows")]
+pub mod win_service;
 // TODO: 平台特定实现待完成（死稿，见 platform.rs 头部注记）
 // pub mod platform;
 
