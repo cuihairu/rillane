@@ -714,6 +714,28 @@ MASQUE / CONNECT-UDP（RFC 9298 / 9297）——HTTP/3 数据报能力代理客�
 - **版本 / 许可 / 平台 / 公开 API / 旁路 / 取消 / 统计 / 复用 / UDP / 服务端面**：按下述钉定交付——**公开 API** = `MasqueConnector` / `MasqueUdpConnector` / `MasqueUdpRelay` / `MasqueUdpStats`（crates/rillane-protocols/src/outbound/masque.rs，自 `rillane_protocols` 再导出）；**旁路** = 客户端不解析目标主机（由代理解析——`target_host` `.invalid` 保留域往返实证平台旁路）；**取消** = 关联丢弃/转发任务中止即释放对端连接（镜像 `closed` 计数）；**统计** = `MasqueUdpStats` datagrams_sent / datagrams_recv / datagrams_dropped；**复用** = 每关联一条 QUIC 连接（无连接复用池交付）；**UDP** = 已交付（`udp: true`，RFC 9298 CONNECT-UDP）；**服务端面** = 未交付（具名——入口侧不在本项范围，RIL-120 为客户端面）。**版本 / 许可 / 平台**：无外部库——载具为仓内 h3 0.0.8 + h3-quinn 0.0.10 + quinn 0.11.9 / quinn-proto 0.11.19（零新增依赖）；对照 RFC 自写；真实对端（`quic-go/masque-go` v0.6.0，MIT，本席自构）仅作进程内验收对端。
 - 复开条件：**已交付——无复开待办**。上述评估钉定（规范、载具、对端）贯穿交付全程；剩余具名边界（服务端面、连接复用池、mihomo 密钥隧道等价性）为独立事项，不构成本项复开。
 
+## openconnect
+
+OpenConnect / Cisco AnyConnect（Cisco Secure Tunnel Protocol，CSTP）——三层 VPN 客户端面（出口）。
+
+- **结论**：**无可用库后端**——crates.io 各选项均为 C 绑定或无许可；无一符合工作区纯 Rust + rustls 姿态（调查见下）。自写**获准**（无后端结论在此留证，满足本项门禁）且架构可行：CSTP 隧道经 TLS（仓内 rustls）上的 HTTPS + HTTP CONNECT 承载，cstp 帧编解码小，三层→TCP 桥有仓内先例。**交付处于评估阶段**——控制通道（webvpn 认证 + CONNECT）、cstp 帧编解码、三层桥尚未入库；验收对端构建需本席缺失的系统包（见下），故本项完整验收（真实对端成功/失败/取消/拆除/统计/平台旁路）待办。
+- 后端调查（2026-11-22，本席取证）：
+  - crates.io：`openconnect-core` / `openconnect-sys`——对 C 库的 C 绑定；`anyconnect` / `anyconnect-sys`——**自带 OpenConnect 9.20 C 源码**（仅 LGPL-2.1，openssl + libxml2，autotools 构建，0★，74-128 下载，v0.1.1，edition 2024 / rust-version 1.85）——C 构建链 + openssl 将进入仓库，破坏纯 Rust + rustls 姿态；`reopenconnect`——无许可、无仓库（2021），不可用。
+  - GitHub：仅 `ctaggart/openconnect-rust`（1★，c2rust 实验，非维护绑定）。**无纯 Rust OpenConnect 实现。**
+- 线上形态（以 OpenConnect 源码为实现真源，自 gitlab.com/openconnect/openconnect `cstp.c` / `auth.c` / `openconnect-internal.h` 核读）：
+  - **控制通道**：HTTPS POST 至 `/+webvpn+/index.html`（表单认证：用户名/密码/组）→ XML 应答携带会话令牌 + `webvpn` cookie；隧道复用该 cookie。
+  - **隧道建立**：HTTP CONNECT `/CSCOSSLC/tunnel HTTP/1.1`，带 `webvpn` Cookie 与 `X-CSTP-Version: 1`、`X-CSTP-Hostname`、`X-CSTP-Protocol: Copyright (c) <年> <用户>`、`X-CSTP-Base-MTU`、`X-CSTP-MTU`（可选）、`X-CSTP-Address-Type: IPv4|IPv6`、`X-CSTP-Address`（可选）、`X-CSTP-Full-IPv6-Capability: true`（可选）。2xx → 该连接即成为 CSTP 隧道。
+  - **CSTP 帧**：8 字节头 `S T F 0x01` + `payload_len`（大端 u16）+ `packet_type`（u8）+ `0x00`；接收侧拒绝任何不匹配魔术/版本的头及任何非零第 7 字节。包类型（`openconnect-internal.h`）：`AC_PKT_DATA=0`（未压缩 IP 包）、`AC_PKT_DPD_OUT=3`、`AC_PKT_DPD_RESP=4`、`AC_PKT_DISCONN=5`、`AC_PKT_KEEPALIVE=7`、`AC_PKT_COMPRESSED=8`、`AC_PKT_TERM_SERVER=9`。
+  - **数据载荷 = 原始 IP 包**（三层——CSTP 隧道是 IP 隧道，非字节流）。此为关键架构事实：OpenConnect 是**三层 VPN 客户端**（WireGuard 族），非面向地址的代理。
+  - **DTLS 数据通道可选**（`www/anyconnect.xml`：「DTLS is optional and not required for basic connectivity」；客户端尝试 UDP 数据报但「will only actually pass traffic over the HTTPS connection if that fails」）——基线隧道骑 HTTPS CONNECT 连接，故基线无需 DTLS（DTLS 面为具名增强，非基线）。
+- 在 rillane 的架构（三层→TCP 桥，仓内先例）：
+  - WireGuard 出口（`crates/rillane-protocols/src/outbound/wireguard.rs`）为三层 VPN 先例：系统级（创建 TUN 接口、注入 wg-quick 风格路由 + DNS），经 `net_mark::connect_tcp` 拨号使内核 TCP 栈路由进接口；Windows 为拒绝桩。
+  - TUN 入口（`crates/rillane-runtime/src/tun_tcp.rs`）为用户态 smoltcp 先例：单个 smoltcp 0.14 `Interface`（仓内依赖）经 `TunPhy`（包队列适配器）承载，逐流 socket 句柄 + waker。
+  - 对 OpenConnect 出口，可移植选择为**用户态 smoltcp 拨号器**骑 CSTP IP 隧道（免 root、跨平台、无系统接口接管）；系统 TUN 路线（WireGuard 式）为 unix/root 替代。cstp 帧编解码位于隧道边界；DTLS 为具名未来面。
+- **版本 / 许可 / 平台 / 公开 API / 旁路 / 取消 / 统计 / 复用**：评估阶段——**版本** = 无选中库（自写于仓内 rustls + smoltcp 0.14 + TUN 设施；基线零新增依赖）；**许可** = 自写、仓库许可；**平台** = 用户态 smoltcp 路径跨平台（系统 TUN 路径仅 unix）；**公开 API** = 将是 `OpenConnectConnector` / `OpenConnectConfig`（尚未入库）；**旁路** = 三层——目标 IP 由 VPN 路由表路由、DNS 由 VPN 的 DNS 服务器解析；**取消** = 开放阶段（TLS 握手 / webvpn POST / CONNECT）检查；**统计** = 经统一 EgressConnector 面；**复用** = 每节点一条隧道（CSTP 为单一隧道流；无复用）。
+- 验收对端：**`ocserv`**（C；权威在 gitlab.com/openconnect/ocserv——GitHub 镜像 2021 已归档；最新版 1.6.0）。本席具备 gcc/autoconf/automake/libtool/make/pkg-config 与 gnutls，但**`libtalloc` 缺失**（ocserv 硬构建要求；`libprotobuf-c` 可选）——完整对端构建需本席缺失的系统开发包（须用户同意的本席变更）。在对端可构建前，本项真实对端验收（成功/失败/取消/拆除/统计/平台旁路）无法执行；仓内 CSTP 镜像对端可覆盖帧/控制路径契约。
+- 复开条件：评估已留证（本项「无可用后端结论留证后才允许自写」门禁已满足）；**交付待办**——控制通道、cstp 编解码、三层桥、目录/IR/runtime/订阅接线与真实对端验收尚待。具名边界（DTLS 数据通道）为增强，非基线要求。
+
 ## 公共传输面（跨协议共享）
 
 | 库 | 版本（要求 / lock 实测） | 许可 | 角色 |
