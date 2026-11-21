@@ -761,6 +761,17 @@ fn proxy_mapping(
                 .push(format!("出口 {name}：tor 无 Clash 对应，跳过"));
             None
         }
+        EgressConfig::Masque { .. } => {
+            // MASQUE（RIL-120）：mihomo `type: masque` 是密钥型客户端隧道
+            // （CONNECT-IP/L4 proxy——private-key/public-key/ip/ipv6），与
+            // 本仓 RFC 9298 CONNECT-UDP 代理客户端面不同协议族；无对应可落
+            // 键面（同名键族语义相反），按 Reject 同口径具名跳过（导入侧
+            // 同边界，见 rillane-subscription 换算臂）
+            report.skipped.push(format!(
+                "出口 {name}：masque 为 RFC 9298 代理客户端面，mihomo 同名键族语义相反，跳过"
+            ));
+            None
+        }
         EgressConfig::Wireguard {
             endpoint,
             private_key,

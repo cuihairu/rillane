@@ -54,15 +54,15 @@ use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
     Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts,
-    HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MieruConnector,
-    MixedIngress, ShadowQuicConnector, ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress,
-    ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector,
-    Socks5Connector, Socks5Ingress, Socks5UdpConnector, SshConnector, TlsConnectorFactory,
-    TlsFingerprint, TorConnector, TransportKey, TransportPool, TrojanConnector, TrojanIngress,
-    TrojanUdpConnector, TrojanUdpParts, TrustTunnelConnector, TrustTunnelUdpConnector,
-    TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress, VlessUdpConnector,
-    VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity, VmessUdpConnector, VmessUdpParts,
-    WireguardConnector, WireguardUdpConnector,
+    HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MasqueConnector,
+    MasqueUdpConnector, MieruConnector, MixedIngress, ShadowQuicConnector, ShadowTlsIngress,
+    ShadowsocksConnector, ShadowsocksIngress, ShadowsocksShadowTlsConnector,
+    ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector, Socks5Connector, Socks5Ingress,
+    Socks5UdpConnector, SshConnector, TlsConnectorFactory, TlsFingerprint, TorConnector,
+    TransportKey, TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector,
+    TrojanUdpParts, TrustTunnelConnector, TrustTunnelUdpConnector, TuicConnector, TuicUdpConnector,
+    VlessConnector, VlessIngress, VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress,
+    VmessSecurity, VmessUdpConnector, VmessUdpParts, WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -3022,6 +3022,7 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::ShadowQuic { server, .. }
         | EgressConfig::Mieru { server, .. }
         | EgressConfig::TrustTunnel { server, .. }
+        | EgressConfig::Masque { server, .. }
         | EgressConfig::Ssh { server, .. } => Some(server),
         // Tor 是网络不是服务器：无 server/port 字段（同 Reject/Direct 的
         // None 口径）
@@ -3356,6 +3357,26 @@ fn build_udp_connectors(
                 if let Some(factory) = tls_factory.as_ref() {
                     conn = conn.with_factory(factory.clone());
                 }
+                Some(Arc::new(conn))
+            }
+            EgressConfig::Masque {
+                server,
+                port,
+                sni,
+                skip_cert_verify,
+                uri_template,
+            } => {
+                // MASQUE UDP 面（RIL-120）：RFC 9298 CONNECT-UDP + QUIC
+                // DATAGRAM 帧（评估与真机对端留证 protocol-backends.md
+                // #masque）；构建期校验同 TCP 面（new 内）
+                let conn = MasqueUdpConnector::new(
+                    server.clone(),
+                    *port,
+                    sni.clone(),
+                    *skip_cert_verify,
+                    uri_template.clone(),
+                )
+                .with_context(|| format!("节点 {} 的 masque 配置无效", desc.name))?;
                 Some(Arc::new(conn))
             }
             EgressConfig::Ssh { .. } => {
@@ -4178,6 +4199,34 @@ fn build_egress_outputs(
                     connector = connector.with_factory(factory.clone());
                 }
                 let connector: Arc<dyn EgressConnector> = Arc::new(connector);
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Masque {
+                server,
+                port,
+                sni,
+                skip_cert_verify,
+                uri_template,
+            } => {
+                // MASQUE（RIL-120）：RFC 9298 CONNECT-UDP 自写客户端面——
+                // TCP 面 HTTP/3 CONNECT（评估与真机对端留证
+                // protocol-backends.md#masque）；UDP 面归 UDP 工厂臂。
+                // 构建期校验归 new 内（节点级失败不拖垮整份订阅）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    MasqueConnector::new(
+                        server.clone(),
+                        *port,
+                        sni.clone(),
+                        *skip_cert_verify,
+                        uri_template.clone(),
+                    )
+                    .with_context(|| format!("节点 {} 的 masque 配置无效", desc.name))?,
+                );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),
                     connector.clone(),

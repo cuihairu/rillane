@@ -291,6 +291,20 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "masque",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#masque",
+        },
+        // RIL-120：RFC 9298 CONNECT-UDP 自写客户端面（真实对端 = 本地
+        // 构建的 quic-go/masque-go v0.6.0 cmd/proxy，MIT；TCP 面留证对端
+        // = 进程内 h3 镜像对端——masque-go proxy 无通用 CONNECT handler）；
+        // TCP + UDP 两面交付；连接复用池与 mihomo 密钥隧道面未交付
+        udp: true,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/masque.rs",
+        },
+    },
+    CatalogEntry {
         kind: "ssh",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#ssh",
@@ -368,6 +382,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::ShadowQuic { .. } => "shadowquic",
         EgressConfig::Mieru { .. } => "mieru",
         EgressConfig::TrustTunnel { .. } => "trusttunnel",
+        EgressConfig::Masque { .. } => "masque",
         EgressConfig::Ssh { .. } => "ssh",
         EgressConfig::Tor { .. } => "tor",
         EgressConfig::Wireguard { .. } => "wireguard",
@@ -559,6 +574,13 @@ mod tests {
                 skip_cert_verify: false,
                 tls_fingerprint: None,
             },
+            EgressConfig::Masque {
+                server: "203.0.113.17".into(),
+                port: 8443,
+                sni: Some("masque.example.test".into()),
+                skip_cert_verify: false,
+                uri_template: None,
+            },
             EgressConfig::Ssh {
                 server: "203.0.113.13".into(),
                 port: 22,
@@ -626,7 +648,7 @@ mod tests {
     /// UDP 能力列与构建期扫描口径一致（§3.1 支持集）。
     #[test]
     fn admitted_requires_evidence_and_backend() {
-        const UDP_SUPPORTED: [&str; 13] = [
+        const UDP_SUPPORTED: [&str; 14] = [
             "direct",
             "shadowsocks",
             "wireguard",
@@ -640,6 +662,7 @@ mod tests {
             "hysteria2",
             "tuic",
             "trusttunnel",
+            "masque",
         ];
         for e in CATALOG {
             match e.registration {
