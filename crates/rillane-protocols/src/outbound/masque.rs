@@ -426,15 +426,13 @@ where
     };
     let down = async {
         let mut total = 0u64;
-        while let Some(mut chunk) = recv_half
-            .recv_data()
-            .await
-            .context("MASQUE 下行接收失败")?
+        while let Some(mut chunk) = recv_half.recv_data().await.context("MASQUE 下行接收失败")?
         {
             while chunk.has_remaining() {
-                let n = writer.write(chunk.chunk()).await.context(
-                    "MASQUE 下行写入失败（客户端侧收束，代理隧道随连接关闭释放）",
-                )?;
+                let n = writer
+                    .write(chunk.chunk())
+                    .await
+                    .context("MASQUE 下行写入失败（客户端侧收束，代理隧道随连接关闭释放）")?;
                 if n == 0 {
                     bail!("MASQUE 下行写入零字节");
                 }
