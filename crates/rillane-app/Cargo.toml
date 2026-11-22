@@ -15,6 +15,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rillane-core = { path = "../rillane-core" }
+rillane-config = { path = "../rillane-config" }
 rillane-routing = { path = "../rillane-routing" }
 reqwest = { workspace = true, optional = true, default-features = false, features = ["blocking", "json", "rustls-tls"] }
 

@@ -6357,6 +6357,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
+ "rillane-config",
  "rillane-core",
  "rillane-routing",
  "serde",
