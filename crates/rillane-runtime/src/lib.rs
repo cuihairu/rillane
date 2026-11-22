@@ -20,6 +20,10 @@ pub mod pool_config;
 pub mod publisher;
 pub mod runtime_builder;
 pub mod sniff;
+// 透明接管入口（RIL-139）：REDIRECT/TPROXY socket 面——Linux 门控
+//（iptables/IP_TRANSPARENT 内核面；同 tun_ingress 口径，非 Linux 整体门控）
+#[cfg(target_os = "linux")]
+pub mod transparent_ingress;
 // TUN 入口 + /proc 进程归因 + TCP 用户态栈（tun-dataplane.md §2；Linux 数据面）。
 // 非 Linux 编译单元整体门控（windows-gnu 打包面 platform-packaging.md；
 // 破损修复：tun_ingress 的 rillane_platform::network::linux import 无门控，

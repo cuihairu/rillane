@@ -50,6 +50,8 @@ use rillane_protocols::middleware::{ANN_ROUTE_EGRESS, ANN_ROUTE_KIND};
 use std::net::IpAddr;
 
 #[cfg(target_os = "linux")]
+use crate::transparent_ingress::{TransparentIngress, TransparentIngressConfig};
+#[cfg(target_os = "linux")]
 use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, CloudflaredConnector, DirectConnector, HttpConnector,
@@ -295,18 +297,30 @@ impl RuntimeBuilder {
             .as_ref()
             .is_some_and(|n| n.mode == NetworkMode::Tun);
         let tun_enabled = self.runtime_config.enable_network_virtualization && network_mode_tun;
-        let network_manager =
-            if self.runtime_config.enable_network_virtualization && !network_mode_tun {
-                if let Some(network_cfg) = &self.runtime_config.network_config {
-                    let mut manager = NetworkManager::new(network_cfg.clone());
-                    manager.initialize()?;
-                    Some(Arc::new(Mutex::new(manager)))
-                } else {
-                    None
-                }
+        // transparent 模式属主裁决（RIL-139）：TransparentIngress 属主化监听
+        // + iptables 规则——NetworkManager 在 transparent 模式同样让位
+        //（路由面 = 接管规则，非 NetworkConfig.routing 的 RouteManager 面）
+        let network_mode_transparent = self
+            .runtime_config
+            .network_config
+            .as_ref()
+            .is_some_and(|n| n.mode == NetworkMode::Transparent);
+        let transparent_enabled =
+            self.runtime_config.enable_network_virtualization && network_mode_transparent;
+        let network_manager = if self.runtime_config.enable_network_virtualization
+            && !network_mode_tun
+            && !network_mode_transparent
+        {
+            if let Some(network_cfg) = &self.runtime_config.network_config {
+                let mut manager = NetworkManager::new(network_cfg.clone());
+                manager.initialize()?;
+                Some(Arc::new(Mutex::new(manager)))
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
 
         // P2-8 M1 §4-4：DNS 分流服务（块缺席/关闭 = None 零开销）。监听独立于
         // 网络虚拟化开关——本地监听即独立可用面（dns-partition.md §9-4，
@@ -694,6 +708,42 @@ impl RuntimeBuilder {
             );
         };
 
+        // 透明接管入口（RIL-139）：TransparentIngress 属主化监听 + iptables
+        // 规则（transparent 模式下 NetworkManager 已让位，见上）；与 socks5/
+        // tun 并列注入同一 FlowRouter（start() 同一循环 spawn run()）。
+        // 固定目标 target 须为已声明 egress（构建期具名拒绝——config validate
+        // 只锁块形状，不锁出口声明存在性）。
+        #[cfg(target_os = "linux")]
+        let transparent_ingress = if transparent_enabled {
+            let block = config_snapshot
+                .network
+                .as_ref()
+                .and_then(|n| n.transparent.as_ref())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "network.mode = transparent 但 network.transparent 块缺失（内部不变式破坏——config validate 应已拒绝）"
+                    )
+                })?;
+            let target = block.target.trim();
+            anyhow::ensure!(
+                config_snapshot.egress.iter().any(|e| e.name == target),
+                "network.transparent.target `{target}` 未声明（须为已声明出口节点名）"
+            );
+            let t = TransparentIngress::new(TransparentIngressConfig::from_block(block)?)?;
+            self.ingress_endpoints
+                .insert("transparent".to_string(), t.clone());
+            Some(t)
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "linux"))]
+        let () = {
+            anyhow::ensure!(
+                !transparent_enabled,
+                "透明接管面仅 Linux 支持（RIL-139：iptables/IP_TRANSPARENT 内核面）"
+            );
+        };
+
         let subscription_manager = if self.runtime_config.enable_hot_reload {
             Some(Arc::new(SubscriptionManager::new()))
         } else {
@@ -739,6 +789,8 @@ impl RuntimeBuilder {
             tls_factory,
             network_manager,
             #[cfg(target_os = "linux")]
+            transparent_ingress,
+            #[cfg(target_os = "linux")]
             tun_ingress,
             dns_service,
             #[cfg(feature = "plugins")]
@@ -757,16 +809,18 @@ impl RuntimeBuilder {
             // TUN-only 启动放行（tun-dataplane.md「TUN-only 独立启动」后续项，
             // 2026-10-05 兑现）：network.mode=tun 且启用网络虚拟化时 TUN 即入口
             // （build() 后段注入 ingress_endpoints["tun"]，start() 同一循环
-            // spawn——无常规入口特判）；其余空 ingress 维持拒绝
-            let tun_only = self.runtime_config.enable_network_virtualization
+            // spawn——无常规入口特判）；透明接管同口径（RIL-139：
+            // network.mode=transparent 时接管监听即入口，build() 注入
+            // ingress_endpoints["transparent"]）；其余空 ingress 维持拒绝
+            let ingress_exempt = self.runtime_config.enable_network_virtualization
                 && self
                     .runtime_config
                     .network_config
                     .as_ref()
-                    .is_some_and(|n| n.mode == NetworkMode::Tun);
-            if !tun_only {
+                    .is_some_and(|n| matches!(n.mode, NetworkMode::Tun | NetworkMode::Transparent));
+            if !ingress_exempt {
                 return Err(anyhow!(
-                    "至少需要配置一个入口（仅 network.mode=tun 可豁免：TUN 即入口）"
+                    "至少需要配置一个入口（仅 network.mode=tun/transparent 可豁免：TUN/接管监听即入口）"
                 ));
             }
         }
@@ -1081,6 +1135,11 @@ pub struct Runtime {
     /// 控制面指标取数（T5）定向寻址。Linux 门控（platform-packaging.md）
     #[cfg(target_os = "linux")]
     tun_ingress: Option<Arc<TunIngress>>,
+    /// 透明接管入口单例（RIL-139；None = 未启用/非 transparent 模式）。
+    /// ingress_endpoints 内共享同一 Arc——本字段供 stop() 优雅关停
+    /// （shutdown → run 循环 break → 规则撤销）。Linux 门控。
+    #[cfg(target_os = "linux")]
+    transparent_ingress: Option<Arc<TransparentIngress>>,
     /// P2-8 M1 观测接缝：DNS 分流服务单例（start/stop 消费 + 控制面
     /// /dns/stats 经 getter 取数；None = network.dns 块缺席/关闭）
     dns_service: Option<Arc<crate::dns_config::DnsService>>,
@@ -1658,6 +1717,11 @@ impl Runtime {
         if let Some(t) = &self.tun_ingress {
             t.shutdown();
         }
+        // 透明接管优雅关停：通知 run 循环 break → 规则撤销（RIL-139）
+        #[cfg(target_os = "linux")]
+        if let Some(t) = &self.transparent_ingress {
+            t.shutdown();
+        }
         if let Some(manager) = &self.network_manager {
             let mut guard = manager.lock().await;
             guard.stop().await.ok();
@@ -1979,6 +2043,13 @@ impl Runtime {
     #[cfg(target_os = "linux")]
     pub fn get_tun_ingress(&self) -> Option<Arc<TunIngress>> {
         self.tun_ingress.clone()
+    }
+
+    /// 透明接管入口单例（RIL-139；None = 未启用/非 transparent 模式）——
+    /// 控制面指标取数与定向关停的寻址面。
+    #[cfg(target_os = "linux")]
+    pub fn get_transparent_ingress(&self) -> Option<Arc<TransparentIngress>> {
+        self.transparent_ingress.clone()
     }
 
     /// 获取网络虚拟化模式（network-route.md：用于 /network/route/status）
@@ -6534,6 +6605,7 @@ routing:
     fn egress_fwmark_config_wires_net_mark() {
         let mut cfg = s5_udp_config(false);
         cfg.network = Some(rillane_config::NetworkBlockConfig {
+            transparent: None,
             sniff: None,
             mode: rillane_config::NetworkBlockMode::Tun,
             tun: None,
@@ -6549,6 +6621,95 @@ routing:
         );
         // 进程级单例复位（防泄漏到后续测试）
         rillane_core::net_mark::set_egress_fwmark(0);
+    }
+
+    /// 透明接管装配钉（RIL-139）：transparent 模式 + 空 ingress → build 成功
+    /// （豁免「至少一个入口」——接管监听即入口）、注入 ingress_endpoints["transparent"]、
+    /// NetworkManager 让位（路由面 = 接管规则，非 RouteManager 面）。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn transparent_mode_builds_ingress_and_exempts_gate() {
+        let mut cfg = s5_udp_config(false);
+        // 空常规入口：验证 transparent 模式豁免入口门
+        cfg.ingress = Vec::new();
+        cfg.network = Some(rillane_config::NetworkBlockConfig {
+            mode: rillane_config::NetworkBlockMode::Transparent,
+            transparent: Some(rillane_config::TransparentBlockConfig {
+                mode: rillane_config::TransparentMode::Redirect,
+                listen: "127.0.0.1:39200".to_string(),
+                target: "direct".to_string(),
+                intercept_ports: vec![],
+                rule_table: 100,
+            }),
+            ..Default::default()
+        });
+        let rc = RuntimeConfig {
+            enable_network_virtualization: true,
+            network_config: Some(rillane_platform::network::NetworkConfig {
+                mode: NetworkMode::Transparent,
+                tun: None,
+                routing: None,
+                filtering: None,
+                dns: None,
+            }),
+            ..RuntimeConfig::default()
+        };
+        let runtime = RuntimeBuilder::new(cfg)
+            .with_runtime_config(rc)
+            .build()
+            .expect("transparent 模式 build 应成功（接管监听即入口）");
+        assert!(
+            runtime.ingress_endpoints.contains_key("transparent"),
+            "透明入口应注入入口表"
+        );
+        assert!(
+            runtime.network_manager.is_none(),
+            "transparent 模式 NetworkManager 让位"
+        );
+        assert!(
+            runtime.get_transparent_ingress().is_some(),
+            "透明入口单例应装配"
+        );
+    }
+
+    /// 透明接管固定目标必须已声明（RIL-139）：config validate 只锁块形状，
+    /// 出口声明存在性归构建期——未声明的 target 具名拒绝。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn transparent_target_must_be_declared_egress() {
+        let mut cfg = s5_udp_config(false);
+        cfg.ingress = Vec::new();
+        cfg.network = Some(rillane_config::NetworkBlockConfig {
+            mode: rillane_config::NetworkBlockMode::Transparent,
+            transparent: Some(rillane_config::TransparentBlockConfig {
+                mode: rillane_config::TransparentMode::Redirect,
+                listen: "127.0.0.1:39200".to_string(),
+                target: "nonexistent".to_string(),
+                intercept_ports: vec![],
+                rule_table: 100,
+            }),
+            ..Default::default()
+        });
+        let rc = RuntimeConfig {
+            enable_network_virtualization: true,
+            network_config: Some(rillane_platform::network::NetworkConfig {
+                mode: NetworkMode::Transparent,
+                tun: None,
+                routing: None,
+                filtering: None,
+                dns: None,
+            }),
+            ..RuntimeConfig::default()
+        };
+        let err = RuntimeBuilder::new(cfg)
+            .with_runtime_config(rc)
+            .build()
+            .err()
+            .expect("未声明 target 应 build 期拒绝");
+        assert!(
+            format!("{err:#}").contains("nonexistent"),
+            "错误应点名未声明 target: {err:#}"
+        );
     }
 
     /// 口径 1：chain+udp 同启 + 显式允许明文 → build 成功；mesh-chain 装配落位
@@ -6617,6 +6778,7 @@ routing:
         let present = {
             let mut cfg = s5_udp_config(true);
             cfg.network = Some(rillane_config::NetworkBlockConfig {
+                transparent: None,
                 sniff: None,
                 egress_fwmark: None,
                 mode: rillane_config::NetworkBlockMode::Tun,
@@ -6664,6 +6826,7 @@ routing:
     async fn dns_block_disabled_builds_none() {
         let mut cfg = s5_udp_config(true);
         cfg.network = Some(rillane_config::NetworkBlockConfig {
+            transparent: None,
             sniff: None,
             egress_fwmark: None,
             mode: rillane_config::NetworkBlockMode::Tun,
@@ -6692,6 +6855,7 @@ routing:
         let mk_cfg = || {
             let mut cfg = s5_udp_config(false);
             cfg.network = Some(rillane_config::NetworkBlockConfig {
+                transparent: None,
                 sniff: None,
                 egress_fwmark: None,
                 mode: rillane_config::NetworkBlockMode::Tun,
@@ -6756,6 +6920,7 @@ routing:
         let mk_cfg = |dns_yaml: &str| {
             let mut cfg = s5_udp_config(false);
             cfg.network = Some(rillane_config::NetworkBlockConfig {
+                transparent: None,
                 sniff: None,
                 egress_fwmark: None,
                 mode: rillane_config::NetworkBlockMode::Tun,
@@ -6891,6 +7056,7 @@ routing:
     async fn dns_block_referenced_empty_group_rejected_at_build() {
         let mut cfg = s5_udp_config(true);
         cfg.network = Some(rillane_config::NetworkBlockConfig {
+            transparent: None,
             sniff: None,
             egress_fwmark: None,
             mode: rillane_config::NetworkBlockMode::Tun,

@@ -160,13 +160,19 @@ routing:
 
 ```yaml
 network:
-  mode: tun                      # 仅 tun（transparent/tap/hybrid 构建期拒）
+  mode: tun                      # tun | transparent（tap/hybrid 构建期拒）
   tun:
     name: rillane0                  # 缺省自动命名（tun%d）
     mtu: 1500                    # 须 ≥ 68
     ipv4: 10.255.0.1/24          # CIDR；进 auto-bypass
     ipv6: fd00::1/128            # 可选
     dns_servers: [1.1.1.1]       # 可选；network.dns.domestic 缺省回落此列表 +53
+  transparent:                   # mode = transparent 时必填；其它 mode 下出现 = 具名拒绝
+    mode: redirect               # redirect | tproxy（RIL-139；见 networking.md）
+    listen: 0.0.0.0:12345        # SocketAddr；接管监听地址
+    target: edge-1               # 固定目标出口节点名（须为已声明出口）
+    intercept_ports: [80, 443]   # 可选；空 = 全端口接管
+    rule_table: 100              # 可选；tproxy ip rule/route 表号（缺省 100）
   routing:
     include: ["10.111.0.0/16"]   # 纳入 tun 的前缀（include 语义；负向即 bypass）
   dns:                           # 见下表；字段见本节

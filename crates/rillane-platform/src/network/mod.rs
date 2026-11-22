@@ -37,6 +37,11 @@ pub mod linux;
 // 现有 TUN 数据面与逃逸表
 #[cfg(target_os = "linux")]
 pub mod takeover;
+// Linux 透明接管 socket 面（RIL-139）：REDIRECT 原目标恢复
+// （SO_ORIGINAL_DST）+ TPROXY 前置（IP_TRANSPARENT）+ 规则 argv 规划。
+// 内核面=Linux（iptables/nftables）；Windows WFP / macOS pf 不在本项。
+#[cfg(target_os = "linux")]
+pub mod transparent;
 // 生命周期恢复（RIL-031 OS 中立面 + RIL-035 Windows 复用）：崩溃日志
 // （持久化 JSONL）+ 网络切换恢复动作映射 OS 中立；Linux 执行入口
 // （recover/journaling_executor/handle_network_event）条目级门控在

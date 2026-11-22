@@ -160,13 +160,19 @@ Existing loss_ratio names are retained for compatibility. Some link observations
 
 ```yaml
 network:
-  mode: tun                      # tun only (transparent/tap/hybrid refused at build time)
+  mode: tun                      # tun | transparent (tap/hybrid refused at build time)
   tun:
     name: rillane0                  # default: automatic naming (tun%d)
     mtu: 1500                    # must be >= 68
     ipv4: 10.255.0.1/24          # CIDR; enters auto-bypass
     ipv6: fd00::1/128            # optional
     dns_servers: [1.1.1.1]       # optional; network.dns.domestic falls back to this list +53
+  transparent:                   # required when mode = transparent; named refusal under other modes
+    mode: redirect               # redirect | tproxy (RIL-139; see networking.md)
+    listen: 0.0.0.0:12345        # SocketAddr; the redirect/tproxy listener
+    target: edge-1               # fixed egress node name (must be a declared egress)
+    intercept_ports: [80, 443]   # optional; empty = all destination ports
+    rule_table: 100              # optional; tproxy ip rule/route table (default 100)
   routing:
     include: ["10.111.0.0/16"]   # prefixes brought into the tun (include semantics; the negative is bypass)
   dns:                           # see the table below; fields described here

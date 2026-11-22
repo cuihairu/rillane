@@ -327,7 +327,7 @@ pub fn resolve_udp_enabled(global_enabled: bool, per_ingress: Option<bool>) -> b
 /// network 区块（network-route.md §1.1/§1.5）：rillane-config 镜像 serde 类型，
 /// 到 rillane-platform `NetworkConfig` 的转换在 rillane-runtime（§1.2 裁决：镜像而非加依赖，
 /// `UdpConfig` 先例）。deny_unknown_fields = 新块无存量兼容负担，拼错子字段立刻报错（B2 定向收口）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkBlockConfig {
     /// 网络模式；缺省 tun（MVP 唯一实现，validate 拒其余）
@@ -352,6 +352,90 @@ pub struct NetworkBlockConfig {
     /// 双界；None = 缺省按需（既有行为零差异）
     #[serde(default)]
     pub sniff: Option<SniffPolicy>,
+    /// 透明接管块（RIL-139）：mode=transparent 时必填（E1 让路）；
+    /// mode 非 transparent 时出现 = 具名拒绝（不静默忽略）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparent: Option<TransparentBlockConfig>,
+}
+
+/// network.transparent 块（RIL-139）：socket 级透明接管入口——经
+/// iptables/nftables REDIRECT 或 TPROXY 把目标流量重定向到本机监听，
+/// 监听器恢复原目标并路由到**固定目标** egress 节点（tunnel）。
+///
+/// 面口径（具名边界，见 networking.md transparent 节）：
+/// - TCP 应用面交付；UDP/QUIC 应用面不交付（catalog 口径）——配置不留
+///   udp 字段；
+/// - `listen` 即接管监听地址（redirect：conntrack REDIRECT 目标；
+///   tproxy：TPROXY on-port）；须为合法 SocketAddr（0.0.0.0:p 语义 = 全部
+///   接口）；
+/// - `target` = 固定目标 egress 节点名（被接管流量恒经它——「固定目标
+///   tunnel」；须为已声明 egress 名，运行时装配校验）；
+/// - `intercept_ports` 空 = 全端口接管；非空 = 仅列出的目的端口（REDIRECT/
+///   TPROXY 规则按 --dport 生成）；
+/// - `rule_table` = ip rule fwmark 逃逸表号（TPROXY 的 ip route/rule 面；
+///   缺省 100，与 RIL-029 逃逸表号一致）；
+/// - `mode` 区分 REDIRECT 与 TPROXY 两种接管机制。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransparentBlockConfig {
+    /// 接管机制：redirect（iptables/nftables NAT REDIRECT + SO_ORIGINAL_DST
+    /// 恢复）或 tproxy（IP_TRANSPARENT + 绑定非本地地址，原目标 =
+    /// accepted socket local_addr）。
+    pub mode: TransparentMode,
+    /// 接管监听地址（合法 SocketAddr；redirect 目标 / tproxy on-port）
+    pub listen: String,
+    /// 固定目标 egress 节点名（被接管流量恒经它）
+    pub target: String,
+    /// 被接管的目的端口（空 = 全端口）
+    #[serde(default)]
+    pub intercept_ports: Vec<u16>,
+    /// ip rule/route 逃逸表号（TPROXY 面；与 RIL-029 逃逸表 100 一致）
+    #[serde(default = "default_transparent_rule_table")]
+    pub rule_table: u32,
+}
+
+/// transparent.mode（serde 名 snake_case）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransparentMode {
+    /// iptables/nftables NAT REDIRECT（原目标经 SO_ORIGINAL_DST 恢复）
+    Redirect,
+    /// TPROXY（IP_TRANSPARENT 绑定非本地地址；原目标 = local_addr）
+    Tproxy,
+}
+
+const fn default_transparent_rule_table() -> u32 {
+    100
+}
+
+impl TransparentBlockConfig {
+    /// 构建期校验（RIL-139）：listen 形如合法 SocketAddr、target 非空、
+    /// intercept_ports 无 0 端口、rule_table 非 0（0 = main 表保留）。
+    pub fn validate(&self) -> Result<()> {
+        self.listen
+            .parse::<std::net::SocketAddr>()
+            .with_context(|| {
+                format!(
+                    "network.transparent.listen 须为合法 SocketAddr（当前 {:?}）",
+                    self.listen
+                )
+            })?;
+        anyhow::ensure!(
+            !self.target.trim().is_empty(),
+            "network.transparent.target 不能为空（固定目标 egress 节点名必填）"
+        );
+        for p in &self.intercept_ports {
+            anyhow::ensure!(
+                *p != 0,
+                "network.transparent.intercept_ports 含 0 端口（0 不是合法目的端口）"
+            );
+        }
+        anyhow::ensure!(
+            self.rule_table != 0,
+            "network.transparent.rule_table 不能为 0（0 = main 表保留；缺省 100）"
+        );
+        Ok(())
+    }
 }
 
 /// network.mode（serde 名随 platform 枚举：transparent 弃 "redir"，§1.3 B4 收口）
@@ -425,15 +509,36 @@ pub fn parse_cidr_pair(cidr: &str) -> Result<(IpAddr, u8)> {
 }
 
 impl NetworkBlockConfig {
-    /// §1.4 构建期校验：E1（mode 仅 tun）/ E3（mtu ≥68、CIDR 逐条过解析带原串）。
+    /// §1.4 构建期校验：E1（mode 仅 tun/transparent，RIL-139 交付
+    /// transparent；tap/hybrid 仍拒）/ E3（mtu ≥68、CIDR 逐条过解析带原串）。
     /// E5（include 命中 auto-bypass 剔除 + warning）落转换处——validate 是只读检查，
     /// 见 rillane-runtime `network_config.rs`（egress/mesh/control 地址集 R1 接线时并入）。
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(
-            self.mode == NetworkBlockMode::Tun,
-            "network.mode = {:?} 未实现（E1）——MVP 仅 tun；transparent/tap/hybrid 归 V2 全局接管条目",
+            matches!(
+                self.mode,
+                NetworkBlockMode::Tun | NetworkBlockMode::Transparent
+            ),
+            "network.mode = {:?} 未实现（E1）——tap/hybrid 无实现面（transparent 已由 RIL-139 交付，须配 network.transparent 块）",
             self.mode
         );
+        // transparent 块与 mode 互锁：mode=transparent 必带块（E1-TP）；
+        // 块出现在其它 mode 下 = 具名拒绝（不静默忽略——配置漂移信号）
+        match (&self.mode, &self.transparent) {
+            (NetworkBlockMode::Transparent, Some(tp)) => {
+                tp.validate().context("network.transparent 块校验失败")?;
+            }
+            (NetworkBlockMode::Transparent, None) => {
+                anyhow::bail!(
+                    "network.mode = transparent 须配 network.transparent 块（listen/target/mode 必填）"
+                );
+            }
+            (_, Some(_)) => anyhow::bail!(
+                "network.transparent 块仅在 network.mode = transparent 下有效（当前 mode = {:?}）——请删除块或改 mode",
+                self.mode
+            ),
+            _ => {}
+        }
         if let Some(tun) = &self.tun {
             anyhow::ensure!(
                 tun.mtu >= 68,
@@ -4199,6 +4304,103 @@ selections:
                 "{why}: {err}"
             );
         }
+    }
+
+    /// RIL-139：transparent 块 serde 形态与校验——mode=transparent 必带块
+    /// （E1-TP）、块仅 transparent 有效（互锁）、listen 须合法 SocketAddr、
+    /// target 非空、intercept_ports 无 0 端口、rule_table 非 0。
+    #[test]
+    fn transparent_block_validate_and_mutual_lock() {
+        // 完整块：解析 + 缺省（rule_table 100、intercept_ports 空）
+        let yaml = "mode: transparent\ntransparent:\n  mode: redirect\n  listen: \"0.0.0.0:12345\"\n  target: tunnel-egress\n";
+        let nb: NetworkBlockConfig = serde_yaml::from_str(yaml).expect("应解析");
+        let tp = nb.transparent.as_ref().expect("块应在场");
+        assert_eq!(tp.mode, TransparentMode::Redirect);
+        assert_eq!(tp.rule_table, 100, "缺省 100");
+        assert!(tp.intercept_ports.is_empty(), "缺省全端口");
+        tp.validate().expect("合法块校验通过");
+        nb.validate().expect("network 块（transparent+块）校验通过");
+
+        // mode=transparent 缺块 → 拒绝
+        let no_block = NetworkBlockConfig {
+            mode: NetworkBlockMode::Transparent,
+            transparent: None,
+            ..Default::default()
+        };
+        let err = no_block.validate().expect_err("缺块应拒");
+        assert!(
+            err.to_string().contains("须配 network.transparent 块"),
+            "缺块错误应指引: {err}"
+        );
+
+        // 块在场而 mode 非 transparent → 拒绝（不静默忽略）
+        let stray = NetworkBlockConfig {
+            mode: NetworkBlockMode::Tun,
+            transparent: Some(TransparentBlockConfig {
+                mode: TransparentMode::Tproxy,
+                listen: "0.0.0.0:12345".into(),
+                target: "tunnel-egress".into(),
+                intercept_ports: vec![],
+                rule_table: 100,
+            }),
+            ..Default::default()
+        };
+        let err = stray.validate().expect_err("块仅 transparent 有效");
+        assert!(
+            err.to_string()
+                .contains("仅在 network.mode = transparent 下有效"),
+            "{err}"
+        );
+
+        // 块字段校验：bad listen / 空 target / 0 端口 / 0 表号
+        let bad_listen = TransparentBlockConfig {
+            mode: TransparentMode::Redirect,
+            listen: "not-an-addr".into(),
+            target: "t".into(),
+            intercept_ports: vec![],
+            rule_table: 100,
+        };
+        assert!(bad_listen
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("SocketAddr"));
+        let empty_target = TransparentBlockConfig {
+            mode: TransparentMode::Redirect,
+            listen: "0.0.0.0:12345".into(),
+            target: "   ".into(),
+            intercept_ports: vec![],
+            rule_table: 100,
+        };
+        assert!(empty_target
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("target 不能为空"));
+        let zero_port = TransparentBlockConfig {
+            mode: TransparentMode::Redirect,
+            listen: "0.0.0.0:12345".into(),
+            target: "t".into(),
+            intercept_ports: vec![0],
+            rule_table: 100,
+        };
+        assert!(zero_port
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("0 端口"));
+        let zero_table = TransparentBlockConfig {
+            mode: TransparentMode::Redirect,
+            listen: "0.0.0.0:12345".into(),
+            target: "t".into(),
+            intercept_ports: vec![],
+            rule_table: 0,
+        };
+        assert!(zero_table
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("rule_table 不能为 0"));
     }
 
     /// RIL-142：池段与保留网络段重叠即拒绝——池落网内（10/8、回环、
