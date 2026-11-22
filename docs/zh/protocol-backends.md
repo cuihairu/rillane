@@ -787,6 +787,26 @@ ZeroTier——层 2 覆盖组网（本项为组网 endpoint：授权、虚拟网
 - **版本 / 许可 / 平台 / 公开 API / 旁路 / 取消 / 统计 / 复用**：不适用——未交付（无目录条目、无 IR 变体、无连接器面）。唯一数据面选项（`libzt`）为 C++ / BSL-1.1 / 未声明许可；纯 Rust crate 根本不暴露节点或数据面 API。
 - 复开条件：出现**维护中的完整纯 Rust ZeroTier 节点**（官方 Rust 重写复活、社区实现、或 `zssp` 成熟并扩展为完整节点）**且**存在自由/开源的自托管控制器可作验收对端。在两者皆成立前，交付被「无载具 + 无对端基础设施」双阻——本仓拒绝的「自己对自己」族（无真实对端即无验收证据，为常设规则；与 MASQUE 待对端前、OpenConnect 待 ocserv 前的阻塞同族）。
 
+## easytier
+
+EasyTier——层 3 覆盖组网 VPN（本项为组网 endpoint：节点生命周期与路由所有权）。
+
+- **结论**：**载具候选存在但不可作流面嵌入承载**——`easytier` 为纯 Rust、TLS 相容、去中心化 mesh VPN，但许可为 **LGPL-3.0（仅此）**、公开 API 为**节点守护 + TUN** 形态（无 `tcp_connect` 型嵌入流原语）、唯一实用集成是**驱动 `easytier-core` CLI 二进制**（系统 TUN + 路由注入）——本仓 OpenVPN 评估已拒收的同族。**未交付**——评估留证于下；复开条件见末条。
+- 载具调查（2026-11-22，本席留证）：
+  - **载具候选 = `easytier`**（EasyTier/EasyTier，GitHub **14.9k★**，活跃——提交至 2026-11-20（PR #2859）；最新 stable **v2.6.4（2026-05-12）**、最新 **v2.7.1 预发布（2026-11-16）**）。纯 Rust + Tokio；**去中心化**（无控制器——对等节点互相发现，mesh 直通承载；对照 ZeroTier 的控制器硬依赖）。数据面 = **`boringtun-easytier` 0.6.1**（纯 Rust WireGuard）+ **`tun-easytier`**（TUN）+ **`smoltcp 0.11`**（用户态栈）；对等链路 `quinn 0.11` / `tokio-websockets`；NAT 穿透 `stun_codec`。**TLS 姿态工作区相容**：`rustls ^0.23` + `tokio-rustls ^0.26`（本仓钉定同对）+ `rcgen`（mesh 自签证书）+ `ring ^0.17`——无 C、无 C 工具链。
+  - **许可 = LGPL-3.0（仅此）**——GitHub 许可指示、README（「EasyTier is released under the LGPL-3.0」）、LICENSE 文件（标准 LGPL-3.0，v3 2007-06-29）三处一致确认；**无双重许可、无商业选项**。crates.io 标记 `non-standard`。
+  - **API 形态**：crate 公开面（docs.rs 最后成功构建 1.2.3）为 `launcher::{EasyTierLauncher, MyNodeInfo, NetworkInstance, NetworkInstanceRunningInfo}` + `rpc`（管理 gRPC，tonic/tarpc）+ `common`/`tunnel`/`utils`——**节点守护启动器**，非逐流连接器。**无 `tcp_connect(peer) -> stream` 原语**（对照 `tailscale` 0.7.1 的 `Device::tcp_connect -> netstack::TcpStream`）：数据面经 mesh **TUN 虚拟 IP** 出口，非可借用的套接字流。文档覆盖率 **11.81%**；**docs.rs 构建 `easytier` 2.0.3 失败**（最后成功构建 1.2.3）；0.1.0–1.0.0 版本曾标「is not a library」。
+  - **版本滞后**：crates.io 停在 **2.0.3（2024-10-13）**，GitHub 项目已 **2.6.4 / 2.7.1（2025–2026）**——项目在 GitHub 发版，不发 crates.io。
+  - 相关 crate（均 EasyTier 自家，LGPL-3.0）：`easytier-rpc-build` 0.1.0（protobuf RPC 生成器）、`boringtun-easytier` 0.6.1（纯 Rust WireGuard）、`tun-easytier` 1.1.1（TUN 设备）。无宽松许可 fork。
+- **为何不交付**：
+  - **许可**：LGPL-3.0 载具入 **Apache-2.0** 宿主（本仓许可）且**二进制分发**（nightly 构建）触发 LGPL §4 静态链接义务——组合作品须交付 Minimal Corresponding Source 使用户可改库后重链接。Rust 静态链接、无共享库机制。本仓迄今全部载具均为宽松许可（MIT / Apache-2.0 / BSD）：rustls、tokio-rustls、h2、quinn、smoltcp、corevpn（MIT/Apache-2.0）、tailscale（BSD-3-Clause）、boringtun、defguard_wireguard_rs。此前唯一考虑过的非宽松载具（`libzt`，BSL 1.1）已拒收——「受限许可载具」族。
+  - **API 形态**：无嵌入流原语；数据面唯一出口是 mesh TUN。rillane 连接器须自持 TUN + 路由（RIL-104 WireGuard 系统 TUN 路径，root/unix）或以 `easytier-core` sidecar 运行并注入路由。
+  - **集成族**：驱动 `easytier-core` CLI 二进制属本仓**已拒收族**——RIL-122 拒 `openvpn-manager`/`vortix`/`vopono`/`tunsmith`/`vpn-shroud`/`openvpn3-indicator-rs` 正因其「驱动系统 `openvpn` 二进制」。
+  - **API 成熟度**：文档覆盖率 11.81%，钉定 crates.io 版本的 docs.rs 构建失败。
+- **验收对端**：**去中心化——对端节点本席可构**（共享网络密钥跑 `easytier-core`；无控制器、无外部账号）——mesh 族后端中最易得的真实对端。对端不是阻点；载具许可/API 才是。
+- **版本 / 许可 / 平台 / 公开 API / 旁路 / 取消 / 统计 / 复用**：不适用——未交付（无目录条目、无 IR 变体、无连接器面）。
+- 复开条件：（1）出现**宽松许可、可嵌入流面**的 EasyTier 库 API（库方重新许可或出现兼容 fork）；或（2）上游重新许可为 MIT/Apache/BSD；或（3）本仓正式接受 **sidecar / binary-driving** 集成（以独立进程跑 `easytier-core` 即免除 LGPL 义务——注意 RIL-126 Gost 的评估可能立此先例）。
+
 ## 公共传输面（跨协议共享）
 
 | 库 | 版本（要求 / lock 实测） | 许可 | 角色 |
