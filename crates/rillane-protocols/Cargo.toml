@@ -46,6 +46,12 @@ webpki-roots.workspace = true
 # OpenConnect CSTP layer-3 bridge (userspace IP stack)
 smoltcp.workspace = true
 
+# OpenVPN（RIL-122）：corevpn-protocol 0.6.0 库承载——协议会话/双角色/TLS
+# 面/KeyMethodV2/PUSH_REPLY（载具经 [patch.crates-io] rustls fork 解析）；
+# corevpn-crypto 直挂（CipherSuite/KeyMaterial/HmacAuth/openvpn_prf/random_bytes）
+corevpn-protocol.workspace = true
+corevpn-crypto.workspace = true
+
 # SOCKS5 client
 tokio-socks.workspace = true
 

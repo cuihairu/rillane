@@ -782,6 +782,16 @@ fn proxy_mapping(
             ));
             None
         }
+        EgressConfig::OpenVpn { .. } => {
+            // OpenVPN（RIL-122）：mihomo outbound schema 无 openvpn 出站
+            // 类型（OpenVPN 为系统级 VPN 协议，Clash 系不做出站面），无对
+            // 应可落键面，按 openconnect 同口径具名跳过（导入侧目录外类型
+            // 按既有类型级不支持口径报损失）
+            report.skipped.push(format!(
+                "出口 {name}：openvpn 为三层 VPN 客户端面，Clash 无对应出站类型，跳过"
+            ));
+            None
+        }
         EgressConfig::Wireguard {
             endpoint,
             private_key,

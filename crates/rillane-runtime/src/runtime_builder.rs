@@ -55,7 +55,8 @@ use rillane_protocols::{
     AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
     Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts,
     HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MasqueConnector,
-    MasqueUdpConnector, MieruConnector, MixedIngress, OpenConnectConnector, ShadowQuicConnector,
+    MasqueUdpConnector, MieruConnector, MixedIngress, OpenConnectConnector, OpenVpnConnector,
+    ShadowQuicConnector,
     ShadowTlsIngress,
     ShadowsocksConnector, ShadowsocksIngress, ShadowsocksShadowTlsConnector,
     ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector, Socks5Connector, Socks5Ingress,
@@ -3025,6 +3026,7 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::TrustTunnel { server, .. }
         | EgressConfig::Masque { server, .. }
         | EgressConfig::OpenConnect { server, .. }
+        | EgressConfig::OpenVpn { server, .. }
         | EgressConfig::Ssh { server, .. } => Some(server),
         // Tor 是网络不是服务器：无 server/port 字段（同 Reject/Direct 的
         // None 口径）
@@ -3386,6 +3388,13 @@ fn build_udp_connectors(
                 // 应用面走 IP 隧道由用户态 smoltcp 栈承载，但本仓未交付
                 // UDP 应用面（catalog udp=false）；节点级 UDP 需求由
                 // scan_udp_capability 按既有口径构建期报错
+                None
+            }
+            EgressConfig::OpenVpn { .. } => {
+                // OpenVPN UDP 判负（RIL-122）：三层 IP 隧道——UDP 应用面走
+                // 用户态 smoltcp 栈承载，但本仓未交付 UDP 应用面（catalog
+                // udp=false）；节点级 UDP 需求由 scan_udp_capability 按既有
+                // 口径构建期报错
                 None
             }
             EgressConfig::Ssh { .. } => {
@@ -4265,6 +4274,43 @@ fn build_egress_outputs(
                         *skip_cert_verify,
                     )
                     .with_context(|| format!("节点 {} 的 openconnect 配置无效", desc.name))?,
+                );
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::OpenVpn {
+                server,
+                port,
+                ca_pem,
+                cert_pem,
+                key_pem,
+                cipher,
+                tls_auth_key,
+                key_direction,
+                sni,
+            } => {
+                // OpenVPN（RIL-122）：corevpn-protocol 0.6.0 库承载三层 VPN
+                // 客户端面——TCP 面用户态 smoltcp 三层桥（与 OpenConnect 共用
+                // 栈）+ PUSH_REPLY 隧道 DNS（评估与标准对端互通留证
+                // protocol-backends.md#openvpn）；UDP 应用面归 UDP 工厂臂
+                // （判负）。构建期校验归 new 内（节点级失败不拖垮整份订阅）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    OpenVpnConnector::new(
+                        server.clone(),
+                        *port,
+                        ca_pem.clone(),
+                        cert_pem.clone(),
+                        key_pem.clone(),
+                        cipher.clone(),
+                        tls_auth_key.clone(),
+                        *key_direction,
+                        sni.clone(),
+                    )
+                    .with_context(|| format!("节点 {} 的 openvpn 配置无效", desc.name))?,
                 );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),

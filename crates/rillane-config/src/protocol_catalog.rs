@@ -319,6 +319,21 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "openvpn",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#openvpn",
+        },
+        // RIL-122：corevpn-protocol 0.6.0 库承载三层 VPN 客户端面（标准对端 =
+        // apt openvpn 2.7.0，本席实机互通实测：TLS 1.3 握手 + KeyMethodV2 +
+        // PUSH_REPLY + 数据通道密钥派生全链通过）；TCP 面交付（用户态
+        // smoltcp 三层桥，与 OpenConnect 共用栈），UDP/QUIC 应用面、服务端
+        // 面与系统 TUN 路线未交付
+        udp: false,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/openvpn.rs",
+        },
+    },
+    CatalogEntry {
         kind: "ssh",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#ssh",
@@ -398,6 +413,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::TrustTunnel { .. } => "trusttunnel",
         EgressConfig::Masque { .. } => "masque",
         EgressConfig::OpenConnect { .. } => "openconnect",
+        EgressConfig::OpenVpn { .. } => "openvpn",
         EgressConfig::Ssh { .. } => "ssh",
         EgressConfig::Tor { .. } => "tor",
         EgressConfig::Wireguard { .. } => "wireguard",
@@ -603,6 +619,17 @@ mod tests {
                 password: "demo".into(),
                 sni: Some("openconnect.example.test".into()),
                 skip_cert_verify: false,
+            },
+            EgressConfig::OpenVpn {
+                server: "203.0.113.21".into(),
+                port: 1194,
+                ca_pem: "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n".into(),
+                cert_pem: "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n".into(),
+                key_pem: "-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n".into(),
+                cipher: "AES-256-GCM".into(),
+                tls_auth_key: None,
+                key_direction: None,
+                sni: Some("openvpn.example.test".into()),
             },
             EgressConfig::Ssh {
                 server: "203.0.113.13".into(),

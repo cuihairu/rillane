@@ -2557,6 +2557,39 @@ pub enum EgressConfig {
         #[serde(default)]
         skip_cert_verify: bool,
     },
+    /// OpenVPN 出口（RIL-122）：corevpn-protocol 0.6.0 库承载三层 VPN
+    /// 客户端面——TLS 1.3 控制通道（HARD_RESET → KeyMethodV2 交换 →
+    /// PUSH_REPLY）+ UDP 数据通道加密 IP 包（AES-256-GCM /
+    /// CHACHA20-POLY1305）；目标连接由用户态 smoltcp 三层桥拨出（与
+    /// OpenConnect 连接器共用栈），DNS 经 PUSH_REPLY 下发 dns 服务器解析。
+    /// 评估与标准对端互通（apt openvpn 2.7.0 实机：TLS 1.3 + KeyMethodV2 +
+    /// PUSH_REPLY + 数据通道密钥派生全链通过）留证
+    /// protocol-backends.md#openvpn。仅交付 TCP 应用面（UDP/QUIC 应用面不
+    /// 交付——catalog udp=false；服务端面与系统 TUN 路线未交付）。安全
+    /// 姿态：载具 CoreVpnServerVerifier 放宽服务端证书链核验（非空根库即
+    /// 放行），故不留 skip_cert_verify 字段（具名边界）。订阅边界：
+    /// mihomo/Clash 无 openvpn 出站类型——导入目录外、导出具名跳过。
+    OpenVpn {
+        server: String,
+        port: u16,
+        /// CA 证书 PEM（必填非空——载具根库非空硬要求）
+        ca_pem: String,
+        /// 客户端证书 PEM（标准 openvpn 证书认证）
+        cert_pem: String,
+        /// 客户端私钥 PEM
+        key_pem: String,
+        /// 数据通道密码（白名单 AES-256-GCM | CHACHA20-POLY1305）
+        cipher: String,
+        /// tls-auth 静态密钥（ta.key 解出的 256 原始字节；可空）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tls_auth_key: Option<Vec<u8>>,
+        /// tls-auth key-direction（0/1；可空）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_direction: Option<u8>,
+        /// SNI（缺省回落 server；载具核验器忽略 server_name，仅作 ClientHello SNI）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sni: Option<String>,
+    },
     /// SSH-2 出口（RIL-113）：russh 客户端面——主机钥钉扎必填（不钉扎
     /// 首用即信是具名拒绝的降级面）+ 认证恰一选一 + direct-tcpip 通道流。
     /// private_key 为 OpenSSH 格式文件路径，加密键须携口令解码（无口令

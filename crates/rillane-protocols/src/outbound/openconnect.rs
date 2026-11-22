@@ -2,10 +2,10 @@
 //!
 //! 三层 VPN 客户端面（WireGuard 族，非面向地址的代理）。载具 rustls TLS
 //! + HTTP/1.1 控制通道（表单认证 POST /auth → CONNECT /CSCOSSLC/tunnel），
-//! 数据面 = CSTP 帧流（每帧一个原始 IP 包）。评估与验收对端留证
-//! protocol-backends.md#openconnect（真实对端 = apt ocserv 1.3.0，本地
-//! /home/cui/ocpeer 服务，127.0.0.1:4433；线格式对照 OpenConnect 源码
-//! cstp.c/auth.c/openconnect-internal.h 核读）。
+//!   数据面 = CSTP 帧流（每帧一个原始 IP 包）。评估与验收对端留证
+//!   protocol-backends.md#openconnect（真实对端 = apt ocserv 1.3.0，本地
+//!   /home/cui/ocpeer 服务，127.0.0.1:4433；线格式对照 OpenConnect 源码
+//!   cstp.c/auth.c/openconnect-internal.h 核读）。
 //!
 //! 线格式钉定（OpenConnect 源码为真源）：
 //! - CSTP 帧头：8 字节 `S T F 0x01` + `payload_len`（大端 u16）+
@@ -432,7 +432,7 @@ fn parse_tunnel_info(resp: &HttpResponse) -> Result<TunnelInfo> {
     let dns = resp
         .header("x-cstp-dns")
         .map(|v| {
-            v.split(|c| c == ',' || c == ' ')
+            v.split([',', ' '])
                 .filter(|s| !s.trim().is_empty())
                 .filter_map(|s| s.trim().parse().ok())
                 .collect::<Vec<Ipv4Addr>>()
@@ -473,10 +473,10 @@ use tokio::sync::Notify;
 type TlsStreamT = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
 
 /// 隧道端 phy：rx = 隧道 DATA 帧入栈队列，tx = 栈出包待编帧队列。
-struct EgressPhy {
-    rx: VecDeque<Vec<u8>>,
-    tx: VecDeque<Vec<u8>>,
-    mtu: usize,
+pub(crate) struct EgressPhy {
+    pub(crate) rx: VecDeque<Vec<u8>>,
+    pub(crate) tx: VecDeque<Vec<u8>>,
+    pub(crate) mtu: usize,
 }
 
 impl Device for EgressPhy {
@@ -504,7 +504,7 @@ impl Device for EgressPhy {
     }
 }
 
-struct PhyRxToken(Vec<u8>);
+pub(crate) struct PhyRxToken(Vec<u8>);
 
 impl RxToken for PhyRxToken {
     fn consume<R, F>(self, f: F) -> R
@@ -515,7 +515,7 @@ impl RxToken for PhyRxToken {
     }
 }
 
-struct PhyTxToken<'a> {
+pub(crate) struct PhyTxToken<'a> {
     queue: &'a mut VecDeque<Vec<u8>>,
 }
 
@@ -536,10 +536,10 @@ const MIN_SOCKET_BUF: usize = 512;
 /// 本地源端口分配起点（临时端口段）
 const EPHEMERAL_BASE: u16 = 32768;
 
-struct StackInner {
-    iface: Interface,
-    device: EgressPhy,
-    sockets: SocketSet<'static>,
+pub(crate) struct StackInner {
+    pub(crate) iface: Interface,
+    pub(crate) device: EgressPhy,
+    pub(crate) sockets: SocketSet<'static>,
     /// 活跃应用流（存在 = 活；流经 EgressTcpStream Drop 收敛）
     flows: HashMap<SmolHandle, ()>,
     retiring: Vec<SmolHandle>,
@@ -557,7 +557,7 @@ impl StackInner {
     fn next_local_port(&mut self) -> u16 {
         for _ in 0..(u16::MAX as u32) {
             let p = self.next_port;
-            self.next_port = if self.next_port >= 65535 {
+            self.next_port = if self.next_port == u16::MAX {
                 EPHEMERAL_BASE
             } else {
                 self.next_port + 1
@@ -575,7 +575,7 @@ impl StackInner {
     }
 
     /// 单 poll 驱动点：入栈包与定时器一次推进 → 退役收敛 → 发信面出队。
-    fn drive(&mut self) -> Vec<Vec<u8>> {
+    pub(crate) fn drive(&mut self) -> Vec<Vec<u8>> {
         self.iface
             .poll(SmolInstant::now(), &mut self.device, &mut self.sockets);
 
@@ -604,13 +604,15 @@ impl StackInner {
 }
 
 /// 用户态 egress 栈（驱动循环与 [`EgressTcpStream`] 共享的句柄持有者）。
-struct EgressStack {
-    inner: StdMutex<StackInner>,
-    kick: Notify,
+/// 隧道无关：入栈 = 隧道下行 IP 包，出栈 = 待隧道的上行 IP 包。OpenVPN
+/// 连接器（RIL-122）与 OpenConnect 连接器共用此栈（三层桥同构）。
+pub(crate) struct EgressStack {
+    pub(crate) inner: StdMutex<StackInner>,
+    pub(crate) kick: Notify,
 }
 
 impl EgressStack {
-    fn new(info: &TunnelInfo) -> Self {
+    pub(crate) fn new(info: &TunnelInfo) -> Self {
         let mtu = info.mtu.max(576) as usize;
         let buf_size = (mtu - 60).max(MIN_SOCKET_BUF);
         let mut device = EgressPhy {
@@ -661,22 +663,22 @@ impl EgressStack {
         }
     }
 
-    fn kick_notify(&self) -> &Notify {
+    pub(crate) fn kick_notify(&self) -> &Notify {
         &self.kick
     }
 
     /// 隧道 DATA 帧载荷入栈（驱动循环调用）。
-    fn ingest(&self, pkt: Vec<u8>) {
+    pub(crate) fn ingest(&self, pkt: Vec<u8>) {
         self.inner.lock().unwrap().device.rx.push_back(pkt);
     }
 
     /// poll + 退役收敛 + 出包（驱动循环调用）。
-    fn drive(&self) -> Vec<Vec<u8>> {
+    pub(crate) fn drive(&self) -> Vec<Vec<u8>> {
         self.inner.lock().unwrap().drive()
     }
 
     /// 拨一条 TCP 连接（源端口显式分配——smoltcp connect 拒绝端口 0）。
-    fn open_tcp(&self, remote: IpEndpoint) -> Result<SmolHandle> {
+    pub(crate) fn open_tcp(&self, remote: IpEndpoint) -> Result<SmolHandle> {
         let mut inner = self.inner.lock().unwrap();
         let port = inner.next_local_port();
         let local = IpEndpoint::new(inner.local_addr, port);
@@ -706,7 +708,7 @@ impl EgressStack {
     }
 
     /// 等待连接 Established（驱动循环持续推进栈）。
-    async fn wait_established(&self, handle: SmolHandle, timeout: Duration) -> Result<()> {
+    pub(crate) async fn wait_established(&self, handle: SmolHandle, timeout: Duration) -> Result<()> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             {
@@ -730,7 +732,7 @@ impl EgressStack {
     }
 
     /// 隧道 DNS 解析（经栈内 dns 套接字；驱动循环持续推进）。
-    async fn dns_query(&self, host: &str) -> Result<Vec<std::net::Ipv4Addr>> {
+    pub(crate) async fn dns_query(&self, host: &str) -> Result<Vec<std::net::Ipv4Addr>> {
         let query = {
             let mut inner = self.inner.lock().unwrap();
             if inner.dns_servers.is_empty() {
@@ -788,7 +790,7 @@ impl EgressStack {
     }
 
     /// 隧道断链收敛：abort 全部活跃 socket（流读侧 EOF / 写侧破裂）。
-    fn shutdown_all(&self) {
+    pub(crate) fn shutdown_all(&self) {
         let mut inner = self.inner.lock().unwrap();
         let handles: Vec<SmolHandle> = inner.flows.keys().copied().collect();
         for h in handles {
@@ -805,7 +807,7 @@ impl EgressStack {
 }
 
 /// 由前缀长算网络掩码。
-fn netmask_of(prefix: u8) -> u32 {
+pub(crate) fn netmask_of(prefix: u8) -> u32 {
     if prefix == 0 {
         0
     } else {
@@ -815,13 +817,13 @@ fn netmask_of(prefix: u8) -> u32 {
 
 /// 应用流面：栈上 TCP socket 的 AsyncRead/AsyncWrite 适配（同构
 /// tun_tcp.rs `SmolTcpStream`；Drop → close 进退役列，驱动循环收敛）。
-struct EgressTcpStream {
+pub(crate) struct EgressTcpStream {
     stack: std::sync::Arc<EgressStack>,
     handle: SmolHandle,
 }
 
 impl EgressTcpStream {
-    fn new(stack: std::sync::Arc<EgressStack>, handle: SmolHandle) -> Self {
+    pub(crate) fn new(stack: std::sync::Arc<EgressStack>, handle: SmolHandle) -> Self {
         Self { stack, handle }
     }
 
@@ -992,14 +994,11 @@ async fn drive_session(
         }
         if running {
             for pkt in stack.drive() {
-                match encode_frame(PKT_DATA, &pkt) {
-                    Ok(fr) => {
-                        if writer.write_all(&fr).await.is_err() {
-                            running = false;
-                            break;
-                        }
+                if let Ok(fr) = encode_frame(PKT_DATA, &pkt) {
+                    if writer.write_all(&fr).await.is_err() {
+                        running = false;
+                        break;
                     }
-                    Err(_) => {}
                 }
             }
         }
