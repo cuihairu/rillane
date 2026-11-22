@@ -771,6 +771,22 @@ OpenConnect / Cisco AnyConnect（Cisco Secure Tunnel Protocol，CSTP）——三
 - **具名风险**（记录在案，不再重议）：载具 pre-1.0 且自述「There are no compatibility guarantees at the moment」；其 NAT 穿透仍在进展中，数据面**可能回退 DERP 中继**（相应延迟/吞吐损失）——经 DERP 通过的验收仍是真实回环，但须如此标注。
 - 复开条件：出现带标准 tailnet 验收记录、可取代本次的维护中纯 Rust Tailscale 客户端。
 
+## zerotier
+
+ZeroTier——层 2 覆盖组网（本项为组网 endpoint：授权、虚拟网络与退出恢复）。
+
+- **结论**：**无可用库后端（数据面）**——crates.io 上唯一的纯 Rust ZeroTier crate 是加密/协议**原语**，非 mesh 节点；唯一真实的数据面载具是官方的 **C++** `libzt`（C/C++ 绑定，破坏纯 Rust + rustls 姿态，上游 **BSL 1.1**，且 crates.io 侧**未声明许可**——三条理由全拒收）。自写**不相称**：一个可用的节点是完整的层 2 覆盖协议栈（VL1 身份/加密信道/对等发现/NAT 穿透/根服务器中继 + VL2 以太网帧/网络配置 + 控制器交互），比仓内自写先例（点对点隧道/代理协议：OpenConnect CSTP、MASQUE、XHTTP）高一个量级。**未交付**——评估留证于下；复开条件见末条。
+- 后端调查（2026-11-22，本席留证）：
+  - crates.io `zerotier` 0.1.0（2020-04-22，transumption/zerotier-rust；下载 1749，近期 4）——**6 年未更**，纯 Rust 加密/协议原语（ed25519-dalek / salsa20 / x25519-dalek 依赖族，无网络栈、无异步运行时）。
+  - crates.io `zerotier-api` 0.2.0（2024-07-30，zo-el/zerotier-rs；下载 4008，近期 21）——`lukateras/rust-zerotier-crypto` 的 fork；**仅加密原语**（1★、0 fork、19 次提交、无 release）；非 mesh 节点。
+  - crates.io `libzt` 0.1.2（2021-05-31，zerotier/libzt；下载 5372）——**C/C++ 核心**（构建依赖 `bindgen` + `cmake` + `libc`；构建须 C 工具链与 CMake）；上游许可 **BSL 1.1**（商业用途受限）；crates.io 侧**许可字段为 `None`**——三条理由全拒收（C 绑定、上游许可受限、未声明许可）。
+  - crates.io `zerotier-client` 1.0.1 / `zerotier-central-api` 1.2.1 / `zerotier-one-api` 1.2.1 / `ikit-net` 0.1.1——**控制面管理 API 客户端**（ZeroTier Central / ZeroTierOne JSON API），非数据面隧道。
+  - crates.io `zeronsd` 0.5.0（官方）——DNS 解析器工具，非节点；`zt` 0.1.1——命名空间占位；`ztui` / `ztui-core` / `ztnet` / `ztcli`——骑 `zerotier-cli` / Central API 的 CLI/UI 包装。
+  - GitHub（官方 `zerotier` org，50 仓，两页皆查）：**整族 Rust 重写已 archived**——`zssp`（ZeroTier Secure Sessions Protocol，**2024-10-04** archived，MPL-2.0，一个 **Noise XK 会话协议原语**——NIST/FIPS 加密 + Kyber1024 后量子，载荷无关，自述「has not yet completed peer review or code audit」），以及 `crypto-glue`、`identity`、`common-utils`、`udwee`、`sequential-exchange`、`nat-emulation`——全 archived。活跃 Rust 仓仅 `zerotier-rust-api`（Central + ZeroTierOne API 客户端）与 `zeronsd`（DNS）。**数据面节点仅 C++**：`ZeroTierOne`（核心，**MPL-2.0**）与 `libzt`（内嵌）。
+- **控制器（验收阻点）**：入网须由**控制器**授权成员并下发网络配置。但**无开源控制器**——ZeroTierOne 的控制器位于仓库 `nonfree/` 目录（source-available、非自由许可；README 的「Network Controller」链到 `nonfree/controller/README.md`），公共的 zerotier.com 控制器为专有托管服务。社区对「自托管 ZeroTier 控制面」的答案是**换协议**（Tailscale/headscale、NetBird、EasyTier、Netmaker、n2n），而非 ZeroTier 控制器。对照 RIL-123：Tailscale 自带开源 `headscale`，正是它使自托管 tailnet 验收成为可能。
+- **版本 / 许可 / 平台 / 公开 API / 旁路 / 取消 / 统计 / 复用**：不适用——未交付（无目录条目、无 IR 变体、无连接器面）。唯一数据面选项（`libzt`）为 C++ / BSL-1.1 / 未声明许可；纯 Rust crate 根本不暴露节点或数据面 API。
+- 复开条件：出现**维护中的完整纯 Rust ZeroTier 节点**（官方 Rust 重写复活、社区实现、或 `zssp` 成熟并扩展为完整节点）**且**存在自由/开源的自托管控制器可作验收对端。在两者皆成立前，交付被「无载具 + 无对端基础设施」双阻——本仓拒绝的「自己对自己」族（无真实对端即无验收证据，为常设规则；与 MASQUE 待对端前、OpenConnect 待 ocserv 前的阻塞同族）。
+
 ## 公共传输面（跨协议共享）
 
 | 库 | 版本（要求 / lock 实测） | 许可 | 角色 |
