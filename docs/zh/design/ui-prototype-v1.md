@@ -98,3 +98,13 @@ Git HTTPS 走 HTTP(S)_PROXY 等受支持环境；SSH 不假定遵守 HTTP_PROXY�
 交互按键盘/读屏、触控目标、明暗主题、文本放大验收；颜色配文字/图标，不靠绿色唯一传达状态。保持窗口与移动安全区，长节点/域名省略但可查看完整脱敏信息。图片是视觉方向，精确字段、错误和权限语义以本页及 IO/Debug 契约为准。
 
 本次图片不构成组件实现，不证明功能已存在。后续桌面与移动客户端分别通过平台验收，现有 Rust 接口和 FFI 不因出图而视为完成。
+
+### 桌面页面模型（RIL-148）
+
+桌面六页的**数据投影层**已落地为 `rillane-app::pages`（纯函数、零 IO、零 GUI 框架依赖）：`DesktopPage` 声明每页依赖的闭合操作名（`runtime_stats`/`routing_quality`/`config_audit`/`flow_list`/`flow_trace`/`flow_events`/`flow_svg`/`explain`），取数一律经统一应用服务（RIL-065）。三条诚实约束以此为结构性保证：
+
+- **平台能力矩阵**：`PlatformCapabilities::with_privilege(os, privilege)` 按 Windows/macOS/Linux 分别产出 `CAPABILITY_KINDS` 六项状态；`CapabilityStatus::is_available` 只认 `Confirmed`——权限态 `Unknown`/`Denied` 时 TUN/透明/DNS 等需要管理员权限的能力**不显示为已启用**。流媒体检测（控制面未接线）与代写宿主文件（落盘只在 CLI 侧）在任何平台都不是 `Confirmed`。Linux `transparent_capture` 有实现面（RIL-139），Windows 为 `Unsupported`（无 nftables 面），macOS 各项实现面未接线 → `Unknown`。
+- **接管状态以回执为准**：`takeover_state(&/config/receipts)` 只认回执链——`apply.applied` + `os_applied == true` + `reconcile.agrees` + 代际吻合才 `Confirmed`；执行失败/OS 未落/代际不符/缺对账摘要分别 `Failed`/`Unconfirmed` 并点名原因；审计不可达 = `Unknown`（既不冒充未接管也不冒充已接管）。
+- **统计不落 0**：`StatValue::{Known,Unknown}` 让缺席字段显示「未知」；采集距今超过 `STALE_STATS_SECONDS`（30s）或不可达标为陈旧。空订阅 = `subscription_nodes == 0` → `Empty`，与 `Unknown` 区分。
+
+网络页（DNS/路由状态读面属管理员 grade，未晋升进闭合操作集）与开发者页（RIL-147 片段 + 写盘计划）为纯本地生成；`DeveloperSnippetView::can_write_files` 恒 false——页面/服务层不承诺写文件，落盘须经 CLI 显式授权。GUI 组件本身仍待各平台客户端批次实现。

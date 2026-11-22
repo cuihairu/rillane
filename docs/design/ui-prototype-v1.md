@@ -55,3 +55,13 @@ Connectivity results separate DNS, proxy setup, HTTPS/Git and SSH handshake evid
 ## States and delivery
 
 Implement empty subscriptions/nodes, denied permission, offline, applying/failed config, stale probes, unknown owners, generation conflicts and overridden policies. Validate keyboard/screen-reader/touch access, themes, text scaling, safe areas and non-color status cues. Images are visual proposals; exact behavior follows this page and IO/Debug contracts. Clients and platform/FFI acceptance remain pending.
+
+### Desktop page model (RIL-148)
+
+The six desktop pages' **data projection layer** now lives in `rillane-app::pages` (pure functions, zero IO, no GUI-framework dependency): `DesktopPage` declares each page's closed operation names (`runtime_stats`/`routing_quality`/`config_audit`/`flow_list`/`flow_trace`/`flow_events`/`flow_svg`/`explain`), and data always goes through the unified app service (RIL-065). Three honesty constraints are structural:
+
+- **Platform capability matrix**: `PlatformCapabilities::with_privilege(os, privilege)` yields per-OS status for all six `CAPABILITY_KINDS`; `CapabilityStatus::is_available` only accepts `Confirmed` — TUN/transparent/DNS capabilities requiring elevation are **not shown enabled** when the privilege state is `Unknown`/`Denied`. Streaming detection (control plane not wired) and host-file writing (persist only on the CLI side) are never `Confirmed` on any platform. Linux `transparent_capture` has an implementation (RIL-139); Windows is `Unsupported` (no nftables surface); macOS surfaces are not wired → `Unknown`.
+- **Takeover state follows receipts**: `takeover_state(&/config/receipts)` trusts only the receipt chain — `apply.applied` + `os_applied == true` + `reconcile.agrees` + generation match → `Confirmed`; execution failure / OS not applied / generation mismatch / missing reconcile summary → `Failed`/`Unconfirmed` with the reason named; unreachable audit → `Unknown` (neither "not configured" nor "configured").
+- **Stats never fake zero**: `StatValue::{Known,Unknown}` shows absent fields as "unknown"; age beyond `STALE_STATS_SECONDS` (30s) or unreachable data is marked stale. Empty subscription = `subscription_nodes == 0` → `Empty`, distinct from `Unknown`.
+
+The network page (DNS/route-status reads are admin-grade, not promoted into the closed set) and developer page (RIL-147 snippets + write plan) are purely local generation; `DeveloperSnippetView::can_write_files` is always false — the page/service layer does not promise file writes, which require explicit CLI authorization. GUI components themselves await the per-platform client batches.
