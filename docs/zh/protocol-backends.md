@@ -737,6 +737,19 @@ OpenConnect / Cisco AnyConnect（Cisco Secure Tunnel Protocol，CSTP）——三
 - 交付边界（留证，不复审）：**仅 TCP 应用面**——UDP/QUIC 应用流具名拒绝（三层栈原理可承载，但 UDP 应用面未交付；catalog `udp=false`）；**无 DTLS**（基线骑 HTTPS CONNECT 连接；DTLS 为增强）；**无系统 TUN 路线**（选用户态 smoltcp 路径；系统 TUN/root 路径为 unix 替代，未交付）。订阅边界：mihomo/Clash 无 `openconnect` 出站类型——导入按既有类型级不支持口径报损失（无同名类型可拒）、导出具名跳过。
 - 复开条件：已交付（RIL-121）；上述具名边界为增强，非基线要求。
 
+## openvpn
+
+- **结论**：**库承载——载具钉定 `corevpn-protocol` 0.6.0**（RIL-122，评估留证 2026-11-22；未交付——无目录条目/IR 变体/连接器面）。自写**未触发**（存在可用纯 Rust 后端）。调查证据（crates.io 2026-11-22 + 载具仓源码核读）：
+  - OpenVPN 3 Core 绑定拒绝——与 OpenConnect C 绑定调查同族：`openvpn-connect` / `openvpn-connect-sys` 0.1.2（"Safe/Raw Rust bindings to the OpenVPN 3 Core client API"）与 `openvpn-rust-bindings` 0.1.0——均为 OpenVPN 3 Core 原生库（gnutls/openltp）的 C 绑定，破坏工作区纯 Rust + rustls 姿态。
+  - `openvpn-parser` 0.6.0（rusticata，MIT/Apache-2.0，约 4.8 万下载）仅为**配置解析器**（2021-09 后未更，约 5 年陈旧）——无会话/协议/通道面。
+  - 其余命中均非可嵌入客户端：`nm-openvpn-sso`（NetworkManager 插件）、`openvpn-manager` / `openvpn-mgmt-codec` / `openvpn-mgmt-frame`（管理接口工具族）、`vortix` / `vopono` / `tunsmith` / `product-os-vpn` / `vpn-shroud` / `openvpn3-indicator-rs`（均驱动**系统 `openvpn` 二进制**）、`openaws-vpn-client` 0.1.8 / `fvpnc` 0.1.3（特定商业供应商 CLI 客户端）。
+  - **载具 = `corevpn-protocol` 0.6.0**（pegasusheavy/corevpn；**MIT OR Apache-2.0**；2026-03-05 更新；依赖 `rustls 0.23` + `tokio-rustls 0.26` + `tokio` + `bytes` + `socket2` + 同仓 `corevpn-core`/`corevpn-crypto`——工作区相容 TLS/工具链姿态，无 C、无非标许可）。完整 Rust OpenVPN 实现、**双角色**：会话面 `ProtocolSession::{new_client, new_server, create_hard_reset_client, create_hard_reset_response, create_control_packets, create_control_packet, create_ack_packet, install_keys(is_server), encrypt_data, get_retransmits, should_send_ack, next_timeout, is_established, rotate_key, set_tls_auth, set_cipher_suite}`；TLS 面 `TlsHandler` / `TlsClientHandler` + `create_client_config` / `create_server_config` + `load_certs_from_pem` / `load_key_from_pem`；通道模块 `control`（`ControlPacket` / `ControlMessage` / **`KeyMethodV2`** / `PushReply` / `PushRoute` / `Topology`）、`data`（`DataChannel` / `DataPacket`）、`reliable`（`ReliableTransport` / `ReliableConfig` / `TlsRecordReassembler`）、`opcode` / `packet`。
+  - 实机驱动 = **`corevpn-cli` 0.6.0**——真实 VPN **客户端**二进制：**标准 `.ovpn` 解析器**（`remote` / `protocol` / `cipher` / `data_ciphers`（NCP）/ `auth` / `verb` / CA + 客户端证书 + 私钥 PEM / `tls-auth` 键 + `key-direction` / `remote-cert-tls` / `dev tun|tap`）与文档化流程「含 tls-auth、TLS 1.3、KeyMethodV2 交换、TUN 转发」——发标准控制报文 `V4,dev-type tun,link-mtu 1560,tun-mtu 1500,proto UDPv4,cipher {},auth [null-digest],keysize 256,key-method 2,tls-client`，再候服务端 KeyMethodV2 + **PUSH_REPLY**（路由/DNS）。`corevpn-server` 声明「Standard OpenVPN certificate authentication works out of the box」。
+- 版本 / 许可 / 平台 / 公开 API / 旁路 / 取消 / 统计 / 复用 / UDP / 服务端面：**未钉定**——评估留证，交付待办：载具嵌入（`ProtocolSession` + `TlsClientHandler` 骑 rillane `Flow` / `FlowTarget`）、IR 变体 + 目录条目 + runtime 接线 + clash 导入导出、验收套件。
+- **验收对端**：**`openvpn` 2.7.0** 本席可 apt 装（`openvpn: Candidate: 2.7.0-1ubuntu1.4`，当前未装——RIL-121 `ocserv` 先例：apt 包即真实对端）。
+- **决定性子验点**：仓*服务端*向显式声明与标准客户端互通；*客户端*向线形标准（标准 `.ovpn` + PUSH_REPLY + tls-auth + KeyMethodV2）但**尚无证据**证 corevpn 客户端拨标准 `openvpn` 2.x 服务端（而非 corevpn 服务端——后者携非标 OAuth2 / ghost-mode 扩展）。故验收须以嵌入客户端对标准 `openvpn` 服务端实测，方可钉定载具交付；若互通失败，载具降级为「参考实现」，自写重新评估。
+- 复开条件：上述标准对端互通，或出现带标准服务端验收记录的维护中纯 Rust OpenVPN 客户端。
+
 ## 公共传输面（跨协议共享）
 
 | 库 | 版本（要求 / lock 实测） | 许可 | 角色 |
