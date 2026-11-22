@@ -334,6 +334,21 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "tailscale",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#tailscale",
+        },
+        // RIL-123：tailscale 0.7.1（tailscale-rs）库承载三层 mesh 客户端面
+        // （自托管 headscale 或官方协调端点 + preauth key + WireGuard 数据
+        // 通道经 ts_netstack_smoltcp 用户态栈，Device::tcp_connect 直出
+        // 已解封 TCP 流）；TCP 面交付，UDP/QUIC 应用面、服务端面与系统 TUN
+        // 路线未交付（载具 pre-1.0 无兼容保证、NAT 穿透在研可能回退 DERP）
+        udp: false,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/tailscale.rs",
+        },
+    },
+    CatalogEntry {
         kind: "ssh",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#ssh",
@@ -414,6 +429,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Masque { .. } => "masque",
         EgressConfig::OpenConnect { .. } => "openconnect",
         EgressConfig::OpenVpn { .. } => "openvpn",
+        EgressConfig::Tailscale { .. } => "tailscale",
         EgressConfig::Ssh { .. } => "ssh",
         EgressConfig::Tor { .. } => "tor",
         EgressConfig::Wireguard { .. } => "wireguard",
@@ -630,6 +646,13 @@ mod tests {
                 tls_auth_key: None,
                 key_direction: None,
                 sni: Some("openvpn.example.test".into()),
+            },
+            EgressConfig::Tailscale {
+                control_url: "http://127.0.0.1:8080".into(),
+                auth_key: "preauth-key-xyz".into(),
+                hostname: Some("rillane-node".into()),
+                ephemeral: true,
+                key_file: "/tmp/tsrs_keys.json".into(),
             },
             EgressConfig::Ssh {
                 server: "203.0.113.13".into(),

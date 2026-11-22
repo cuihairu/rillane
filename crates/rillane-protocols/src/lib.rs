@@ -36,7 +36,7 @@ pub use outbound::{
     ShadowsocksConnector,
     ShadowsocksShadowTlsConnector,
     ShadowsocksUdpConnector, SnellConnector, Socks5Connector, Socks5UdpConnector, SshConnector,
-    TorConnector, TrojanConnector, TrojanUdpConnector, TrustTunnelConnector,
+    TailscaleConnector, TorConnector, TrojanConnector, TrojanUdpConnector, TrustTunnelConnector,
     TrustTunnelUdpConnector, TuicConnector, TuicStream, TuicUdpConnector, TuicUdpRelay,
     VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity, VmessUdpConnector,
     WireguardConnector, WireguardUdpConnector,

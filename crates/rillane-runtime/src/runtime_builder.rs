@@ -60,7 +60,8 @@ use rillane_protocols::{
     ShadowTlsIngress,
     ShadowsocksConnector, ShadowsocksIngress, ShadowsocksShadowTlsConnector,
     ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector, Socks5Connector, Socks5Ingress,
-    Socks5UdpConnector, SshConnector, TlsConnectorFactory, TlsFingerprint, TorConnector,
+    Socks5UdpConnector, SshConnector, TailscaleConnector, TlsConnectorFactory, TlsFingerprint,
+    TorConnector,
     TransportKey, TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector,
     TrojanUdpParts, TrustTunnelConnector, TrustTunnelUdpConnector, TuicConnector, TuicUdpConnector,
     VlessConnector, VlessIngress, VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress,
@@ -3028,6 +3029,9 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::OpenConnect { server, .. }
         | EgressConfig::OpenVpn { server, .. }
         | EgressConfig::Ssh { server, .. } => Some(server),
+        // Tailscale 的可达面：控制面 URL（载具在此握手+授权；数据面为
+        // tailnet 内直连/DERP，不经此地址）
+        EgressConfig::Tailscale { control_url, .. } => Some(control_url),
         // Tor 是网络不是服务器：无 server/port 字段（同 Reject/Direct 的
         // None 口径）
         EgressConfig::Tor { .. } => None,
@@ -3400,6 +3404,13 @@ fn build_udp_connectors(
             EgressConfig::Ssh { .. } => {
                 // SSH UDP 判负（RIL-113）：direct-tcpip 仅 TCP 面——该节点
                 // UDP 需求由 scan_udp_capability 按既有口径构建期报错
+                None
+            }
+            EgressConfig::Tailscale { .. } => {
+                // Tailscale UDP 判负（RIL-123）：载具数据面为 WireGuard 三层
+                // 隧道，tcp_connect 仅 TCP 流；本仓未交付 UDP 应用面
+                // （catalog udp=false）——该节点 UDP 需求由
+                // scan_udp_capability 按既有口径构建期报错
                 None
             }
             EgressConfig::Tor { .. } => {
@@ -4311,6 +4322,37 @@ fn build_egress_outputs(
                         sni.clone(),
                     )
                     .with_context(|| format!("节点 {} 的 openvpn 配置无效", desc.name))?,
+                );
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Tailscale {
+                control_url,
+                auth_key,
+                hostname,
+                ephemeral,
+                key_file,
+            } => {
+                // Tailscale（RIL-123）：tailscale 0.7.1（tailscale-rs）库承载
+                // 三层 mesh 客户端面——噪音控制面握手（自托管 headscale 或
+                // 官方协调端点）+ preauth key 授权 + WireGuard 数据通道经
+                // ts_netstack_smoltcp 用户态栈直出已解封 TCP 流（评估与交付
+                // 边界留证 protocol-backends.md#tailscale）。UDP 应用面归
+                // UDP 工厂臂（判负）；构建期校验归 new 内（节点级失败不拖
+                // 垮整份订阅）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    TailscaleConnector::new(
+                        control_url.clone(),
+                        auth_key.clone(),
+                        hostname.clone(),
+                        *ephemeral,
+                        key_file.clone(),
+                    )
+                    .with_context(|| format!("节点 {} 的 tailscale 配置无效", desc.name))?,
                 );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),

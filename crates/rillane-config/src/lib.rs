@@ -2609,6 +2609,33 @@ pub enum EgressConfig {
         /// 主机钥 SHA256 指纹（`SHA256:` 前缀可带可不带，比对先剥前缀）
         host_key: String,
     },
+    /// Tailscale 出口（RIL-123）：tailscale 0.7.1（tailscale-rs，BSD-3-Clause）
+    /// 库承载三层 mesh 客户端面——噪音控制面握手（自托管 headscale 或官方
+    /// 协调端点）+ 授权（preauth key）+ WireGuard 数据通道（直连或 DERP
+    /// 中继）经 ts_netstack_smoltcp 用户态栈，Device::tcp_connect 直接给出
+    /// 已解封 TCP 流；目标寻址为 tailnet 地址（对端 tailnet IP 字面量或
+    /// peer 主机名经 peer_by_name）。评估与交付边界（载具 pre-1.0 无兼容
+    /// 保证、NAT 穿透在研数据面可能回退 DERP、无出口节点/MagicDNS/子网
+    /// 路由器/私有 DERP/taildrop）见两语 protocol-backends.md tailscale 段。
+    /// 仅交付 TCP 应用面（UDP/QUIC 应用面不交付——catalog udp=false；服务端
+    /// 面与系统 TUN 路线未交付）。订阅边界：mihomo/Clash 无 tailscale 出站
+    /// 类型——导入目录外、导出具名跳过。
+    Tailscale {
+        /// 控制面 URL（自托管 headscale `http://host:port` 或 Tailscale 协调
+        /// 端点；必填非空——不静默指官方端点）
+        control_url: String,
+        /// preauth key（headscale `preauthkeys create` / Tailscale oauth）；
+        /// 必填非空
+        auth_key: String,
+        /// 请求主机名（tailnet 内名称；缺省用系统主机名）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
+        /// 临时节点（注销即清；缺省 false）
+        #[serde(default)]
+        ephemeral: bool,
+        /// 节点身份持久文件（载具 load_or_init：缺失即新建身份）；必填非空
+        key_file: String,
+    },
     /// Tor 出口（RIL-114）：arti-client 嵌入式客户端面——共享客户端惰性
     /// 引导（缺省磁盘缓存 ~/.cache/arti + ~/.local/share/arti），逐流隔离
     /// （isolated_client，流间不共享电路）。Tor 是网络不是服务器：无

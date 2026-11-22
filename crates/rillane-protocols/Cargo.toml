@@ -35,6 +35,7 @@ http.workspace = true
 pin-project-lite.workspace = true
 uuid.workspace = true
 rand.workspace = true
+url.workspace = true
 rillane-core = { path = "../rillane-core" }
 rillane-config = { path = "../rillane-config" }
 
@@ -51,6 +52,15 @@ smoltcp.workspace = true
 # corevpn-crypto 直挂（CipherSuite/KeyMaterial/HmacAuth/openvpn_prf/random_bytes）
 corevpn-protocol.workspace = true
 corevpn-crypto.workspace = true
+
+# Tailscale（RIL-123）：tailscale 0.7.1 库承载——Device/tcp_connect/netstack
+# （ts_netstack_smoltcp，AsyncRead/AsyncWrite；载具 rustls 经 [patch.crates-io]
+# fork 解析，ts_tls_util 骑 tokio-rustls 0.26）
+tailscale.workspace = true
+# 载具子层 feature 统一：insecure-keyfetch 使控制面 key 获取沿用用户给定的 URL
+# scheme（否则无条件改写 https，自托管明文 headscale 会 TLS 握手失败，见 RIL-123
+# 真机对端实测）。仅作 feature 开关，不直接调用。
+ts_control.workspace = true
 
 # SOCKS5 client
 tokio-socks.workspace = true

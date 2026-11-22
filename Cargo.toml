@@ -130,6 +130,19 @@ shadowquic = "0.4.12"
 # rustls 经本仓 [patch.crates-io] fork 统一解析
 corevpn-protocol = "0.6"
 corevpn-crypto = "0.6"
+# Tailscale（RIL-123）：库承载出站——tailscale 0.7.1（tailscale-rs，
+# BSD-3-Clause，纯 Rust；Device::tcp_connect -> netstack::TcpStream，
+# AsyncRead/AsyncWrite 经 ts_netstack_smoltcp 的 tokio 特性）。载具
+# ts_tls_util 骑 tokio-rustls 0.26（→rustls 0.23，经本仓
+# [patch.crates-io] fork 统一解析）；用户态数据面=ts_netstack_smoltcp，
+# 与 OpenConnect/OpenVPN 三层桥同构。评估留证 protocol-backends.md#tailscale
+tailscale = "0.7"
+# 载具子层 ts_control：启用 insecure-keyfetch 使控制面 key 获取沿用用户给定的
+# URL scheme——否则载具无条件把 key URL 改写成 https（ts_control::fetch_control_key），
+# 自托管 headscale 的明文 http 控制面会 TLS 握手失败（RIL-123 真机对端实测）。
+# https 官方控制面不受影响（scheme 已是 https，仍走证书校验）。
+# 此处仅作 feature 统一（不直接调用），挂在 rillane-protocols 上。
+ts_control = { version = "0.7", features = ["insecure-keyfetch"] }
 defguard_wireguard_rs = "0.11"
 x509-parser = "0.16"
 time = "0.3"
