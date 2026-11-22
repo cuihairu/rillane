@@ -45,9 +45,24 @@ where
 }
 
 pub(crate) async fn ws_client_handshake<S>(
+    stream: S,
+    host: &str,
+    path: &str,
+) -> Result<WsClient<tokio::io::ReadHalf<S>, tokio::io::WriteHalf<S>>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    ws_client_handshake_extra(stream, host, path, &[]).await
+}
+
+/// 带额外请求头的 WS 握手（RIL-128 Cloudflared）：CF Access 服务令牌头
+/// （CF-Access-Client-Id/Secret）经 `extra_headers` 入握手；空表与
+/// `ws_client_handshake` 逐字节同构。
+pub(crate) async fn ws_client_handshake_extra<S>(
     mut stream: S,
     host: &str,
     path: &str,
+    extra_headers: &[(&str, &str)],
 ) -> Result<WsClient<tokio::io::ReadHalf<S>, tokio::io::WriteHalf<S>>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -69,6 +84,12 @@ where
     req.push_str(&key);
     req.push_str("\r\n");
     req.push_str("Sec-WebSocket-Version: 13\r\n");
+    for (name, value) in extra_headers {
+        req.push_str(name);
+        req.push_str(": ");
+        req.push_str(value);
+        req.push_str("\r\n");
+    }
     req.push_str("User-Agent: rillane\r\n\r\n");
 
     stream.write_all(req.as_bytes()).await?;
@@ -185,6 +206,30 @@ where
                 0x9 => {
                     if let Some(tx) = &self.pong_tx {
                         // try_send：有界通道满则丢弃（不阻塞读帧、不积压）。
+                        let _ = tx.try_send(frame.payload);
+                    }
+                    continue;
+                }
+                0xA => continue,
+                _ => continue,
+            }
+        }
+    }
+
+    /// 数据帧读取（RIL-128 Cloudflared）：同 `read_binary` 但 text(0x1)
+    /// 亦视为数据——CF edge 对 origin 回显可能按客户端原 opcode 或恒 text
+    /// 发帧，两者均承载裸字节；close(0x8) 即流末。
+    pub(crate) async fn read_data(&mut self) -> Result<Option<Vec<u8>>> {
+        loop {
+            let frame = self.read_frame().await?;
+            let Some(frame) = frame else {
+                return Ok(None);
+            };
+            match frame.opcode {
+                0x0..=0x2 => return Ok(Some(frame.payload)),
+                0x8 => return Ok(None),
+                0x9 => {
+                    if let Some(tx) = &self.pong_tx {
                         let _ = tx.try_send(frame.payload);
                     }
                     continue;

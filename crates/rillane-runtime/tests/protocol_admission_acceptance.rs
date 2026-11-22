@@ -120,7 +120,7 @@ fn hysteria2_node() -> EgressDescriptor {
 /// 回归由目录单测钉住）；目录外类型恒 Unknown（订阅转换/诊断面点名）。
 #[test]
 fn catalog_entries_all_admitted_with_evidence() {
-    assert_eq!(protocol_catalog::CATALOG.len(), 25, "全目录二十五条");
+    assert_eq!(protocol_catalog::CATALOG.len(), 26, "全目录二十六条");
     for e in protocol_catalog::CATALOG {
         let evidence = e
             .evidence()
@@ -240,6 +240,21 @@ fn catalog_entries_all_admitted_with_evidence() {
         ),
         "masque 后端 = 仓库自写: {:?}",
         mq.backend
+    );
+    // cloudflared 具体口径（RIL-128）：客户端面自写（WS-over-TLS 拨 CF
+    // 隧道公共主机名；载具 libcfd 0.2.0 仅 dev-dependency 承担验收门）
+    // + 无 UDP 面
+    let cf = protocol_catalog::entry_for("cloudflared").expect("已编目");
+    assert!(!cf.udp, "RIL-128 客户端面仅 TCP 流，UDP 面未交付");
+    assert!(
+        matches!(
+            cf.backend,
+            protocol_catalog::Backend::InTree {
+                path: "crates/rillane-protocols/src/outbound/cloudflared.rs"
+            }
+        ),
+        "cloudflared 后端 = 仓库自写: {:?}",
+        cf.backend
     );
     for unknown in ["ss", ""] {
         assert_eq!(

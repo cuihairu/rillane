@@ -102,6 +102,13 @@ x509-parser.workspace = true
 defguard_wireguard_rs.workspace = true
 
 [dev-dependencies]
+# Cloudflared 验收门对端（RIL-128）：隧道客户端面参考实现=真实对端
+# （quick tunnel 由验收门自预配）；仅测试用，resolver v2 下不泄漏进生产
+# 构建（同 anytls server 特性口径）
+libcfd.workspace = true
+# 真机对端验收门（RIL-128）：origin 桥接 tokio duplex→futures-io
+# compat（libcfd Stream::from_io 收 futures-io trait）；仅测试用
+tokio-util = { version = "0.7", features = ["compat"] }
 # §8.2 mock TLS 服务端（自签证书）
 rcgen.workspace = true
 # RIL-106 真实对端：库自带 AnyTLS 服务端面（Session::new_server/accept_stream）

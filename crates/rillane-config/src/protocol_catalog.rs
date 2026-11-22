@@ -366,6 +366,25 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "cloudflared",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#cloudflared",
+        },
+        // RIL-128：客户端面自写（in-tree）——WS-over-TLS 拨 CF 隧道公共
+        // 主机名（RFC 6455 掩码写/非掩码读、16KiB 内部分片、16MiB 读上限；
+        // edge 终结 WS 帧后经 QUIC/H2 隧道转至隧道客户端，origin 收到帧
+        // 终结后的裸字节，与 cloudflared access tcp 客户端语义同构）。载具
+        // libcfd 0.2.0（apersomany/libcfd，Apache-2.0，crates.io 发布；
+        // 隧道客户端面参考实现=真实对端）仅作 dev-dependency 承担验收门
+        // （生产路径不经它——resolver v2 下不泄漏）。TCP 面交付；UDP/QUIC
+        // 应用面与隧道客户端/守护面未交付（载具可承载，本仓不做隧道服务
+        // 端面——catalog udp=false）；见 protocol-backends.md#cloudflared
+        udp: false,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/cloudflared.rs",
+        },
+    },
+    CatalogEntry {
         kind: "ssh",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#ssh",
@@ -448,6 +467,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::OpenVpn { .. } => "openvpn",
         EgressConfig::Tailscale { .. } => "tailscale",
         EgressConfig::Tailcat { .. } => "tailcat",
+        EgressConfig::Cloudflared { .. } => "cloudflared",
         EgressConfig::Ssh { .. } => "ssh",
         EgressConfig::Tor { .. } => "tor",
         EgressConfig::Wireguard { .. } => "wireguard",
@@ -677,6 +697,12 @@ mod tests {
                 private_key: None,
                 relay_only: true,
                 derp_map_url: None,
+            },
+            EgressConfig::Cloudflared {
+                hostname: "tunnel-abc.trycloudflare.com".into(),
+                path: "/ws".into(),
+                access_client_id: None,
+                access_client_secret: None,
             },
             EgressConfig::Ssh {
                 server: "203.0.113.13".into(),

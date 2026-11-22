@@ -812,6 +812,16 @@ fn proxy_mapping(
             ));
             None
         }
+        EgressConfig::Cloudflared { .. } => {
+            // Cloudflared（RIL-128）：mihomo outbound schema 无 cloudflared
+            // 出站类型（Clash 系对 Cloudflare Tunnel 客户端面不建模），无
+            // 对应可落键面，按 tailcat 同口径具名跳过（导入侧目录外类型按
+            // 既有类型级不支持口径报损失）
+            report.skipped.push(format!(
+                "出口 {name}：cloudflared 为隧道客户端面，Clash 无对应出站类型，跳过"
+            ));
+            None
+        }
         EgressConfig::Wireguard {
             endpoint,
             private_key,

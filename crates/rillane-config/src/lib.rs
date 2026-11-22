@@ -2666,6 +2666,32 @@ pub enum EgressConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         derp_map_url: Option<String>,
     },
+    /// Cloudflared 出口（RIL-128）：经 Cloudflare Tunnel 公共主机名拨
+    /// 远程 TCP 服务——本仓侧 WS-over-TLS 客户端（RFC 6455，掩码写/非
+    /// 掩码读，16KiB 内部分片、16MiB 读上限），CF edge 终结 WS 帧后经
+    /// QUIC/H2 隧道转至隧道客户端（载具 libcfd 0.2.0，Apache-2.0，
+    /// 隧道客户端面；本仓仅交付客户端面，不做隧道守护/服务端面）。
+    /// 目标寻址口径：`hostname` 即端点身份（公共主机名 → 单 ingress
+    /// 服务），flow 目标不参预路由（与 tailscale/tailcat 的「地址即
+    /// 端点」同口径）。CF Access 服务令牌成对（id/secret）——命名隧道
+    /// 受 Access 保护时必填，建期具名校验成对（不静默降级为匿名）。
+    /// 仅交付 TCP 应用面（UDP/QUIC 应用面不交付——catalog udp=false）；
+    /// edge 恒 443（hostname 不得带端口）。评估与交付边界见两语
+    /// protocol-backends.md cloudflared 段。
+    Cloudflared {
+        /// 公共隧道主机名（quick 的 trycloudflare.com 主机或命名隧道
+        /// 主机）；必填非空，裸主机名（无 scheme、无端口）
+        hostname: String,
+        /// WS upgrade 路径；缺省 `/`
+        #[serde(default)]
+        path: String,
+        /// CF Access 服务令牌 Client-ID（与 Secret 成对；缺省匿名）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access_client_id: Option<String>,
+        /// CF Access 服务令牌 Client-Secret（与 ID 成对；缺省匿名）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access_client_secret: Option<String>,
+    },
     /// Tor 出口（RIL-114）：arti-client 嵌入式客户端面——共享客户端惰性
     /// 引导（缺省磁盘缓存 ~/.cache/arti + ~/.local/share/arti），逐流隔离
     /// （isolated_client，流间不共享电路）。Tor 是网络不是服务器：无

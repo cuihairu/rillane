@@ -181,6 +181,13 @@ geosite-rs = "0.1.6"
 # Test-only writer to synthesize a small .mmdb without external files.
 maxminddb-writer = "0.1.3"
 
+# Cloudflared（RIL-128）：库承载的 Cloudflare Tunnel 客户端——quick/named
+# 隧道 + QUIC(quinn)/HTTP2 edge + 重连退避 + TCP/WS/HTTP origin（载具评估
+# 见 protocol-backends.md#cloudflared）；Apache-2.0；伴生 libcfd-rpc(capnp
+# 缺编译器回退 committed pregenerated=零安装面)；rustls 0.23 ring 经本仓
+# [patch.crates-io] fork 统一解析（quinn ^0.11.11 与工作区 0.11.9 归并）
+libcfd = "0.2.0"
+
 # REALITY 传输面（RIL-107）：cfal/rustls fork——上游 049d39b9（0.23.46）+
 # 5 个 REALITY 提交（ClientHooks/new_reality/PreparedServerHello/隔离加固），
 # 固定 rev 全仓换用；选库评估见 docs/zh/protocol-backends.md#vless。

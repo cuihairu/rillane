@@ -52,8 +52,8 @@ use std::net::IpAddr;
 #[cfg(target_os = "linux")]
 use crate::tun_ingress::{TunIngress, TunIngressConfig};
 use rillane_protocols::{
-    AnytlsConnector, AnytlsUdpConnector, DirectConnector, HttpConnector, HttpIngress,
-    Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts,
+    AnytlsConnector, AnytlsUdpConnector, CloudflaredConnector, DirectConnector, HttpConnector,
+    HttpIngress, Hysteria2Connector, Hysteria2Ingress, Hysteria2UdpConnector, Hysteria2UdpParts,
     HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MasqueConnector,
     MasqueUdpConnector, MieruConnector, MixedIngress, OpenConnectConnector, OpenVpnConnector,
     ShadowQuicConnector, ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress,
@@ -3033,6 +3033,8 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         // Tailcat 的可达面：自定义 DERP map URL（载具从此取中继映射；缺省
         // 用载具内建 map——不指向固定 host）
         EgressConfig::Tailcat { derp_map_url, .. } => derp_map_url.as_deref(),
+        // Cloudflared 的可达面：公共隧道主机名（edge 恒 443，不含端口）
+        EgressConfig::Cloudflared { hostname, .. } => Some(hostname),
         // Tor 是网络不是服务器：无 server/port 字段（同 Reject/Direct 的
         // None 口径）
         EgressConfig::Tor { .. } => None,
@@ -3419,6 +3421,12 @@ fn build_udp_connectors(
                 // 栈，dial_tcp 仅 TCP 流；本仓未交付 UDP 应用面（catalog
                 // udp=false）——该节点 UDP 需求由 scan_udp_capability 按既有
                 // 口径构建期报错
+                None
+            }
+            EgressConfig::Cloudflared { .. } => {
+                // Cloudflared UDP 判负（RIL-128）：客户端面仅 WS-over-TLS 流
+                // （TCP 应用面）；无 UDP 数据报面（catalog udp=false）——该
+                // 节点 UDP 需求由 scan_udp_capability 按既有口径构建期报错
                 None
             }
             EgressConfig::Tor { .. } => {
@@ -4390,6 +4398,36 @@ fn build_egress_outputs(
                         derp_map_url.clone(),
                     )
                     .with_context(|| format!("节点 {} 的 tailcat 配置无效", desc.name))?,
+                );
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Cloudflared {
+                hostname,
+                path,
+                access_client_id,
+                access_client_secret,
+            } => {
+                // Cloudflared（RIL-128）：客户端面自写——WS-over-TLS 拨 CF
+                // 隧道公共主机名（RFC 6455 掩码写/非掩码读；edge 终结 WS 帧
+                // 后经 QUIC/H2 隧道转至隧道客户端，与 cloudflared access tcp
+                // 客户端语义同构；评估与交付边界留证
+                // protocol-backends.md#cloudflared）。载具 libcfd 0.2.0 仅
+                // dev-dependency 承担验收门（生产路径不经它）。UDP 应用面归
+                // UDP 工厂臂（判负）；构建期校验（hostname/path/令牌成对）归
+                // new 内（节点级失败不拖垮整份订阅）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    CloudflaredConnector::new(
+                        hostname.clone(),
+                        path.clone(),
+                        access_client_id.clone(),
+                        access_client_secret.clone(),
+                    )
+                    .with_context(|| format!("节点 {} 的 cloudflared 配置无效", desc.name))?,
                 );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),

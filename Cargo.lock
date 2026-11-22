@@ -898,6 +898,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
 
 [[package]]
+name = "capnp"
+version = "0.27.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98216f4102645406ce4dbb0d2b3511cae502537885bae5662812ccc1fe6b04e7"
+dependencies = [
+ "embedded-io 0.7.1",
+]
+
+[[package]]
+name = "capnpc"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82ca16312ddb64529d31c8dc46148671c22e57b80134fa5f17811ad5a6a79492"
+dependencies = [
+ "capnp",
+]
+
+[[package]]
 name = "caret"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2430,6 +2448,12 @@ name = "embedded-io"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
+
+[[package]]
+name = "embedded-io"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9eb1aa714776b75c7e67e1da744b81a129b3ff919c8712b5e1b32252c1f07cc7"
 
 [[package]]
 name = "encoding_rs"
@@ -4115,6 +4139,47 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "libcfd"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ce50b0e625cf0ea8a9d482889487d247663b786b2db22e3ee3516b557ce0e67"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "futures-io",
+ "futures-util",
+ "getrandom 0.4.3",
+ "h2",
+ "http",
+ "libcfd-rpc",
+ "quinn",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "uuid",
+ "webpki-roots 1.0.12",
+]
+
+[[package]]
+name = "libcfd-rpc"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0085a79f40f916e6e206276a6d13574c7c62238944e4482e252045400da1b36"
+dependencies = [
+ "capnp",
+ "capnpc",
+ "futures-io",
+ "thiserror 2.0.21",
+ "tracing",
+]
 
 [[package]]
 name = "libloading"
@@ -6447,6 +6512,7 @@ dependencies = [
  "hmac 0.12.1",
  "http",
  "httparse",
+ "libcfd",
  "libsqlite3-sys",
  "md-5 0.10.6",
  "pin-project-lite",
@@ -6473,6 +6539,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-socks",
+ "tokio-util",
  "toml 0.8.23",
  "tor-chanmgr",
  "tor-rtcompat",
