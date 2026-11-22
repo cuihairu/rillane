@@ -262,6 +262,7 @@ mod tests {
             routing: None,
             dns: None,
             egress_fwmark: None,
+            transparent: None,
         });
         let rc = derive_runtime_config(&cfg).unwrap();
         assert!(rc.enable_network_virtualization);

@@ -3,15 +3,16 @@
 //! 证据可注入），Linux 验证席确定性可测。
 //!
 //! 边界（诚实注记，与 RIL-059 具名缺口同链）：
-//! - **出口拨号 HTTP 探测执行器未落地**——「选定出口」的检测须经代理
-//!   节点出口发 HTTP 探测，而 EgressConnector 现状是纯流转发面（无
-//!   「拨号并测」形态，RIL-059 证据已具名）；执行器归后续接线。本模块
-//!   只钉决策契约：执行器侧完成 [`StreamingProbeService::complete`]
-//!   即进分类与缓存；
-//! - **真服务验证归机批次**（Netflix/Disney 等真端点、地区证据抽取规则
-//!   按真响应钉）；本模块的分类判据（标记命中/阻断证据）由服务登记表
-//!   显式声明，无一硬编码服务名；
-//! - 控制面端点与 CLI 归执行器接线批（本模块快照面已备好展示字段）。
+//! - **出口拨号 HTTP 探测执行器已落地**（`rillane-platform::streaming_exec`：
+//!   经选定出口的已装配 `FlowOutput` 合成 duplex 流走既有 forward 路径
+//!   发真实 HTTP/1.1 GET，抽取证据后完成 [`StreamingProbeService::complete`]
+//!   进分类与缓存）。EgressConnector 现状仍是纯流转发面（无「拨号并测」
+//!   形态，RIL-059 证据已具名），故探测是真实 HTTP 往返而非握手 RTT；
+//! - **真服务验证归机批次**（Netflix/Disney 等真端点、地区/阻断证据抽取
+//!   规则按真响应钉）；本模块的分类判据（标记命中/阻断证据）由服务
+//!   登记表显式声明，无一硬编码服务名；执行器侧缺省规则不虚构证据；
+//! - 控制面端点与 CLI 归后续批次（本模块快照面已备好展示字段，运行态
+//!   经 `Runtime::get_streaming()` 暴露）。
 //!
 //! 验收语义落点：
 //! - **状态分开**：未检测/检测中/可用/受限/未知/失败/过期七态显式
@@ -154,8 +155,8 @@ pub struct RunningJob {
 }
 
 /// 流媒体探测决策服务：闭合服务登记 + (服务, 出口) 缓存 + 作业配额
-/// 与取消。同步决策面（真执行器归后续接线——完成后经
-/// [`StreamingProbeService::complete`] 进分类与缓存）。
+/// 与取消。同步决策面；出口拨号执行器（`rillane-platform::streaming_exec`）
+/// 完成后经 [`StreamingProbeService::complete`] 进分类与缓存。
 pub struct StreamingProbeService {
     services: BTreeMap<String, StreamingService>,
     results: BTreeMap<(String, String), CacheEntry>,
@@ -204,6 +205,14 @@ impl StreamingProbeService {
         self.services
             .get(name)
             .map(|s| s.expect_markers.clone())
+            .unwrap_or_default()
+    }
+
+    /// 服务检测端点（执行器按序拨号——首个取得 HTTP 响应者为准）
+    pub fn check_urls(&self, name: &str) -> Vec<String> {
+        self.services
+            .get(name)
+            .map(|s| s.check_urls.clone())
             .unwrap_or_default()
     }
 

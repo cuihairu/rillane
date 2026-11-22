@@ -4579,6 +4579,7 @@ mod tests {
             performance: None,
             egress_pool: None,
             probe: None,
+            streaming: None,
         }
     }
 
@@ -4651,6 +4652,7 @@ mod tests {
                 pre_dial_direct: None,
             }),
             probe: None,
+            streaming: None,
         }
     }
 
@@ -4920,6 +4922,7 @@ mod tests {
             tun: None,
             routing: None,
             egress_fwmark: None,
+            transparent: None,
             dns: Some(rillane_config::DnsBlockConfig {
                 enabled: true,
                 domestic: vec![],
@@ -5001,6 +5004,7 @@ mod tests {
             tun: None,
             routing: None,
             egress_fwmark: None,
+            transparent: None,
             dns: Some(rillane_config::DnsBlockConfig {
                 enabled: true,
                 domestic: vec!["223.5.5.5:53".to_string()],

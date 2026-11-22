@@ -35,6 +35,9 @@ use rillane_config::contract::CODE_UNKNOWN_EGRESS;
 use rillane_config::protocol_catalog::{
     admission, Admission, Registration, CODE_EGRESS_NOT_ADMITTED,
 };
+use rillane_core::streaming::{
+    AutoSwitchPolicy, AutoSwitchState, ProbeVerdict, StreamingProbeService, SwitchDecision,
+};
 use rillane_core::udp::table::chain_id_of;
 use rillane_core::udp::{ChainFailureEvent, EgressUdpConnector};
 use rillane_core::{
@@ -45,6 +48,9 @@ use rillane_mesh::{MeshRegistry, MeshSession, NodeId, SessionId};
 #[cfg(target_os = "linux")]
 use rillane_platform::network::route::RouteDestination;
 use rillane_platform::network::{NetworkConfig, NetworkManager, NetworkMode};
+use rillane_platform::streaming_exec::{
+    DefaultEvidenceRules, OutputStreamingDial, StreamingProbeExecutor,
+};
 use rillane_protocols::middleware::{ANN_ROUTE_EGRESS, ANN_ROUTE_KIND};
 #[cfg(target_os = "linux")]
 use std::net::IpAddr;
@@ -252,6 +258,44 @@ impl RuntimeBuilder {
                 }) as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
             },
         ));
+
+        // RIL-145 流媒体检测执行面（块缺席/无服务登记 = None 零开销）：
+        // 决策服务（OS-free 分类/缓存/配额）+ 出口表快照拨号面（url-test
+        // 同先例：装配期快照，热重载归控制面批）。默认证据规则不虚构
+        // 地区/阻断线索；自动选组缺省关死（config.auto_switch.enabled=false）。
+        let streaming = config_snapshot
+            .streaming
+            .as_ref()
+            .filter(|b| !b.services.is_empty())
+            .map(|block| {
+                let services = block
+                    .services
+                    .iter()
+                    .map(|s| rillane_core::streaming::StreamingService {
+                        name: s.name.clone(),
+                        check_urls: s.check_urls.clone(),
+                        expect_markers: s.expect_markers.clone(),
+                    })
+                    .collect();
+                let svc = Arc::new(Mutex::new(StreamingProbeService::new(
+                    services,
+                    block.max_active as usize,
+                    Duration::from_secs(block.ttl_secs),
+                )));
+                let dial = Arc::new(OutputStreamingDial::new(self.flow_outputs.clone()));
+                let executor = Arc::new(StreamingProbeExecutor::new(
+                    svc,
+                    dial,
+                    Arc::new(DefaultEvidenceRules),
+                    Duration::from_secs(block.probe_timeout_secs),
+                ));
+                let policy = AutoSwitchPolicy {
+                    enabled: block.auto_switch.enabled,
+                    confirmations_needed: block.auto_switch.confirmations_needed,
+                    failures_needed: block.auto_switch.failures_needed,
+                };
+                Arc::new(StreamingState::new(executor, policy))
+            });
 
         // P1-4 §1.2/§3.2：混淆 middleware 链（块缺席/关闭 = 空链零开销，§2.5）。
         // known_egress = 配置 egress 名 ∪ build 期已注册输出名（E5 判定输入；
@@ -796,6 +840,7 @@ impl RuntimeBuilder {
             #[cfg(feature = "plugins")]
             plugin_middlewares,
             subscription_manager,
+            streaming,
             event_tx,
             stats: Arc::new(RwLock::new(RuntimeStats::new())),
             running: Arc::new(RwLock::new(false)),
@@ -1090,6 +1135,56 @@ pub struct SourceMergeStats {
     pub rules_stale: usize,
 }
 
+/// RIL-145 流媒体检测面运行态：执行器（含决策服务）+ 自动选组策略 +
+/// 逐 (服务, 出口) 迟滞计数。控制面经 `Runtime::get_streaming` 取用——
+/// status/probe_bytes/running_jobs 在决策服务（`executor().service()`），
+/// 探测经 `executor().probe()`，选组建议经 [`StreamingState::decide_auto_switch`]。
+pub struct StreamingState {
+    executor: Arc<StreamingProbeExecutor>,
+    /// 自动选组迟滞策略（自 config.streaming.auto_switch；enabled 缺省关死）
+    policy: AutoSwitchPolicy,
+    /// 逐 (服务, 出口) 迟滞计数（建议面，不执行路由变更）
+    auto_states: std::sync::Mutex<HashMap<(String, String), AutoSwitchState>>,
+}
+
+impl StreamingState {
+    fn new(executor: Arc<StreamingProbeExecutor>, policy: AutoSwitchPolicy) -> Self {
+        Self {
+            executor,
+            policy,
+            auto_states: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 执行器（探测经 `probe(service, exit)`；决策服务经 `service()`）
+    pub fn executor(&self) -> &Arc<StreamingProbeExecutor> {
+        &self.executor
+    }
+
+    /// 自动选组策略（enabled 面；门关死时 `decide_auto_switch` 恒 Stay）
+    pub fn policy(&self) -> &AutoSwitchPolicy {
+        &self.policy
+    }
+
+    /// 探测结论进自动选组迟滞：逐 (服务, 出口) 独立计数。**建议面**——
+    /// 只返回建议（新流生效），不执行任何路由变更。
+    pub fn decide_auto_switch(
+        &self,
+        service: &str,
+        exit: &str,
+        verdict: &ProbeVerdict,
+    ) -> SwitchDecision {
+        let mut states = self
+            .auto_states
+            .lock()
+            .expect("auto_switch states lock poisoned");
+        let st = states
+            .entry((service.to_string(), exit.to_string()))
+            .or_default();
+        self.policy.decide(st, verdict)
+    }
+}
+
 /// Runtime 实例
 pub struct Runtime {
     config: Arc<RwLock<RillaneConfig>>,
@@ -1149,6 +1244,9 @@ pub struct Runtime {
     #[cfg(feature = "plugins")]
     plugin_middlewares: Vec<Arc<rillane_plugins::WasmPluginMiddleware>>,
     subscription_manager: Option<Arc<SubscriptionManager>>,
+    /// RIL-145 流媒体检测面（None = config.streaming 块缺席/关闭；控制面
+    /// 查询经 getter 取数，自动选组策略面归控制面接线批）
+    streaming: Option<Arc<StreamingState>>,
     event_tx: broadcast::Sender<RuntimeEvent>,
     stats: Arc<RwLock<RuntimeStats>>,
     running: Arc<RwLock<bool>>,
@@ -2161,6 +2259,14 @@ impl Runtime {
     /// 获取订阅管理器
     pub fn get_subscription_manager(&self) -> Option<Arc<SubscriptionManager>> {
         self.subscription_manager.clone()
+    }
+
+    /// RIL-145 流媒体检测面（None = config.streaming 块缺席/无服务登记）。
+    /// 控制面经此取执行器（`status`/`probe_bytes`/`running_jobs` 在决策
+    /// 服务 `executor().service()`；探测经 `executor().probe()`）与选组
+    /// 建议面（`decide_auto_switch`）。
+    pub fn get_streaming(&self) -> Option<Arc<StreamingState>> {
+        self.streaming.clone()
     }
 
     /// 获取 FlowRouter（必要时自动包装为 mesh-chain 路由器）
@@ -5518,6 +5624,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_surface_assembled_from_config_block() {
+        /// 最小可构建 config（socks 入口 + direct 出口）；仅 streaming 面可变
+        let mk_cfg = |streaming: Option<rillane_config::StreamingConfigBlock>| RillaneConfig {
+            version: rillane_config::ConfigVersion::default(),
+            control: rillane_config::ControlConfig {
+                api_bind: "127.0.0.1:0".to_string(),
+                uds_path: None,
+                admin_token: None,
+            },
+            telemetry: rillane_config::TelemetryConfig {
+                log_level: "info".to_string(),
+                enable_metrics: false,
+                enable_tracing: false,
+            },
+            ingress: vec![IngressDescriptor {
+                name: "in1".to_string(),
+                spec: IngressConfig::Socks5 {
+                    bind: "127.0.0.1:0".to_string(),
+                    auth: None,
+                    udp_enabled: None,
+                },
+            }],
+            egress: vec![EgressDescriptor {
+                name: "direct".to_string(),
+                spec: EgressConfig::Direct,
+            }],
+            routing: rillane_config::RoutingConfig {
+                default_node: "direct".to_string(),
+                scenarios: Vec::new(),
+                groups: vec![],
+                rules: vec![],
+                ..Default::default()
+            },
+            udp: rillane_config::UdpConfig::default(),
+            network: None,
+            obfuscation: None,
+            profile: None,
+            scenarios: Default::default(),
+            performance: None,
+            egress_pool: None,
+            probe: None,
+            streaming,
+        };
+        let mk_runtime = |cfg: RillaneConfig| {
+            RuntimeBuilder::new(cfg)
+                .with_runtime_config(RuntimeConfig {
+                    enable_hot_reload: false,
+                    ..RuntimeConfig::default()
+                })
+                .build()
+                .expect("build runtime")
+        };
+
+        // 块在场：装配出检测面（服务登记可见、策略按 config 面、缺省关死）
+        let rt = mk_runtime(mk_cfg(Some(rillane_config::StreamingConfigBlock {
+            services: vec![rillane_config::StreamingServiceConfig {
+                name: "svc-a".to_string(),
+                check_urls: vec!["https://example.com/a".to_string()],
+                expect_markers: vec!["playable".to_string()],
+            }],
+            max_active: 4,
+            ttl_secs: 1800,
+            probe_timeout_secs: 5,
+            auto_switch: rillane_config::StreamingAutoSwitchConfig::default(),
+        })));
+        let st = rt.get_streaming().expect("streaming 块应装配出检测面");
+        let svc = st.executor().service().lock().await;
+        assert!(svc.service_registered("svc-a"), "服务登记应可见");
+        assert_eq!(svc.check_urls("svc-a"), vec!["https://example.com/a"]);
+        assert_eq!(svc.expect_markers("svc-a"), vec!["playable"]);
+        assert_eq!(
+            svc.status("svc-a", "direct"),
+            rillane_core::streaming::StreamingStatus::Untested
+        );
+        drop(svc);
+        // 缺省策略关死 → 建议恒 Stay（迟滞门不读阈值）
+        assert!(!st.policy().enabled, "自动选组缺省关死");
+        assert_eq!(
+            st.decide_auto_switch("svc-a", "direct", &ProbeVerdict::Available { region: None }),
+            SwitchDecision::Stay
+        );
+
+        // 块缺席 = None（零开销面）
+        assert!(mk_runtime(mk_cfg(None)).get_streaming().is_none());
+        // 块在场但服务登记空 = None（无服务可探测）
+        assert!(
+            mk_runtime(mk_cfg(Some(rillane_config::StreamingConfigBlock {
+                services: vec![],
+                ..rillane_config::StreamingConfigBlock::default()
+            })))
+            .get_streaming()
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn merge_config_delta_updates_egress_connectors() {
         let cfg = RillaneConfig {
             version: rillane_config::ConfigVersion::default(),
@@ -5558,6 +5760,7 @@ mod tests {
             performance: None,
             egress_pool: None,
             probe: None,
+            streaming: None,
         };
 
         let runtime = RuntimeBuilder::new(cfg)
@@ -5607,6 +5810,7 @@ mod tests {
             performance: None,
             egress_pool: None,
             probe: None,
+            streaming: None,
         };
 
         let stats = runtime
@@ -5662,6 +5866,7 @@ mod tests {
             performance: None,
             egress_pool: None,
             probe: None,
+            streaming: None,
         };
         let runtime = Arc::new(
             RuntimeBuilder::new(cfg.clone())
@@ -5735,6 +5940,7 @@ mod tests {
             performance: None,
             egress_pool: None,
             probe: None,
+            streaming: None,
         };
         let runtime = Arc::new(
             RuntimeBuilder::new(cfg)
@@ -5778,6 +5984,7 @@ mod tests {
             performance: None,
             egress_pool: None,
             probe: None,
+            streaming: None,
         };
 
         let d1 = mk_delta("n1");
@@ -5884,6 +6091,7 @@ mod tests {
             performance: None,
             egress_pool: None,
             probe: None,
+            streaming: None,
         }
     }
 
@@ -6222,6 +6430,7 @@ mod tests {
             performance: None,
             egress_pool: None,
             probe: None,
+            streaming: None,
         };
 
         let delta = RillaneConfig {
@@ -6299,6 +6508,7 @@ mod tests {
             performance: None,
             egress_pool: None,
             probe: None,
+            streaming: None,
         };
 
         let stats = merge_config_delta_in_place(&mut target, &delta);
@@ -6458,6 +6668,7 @@ routing:
             performance: None,
             egress_pool: None,
             probe: None,
+            streaming: None,
         }
     }
 
@@ -7604,6 +7815,7 @@ routing:
             performance: None,
             egress_pool: None,
             probe: None,
+            streaming: None,
         }
     }
 
@@ -7815,6 +8027,7 @@ routing:
             scenarios: Default::default(),
             performance: None,
             probe: None,
+            streaming: None,
         }
     }
 

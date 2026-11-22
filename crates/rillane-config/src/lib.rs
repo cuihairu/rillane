@@ -178,6 +178,11 @@ pub struct RillaneConfig {
     /// 不在合并面——订阅文本永远无法扩探测范围。
     #[serde(default)]
     pub probe: Option<ProbeConfigBlock>,
+    /// 流媒体可用性检测块（RIL-145；缺省 None = 整块关闭，行为零差异）。
+    /// services 是闭合登记表（无登记 = 无服务可探测），**无任何凭据字段**
+    /// （构造上不可能收密码/装证书/承诺解锁）；自动选组显式启用缺省关死。
+    #[serde(default)]
+    pub streaming: Option<StreamingConfigBlock>,
     /// 场景预设（P2-3 scenario-profiles.md §2-D1；缺省 None = 存量零差异；
     /// 仅 from_str 入口展开——订阅/程序化构造不触发，§5-1）。
     /// RIL-017 起为 legacy 面：与 `scenarios` 并列面互斥，解析期二选一。
@@ -1707,6 +1712,175 @@ pub struct ProbeLimitsConfig {
     pub byte_budget: Option<u64>,
 }
 
+/// 流媒体可用性检测块（RIL-145）：块存在 = 探测面启用。services 是闭合
+/// 登记表（无登记 = 无服务可探测，submit 对未登记服务以
+/// `streaming.service.unknown` 拒绝）。**无凭据字段**（构造上不可能收
+/// 密码/装证书/承诺解锁——范围只来自操作员声明）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StreamingConfigBlock {
+    /// 服务登记（逐条：检测方法 + 判据标记）
+    #[serde(default)]
+    pub services: Vec<StreamingServiceConfig>,
+    /// 并发作业上限（缺省 8；超额 submit 以 `streaming.limit.quota` 拒绝）
+    #[serde(default = "default_streaming_max_active")]
+    pub max_active: u32,
+    /// 结果 TTL 秒（缺省 3600；过期 = 单独状态，非失败）
+    #[serde(default = "default_streaming_ttl_secs")]
+    pub ttl_secs: u64,
+    /// 单次探测全程超时秒（缺省 10；覆盖拨号 + HTTP 往返，超时判
+    /// Failed 非取消）
+    #[serde(default = "default_streaming_probe_timeout")]
+    pub probe_timeout_secs: u64,
+    /// 自动选组迟滞策略（缺省显式关闭）
+    #[serde(default)]
+    pub auto_switch: StreamingAutoSwitchConfig,
+}
+
+/// 手写 Default（与 serde 字段缺省同值——`derive(Default)` 会给 0，与
+/// max_active/ttl 缺省 8/3600 不符，缺省块语义以 serde 缺省为准）
+impl Default for StreamingConfigBlock {
+    fn default() -> Self {
+        Self {
+            services: Vec::new(),
+            max_active: default_streaming_max_active(),
+            ttl_secs: default_streaming_ttl_secs(),
+            probe_timeout_secs: default_streaming_probe_timeout(),
+            auto_switch: StreamingAutoSwitchConfig::default(),
+        }
+    }
+}
+
+/// 单条流媒体服务登记（检测端点 + 播放判据标记；无凭据）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StreamingServiceConfig {
+    /// 服务名（登记键；唯一）
+    pub name: String,
+    /// 检测端点（`http(s)://host[:port]/path`；逐条按序拨号，首个取得
+    /// HTTP 响应者为准）
+    pub check_urls: Vec<String>,
+    /// 播放判据标记（响应含任一 = 播放证据；空 = 该服务 200 恒 Unknown）
+    #[serde(default)]
+    pub expect_markers: Vec<String>,
+}
+
+/// 自动选组迟滞策略（验收「自动选组需显式启用与迟滞」：enabled 缺省
+/// false = 门关死，决策恒 Stay）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StreamingAutoSwitchConfig {
+    /// 显式启用门（缺省 false）
+    #[serde(default)]
+    pub enabled: bool,
+    /// 切换迟滞：连续 N 次「可用」确认才建议切换（缺省 2）
+    #[serde(default = "default_streaming_confirmations")]
+    pub confirmations_needed: u32,
+    /// 退出迟滞：连续 M 次不可用才建议切走（缺省 2）
+    #[serde(default = "default_streaming_failures")]
+    pub failures_needed: u32,
+}
+
+/// 手写 Default（serde 块缺席时经 `#[serde(default)]` 字段缺省取此）：
+/// `derive(Default)` 会给 0/0，违背缺省 2/2 且 validate 拒 0——缺省须与
+/// serde 字段缺省同值。
+impl Default for StreamingAutoSwitchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            confirmations_needed: default_streaming_confirmations(),
+            failures_needed: default_streaming_failures(),
+        }
+    }
+}
+
+const fn default_streaming_max_active() -> u32 {
+    8
+}
+const fn default_streaming_ttl_secs() -> u64 {
+    3600
+}
+const fn default_streaming_probe_timeout() -> u64 {
+    10
+}
+const fn default_streaming_confirmations() -> u32 {
+    2
+}
+const fn default_streaming_failures() -> u32 {
+    2
+}
+
+impl StreamingConfigBlock {
+    /// 构建期校验：服务名唯一非空、check_urls 非空逐条合法 http(s) 端点、
+    /// 上限/超时/迟滞为正——非法值启动期拒绝，不带病装配流媒体探测。
+    pub fn validate(&self) -> Result<()> {
+        let mut names = std::collections::HashSet::new();
+        for (i, s) in self.services.iter().enumerate() {
+            let name = s.name.trim();
+            if name.is_empty() {
+                anyhow::bail!("streaming.services[{i}].name 不能为空");
+            }
+            if !names.insert(name.to_string()) {
+                anyhow::bail!("streaming.services[{i}].name 重复（{name}）——服务名须唯一");
+            }
+            if s.check_urls.is_empty() {
+                anyhow::bail!("streaming.services[{i}].check_urls 不能为空（{name} 无检测端点）");
+            }
+            for (j, u) in s.check_urls.iter().enumerate() {
+                validate_check_url(u).with_context(|| {
+                    format!("streaming.services[{i}].check_urls[{j}]（{name}）")
+                })?;
+            }
+        }
+        if self.max_active == 0 {
+            anyhow::bail!("streaming.max_active 须 ≥ 1（当前 0）");
+        }
+        if self.ttl_secs == 0 {
+            anyhow::bail!("streaming.ttl_secs 须 ≥ 1（当前 0）");
+        }
+        if self.probe_timeout_secs == 0 {
+            anyhow::bail!("streaming.probe_timeout_secs 须 ≥ 1（当前 0）");
+        }
+        if self.auto_switch.confirmations_needed == 0 {
+            anyhow::bail!("streaming.auto_switch.confirmations_needed 须 ≥ 1（当前 0）");
+        }
+        if self.auto_switch.failures_needed == 0 {
+            anyhow::bail!("streaming.auto_switch.failures_needed 须 ≥ 1（当前 0）");
+        }
+        Ok(())
+    }
+}
+
+/// 检测端点合法性：`http(s)://host[:port]/path`，host 非空、仅 http/https。
+/// 与执行器 `parse_check_url` 同口径（此处配置期即拒，不带病装配）。
+fn validate_check_url(url: &str) -> Result<()> {
+    let rest = match url.strip_prefix("https://") {
+        Some(r) => r,
+        None => match url.strip_prefix("http://") {
+            Some(r) => r,
+            None => anyhow::bail!("仅支持 http/https 检测端点（{url}）"),
+        },
+    };
+    let host_port = match rest.find('/') {
+        Some(i) => &rest[..i],
+        None => rest,
+    };
+    let host = host_port
+        .strip_prefix('[')
+        .and_then(|r| r.split(']').next())
+        .unwrap_or_else(|| {
+            host_port
+                .rsplit_once(':')
+                .filter(|(_, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+                .map(|(h, _)| h)
+                .unwrap_or(host_port)
+        });
+    if host.is_empty() {
+        anyhow::bail!("检测端点主机为空（{url}）");
+    }
+    Ok(())
+}
+
 impl RillaneConfig {
     /// 版本字段合约错误探测（parse_any_format 用）：合法 YAML 且 version
     /// 值非法 → 返回携带稳定原因码的错误；其余情形返回 None。
@@ -1786,6 +1960,11 @@ impl RillaneConfig {
         // 不带病装配（块缺席 = 探测面整体关闭，无校验面）
         if let Some(probe) = &config.probe {
             probe.validate()?;
+        }
+        // RIL-145：流媒体检测块构建期校验——非法服务登记/上限/迟滞
+        // 启动期拒绝（块缺席 = 探测面整体关闭，无校验面）
+        if let Some(streaming) = &config.streaming {
+            streaming.validate()?;
         }
         config.apply_profile();
         // RIL-141：区域预设展开（块在场即生效；规则追加在用户规则之后）
@@ -4401,6 +4580,140 @@ selections:
             .unwrap_err()
             .to_string()
             .contains("rule_table 不能为 0"));
+    }
+
+    /// RIL-145：流媒体块 serde 往返 + 缺省 + 校验拒绝面
+    #[test]
+    fn streaming_block_validate_and_defaults() {
+        let yaml = r#"
+services:
+  - name: svc-a
+    check_urls: ["https://www.example.com/a", "https://www.example.com/b"]
+    expect_markers: ["playable", "player-ready"]
+  - name: svc-b
+    check_urls: ["http://example.com:8080"]
+max_active: 4
+ttl_secs: 1800
+auto_switch:
+  enabled: true
+  confirmations_needed: 3
+  failures_needed: 5
+"#;
+        let full: StreamingConfigBlock = serde_yaml::from_str(yaml).expect("应解析");
+        assert_eq!(full.services.len(), 2);
+        assert_eq!(full.services[0].name, "svc-a");
+        assert_eq!(full.services[0].check_urls.len(), 2);
+        assert_eq!(
+            full.services[0].expect_markers,
+            vec!["playable", "player-ready"]
+        );
+        assert_eq!(full.max_active, 4);
+        assert_eq!(full.ttl_secs, 1800);
+        assert_eq!(
+            full.probe_timeout_secs, 10,
+            "probe_timeout_secs 未给 = 缺省 10"
+        );
+        assert!(full.auto_switch.enabled);
+        assert_eq!(full.auto_switch.confirmations_needed, 3);
+        assert_eq!(full.auto_switch.failures_needed, 5);
+        full.validate().expect("合法块校验通过");
+
+        // 缺省：max_active 8 / ttl 3600 / probe_timeout 10 / auto_switch 显式关死
+        let minimal = r#"
+services:
+  - name: s
+    check_urls: ["https://example.com/"]
+    expect_markers: ["m"]
+"#;
+        let st: StreamingConfigBlock = serde_yaml::from_str(minimal).expect("应解析");
+        assert_eq!(st.max_active, 8);
+        assert_eq!(st.ttl_secs, 3600);
+        assert_eq!(st.probe_timeout_secs, 10);
+        assert!(!st.auto_switch.enabled, "自动选组缺省关死");
+        assert_eq!(st.auto_switch.confirmations_needed, 2);
+        assert_eq!(st.auto_switch.failures_needed, 2);
+        st.validate().expect("最小合法块校验通过");
+
+        // 拒绝面：空名 / 重复名 / 空 check_urls / 非 http / 空主机 / 0 上限 / 0 迟滞
+        let bad: StreamingConfigBlock =
+            serde_yaml::from_str("services: [{name: '  ', check_urls: ['https://example.com/']}]")
+                .unwrap();
+        assert!(bad
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("name 不能为空"));
+        let dup: StreamingConfigBlock = serde_yaml::from_str(
+            "services: [{name: a, check_urls: ['https://e.com/']}, {name: a, check_urls: ['https://e.com/']}]",
+        ).unwrap();
+        assert!(dup.validate().unwrap_err().to_string().contains("重复"));
+        // check_urls 缺失 = 解析期拒绝（必填字段，不带病装配）
+        assert!(serde_yaml::from_str::<StreamingConfigBlock>("services: [{name: a}]").is_err());
+        // check_urls 空列表 = validate 拒绝（程序构造面仍收口）
+        let no_urls: StreamingConfigBlock =
+            serde_yaml::from_str("services: [{name: a, check_urls: []}]").unwrap();
+        assert!(no_urls
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("check_urls 不能为空"));
+        let bad_url: StreamingConfigBlock =
+            serde_yaml::from_str("services: [{name: a, check_urls: ['ftp://x/y']}]").unwrap();
+        assert!(bad_url
+            .validate()
+            .unwrap_err()
+            .root_cause()
+            .to_string()
+            .contains("仅支持 http/https"));
+        let empty_host: StreamingConfigBlock =
+            serde_yaml::from_str("services: [{name: a, check_urls: ['https:///path']}]").unwrap();
+        assert!(empty_host
+            .validate()
+            .unwrap_err()
+            .root_cause()
+            .to_string()
+            .contains("主机为空"));
+        let zero_active: StreamingConfigBlock = serde_yaml::from_str(
+            "services: [{name: a, check_urls: ['https://e.com/']}]\nmax_active: 0",
+        )
+        .unwrap();
+        assert!(zero_active
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_active 须 ≥ 1"));
+        let zero_ttl: StreamingConfigBlock = serde_yaml::from_str(
+            "services: [{name: a, check_urls: ['https://e.com/']}]\nttl_secs: 0",
+        )
+        .unwrap();
+        assert!(zero_ttl
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("ttl_secs 须 ≥ 1"));
+        let zero_confirm: StreamingConfigBlock = serde_yaml::from_str(
+            "services: [{name: a, check_urls: ['https://e.com/']}]\nauto_switch: {confirmations_needed: 0}",
+        ).unwrap();
+        assert!(zero_confirm
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("confirmations_needed 须 ≥ 1"));
+        let zero_timeout: StreamingConfigBlock = serde_yaml::from_str(
+            "services: [{name: a, check_urls: ['https://e.com/']}]\nprobe_timeout_secs: 0",
+        )
+        .unwrap();
+        assert!(zero_timeout
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("probe_timeout_secs 须 ≥ 1"));
+
+        // serde json 往返（字段逐项保真）
+        let cfg_json: StreamingConfigBlock =
+            serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(cfg_json.services.len(), 2);
+        assert_eq!(cfg_json.probe_timeout_secs, 10);
     }
 
     /// RIL-142：池段与保留网络段重叠即拒绝——池落网内（10/8、回环、

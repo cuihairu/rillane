@@ -161,6 +161,7 @@ fn runtime_shell(
         performance: None,
         egress_pool: None,
         probe: None,
+        streaming: None,
     }
 }
 

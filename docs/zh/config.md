@@ -23,6 +23,7 @@
 | `obfuscation` | 可选 | 混淆横切层（缺省关） |
 | `egress_pool` | 可选 | 出站连接池（缺省关） |
 | `probe` | 可选 | 主动探测授权（缺省 None = 整面关） |
+| `streaming` | 可选 | 流媒体可用性探测（缺省 None = 整面关） |
 | `profile` | 可选 | 场景预设 `proxy\|game\|web` |
 | `performance` | 可选 | relay 缓冲参数 |
 
@@ -265,6 +266,32 @@ network:
 本块只存在于操作员本地配置：来源合并面是对象登记（`SourceSnapshot.objects`），顶层 `probe` 块结构上进不了合并面——不可信订阅文本永远无法扩探测范围。无 `probe` 块 = 探测面整体关闭：端点答 `503 probe.disabled`，无网络副作用。测量只含执行器实际观测（`failure` / `rtt_ms` / UDP 回显 `sent`/`replies`/`loss_ratio`/`payload_len`），不含任何机场内部路径推断（debug-and-mcp.md §3）。代理握手目标本版刻意不在配置面——egress connector 是流级 forward 面，无「拨号并测握手」形态。
 
 端点/CLI 面：`GET /probe`、`POST /probe`、`GET /probe/result?id=`、`POST /probe/cancel?id=` 与 `rillanectl probe submit|cancel|result|list`（见 [cli.md](cli.md) § probe）。
+
+## streaming（缺省 None = 整面关；服务登记表闭合、无凭据、HTTP 200 ≠ 可播放）
+
+| 字段 | 缺省 | 约束 |
+|------|------|------|
+| `services` | `[]` | 闭合登记表（空 = 无服务可探测）；逐条 `name`（唯一、非空）、`check_urls`（`http(s)://host[:port]/path`，按序拨号——首个取得可解析 HTTP 响应者为准；传输失败顺延下一条）、`expect_markers`（子串、大小写不敏感；空 = 该服务 200 恒 `Unknown`） |
+| `max_active` | `8` | ≥ 1；并发作业上限——超额 `submit` 以 `streaming.limit.quota` 拒绝 |
+| `ttl_secs` | `3600` | ≥ 1；结果新鲜窗口；过期 = 单独状态（`Expired`），非失败 |
+| `probe_timeout_secs` | `10` | ≥ 1；单次探测全程 deadline（拨号 + HTTP 往返）；超时判 `Failed`，非取消 |
+| `auto_switch.enabled` | `false` | 显式启用门；`false` = 门关死，决策恒 `Stay` |
+| `auto_switch.confirmations_needed` | `2` | ≥ 1；连续 N 次「可用」确认才建议切换 |
+| `auto_switch.failures_needed` | `2` | ≥ 1；连续 M 次不可用（受限/未知/失败）才建议切走 |
+
+本块是操作员本地（与 `probe` 同合并面：订阅转换器硬编码 `streaming = None`），不可信订阅文本无法扩服务登记表。无 `streaming` 块或 `services` 空 = 整面关（`Runtime::get_streaming()` 为 `None`），零开销。
+
+结论语义（RIL-145 决策层，执行器向其回报）：
+- **状态分开**：未检测/检测中/可用/受限/未知/失败/过期——互不冒充；取消保留既有缓存条目（取消不是失败）。
+- **HTTP 200 ≠ 播放**：200 无播放判据标记且无阻断证据 = `Unknown`——分类器结构上不允许「200 即可用」。
+- **阻断证据优先于判据**：200 带判据但带阻断指标 = `Restricted` 非 `Available`；403/451 无任何判据亦 `Restricted`；5xx 与无响应 = `Failed`（非服务侧不可用证据）。
+- **不收密码/不装证书/不承诺解锁**：登记表只含检测端点与判据标记——结构上不存在可携账号证据的字段。
+- **探测流量单计**：`probe_bytes` 按 (服务, 出口) 独立入账，与业务计量分账（快照面分字段展示）。
+- **自动选组是建议面**：逐 (服务, 出口) 迟滞，仅建议——只影响新流路由选择，不断言存量流无逢迁移。
+
+执行器机械：先向决策服务提交作业，再按序经「选定出口」的已装配 `FlowOutput`（构建期快照，与 url-test 探测处理器同先例）以合成 duplex 流走既有 forward 路径拨 `check_urls`——真实 HTTP/1.1 GET（**非握手 RTT 探测**；egress connector 无「拨号并测」形态，RIL-059）。解析响应状态行、`expect_markers` 大小写不敏感子串匹配（头部 + 正文）、计探测字节、进分类。出口侧连接失败经 EOF（无响应字节）显形并顺延下一条 `check_url`；全部端点失败 = `http_status=None` 证据 → `Failed`。响应体读取上限 256 KiB（防内存放大）。
+
+边界（诚实注记）：地区与阻断证据抽取用缺省规则（`region = None`、`block = []`——不虚构证据）；真服务规则（Netflix/Disney 地区线索、DRM/地区文案）归后续批次，经 `StreamingEvidenceRules` 注入。控制面端点与 CLI 归后续批次（运行态已经 `Runtime::get_streaming()` 暴露；本版 `streaming` 块不热重载）。
 
 ## profile / performance
 

@@ -3,7 +3,8 @@
 //! rillane-runtime `network_config.rs`。
 
 use rillane_config::{
-    NetworkBlockConfig, NetworkBlockMode, RillaneConfig, RoutingBlockConfig, TunBlockConfig,
+    NetworkBlockConfig, NetworkBlockMode, RillaneConfig, RoutingBlockConfig,
+    TransparentBlockConfig, TransparentMode, TunBlockConfig,
 };
 
 const BASE_YAML: &str = r#"
@@ -114,20 +115,18 @@ fn network_block_serde_roundtrip() {
             ],
         }),
         dns: None,
+        transparent: None,
     };
     let rendered = serde_yaml::to_string(&cfg).expect("应可序列化");
     let reparsed: NetworkBlockConfig = serde_yaml::from_str(&rendered).expect("序列化结果应可往返");
     assert_eq!(reparsed, cfg);
 }
 
-/// §1.4 E1：transparent/tap/hybrid 三非法 mode 构建期报"未实现"。
+/// §1.4 E1：tap/hybrid 无实现面构建期报「未实现」；transparent 已由
+/// RIL-139 交付——无块拒（须配块）、有块通过（transparent 属主裁决）。
 #[test]
-fn network_block_rejects_non_tun_modes() {
-    for mode in [
-        NetworkBlockMode::Transparent,
-        NetworkBlockMode::Tap,
-        NetworkBlockMode::Hybrid,
-    ] {
+fn network_block_rejects_unimplemented_modes_and_locks_transparent() {
+    for mode in [NetworkBlockMode::Tap, NetworkBlockMode::Hybrid] {
         let cfg = NetworkBlockConfig {
             sniff: None,
             egress_fwmark: None,
@@ -135,13 +134,68 @@ fn network_block_rejects_non_tun_modes() {
             tun: None,
             routing: None,
             dns: None,
+            transparent: None,
         };
-        let err = cfg.validate().expect_err("非 tun mode 应被拒绝");
+        let err = cfg.validate().expect_err("无实现面 mode 应被拒绝");
         assert!(
             err.to_string().contains("未实现"),
             "错误应含「未实现」指引：{err}"
         );
     }
+    // transparent 无块：具名拒绝（E1-TP），非「未实现」
+    let cfg = NetworkBlockConfig {
+        sniff: None,
+        egress_fwmark: None,
+        mode: NetworkBlockMode::Transparent,
+        tun: None,
+        routing: None,
+        dns: None,
+        transparent: None,
+    };
+    let err = cfg.validate().expect_err("transparent 无块应被拒绝");
+    assert!(
+        err.to_string().contains("transparent 须配"),
+        "错误应指须配块：{err}"
+    );
+    // transparent 有块：通过（RIL-139 交付面）
+    let cfg = NetworkBlockConfig {
+        sniff: None,
+        egress_fwmark: None,
+        mode: NetworkBlockMode::Transparent,
+        tun: None,
+        routing: None,
+        dns: None,
+        transparent: Some(TransparentBlockConfig {
+            mode: TransparentMode::Redirect,
+            listen: "0.0.0.0:80".to_string(),
+            target: "edge-1".to_string(),
+            intercept_ports: vec![80],
+            rule_table: 100,
+        }),
+    };
+    cfg.validate().expect("transparent 有块应通过");
+    // 块出现在 tun 下 = 具名拒绝（不静默忽略）
+    let cfg = NetworkBlockConfig {
+        sniff: None,
+        egress_fwmark: None,
+        mode: NetworkBlockMode::Tun,
+        tun: None,
+        routing: None,
+        dns: None,
+        transparent: Some(TransparentBlockConfig {
+            mode: TransparentMode::Tproxy,
+            listen: "127.0.0.1:8080".to_string(),
+            target: "edge-2".to_string(),
+            intercept_ports: vec![443],
+            rule_table: 100,
+        }),
+    };
+    let err = cfg.validate().expect_err("tun 下带 transparent 块应被拒");
+    assert!(
+        err.to_string()
+            .contains("仅在 network.mode = transparent 下有效"),
+        "错误应指块归属：{err}"
+    );
     // tun 通过（空块 = 最小合法形态）
     NetworkBlockConfig {
         sniff: None,
@@ -150,6 +204,7 @@ fn network_block_rejects_non_tun_modes() {
         tun: None,
         routing: None,
         dns: None,
+        transparent: None,
     }
     .validate()
     .expect("空 tun 块应通过");
@@ -173,6 +228,7 @@ fn network_block_validate_rejects_illegal_values() {
             include: vec!["203.0.113.0/24".to_string()],
         }),
         dns: None,
+        transparent: None,
     };
 
     // mtu 下界（68 = 最小 IPv4 MTU，TunConfig::validate 口径）

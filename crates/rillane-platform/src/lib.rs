@@ -10,6 +10,10 @@ pub mod network;
 /// 真实探测执行器（RIL-061）：ProbeExecutor 的本机 I/O 装配面
 pub mod probe_exec;
 
+/// 流媒体探测执行器（RIL-145）：出口拨号 HTTP 探测——注入拨号面，
+/// HTTP/1.1 机械 + 证据抽取 + 探测字节单计，回报决策层
+pub mod streaming_exec;
+
 #[derive(Debug, Clone, Copy)]
 pub enum PlatformKind {
     Linux,

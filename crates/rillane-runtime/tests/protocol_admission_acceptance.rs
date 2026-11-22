@@ -47,6 +47,7 @@ fn shell(egress: Vec<EgressDescriptor>, default_node: &str, udp_enabled: bool) -
         performance: None,
         egress_pool: None,
         probe: None,
+        streaming: None,
     }
 }
 

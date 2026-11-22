@@ -23,6 +23,7 @@ This page describes current configuration, not completed v1 fields. Definitions 
 | `obfuscation` | optional | obfuscation cross-cutting layer (default off) |
 | `egress_pool` | optional | egress connection pool (default off) |
 | `probe` | optional | active-probe authorization (default None = the whole surface off) |
+| `streaming` | optional | streaming availability probe (default None = the whole surface off) |
 | `profile` | optional | scenario preset `proxy\|game\|web` |
 | `performance` | optional | relay buffer parameters |
 
@@ -265,6 +266,32 @@ Snapshot observability: `GET /egress/pool/stats` or `rillanectl pool status`.
 The block only exists in operator-local config: the source merge surface is object registration (`SourceSnapshot.objects`), so a top-level `probe` block is structurally unreachable from subscription text — untrusted input can never extend the probe scope. No `probe` block = the whole surface off: the endpoints answer `503 probe.disabled` and no network side effects occur. Measurements are exactly what the executor observed (`failure` / `rtt_ms` / UDP echo `sent`/`replies`/`loss_ratio`/`payload_len`) and never include provider-internal path inference (debug-and-mcp.md §3). Proxy-handshake targets are deliberately absent from this version's config surface — the egress connector is a flow-level forward surface without a dial-and-measure shape.
 
 Endpoint/CLI surface: `GET /probe`, `POST /probe`, `GET /probe/result?id=`, `POST /probe/cancel?id=` and `rillanectl probe submit|cancel|result|list` (see [cli.md](cli.md) § probe).
+
+## streaming (default None = the whole surface off; closed service registry, no credentials, HTTP 200 ≠ playable)
+
+| Field | Default | Constraint |
+|------|------|------|
+| `services` | `[]` | closed registry (empty = nothing probeable); each entry is `name` (unique, non-empty), `check_urls` (`http(s)://host[:port]/path`, tried in order — first parseable HTTP response wins; transport failure falls through to the next), `expect_markers` (substring, case-insensitive; empty = that service's 200 is always `Unknown`) |
+| `max_active` | `8` | >= 1; concurrent job cap — `submit` over the cap is rejected with `streaming.limit.quota` |
+| `ttl_secs` | `3600` | >= 1; result freshness window; expiry is a distinct state (`Expired`), not a failure |
+| `probe_timeout_secs` | `10` | >= 1; whole-probe deadline (dial + HTTP round trip); timeout yields `Failed`, not a cancel |
+| `auto_switch.enabled` | `false` | explicit enable gate; `false` = hard off, the decision is always `Stay` |
+| `auto_switch.confirmations_needed` | `2` | >= 1; consecutive `Available` confirmations before a switch is suggested |
+| `auto_switch.failures_needed` | `2` | >= 1; consecutive unavailable (`Restricted`/`Unknown`/`Failed`) before leaving is suggested |
+
+The block is operator-local (same merge surface as `probe`: subscription converters hard-code `streaming = None`), so untrusted subscription text cannot extend the service registry. No `streaming` block or empty `services` = the whole surface off (`Runtime::get_streaming()` is `None`), zero overhead.
+
+Verdict semantics (RIL-145 decision layer, which the executor feeds):
+- **Statuses are distinct**: untested / running / available / restricted / unknown / failed / expired — never impersonating each other; cancel keeps the previous cache entry (a cancel is not a failure).
+- **HTTP 200 ≠ playable**: a 200 with no playback marker and no block evidence is `Unknown`, structurally — the classifier cannot declare "200 = available".
+- **Block evidence outranks markers**: 200 with playback markers but with block indicators is `Restricted`, not `Available`; 403/451 without any marker is `Restricted` too; 5xx and no-response are `Failed` (not service-side unavailability).
+- **No credentials / no certificate install / no unlock promise**: the registry carries only check endpoints and judgment markers — there is no field that could hold account evidence.
+- **Probe bytes are metered separately** from business traffic (`probe_bytes` per (service, exit); snapshot surface exposes them as distinct fields).
+- **Auto-switch is advisory**: per (service, exit) hysteresis, suggestion only — it affects new-flow route selection and never claims seamless migration of in-flight flows.
+
+Executor mechanics: each probe is submitted to the decision service, then the `check_urls` are dialed in order through the named exit's assembled `FlowOutput` (build-time snapshot, same precedent as the url-test handler) via a synthetic duplex flow down the existing forward path — a real HTTP/1.1 GET (never a handshake-RTT probe; the egress connector has no dial-and-measure shape, RIL-059). The response status line is parsed, `expect_markers` are matched case-insensitively over the response (head + body), bytes are counted, and the evidence is classified. Egress-side connect failure surfaces as EOF (no response bytes) and falls through to the next `check_url`; all endpoints failing yields `http_status=None` evidence → `Failed`. The response body is capped (256 KiB) against memory amplification.
+
+Boundaries (honest): region and block extraction use the default rules (`region = None`, `block = []` — no fabricated evidence); real-service rules (Netflix/Disney region hints, DRM/geo copy) are a later batch injected via `StreamingEvidenceRules`. Control-plane endpoints and CLI are a later batch (the runtime face is already exposed via `Runtime::get_streaming()`; the streaming block itself does not hot-reload in this version).
 
 ## profile / performance
 

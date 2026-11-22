@@ -146,6 +146,7 @@ fn off_mode_tolerates_declared_ports() {
             ports: vec![443],
             ..SniffPolicy::default()
         }),
+        transparent: None,
     };
     assert!(network.validate().is_ok());
     assert!(!network.sniff.as_ref().expect("在场").applies(true, 443));

@@ -252,6 +252,7 @@ fn network_block_carries_dns_validation() {
             )
             .unwrap(),
         ),
+        transparent: None,
     };
     base().validate().expect("合法形态应通过");
 

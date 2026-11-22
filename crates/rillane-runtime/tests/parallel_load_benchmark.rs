@@ -121,6 +121,7 @@ fn bench_runtime_config(socks_bind: String) -> RillaneConfig {
         performance: None,
         egress_pool: None,
         probe: None,
+        streaming: None,
     }
 }
 
