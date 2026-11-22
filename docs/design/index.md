@@ -13,6 +13,7 @@ This directory maintains only the current v1 design. **Proposal, not implemented
 | [10-image prototype gallery](ui/README.md) | Six desktop and two screens per mobile platform, saved PNGs/prompts |
 | [Debug, paths and optional MCP](debug-and-mcp.md) | Explanation, actual traces, active probes, privacy, authority and configuration lifecycle |
 | [Upstream architecture study](../research/proxy-architectures-2026-11-14.md) | Primary evidence, SVGs and influences from Mihomo, sing-box and Surge |
+| [Platform adapter decision](platform-adapter-decision.md) | Cross-platform TUN survey and decisions: platform-interface inversion, smoltcp userspace stack, tun crate device layer, mobile fd injection, per-platform matrix |
 
 The repository-root [todo.md](https://github.com/cuihairu/rillane/blob/main/todo.md) is the single execution backlog. Other pages do not duplicate completion checklists. Process routing is required only on local Windows/macOS/Linux hosts; OpenWrt/Android/iOS use available domain/IP/port/device evidence.
 
