@@ -805,7 +805,25 @@ EasyTier——层 3 覆盖组网 VPN（本项为组网 endpoint：节点生命�
   - **API 成熟度**：文档覆盖率 11.81%，钉定 crates.io 版本的 docs.rs 构建失败。
 - **验收对端**：**去中心化——对端节点本席可构**（共享网络密钥跑 `easytier-core`；无控制器、无外部账号）——mesh 族后端中最易得的真实对端。对端不是阻点；载具许可/API 才是。
 - **版本 / 许可 / 平台 / 公开 API / 旁路 / 取消 / 统计 / 复用**：不适用——未交付（无目录条目、无 IR 变体、无连接器面）。
-- 复开条件：（1）出现**宽松许可、可嵌入流面**的 EasyTier 库 API（库方重新许可或出现兼容 fork）；或（2）上游重新许可为 MIT/Apache/BSD；或（3）本仓正式接受 **sidecar / binary-driving** 集成（以独立进程跑 `easytier-core` 即免除 LGPL 义务——注意 RIL-126 Gost 的评估可能立此先例）。
+- 复开条件：（1）出现**宽松许可、可嵌入流面**的 EasyTier 库 API（库方重新许可或出现兼容 fork）；或（2）上游重新许可为 MIT/Apache/BSD；或（3）本仓正式接受 **sidecar / binary-driving** 集成（以独立进程跑 `easytier-core` 即免除 LGPL 义务；注意 RIL-126 Gost 的评估**未**立此先例——结论为不交付）。
+
+## gost-relay
+
+Gost Relay——go-gost 自有 relay/链协议（本项为出站传输：gost 专属中继，区别于策略组 relay）。
+
+- **结论**：**无可用后端——评估留证，未交付**。relay 协议为 **GOST 专属专有协议**（仅 go-gost 可解析、实现在 Go 中、无 RFC/规范），而本仓为 Rust。**无 Rust 载具**（crates.io 无 go-gost crate；其全部 `gost*` 命中均为无关的俄罗斯 GOST 密码学标准），Go 库**不经巨量 cgo/Go 运行时工作不可 FFI 嵌入**，唯一实用集成是**驱动 `gost` CLI 二进制**——本仓 OpenVPN 评估已拒收的同族。自写（把 gost relay 协议移植到 Rust）依任务验收条款仅在本「无可用后端」留证后才允许，且属后续大工程，本次不交付。复开条件见末条。
+- 载具调查（2026-11-22，本席留证）：
+  - **无 Rust 载具。** crates.io **零** go-gost crate：`gost-rs`/`go-gost`/`gostx`/`gost-relay` 均 0 结果；103 个 `gost*` 命中全为**俄罗斯 GOST 密码学标准**（`gost-crypto`、`gost94`、`gost-modes`、`gost-56042`…）——无关。无 crate 实现 gost relay 线上协议（`gost-relay-protocol` = 0；泛化 `relay-protocol` 命中均为他域——manabrew / hns-dns / iridium / ap-relay / mpc / dig——非 gost）。标准 SOCKS5 crate（`socks5`、`socks5-impl`、`resocks5-net`…）说的是 RFC 1928，**不是** gost relay。
+  - **上游 = go-gost/gost**（GitHub，**MIT**，**7.9k★**，858 fork，活跃：最新 stable **v3.3.3（2026-11-02）**、最新 **v3.3.4-nightly.20261111（2026-11-11）**；v3.3.3 含 CVE-2026-98432 的默认关闭 MPTCP 修复、`go-gost/x` 升 **v0.28.1**）。其形态为 **Go CLI/服务二进制**：`go build cmd/gost` → 独立可执行；以 DEB/RPM、安装脚本、Docker 镜像（`gogost/gost`）分发；库面是 Go 服务框架（`go-gost/core` + `go-gost/x`），**非** C-ABI 库。
+  - **协议性质**：文档明言「The Relay protocol is a GOST-specific protocol that has both proxy and forwarding functions」——**专有，非 SOCKS5/HTTP；无 RFC 或外部规范**；线上格式只存在于 Go 源码。支持 TCP+UDP、用户名/密码、包裹传输（`relay+tls`/`+ws`/`+wss`/`+kcp`）、SOCKS5 式 BIND 模式（`bind=true`，默认关）、`nodelay` 客户端选项。行为随版本耦合，无稳定契约。
+  - **库 vs 二进制**：无对宿主（非 Go）的文档化嵌入；服务框架面向 Go 内嵌设计。FFI 需把整个 gost 运行时做成 Go `c-shared`（goroutine 调度器 + GC + cgo 调用开销 + panic/exit 语义进入 Rust 宿主）——不成比例且脆弱。
+- **为何不交付**：
+  - **无 Rust 载具**：无 crate 实现 go-gost 或其 relay 协议；Rust 宿主无法链接 Go 服务框架。
+  - **协议实现在 Go 中**：无规范/RFC；Rust 自写意味着逆向 gost 的 relay 帧 + 握手 + TLS/WS/KCP 包裹 + BIND + nodelay 语义，再追踪其版本化行为——不成比例且脆弱，且按任务验收条款（「无可用后端结论留证后才允许自写」）本就应先留证。
+  - **集成族**：驱动 `gost` CLI 二进制属本仓**已拒收族**——RIL-122 拒 `openvpn-manager`/`vortix`/`vopono`/`tunsmith`/`vpn-shroud`/`openvpn3-indicator-rs` 正因其「驱动系统 `openvpn` 二进制」。gost 亦无嵌入流原语。
+- **验收对端**：**本席可构 gost 对端（go-gost v3.3.x）**——跑 `gost -L relay://:port`，客户端指向即可。对端可得；阻点是载具，非对端。
+- **版本 / 许可 / 平台 / 公开 API / 旁路 / 取消 / 统计 / 复用**：不适用——未交付（无目录条目、无 IR 变体、无连接器面）。
+- 复开条件：（1）出现**宽松许可的 Rust crate** 实现 gost relay 协议，或 go-gost 发布可干净移植的稳定协议规范；或（2）本仓正式接受 **sidecar / binary-driving** 集成（届时 gost relay 以进程边界驱动；gost 为 MIT，无许可障碍）；或（3）本任务自写闸门作为独立大工程、针对已发布规范启动。
 
 ## 公共传输面（跨协议共享）
 
