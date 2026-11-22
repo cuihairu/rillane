@@ -2636,6 +2636,36 @@ pub enum EgressConfig {
         /// 节点身份持久文件（载具 load_or_init：缺失即新建身份）；必填非空
         key_file: String,
     },
+    /// Tailcat 出口（RIL-127）：tailcat-client 0.1.1（kosumic/whip，MIT）
+    /// 库承载 mesh 客户端面（出口）——`tc` 紧凑地址即端点身份（服务端
+    /// WireGuard 公钥 + 发现密钥 + DERP 区域 + 预共享密钥，即访问凭证），
+    /// Client::connect + dial_tcp(port) 给出已解封 TCP 流（boringtun
+    /// WireGuard + smoltcp 0.14 用户态栈 + DERP 中继，无 TUN/无路由/无
+    /// root）。目标寻址口径：flow 目标端口选择服务端所伺服端口，目标
+    /// 主机名不参预路由（载具无主机寻址面——地址即端点）。评估与交付
+    /// 边界（载具 pre-1.0 自述 experimental 且 wire 可能变更、许可
+    /// 0.1.0→0.1.1 由 BSD-3 改 MIT、DERP 中继为可达性保底直连发现失败
+    /// 即回退）见两语 protocol-backends.md tailcat 段。仅交付 TCP 应用面
+    /// （UDP/QUIC 应用面不交付——catalog udp=false）；服务端面不交付
+    /// （载具 client-only；入口/服务端载具 `tailcat` 0.1.0 被 ssh-key 精确
+    /// rc 冲突硬阻断——见 protocol-backends.md#tailcat）。订阅边界：
+    /// mihomo/Clash 无 tailcat 出站类型——导入目录外、导出具名跳过。
+    Tailcat {
+        /// 服务端 `tc` 紧凑地址（含访问凭证）；必填非空——不静默指官方
+        /// DERP/端点；建期经载具 validate_address 离线校验（触网前具名
+        /// 拒绝，错误不回显地址内容）
+        server_address: String,
+        /// 节点身份私钥（WireGuard 私钥文本；缺省新建临时身份，不持久；
+        /// 导入失败绝不静默换新钥——建期具名拒绝）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        private_key: Option<String>,
+        /// 仅 DERP 中继（禁用直连发现）；缺省 false
+        #[serde(default)]
+        relay_only: bool,
+        /// 自定义 DERP map URL；缺省 None（载具内建 DERP map）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        derp_map_url: Option<String>,
+    },
     /// Tor 出口（RIL-114）：arti-client 嵌入式客户端面——共享客户端惰性
     /// 引导（缺省磁盘缓存 ~/.cache/arti + ~/.local/share/arti），逐流隔离
     /// （isolated_client，流间不共享电路）。Tor 是网络不是服务器：无

@@ -349,6 +349,23 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "tailcat",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#tailcat",
+        },
+        // RIL-127：tailcat-client 0.1.1（kosumic/whip，MIT）库承载 mesh 客户端
+        // 面（出口）——tc 紧凑地址即端点身份（服务端 WireGuard 公钥 + 发现密钥 +
+        // DERP 区域 + 预共享密钥，即访问凭证），boringtun WireGuard + smoltcp
+        // 0.14 用户态栈 + DERP 中继，dial_tcp 直出已解封 TCP 流（无 TUN/无路由/
+        // 无 root）；TCP 面交付，UDP/QUIC 应用面与服务端面未交付（载具 client-
+        // only；入口/服务端载具 tailcat 0.1.0 被 ssh-key 精确 rc 冲突硬阻断——
+        // 见 protocol-backends.md#tailcat）
+        udp: false,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/tailcat.rs",
+        },
+    },
+    CatalogEntry {
         kind: "ssh",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#ssh",
@@ -430,6 +447,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::OpenConnect { .. } => "openconnect",
         EgressConfig::OpenVpn { .. } => "openvpn",
         EgressConfig::Tailscale { .. } => "tailscale",
+        EgressConfig::Tailcat { .. } => "tailcat",
         EgressConfig::Ssh { .. } => "ssh",
         EgressConfig::Tor { .. } => "tor",
         EgressConfig::Wireguard { .. } => "wireguard",
@@ -653,6 +671,12 @@ mod tests {
                 hostname: Some("rillane-node".into()),
                 ephemeral: true,
                 key_file: "/tmp/tsrs_keys.json".into(),
+            },
+            EgressConfig::Tailcat {
+                server_address: "tcAAAA".into(),
+                private_key: None,
+                relay_only: true,
+                derp_map_url: None,
             },
             EgressConfig::Ssh {
                 server: "203.0.113.13".into(),

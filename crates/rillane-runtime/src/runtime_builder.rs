@@ -58,11 +58,11 @@ use rillane_protocols::{
     MasqueUdpConnector, MieruConnector, MixedIngress, OpenConnectConnector, OpenVpnConnector,
     ShadowQuicConnector, ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress,
     ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector,
-    Socks5Connector, Socks5Ingress, Socks5UdpConnector, SshConnector, TailscaleConnector,
-    TlsConnectorFactory, TlsFingerprint, TorConnector, TransportKey, TransportPool,
-    TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts, TrustTunnelConnector,
-    TrustTunnelUdpConnector, TuicConnector, TuicUdpConnector, VlessConnector, VlessIngress,
-    VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity,
+    Socks5Connector, Socks5Ingress, Socks5UdpConnector, SshConnector, TailcatConnector,
+    TailscaleConnector, TlsConnectorFactory, TlsFingerprint, TorConnector, TransportKey,
+    TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts,
+    TrustTunnelConnector, TrustTunnelUdpConnector, TuicConnector, TuicUdpConnector, VlessConnector,
+    VlessIngress, VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity,
     VmessUdpConnector, VmessUdpParts, WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
@@ -3030,6 +3030,9 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         // Tailscale 的可达面：控制面 URL（载具在此握手+授权；数据面为
         // tailnet 内直连/DERP，不经此地址）
         EgressConfig::Tailscale { control_url, .. } => Some(control_url),
+        // Tailcat 的可达面：自定义 DERP map URL（载具从此取中继映射；缺省
+        // 用载具内建 map——不指向固定 host）
+        EgressConfig::Tailcat { derp_map_url, .. } => derp_map_url.as_deref(),
         // Tor 是网络不是服务器：无 server/port 字段（同 Reject/Direct 的
         // None 口径）
         EgressConfig::Tor { .. } => None,
@@ -3409,6 +3412,13 @@ fn build_udp_connectors(
                 // 隧道，tcp_connect 仅 TCP 流；本仓未交付 UDP 应用面
                 // （catalog udp=false）——该节点 UDP 需求由
                 // scan_udp_capability 按既有口径构建期报错
+                None
+            }
+            EgressConfig::Tailcat { .. } => {
+                // Tailcat UDP 判负（RIL-127）：载具数据面为 WireGuard 用户态
+                // 栈，dial_tcp 仅 TCP 流；本仓未交付 UDP 应用面（catalog
+                // udp=false）——该节点 UDP 需求由 scan_udp_capability 按既有
+                // 口径构建期报错
                 None
             }
             EgressConfig::Tor { .. } => {
@@ -4351,6 +4361,35 @@ fn build_egress_outputs(
                         key_file.clone(),
                     )
                     .with_context(|| format!("节点 {} 的 tailscale 配置无效", desc.name))?,
+                );
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Tailcat {
+                server_address,
+                private_key,
+                relay_only,
+                derp_map_url,
+            } => {
+                // Tailcat（RIL-127）：tailcat-client 0.1.1（kosumic/whip，
+                // MIT）库承载 mesh 客户端面（出口）——tc 紧凑地址即端点身份
+                // （boringtun WireGuard + smoltcp 0.14 用户态栈 + DERP 中继，
+                // dial_tcp 直出已解封 TCP 流；评估与交付边界留证
+                // protocol-backends.md#tailcat）。UDP 应用面归 UDP 工厂臂
+                // （判负）；构建期校验（tc 地址离线校验/私钥解析）归 new 内
+                // （节点级失败不拖垮整份订阅）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    TailcatConnector::new(
+                        server_address.clone(),
+                        private_key.clone(),
+                        *relay_only,
+                        derp_map_url.clone(),
+                    )
+                    .with_context(|| format!("节点 {} 的 tailcat 配置无效", desc.name))?,
                 );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),

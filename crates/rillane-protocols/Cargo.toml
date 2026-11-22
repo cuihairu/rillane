@@ -62,6 +62,12 @@ tailscale.workspace = true
 # 真机对端实测）。仅作 feature 开关，不直接调用。
 ts_control.workspace = true
 
+# Tailcat（RIL-127）：tailcat-client 0.1.1 库承载（出口客户端面）——
+# ClientCache::connect + Client::dial_tcp -> Stream；boringtun（default_features=False）
+# + smoltcp 0.14 用户态栈 + DERP 中继；rustls 0.23/tokio-rustls 0.26 经
+# [patch.crates-io] fork 解析
+tailcat-client.workspace = true
+
 # SOCKS5 client
 tokio-socks.workspace = true
 
@@ -100,3 +106,5 @@ defguard_wireguard_rs.workspace = true
 rcgen.workspace = true
 # RIL-106 真实对端：库自带 AnyTLS 服务端面（Session::new_server/accept_stream）
 anytls = { workspace = true, features = ["server"] }
+# RIL-127 契约测试：构造合法形态 tc 地址（载具地址 schema 同构）
+ciborium = "0.2"

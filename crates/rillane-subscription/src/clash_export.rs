@@ -802,6 +802,16 @@ fn proxy_mapping(
             ));
             None
         }
+        EgressConfig::Tailcat { .. } => {
+            // Tailcat（RIL-127）：mihomo outbound schema 无 tailcat 出站
+            // 类型（mesh 传输面，Clash 系不做出站面），无对应可落键面，
+            // 按 tailscale 同口径具名跳过（导入侧目录外类型按既有类型级不
+            // 支持口径报损失）
+            report.skipped.push(format!(
+                "出口 {name}：tailcat 为 mesh 传输客户端面，Clash 无对应出站类型，跳过"
+            ));
+            None
+        }
         EgressConfig::Wireguard {
             endpoint,
             private_key,
