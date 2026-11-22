@@ -752,6 +752,23 @@ OpenConnect / Cisco AnyConnect（Cisco Secure Tunnel Protocol，CSTP）——三
 - 复开条件：已交付（RIL-122）；上述命名边界为增强项，非基线要求（若需对启用 DCO 的标准服务端跑数据面，再开 `tls-ekm`/P_DATA_V2 支持）。
 - **验收对端**：**`openvpn` 2.7.0**——本席 apt 已装并用作上述决定性核验的真实对端（`openvpn: 2.7.0-1ubuntu1.4`）。
 - **决定性子验点——2026-11-22 已核验通过**（本席标准对端互通）：对端 = 标准 **`openvpn` 2.7.0**（apt）服务端 @ 127.0.0.1:21194/udp（openssl CA+服务端+客户端证书，`data-ciphers AES-256-GCM`，`auth SHA256`，`topology subnet`，`server 10.8.0.0/24`）；客户端 = 载具仓构建的 `corevpn-cli` 0.6.0，以**标准** `client.ovpn` 驱动（内联 CA/证书/私钥，`remote-cert-tls server`，`cipher AES-256-GCM`，`auth SHA256`）。结果：TLS 1.3 握手完成（`TLS13_AES_256_GCM_SHA384`）；服务端 KeyMethodV2 解析成功（`V4,dev-type tun,link-mtu 1553,tun-mtu 1500,proto UDPv4,auth SHA256,keysize 128,key-method 2,tls-server`）；**PUSH_REPLY 收到并解析**（`route-gateway 10.8.0.1,topology subnet,ping 10,ping-restart 120,ifconfig 10.8.0.2 255.255.255.0,peer-id 0,cipher AES-256-GCM,key-derivation tls-ekm`）；数据通道密钥派生并安装；`VPN session established!`。唯一失败为 TUN 设备创建（非 root 下 EPERM）——操作系统边界而非协议失败（rillane 为用户态三层连接器，从不创建 TUN）。**载具据此确认，降级条款关闭**。
+## tailscale
+
+- **结论**：**库承载——载具钉定 `tailscale` 0.7.1**（RIL-123，评估留证 2026-11-22；未交付——无目录条目/IR 变体/连接器面）。自写**未触发**（存在维护中的纯 Rust 实现）。调查证据（crates.io 2026-11-22 + 载具仓 README/源码核读）：
+  - **`libtailscale` / `libtailscale-sys` 0.2.2**（下载 1.26 万/1.29 万，2026-02）及镜像 `esper-libtailscale(-sys)` 0.2.3、`rsnet` 0.2.0——均为对 Tailscale `libtailscale` **C 库的 FFI**（原生链接 Go 控制面 + netstack）。与 OpenVPN 3 Core / OpenConnect C 绑定拒收同族：破坏工作区纯 Rust + rustls 姿态。
+  - **`tsnet` 0.1.0**（下载 2.3 千，**2023-03-12**——3.5 年未更，无后续发布）——「把 Tailscale 编进你的程序」crate；无人维护。
+  - **`tailscale-client` 0.1.5**（下载 4.8 千，2025-03，无 repository/homepage）——**控制面管理 API 客户端**（auth key / tailnet 管理），非数据面隧道。
+  - **`rscale` 0.1.0**（下载 31，2026-04-16）——**自托管控制面服务端**（「运维单 tailnet」），即协调服务端一侧，非客户端。
+  - **`geiserx_tailscale` 0.58.9**（下载 4.9 千，2026-11-19）——上游仓的 fork，其自 README 带常设 `CAUTION`：「This software is unstable and insecure... **do not** build production software using these libraries or rely on it for data privacy until I've had a chance to batten down some hatches and complete a third-party audit.」据此拒收；取上游 crate 为载具。
+  - **`ts_derp` 0.7.1**（下载 31.9 万）——非客户端，乃载具的 DERP 模块；记录在案因数据面可回退其上。
+  - **载具 = `tailscale` 0.7.1**（tailscale/tailscale-rs；**BSD-3-Clause**；2026-11-06 发布，近 30 日下载 1.2 万；依赖 `ts_control`/`ts_keys`/`ts_netstack_smoltcp`/`ts_runtime` 0.7.1 + `tokio` + `rand 0.10` + `serde`/`serde_json` + `thiserror 2` + `tracing` + `url`——**纯 Rust、无 C**；可选 `axum`/`ratatui`/`russh` 特性在 tailnet-SSH 面，我们不启用）。「A work-in-progress Tailscale library written in Rust」，C/Elixir/Python 绑定为**独立** crate（`ts_ffi` 等）发布，核心 crate 本身保持纯 Rust。
+  - 已实现（自述，README *Status*）：**tailnet 上创建 TCP 与 UDP 套接字**；**经公共 DERP 中继与对端通信**；**多情况下经直连与对端通信**；**与 Tailscale Go 客户端、`tsnet`、`libtailscale` 互通**；Rust API。即将到来：DNS 转发、按主机名查对端、端口映射。不支持：出口节点（任一角色）、MagicDNS、私有 DERP、子网路由器、taildrop、serve/funnel/SSH、节点共享、应用能力、自动密钥轮换；平台 AIX/Android/BSD/iOS/Plan9/QNAP/Synology。
+  - TLS 姿态工作区相容：载具 `ts_tls_util` 骑 **`tokio-rustls 0.26`**（→ rustls 0.23——与本工作区钉定同对；`ts_http_util`/`ts_transport` 在其下）+ `webpki-roots` 校验协调服务端证书链；用户态数据路径为 `ts_netstack_smoltcp`——**「opinionated wrapper around smoltcp」**，即与树内 OpenConnect/OpenVPN 同构的用户态三层桥模式。
+- 版本 / 许可 / 平台 / 公开 API / 旁路 / 取消 / 统计 / 复用：**未钉定**——评估留证，交付待办：载具嵌入（`Device` + `netstack::TcpStream` 骑 rillane `Flow` / `FlowTarget`）、IR 变体 + 目录条目 + runtime 接线 + clash 导入导出、验收套件。
+- **验收对端**：**自托管协调 + 标准 Go 客户端**——决定性门为真实 tailnet，计划为 **`headscale`**（自托管控制面）+ **`tailscaled`**（官方 Go 节点）作对端，rillane `TailscaleConnector` 以 preauth key 入同一 tailnet（载具 README 自称与 Go 客户端 / `tsnet` / `libtailscale` 互通）。两者本席均未装（apt 无候选）；对端基础设施须建于 `/home/cui` 下（非 `/tmp`，遵 worktree 持久化规则）。
+- **具名风险**（记录在案，不再重议）：载具 pre-1.0 且自述「There are no compatibility guarantees at the moment」；其 NAT 穿透仍在进展中，数据面**可能回退 DERP 中继**（相应延迟/吞吐损失）——经 DERP 通过的验收仍是真实回环，但须如此标注。
+- 复开条件：出现带标准 tailnet 验收记录、可取代本次的维护中纯 Rust Tailscale 客户端。
+
 ## 公共传输面（跨协议共享）
 
 | 库 | 版本（要求 / lock 实测） | 许可 | 角色 |
