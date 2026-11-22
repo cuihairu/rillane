@@ -75,10 +75,7 @@ async fn udp_target_is_named_refused() {
     let c = connector();
     let flow = udp_flow("100.64.0.2", 8080);
     let err = c.forward(flow).await.unwrap_err().to_string();
-    assert!(
-        err.contains("仅交付 TCP 应用面"),
-        "UDP 应具名拒绝：{err}"
-    );
+    assert!(err.contains("仅交付 TCP 应用面"), "UDP 应具名拒绝：{err}");
 }
 
 /// 控制面 URL 建期具名拒绝：非法 URL 在构造期失败，不落身份文件、不触达
@@ -107,8 +104,8 @@ async fn bad_control_url_is_named_at_construction() {
 #[ignore = "真机对端（headscale + tailscaled + preauth key），本地手动验收用"]
 async fn real_peer_tailnet_roundtrip() {
     install_tls_provider();
-    let control_url = std::env::var("RIL_TS_CONTROL_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+    let control_url =
+        std::env::var("RIL_TS_CONTROL_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
     let auth_key = std::env::var("RIL_TS_AUTH_KEY")
         .expect("RIL_TS_AUTH_KEY 缺失：headscale preauthkeys create 后导出");
     let peer = std::env::var("RIL_TS_PEER").expect("RIL_TS_PEER 缺失：对端主机名或 tailnet IP");

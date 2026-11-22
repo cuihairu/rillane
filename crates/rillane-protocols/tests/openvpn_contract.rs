@@ -88,16 +88,15 @@ async fn wait_for(cond: impl Fn() -> bool, limit: Duration) -> bool {
 
 /// OpenVPN PING 魔术载荷（与连接器同值；收到即原样回，不入栈）。
 const PING_PAYLOAD: [u8; 16] = [
-    0x2a, 0x18, 0x7b, 0xf3, 0x64, 0x1e, 0xb4, 0xcb, 0x07, 0xed, 0x2d, 0x0a, 0x98, 0x1f, 0xc7,
-    0x48,
+    0x2a, 0x18, 0x7b, 0xf3, 0x64, 0x1e, 0xb4, 0xcb, 0x07, 0xed, 0x2d, 0x0a, 0x98, 0x1f, 0xc7, 0x48,
 ];
 
 /// rcgen 自签 CA（is_ca=true——载具根库 `RootCertStore::add` 要求 CA 位）。
 /// 返回 (cert_pem, key_pem)。同一 CA 兼作镜像服务端证书与客户端证书
 /// （服务端 with_no_client_auth、客户端核验器放宽——均不校链）。
 fn mirror_ca_certs() -> (String, String) {
-    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-        .expect("rcgen 参数");
+    let mut params =
+        rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("rcgen 参数");
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     let key_pair = rcgen::KeyPair::generate().expect("CA 密钥");
     let cert = params.self_signed(&key_pair).expect("CA 自签");
@@ -117,13 +116,23 @@ impl Device for MirrorPhy {
     type RxToken<'a> = MirrorRxToken;
     type TxToken<'a> = MirrorTxToken<'a>;
 
-    fn receive(&mut self, _timestamp: SmolInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(
+        &mut self,
+        _timestamp: SmolInstant,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let pkt = self.rx.pop_front()?;
-        Some((MirrorRxToken(pkt), MirrorTxToken { queue: &mut self.tx }))
+        Some((
+            MirrorRxToken(pkt),
+            MirrorTxToken {
+                queue: &mut self.tx,
+            },
+        ))
     }
 
     fn transmit(&mut self, _timestamp: SmolInstant) -> Option<Self::TxToken<'_>> {
-        Some(MirrorTxToken { queue: &mut self.tx })
+        Some(MirrorTxToken {
+            queue: &mut self.tx,
+        })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -438,8 +447,9 @@ impl VpnMirror {
                         seed2.extend_from_slice(&srv_random2);
                         seed2.extend_from_slice(&client_sid);
                         seed2.extend_from_slice(&server_sid);
-                        let key_block = openvpn_prf(&master_secret, b"OpenVPN key expansion", &seed2, 256)
-                            .context("PRF key expansion 失败")?;
+                        let key_block =
+                            openvpn_prf(&master_secret, b"OpenVPN key expansion", &seed2, 256)
+                                .context("PRF key expansion 失败")?;
                         let km = KeyMaterial::from_openvpn_key2_block(&key_block);
                         core.session.install_keys(&km, true);
                         core.session.set_state(ProtocolState::Established);
@@ -471,10 +481,7 @@ impl VpnMirror {
     /// 出栈 IP 包加密（数据面）。
     fn encrypt_outbound(&self, pkt: Vec<u8>) -> Result<Vec<u8>> {
         let mut core = self.inner.lock().unwrap();
-        let enc = core
-            .session
-            .encrypt_data(&pkt)
-            .context("数据加密失败")?;
+        let enc = core.session.encrypt_data(&pkt).context("数据加密失败")?;
         Ok(enc.to_vec())
     }
 }
@@ -487,9 +494,7 @@ fn cipher_name(c: CipherSuite) -> &'static str {
 }
 
 /// 启动镜像对端：绑定随机 UDP 端口，返回 (地址, 观测状态, 监听栈)。
-async fn spawn_vpn_mirror(
-    echo_port: u16,
-) -> (SocketAddr, Arc<MirrorStats>, Arc<VpnEchoStack>) {
+async fn spawn_vpn_mirror(echo_port: u16) -> (SocketAddr, Arc<MirrorStats>, Arc<VpnEchoStack>) {
     install_tls_provider();
     let socket = UdpSocket::bind("127.0.0.1:0").await.expect("绑定镜像端口");
     let addr = socket.local_addr().unwrap();
@@ -720,11 +725,19 @@ async fn mirror_cancel_drops_flow() {
     let result = timeout(Duration::from_secs(10), task).await;
     assert!(result.is_ok(), "流取消后 forward 应在超时前收束");
     assert!(
-        wait_for(|| stack.established.load(Ordering::Relaxed), Duration::from_secs(5)).await,
+        wait_for(
+            || stack.established.load(Ordering::Relaxed),
+            Duration::from_secs(5)
+        )
+        .await,
         "取消前镜像应已建立连接"
     );
     assert!(
-        wait_for(|| stack.closed.load(Ordering::Relaxed), Duration::from_secs(5)).await,
+        wait_for(
+            || stack.closed.load(Ordering::Relaxed),
+            Duration::from_secs(5)
+        )
+        .await,
         "取消后镜像应观测到连接收束"
     );
 }
@@ -746,8 +759,7 @@ async fn real_peer_openvpn_2_7_roundtrip() {
     let dir = std::path::Path::new("/home/cui/ovpnsrv");
     let ca = std::fs::read_to_string(dir.join("ca.crt"))
         .expect("对端 CA 缺失：请先按 docs/protocol-backends.md#openvpn 真机对端小节搭建");
-    let cert = std::fs::read_to_string(dir.join("client.crt"))
-        .expect("对端客户端证书缺失");
+    let cert = std::fs::read_to_string(dir.join("client.crt")).expect("对端客户端证书缺失");
     let key = std::fs::read_to_string(dir.join("client.key")).expect("对端客户端私钥缺失");
     let connector = OpenVpnConnector::new(
         "127.0.0.1".into(),
@@ -803,5 +815,9 @@ async fn real_peer_openvpn_2_7_roundtrip() {
         .expect("forward 超时")
         .expect("forward 错误")
         .expect("forward 失败");
-    assert!(report.upstream >= msg.len() as u64, "upstream 计入：{:?}", report);
+    assert!(
+        report.upstream >= msg.len() as u64,
+        "upstream 计入：{:?}",
+        report
+    );
 }

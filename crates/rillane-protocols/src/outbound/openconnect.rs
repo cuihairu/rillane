@@ -209,9 +209,10 @@ async fn read_response<R: AsyncRead + Unpin>(
         .and_then(|(_, v)| v.parse().ok())
         .unwrap_or(0);
     let mut body = vec![0u8; body_len];
-    reader.read_exact(&mut body).await.with_context(|| {
-        format!("读 HTTP 响应体（{body_len} 字节）失败：{} {reason}", status)
-    })?;
+    reader
+        .read_exact(&mut body)
+        .await
+        .with_context(|| format!("读 HTTP 响应体（{body_len} 字节）失败：{} {reason}", status))?;
 
     Ok(HttpResponse {
         status,
@@ -222,7 +223,10 @@ async fn read_response<R: AsyncRead + Unpin>(
 }
 
 /// 读一行（CRLF 结尾；不含结尾）。
-async fn read_line_until<R: AsyncRead + Unpin>(reader: &mut R, buf: &mut Vec<u8>) -> Result<String> {
+async fn read_line_until<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> Result<String> {
     buf.clear();
     let mut byte = [0u8; 1];
     loop {
@@ -284,17 +288,16 @@ impl OpenConnectConfig {
 
 /// 建立一次 TLS 连接到服务器（拨号 + 握手；ALPN 不设——ocserv 期望
 /// HTTP/1.1 CONNECT，无 ALPN 协商）。
-async fn tls_connect(cfg: &OpenConnectConfig) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
+async fn tls_connect(
+    cfg: &OpenConnectConfig,
+) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
     let addr = format!("{}:{}", cfg.server, cfg.port);
     let tcp = tokio::net::TcpStream::connect(&addr)
         .await
         .with_context(|| format!("TCP 拨号 {addr} 失败"))?;
     tcp.set_nodelay(true).ok();
-    let connector = create_tls_connector_with_profile(
-        cfg.skip_cert_verify,
-        None,
-        TlsFingerprint::None,
-    )?;
+    let connector =
+        create_tls_connector_with_profile(cfg.skip_cert_verify, None, TlsFingerprint::None)?;
     let server_name = cfg.sni_or_server();
     let dns_name = tokio_rustls::rustls::pki_types::ServerName::try_from(server_name.clone())
         .map_err(|_| anyhow!("SNI 非法：{server_name}"))?;
@@ -310,7 +313,10 @@ async fn tls_connect(cfg: &OpenConnectConfig) -> Result<tokio_rustls::client::Tl
 /// 返回的流即 CONNECT 隧道数据流（后续 CSTP 帧读写在它之上）。
 pub(crate) async fn establish_session(
     cfg: &OpenConnectConfig,
-) -> Result<(tokio_rustls::client::TlsStream<tokio::net::TcpStream>, TunnelInfo)> {
+) -> Result<(
+    tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    TunnelInfo,
+)> {
     let username_body = form_encode(&[("username", &cfg.username)]);
     let password_body = form_encode(&[("password", &cfg.password)]);
     let host = cfg.sni_or_server();
@@ -461,9 +467,9 @@ fn parse_tunnel_info(resp: &HttpResponse) -> Result<TunnelInfo> {
 use smoltcp::iface::{Config, Interface, SocketHandle as SmolHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::dns::{self, Socket as DnsSocket};
-use smoltcp::wire::DnsQueryType as DnsType;
 use smoltcp::socket::tcp::{self, SocketBuffer, State as TcpState};
 use smoltcp::time::Instant as SmolInstant;
+use smoltcp::wire::DnsQueryType as DnsType;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -483,16 +489,23 @@ impl Device for EgressPhy {
     type RxToken<'a> = PhyRxToken;
     type TxToken<'a> = PhyTxToken<'a>;
 
-    fn receive(&mut self, _timestamp: SmolInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(
+        &mut self,
+        _timestamp: SmolInstant,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let pkt = self.rx.pop_front()?;
         Some((
             PhyRxToken(pkt),
-            PhyTxToken { queue: &mut self.tx },
+            PhyTxToken {
+                queue: &mut self.tx,
+            },
         ))
     }
 
     fn transmit(&mut self, _timestamp: SmolInstant) -> Option<Self::TxToken<'_>> {
-        Some(PhyTxToken { queue: &mut self.tx })
+        Some(PhyTxToken {
+            queue: &mut self.tx,
+        })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -586,7 +599,11 @@ impl StackInner {
                 keep.push(h);
             } else {
                 // 归还源端口
-                let port = self.sockets.get::<tcp::Socket>(h).local_endpoint().map(|e| e.port);
+                let port = self
+                    .sockets
+                    .get::<tcp::Socket>(h)
+                    .local_endpoint()
+                    .map(|e| e.port);
                 if let Some(p) = port {
                     self.used_ports.remove(&p);
                 }
@@ -689,9 +706,7 @@ impl EgressStack {
         sock.set_nagle_enabled(false);
         let h = inner.sockets.add(sock);
         let conn = {
-            let StackInner {
-                iface, sockets, ..
-            } = &mut *inner;
+            let StackInner { iface, sockets, .. } = &mut *inner;
             let cx = iface.context();
             let s = sockets.get_mut::<tcp::Socket>(h);
             s.connect(cx, remote, local)
@@ -708,7 +723,11 @@ impl EgressStack {
     }
 
     /// 等待连接 Established（驱动循环持续推进栈）。
-    pub(crate) async fn wait_established(&self, handle: SmolHandle, timeout: Duration) -> Result<()> {
+    pub(crate) async fn wait_established(
+        &self,
+        handle: SmolHandle,
+        timeout: Duration,
+    ) -> Result<()> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             {
@@ -740,15 +759,12 @@ impl EgressStack {
             }
             if inner.dns.is_none() {
                 let servers: Vec<IpAddress> = inner.dns_servers.clone();
-                let slots: Vec<Option<dns::DnsQuery>> =
-                    (0..4).map(|_| None).collect();
+                let slots: Vec<Option<dns::DnsQuery>> = (0..4).map(|_| None).collect();
                 let sock = DnsSocket::new(&servers, slots);
                 inner.dns = Some(inner.sockets.add(sock));
             }
             let dh = inner.dns.expect("dns handle");
-            let StackInner {
-                iface, sockets, ..
-            } = &mut *inner;
+            let StackInner { iface, sockets, .. } = &mut *inner;
             let cx = iface.context();
             let s = sockets.get_mut::<DnsSocket>(dh);
             match s.start_query(cx, host, DnsType::A) {
@@ -1080,12 +1096,7 @@ impl OpenConnectConnector {
         let stack = std::sync::Arc::new(EgressStack::new(&info));
         let dead = std::sync::Arc::new(AtomicBool::new(false));
         let (reader, writer) = tokio::io::split(stream);
-        let driver = tokio::spawn(drive_session(
-            stack.clone(),
-            dead.clone(),
-            reader,
-            writer,
-        ));
+        let driver = tokio::spawn(drive_session(stack.clone(), dead.clone(), reader, writer));
         let s = std::sync::Arc::new(OpenConnectSession {
             stack,
             dead,
@@ -1111,10 +1122,7 @@ impl rillane_core::EgressConnector for OpenConnectConnector {
         }
         let session = self.session().await?;
         let remote = match flow.target.host.parse::<std::net::Ipv4Addr>() {
-            Ok(ip) => IpEndpoint::new(
-                IpAddress::from(std::net::IpAddr::V4(ip)),
-                flow.target.port,
-            ),
+            Ok(ip) => IpEndpoint::new(IpAddress::from(std::net::IpAddr::V4(ip)), flow.target.port),
             Err(_) => {
                 if flow.target.host.parse::<std::net::Ipv6Addr>().is_ok() {
                     return Err(anyhow!(
@@ -1127,10 +1135,7 @@ impl rillane_core::EgressConnector for OpenConnectConnector {
                     .first()
                     .copied()
                     .ok_or_else(|| anyhow!("DNS 无结果：{}", flow.target.host))?;
-                IpEndpoint::new(
-                    IpAddress::from(std::net::IpAddr::V4(ip)),
-                    flow.target.port,
-                )
+                IpEndpoint::new(IpAddress::from(std::net::IpAddr::V4(ip)), flow.target.port)
             }
         };
         let handle = session.stack.open_tcp(remote)?;
@@ -1156,7 +1161,8 @@ mod tests {
 
     #[test]
     fn frame_roundtrip_and_rejections() {
-        let pkt = b"\x45\x00\x00\x2c\x01\x02\x40\x00\x40\x06\x00\x00\x0a\xc8\x00\x01\x0a\xc8\x00\x02";
+        let pkt =
+            b"\x45\x00\x00\x2c\x01\x02\x40\x00\x40\x06\x00\x00\x0a\xc8\x00\x01\x0a\xc8\x00\x02";
         let enc = encode_frame(PKT_DATA, pkt).unwrap();
         assert_eq!(&enc[0..4], b"STF\x01");
         assert_eq!(&enc[4..6], &((pkt.len() as u16).to_be_bytes()));
@@ -1175,18 +1181,30 @@ mod tests {
         h[5] = 0;
         h[6] = PKT_DATA;
         // 魔术错误
-        assert!(decode_frame(&h, &[]).unwrap_err().to_string().contains("魔术"));
+        assert!(decode_frame(&h, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("魔术"));
         // 版本错误
         h[0..4].copy_from_slice(b"STF\x02");
-        assert!(decode_frame(&h, &[]).unwrap_err().to_string().contains("版本"));
+        assert!(decode_frame(&h, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("版本"));
         // 保留字节非零
         h[0..4].copy_from_slice(b"STF\x01");
         h[7] = 1;
-        assert!(decode_frame(&h, &[]).unwrap_err().to_string().contains("保留"));
+        assert!(decode_frame(&h, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("保留"));
         // 长度不一致
         h[7] = 0;
         h[5] = 4;
-        assert!(decode_frame(&h, &[1, 2, 3]).unwrap_err().to_string().contains("长度"));
+        assert!(decode_frame(&h, &[1, 2, 3])
+            .unwrap_err()
+            .to_string()
+            .contains("长度"));
     }
 
     #[test]
@@ -1199,10 +1217,7 @@ mod tests {
 
     #[test]
     fn form_and_cookie() {
-        assert_eq!(
-            form_encode(&[("username", "demo")]),
-            "username=demo"
-        );
+        assert_eq!(form_encode(&[("username", "demo")]), "username=demo");
         assert_eq!(
             cookie_value(Some("webvpncontext=abc123; Path=/; HttpOnly")),
             Some("abc123".into())

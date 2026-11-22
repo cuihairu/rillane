@@ -56,8 +56,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const RECV_BUF: usize = 65536;
 /// OpenVPN PING 魔术载荷（16 字节；收到即原样回，不入栈）
 const PING_PAYLOAD: [u8; 16] = [
-    0x2a, 0x18, 0x7b, 0xf3, 0x64, 0x1e, 0xb4, 0xcb, 0x07, 0xed, 0x2d, 0x0a, 0x98, 0x1f, 0xc7,
-    0x48,
+    0x2a, 0x18, 0x7b, 0xf3, 0x64, 0x1e, 0xb4, 0xcb, 0x07, 0xed, 0x2d, 0x0a, 0x98, 0x1f, 0xc7, 0x48,
 ];
 /// 载具 peer_info（IV_* 集合；NCP 协商面）。
 ///
@@ -96,7 +95,9 @@ fn cipher_suite_of(cipher: &str) -> Result<CipherSuite> {
     match cipher.to_uppercase().as_str() {
         "CHACHA20-POLY1305" => Ok(CipherSuite::ChaCha20Poly1305),
         "AES-256-GCM" => Ok(CipherSuite::Aes256Gcm),
-        other => Err(anyhow!("openvpn 数据通道密码不支持：{other}（白名单 AES-256-GCM / CHACHA20-POLY1305）")),
+        other => Err(anyhow!(
+            "openvpn 数据通道密码不支持：{other}（白名单 AES-256-GCM / CHACHA20-POLY1305）"
+        )),
     }
 }
 
@@ -181,7 +182,10 @@ async fn flush_tls(
 ) -> Result<()> {
     let mut all = Vec::new();
     while tls.wants_write() {
-        match tls.get_outgoing().map_err(|e| anyhow!("TLS 出包失败：{e}"))? {
+        match tls
+            .get_outgoing()
+            .map_err(|e| anyhow!("TLS 出包失败：{e}"))?
+        {
             Some(out) => all.extend_from_slice(&out),
             None => break,
         }
@@ -244,9 +248,8 @@ fn try_parse_server_messages(
         let msg = String::from_utf8_lossy(total_plaintext);
         let msg_str = msg.trim_end_matches('\0');
         if msg_str.starts_with("PUSH_REPLY") {
-            *push_reply = Some(
-                PushReply::parse(msg_str).map_err(|e| anyhow!("PUSH_REPLY 解析失败：{e}"))?,
-            );
+            *push_reply =
+                Some(PushReply::parse(msg_str).map_err(|e| anyhow!("PUSH_REPLY 解析失败：{e}"))?);
         }
     }
     Ok(())
@@ -259,8 +262,8 @@ fn setup_tls_client(cfg: &OpenVpnConfig) -> Result<TlsClientHandler> {
         .map_err(|e| anyhow!("CA 证书解析失败：{e}"))?
         .into_iter()
         .collect::<Vec<_>>();
-    let client_certs = load_certs_from_pem(&cfg.cert_pem)
-        .map_err(|e| anyhow!("客户端证书解析失败：{e}"))?;
+    let client_certs =
+        load_certs_from_pem(&cfg.cert_pem).map_err(|e| anyhow!("客户端证书解析失败：{e}"))?;
     let client_key =
         load_key_from_pem(&cfg.key_pem).map_err(|e| anyhow!("客户端私钥解析失败：{e}"))?;
     let tls_config = create_client_config(ca, Some((client_certs, client_key)))
@@ -294,9 +297,7 @@ async fn establish_session(
             cfg.server
         ));
     };
-    let mut socket = UdpSocket::bind("0.0.0.0:0")
-        .await
-        .context("UDP 绑定失败")?;
+    let mut socket = UdpSocket::bind("0.0.0.0:0").await.context("UDP 绑定失败")?;
     socket.connect(remote).await.context("UDP 连接失败")?;
 
     let mut session = ProtocolSession::new_client(cipher_suite);
@@ -580,16 +581,22 @@ impl OpenVpnConnector {
             return Err(anyhow!("openvpn 服务器地址为空"));
         }
         if ca_pem.trim().is_empty() {
-            return Err(anyhow!("openvpn CA 证书缺失（ca_pem 必填——载具根库非空硬要求）"));
+            return Err(anyhow!(
+                "openvpn CA 证书缺失（ca_pem 必填——载具根库非空硬要求）"
+            ));
         }
         if cert_pem.trim().is_empty() || key_pem.trim().is_empty() {
-            return Err(anyhow!("openvpn 客户端证书/私钥缺失（cert_pem/key_pem 均必填）"));
+            return Err(anyhow!(
+                "openvpn 客户端证书/私钥缺失（cert_pem/key_pem 均必填）"
+            ));
         }
         // 密码白名单建期校验（白名单外具名拒绝）
         cipher_suite_of(&cipher)?;
         if let Some(dir) = key_direction {
             if dir > 1 {
-                return Err(anyhow!("openvpn tls-auth key-direction 非法：{dir}（合法 0/1）"));
+                return Err(anyhow!(
+                    "openvpn tls-auth key-direction 非法：{dir}（合法 0/1）"
+                ));
             }
         }
         if server.parse::<Ipv4Addr>().is_err() {
@@ -655,7 +662,9 @@ impl rillane_core::EgressConnector for OpenVpnConnector {
     async fn forward(&self, mut flow: rillane_core::Flow) -> Result<rillane_core::FlowReport> {
         use rillane_core::{FlowReport, TargetProto};
         if !matches!(flow.target.proto, TargetProto::Tcp) {
-            return Err(anyhow!("OpenVPN 仅交付 TCP 应用面（UDP/QUIC 应用面不交付）"));
+            return Err(anyhow!(
+                "OpenVPN 仅交付 TCP 应用面（UDP/QUIC 应用面不交付）"
+            ));
         }
         let session = self.session().await?;
         let remote = match flow.target.host.parse::<std::net::Ipv4Addr>() {
@@ -747,7 +756,8 @@ mod tests {
             None,
             None,
         )
-        .err().unwrap()
+        .err()
+        .unwrap()
         .to_string()
         .contains("服务器地址为空"));
         assert!(OpenVpnConnector::new(
@@ -761,7 +771,8 @@ mod tests {
             None,
             None,
         )
-        .err().unwrap()
+        .err()
+        .unwrap()
         .to_string()
         .contains("CA 证书缺失"));
         assert!(OpenVpnConnector::new(
@@ -775,7 +786,8 @@ mod tests {
             None,
             None,
         )
-        .err().unwrap()
+        .err()
+        .unwrap()
         .to_string()
         .contains("证书/私钥缺失"));
         assert!(OpenVpnConnector::new(
@@ -789,7 +801,8 @@ mod tests {
             None,
             None,
         )
-        .err().unwrap()
+        .err()
+        .unwrap()
         .to_string()
         .contains("白名单"));
         assert!(OpenVpnConnector::new(
@@ -803,7 +816,8 @@ mod tests {
             None,
             None,
         )
-        .err().unwrap()
+        .err()
+        .unwrap()
         .to_string()
         .contains("IPv4 字面量"));
         assert!(OpenVpnConnector::new(
@@ -817,7 +831,8 @@ mod tests {
             Some(5),
             None,
         )
-        .err().unwrap()
+        .err()
+        .unwrap()
         .to_string()
         .contains("key-direction 非法"));
     }

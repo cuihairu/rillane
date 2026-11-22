@@ -124,11 +124,18 @@ impl Device for MirrorPhy {
         _timestamp: SmolInstant,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let pkt = self.rx.pop_front()?;
-        Some((MirrorRxToken(pkt), MirrorTxToken { queue: &mut self.tx }))
+        Some((
+            MirrorRxToken(pkt),
+            MirrorTxToken {
+                queue: &mut self.tx,
+            },
+        ))
     }
 
     fn transmit(&mut self, _timestamp: SmolInstant) -> Option<Self::TxToken<'_>> {
-        Some(MirrorTxToken { queue: &mut self.tx })
+        Some(MirrorTxToken {
+            queue: &mut self.tx,
+        })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -443,7 +450,9 @@ async fn spawn_mirror(
     deny_password: bool,
     stack: Arc<MirrorStack>,
 ) -> (SocketAddr, Arc<MirrorState>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("绑定镜像端口");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定镜像端口");
     let addr = listener.local_addr().unwrap();
     let state = Arc::new(MirrorState {
         deny_password,
@@ -526,13 +535,7 @@ async fn serve_conn(
                 .await;
             }
         } else {
-            let _ = write_http_response(
-                &mut stream,
-                "HTTP/1.1 400 Bad Request",
-                &[],
-                "",
-            )
-            .await;
+            let _ = write_http_response(&mut stream, "HTTP/1.1 400 Bad Request", &[], "").await;
         }
         return;
     }
@@ -540,13 +543,7 @@ async fn serve_conn(
     if method == "CONNECT" && path == "/CSCOSSLC/tunnel" {
         let cookie = header(&headers, "cookie").unwrap_or("");
         if !cookie.contains("webvpn=sess-456") {
-            let _ = write_http_response(
-                &mut stream,
-                "HTTP/1.1 403 Forbidden",
-                &[],
-                "",
-            )
-            .await;
+            let _ = write_http_response(&mut stream, "HTTP/1.1 403 Forbidden", &[], "").await;
             return;
         }
         // 200 CONNECTED + X-CSTP-* 头（地址/掩码/DNS/MTU）；此连接即隧道
@@ -678,7 +675,11 @@ async fn mirror_success_roundtrip_and_stats() {
     let _ = timeout(Duration::from_secs(5), task2).await;
 
     assert!(
-        wait_for(|| state.connects.load(Ordering::Relaxed) == 3, Duration::from_secs(5)).await,
+        wait_for(
+            || state.connects.load(Ordering::Relaxed) == 3,
+            Duration::from_secs(5)
+        )
+        .await,
         "会话共享：两流共用一条隧道，TLS 连接数应为 3（用户/密码/CONNECT），实为 {}",
         state.connects.load(Ordering::Relaxed)
     );
@@ -765,16 +766,21 @@ async fn mirror_cancel_drops_flow() {
     drop(client);
     // forward 应结束（EOF 传播），不挂死
     let result = timeout(Duration::from_secs(10), task).await;
+    assert!(result.is_ok(), "流取消后 forward 应在超时前收束");
     assert!(
-        result.is_ok(),
-        "流取消后 forward 应在超时前收束"
-    );
-    assert!(
-        wait_for(|| stack.established.load(Ordering::Relaxed), Duration::from_secs(5)).await,
+        wait_for(
+            || stack.established.load(Ordering::Relaxed),
+            Duration::from_secs(5)
+        )
+        .await,
         "取消前镜像应已建立连接"
     );
     assert!(
-        wait_for(|| stack.closed.load(Ordering::Relaxed), Duration::from_secs(5)).await,
+        wait_for(
+            || stack.closed.load(Ordering::Relaxed),
+            Duration::from_secs(5)
+        )
+        .await,
         "取消后镜像应观测到连接收束"
     );
 }

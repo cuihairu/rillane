@@ -53,9 +53,9 @@ pub use hysteria2::{
     Hysteria2Connector, Hysteria2UdpConnector, Hysteria2UdpRelay, UdpSessionStats,
 };
 pub use masque::{MasqueConnector, MasqueUdpConnector, MasqueUdpRelay, MasqueUdpStats};
+pub use mieru::MieruConnector;
 pub use openconnect::OpenConnectConnector;
 pub use openvpn::OpenVpnConnector;
-pub use mieru::MieruConnector;
 pub use reality::{
     derive_auth_key, extract_client_random, extract_session_id, extract_x25519_key_share,
     handshake, hmac_cert_tag, open_session_id, seal_session_id, zero_session_id_slot,

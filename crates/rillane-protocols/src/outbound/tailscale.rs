@@ -63,7 +63,9 @@ impl TailscaleConnector {
         key_file: String,
     ) -> Result<Self> {
         if control_url.trim().is_empty() {
-            return Err(anyhow!("tailscale 控制面地址为空（control_url 必填，不静默指官方协调端点）"));
+            return Err(anyhow!(
+                "tailscale 控制面地址为空（control_url 必填，不静默指官方协调端点）"
+            ));
         }
         // 控制面 URL 建期解析校验（具名非法，不落任何身份文件）
         if url::Url::parse(&control_url).is_err() {
@@ -89,39 +91,38 @@ impl TailscaleConnector {
 
     /// 惰性建立共享 Device（载具控制面握手 + 授权；一次性，超时具名）。
     async fn device(&self) -> Result<Arc<tailscale::Device>> {
-        let dev = self
-            .device
-            .get_or_try_init(|| async {
-                let mut config = tailscale::Config::default_with_key_file(&self.cfg.key_file)
-                    .await
-                    .context("载具密钥文件初始化失败")?;
-                config.control_server_url = self
-                    .cfg
-                    .control_url
-                    .parse()
-                    .with_context(|| format!("控制面 URL 非法：{}", self.cfg.control_url))?;
-                if let Some(h) = self.cfg.hostname.clone() {
-                    config.requested_hostname = Some(h);
-                }
-                config.ephemeral = self.cfg.ephemeral;
-                let dev = timeout(
-                    CONNECT_TIMEOUT,
-                    tailscale::Device::new(&config, Some(self.cfg.auth_key.clone())),
-                )
-                .await
-                .context("tailscale 控制面连接超时（控制服务不可达）")?
-                .context("载具启动失败")?;
-                match timeout(CONNECT_TIMEOUT, dev.is_authorized()).await {
-                    Ok(Ok(tailscale::AuthState::Authorized)) => {}
-                    Ok(Ok(tailscale::AuthState::NotAuthorized(url))) => {
-                        bail!("tailscale 未授权（preauth key 失效，须重新申请）：{url}");
+        let dev =
+            self.device
+                .get_or_try_init(|| async {
+                    let mut config = tailscale::Config::default_with_key_file(&self.cfg.key_file)
+                        .await
+                        .context("载具密钥文件初始化失败")?;
+                    config.control_server_url =
+                        self.cfg.control_url.parse().with_context(|| {
+                            format!("控制面 URL 非法：{}", self.cfg.control_url)
+                        })?;
+                    if let Some(h) = self.cfg.hostname.clone() {
+                        config.requested_hostname = Some(h);
                     }
-                    Ok(Err(e)) => bail!("tailscale 授权失败：{e}"),
-                    Err(_) => bail!("tailscale 授权超时（控制面不可达）"),
-                }
-                Ok(Arc::new(dev))
-            })
-            .await;
+                    config.ephemeral = self.cfg.ephemeral;
+                    let dev = timeout(
+                        CONNECT_TIMEOUT,
+                        tailscale::Device::new(&config, Some(self.cfg.auth_key.clone())),
+                    )
+                    .await
+                    .context("tailscale 控制面连接超时（控制服务不可达）")?
+                    .context("载具启动失败")?;
+                    match timeout(CONNECT_TIMEOUT, dev.is_authorized()).await {
+                        Ok(Ok(tailscale::AuthState::Authorized)) => {}
+                        Ok(Ok(tailscale::AuthState::NotAuthorized(url))) => {
+                            bail!("tailscale 未授权（preauth key 失效，须重新申请）：{url}");
+                        }
+                        Ok(Err(e)) => bail!("tailscale 授权失败：{e}"),
+                        Err(_) => bail!("tailscale 授权超时（控制面不可达）"),
+                    }
+                    Ok(Arc::new(dev))
+                })
+                .await;
         dev.cloned()
     }
 
@@ -151,7 +152,9 @@ impl rillane_core::EgressConnector for TailscaleConnector {
     async fn forward(&self, mut flow: rillane_core::Flow) -> Result<rillane_core::FlowReport> {
         use rillane_core::{FlowReport, TargetProto};
         if !matches!(flow.target.proto, TargetProto::Tcp) {
-            return Err(anyhow!("Tailscale 仅交付 TCP 应用面（UDP/QUIC 应用面不交付）"));
+            return Err(anyhow!(
+                "Tailscale 仅交付 TCP 应用面（UDP/QUIC 应用面不交付）"
+            ));
         }
         let dev = self.device().await?;
         let remote = self
