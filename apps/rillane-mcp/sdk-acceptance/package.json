@@ -1,0 +1,13 @@
+{
+  "name": "rillane-mcp-sdk-acceptance",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RIL-090: real MCP client (official SDK, pinned) acceptance driver for apps/rillane-mcp",
+  "scripts": {
+    "accept": "node accept.cjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "^4.6.7"
+  }
+}
