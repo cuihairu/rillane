@@ -11,6 +11,8 @@
         android:id="@+id/group_name"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:maxLines="1"
+        android:ellipsize="end"
         android:textColor="@color/rillane_primary"
         android:textSize="16sp"
         android:textStyle="bold" />
@@ -19,6 +21,8 @@
         android:id="@+id/group_strategy"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:maxLines="2"
+        android:ellipsize="end"
         android:textColor="@color/rillane_on_surface_variant"
         android:textSize="12sp" />
 </LinearLayout>
