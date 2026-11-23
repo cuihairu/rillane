@@ -41,6 +41,9 @@ pub mod session_trace;
 // 同链）与真服务验证归后续批次
 pub mod streaming;
 pub mod trace;
+// 诊断轨迹 → 冻结 JSON 形态（RIL-150）：控制面 `/trace/*` 与 FFI
+// （Android/iOS 客户端）共享同一发射器，两面线格式由构造保证一致
+pub mod trace_json;
 pub mod trace_svg;
 pub mod udp;
 pub mod underlay;

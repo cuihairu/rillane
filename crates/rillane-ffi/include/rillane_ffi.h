@@ -45,6 +45,33 @@ int32_t rillane_ffi_is_running(const rillane_ffi_handle_t *handle);
 char *rillane_ffi_stats_json(const rillane_ffi_handle_t *handle);
 
 /*
+ * 查询面（RIL-150）——与 rillaned 控制面同字段口径（schema_version=1）；
+ * 全部 handle 无效返回 NULL（错误见 last_error），成功返回 JSON 字符串
+ * 以 rillane_ffi_free_string 归还。
+ */
+
+/* 路由概要：mode/default_node/global_node/direct_node/groups/rules_count */
+char *rillane_ffi_routing_json(const rillane_ffi_handle_t *handle);
+
+/* 节点：组实时质量 + 出口节点（name/type，不含凭证）+ 订阅源 */
+char *rillane_ffi_nodes_json(const rillane_ffi_handle_t *handle);
+
+/* DNS 统计（/dns/stats 同形；network.dns 缺席 = enabled:false 零值） */
+char *rillane_ffi_dns_stats_json(const rillane_ffi_handle_t *handle);
+
+/* DNS 解析器形状（/dns/resolvers 同形；块缺席 = enabled:false 空形态） */
+char *rillane_ffi_dns_resolvers_json(const rillane_ffi_handle_t *handle);
+
+/*
+ * 活动/近期连接分页（/trace/flows 同形信封）。limit=0 显式拒绝——
+ * 返回非 NULL 信封 `{"schema_version":1,"error":"query.page.invalid"}`。
+ */
+char *rillane_ffi_flows_json(const rillane_ffi_handle_t *handle, size_t offset, size_t limit);
+
+/* 单流详情（/trace/flow 同形；未知/无效 ID = found:false + 稳定码 + 计数） */
+char *rillane_ffi_flow_json(const rillane_ffi_handle_t *handle, const char *flow_id);
+
+/*
  * 挂载 TUN fd 并起最小数据通路（ICMP echo 轮转）。
  * fd 所有权转移至本层（调用方 detach 后不得再关闭）；
  * 重复挂载先停旧再起新。0 成功 / -1 失败。

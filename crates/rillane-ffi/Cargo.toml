@@ -20,6 +20,9 @@ mobile = ["rillane-runtime/small"]
 
 [dependencies]
 rillane-config = { path = "../rillane-config" }
+# RIL-150：诊断查询面（FlowId/FlowQueryService/trace_json 发射器）——
+# 控制面 /trace/* 与 FFI 同一查询契约
+rillane-core = { path = "../rillane-core" }
 rillane-runtime = { path = "../rillane-runtime", default-features = false }
 anyhow.workspace = true
 serde_json.workspace = true

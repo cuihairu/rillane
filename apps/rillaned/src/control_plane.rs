@@ -18,6 +18,7 @@ use hyper::{
 };
 use serde::{Deserialize, Serialize};
 
+use rillane_core::trace_json::{collector_stats_json, trace_event_json, trace_json};
 use rillane_core::udp::{TableSnapshot, UdpIngressMetrics, UdpIngressSnapshot};
 use rillane_core::{JobSnapshot, ProbeOutcome, ProbeService};
 use rillane_mesh::{LinkState, MeshRegistry, NodeCapability, NodeRecord, NodeRole};
@@ -1847,7 +1848,7 @@ impl ControlPlane {
             rillane_core::query::FlowRecord::Found(trace) => serde_json::json!({
                 "schema_version": 1u32,
                 "found": true,
-                "trace": trace_trace_json(&trace),
+                "trace": trace_json(&trace),
                 "absence": null,
             }),
             rillane_core::query::FlowRecord::Absent(absent) => serde_json::json!({
@@ -3499,47 +3500,6 @@ fn probe_target_from_body(body: ProbeSubmitBody) -> Result<rillane_core::ProbeTa
             Ok(rillane_core::ProbeTarget::UdpEcho { addr, payload_len })
         }
     }
-}
-
-/// FlowTrace → 冻结 JSON 形态（schema_version=1：字段面 + 机器码——
-/// stage/evidence 用恒定机器口径，attempt 仅 Attempt 事件携带）
-fn trace_trace_json(trace: &rillane_core::trace::FlowTrace) -> serde_json::Value {
-    serde_json::json!({
-        "flow": trace.flow.as_str(),
-        "origin": trace.origin.as_str(),
-        "generation": trace.generation,
-        "closed": trace.closed,
-        "events": trace.events.iter().map(trace_event_json).collect::<Vec<_>>(),
-    })
-}
-
-/// TraceEvent → 冻结 JSON 形态（RIL-051 schema 的线格式）
-fn trace_event_json(event: &rillane_core::trace::TraceEvent) -> serde_json::Value {
-    serde_json::json!({
-        "seq": event.seq,
-        "stage": event.stage.as_str(),
-        "attempt": event.attempt.map(|a| a.0),
-        "code": event.code,
-        "evidence": event.evidence.as_str(),
-        "monotonic_ms": event.monotonic_ms,
-        "wall_ms": event.wall_ms,
-        "detail": event.detail,
-    })
-}
-
-/// CollectorStats → 冻结 JSON 形态（缺席答复的计数可见面）
-fn collector_stats_json(stats: &rillane_core::collector::CollectorStats) -> serde_json::Value {
-    serde_json::json!({
-        "traces_admitted": stats.traces_admitted,
-        "traces_sampled_out": stats.traces_sampled_out,
-        "flows_dropped_active_limit": stats.flows_dropped_active_limit,
-        "events_dropped_per_flow": stats.events_dropped_per_flow,
-        "traces_dropped_overflow": stats.traces_dropped_overflow,
-        "events_dropped_overflow": stats.events_dropped_overflow,
-        "traces_expired": stats.traces_expired,
-        "closed_pending": stats.closed_pending,
-        "active_traces": stats.active_traces,
-    })
 }
 
 fn json<T: Serialize>(status: StatusCode, value: &T) -> Response<RespBody> {

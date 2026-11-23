@@ -8,10 +8,13 @@
 use jni::objects::{JClass, JString};
 use jni::sys::{jint, jlong, jstring};
 use jni::JNIEnv;
+use std::os::raw::c_char;
 
 use crate::FfiHandle;
 use crate::{
-    rillane_ffi_free_string, rillane_ffi_is_running, rillane_ffi_last_error,
+    rillane_ffi_dns_resolvers_json, rillane_ffi_dns_stats_json, rillane_ffi_flow_json,
+    rillane_ffi_flows_json, rillane_ffi_free_string, rillane_ffi_is_running,
+    rillane_ffi_last_error, rillane_ffi_nodes_json, rillane_ffi_routing_json,
     rillane_ffi_stats_json, rillane_ffi_stop, rillane_ffi_tun_start, rillane_ffi_tun_stop,
 };
 
@@ -102,6 +105,107 @@ pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_statsJson(
     handle: jlong,
 ) -> jstring {
     let s = unsafe { rillane_ffi_stats_json(handle_from(handle)) };
+    if s.is_null() {
+        return std::ptr::null_mut();
+    }
+    let raw = unsafe { std::ffi::CStr::from_ptr(s) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { rillane_ffi_free_string(s) };
+    jstring_from(&mut env, &raw)
+}
+
+/// 查询面 JSON（RIL-150）：handle-only 六查询共用包装——NULL → 可空 jstring。
+/// 命名口径同 `statsJson`：camelCase 对齐 Kotlin `external fun`。
+fn query_json(
+    env: &mut JNIEnv,
+    handle: jlong,
+    f: unsafe extern "C" fn(*const FfiHandle) -> *mut c_char,
+) -> jstring {
+    let s = unsafe { f(handle_from(handle)) };
+    if s.is_null() {
+        return std::ptr::null_mut();
+    }
+    let raw = unsafe { std::ffi::CStr::from_ptr(s) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { rillane_ffi_free_string(s) };
+    jstring_from(env, &raw)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_routingJson(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jstring {
+    query_json(&mut env, handle, rillane_ffi_routing_json)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_nodesJson(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jstring {
+    query_json(&mut env, handle, rillane_ffi_nodes_json)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_dnsStatsJson(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jstring {
+    query_json(&mut env, handle, rillane_ffi_dns_stats_json)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_dnsResolversJson(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jstring {
+    query_json(&mut env, handle, rillane_ffi_dns_resolvers_json)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_flowsJson(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    offset: jlong,
+    limit: jlong,
+) -> jstring {
+    let s = unsafe { rillane_ffi_flows_json(handle_from(handle), offset as usize, limit as usize) };
+    if s.is_null() {
+        return std::ptr::null_mut();
+    }
+    let raw = unsafe { std::ffi::CStr::from_ptr(s) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { rillane_ffi_free_string(s) };
+    jstring_from(&mut env, &raw)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_flowJson(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    flow_id: JString,
+) -> jstring {
+    // jstring → UTF-8 C 字符串（CString 保 NUL 终止——String 指针直接
+    // 传 CStr::from_ptr 是越界读；id 含 NUL → NULL + last_error）
+    let id_bytes = match env.get_string(&flow_id) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let id_c = match std::ffi::CString::new(id_bytes) {
+        Ok(c) => c,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let s = unsafe { rillane_ffi_flow_json(handle_from(handle), id_c.as_ptr()) };
     if s.is_null() {
         return std::ptr::null_mut();
     }
