@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Rillane 品牌 teal（Material 3 深色调色，深底浅字；主题 DayNight 切换） -->
+    <color name="rillane_primary">#4DD8DC</color>
+    <color name="rillane_on_primary">#003739</color>
+    <color name="rillane_primary_container">#004F53</color>
+    <color name="rillane_on_primary_container">#9CF2F7</color>
+    <color name="rillane_secondary">#B1CBC7</color>
+    <color name="rillane_on_secondary">#1C3532</color>
+    <color name="rillane_surface">#101414</color>
+    <color name="rillane_on_surface">#DEE4E3</color>
+    <color name="rillane_surface_variant">#3F494A</color>
+    <color name="rillane_on_surface_variant">#BFC8C9</color>
+    <color name="rillane_outline">#899394</color>
+    <color name="rillane_background">#101414</color>
+    <color name="rillane_on_background">#DEE4E3</color>
+    <!-- 状态色（深底浅字，不单独用颜色传达状态） -->
+    <color name="status_connected">#4DD8DC</color>
+    <color name="status_disconnected">#899394</color>
+    <color name="status_error">#FFB4AB</color>
+    <color name="status_revoked">#FFB95C</color>
+</resources>
