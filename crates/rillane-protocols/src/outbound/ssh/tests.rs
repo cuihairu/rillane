@@ -549,3 +549,42 @@ fn client_config_carries_keepalive_lifecycle() {
         "russh 缺省无 keepalive——探测面由本连接器注入而非库缺省"
     );
 }
+
+/// 公网真实对端（RIL-113 边界行使）：真实公网 SSH 服务器握手 + 公开
+/// 指纹钉扎命中 + 未注册公钥被真服务器具名拒绝。默认跳过（CI 不打第
+/// 三方公网端点——本席实跑：
+/// `RILLANE_SSH_PUBLIC_PEER=github.com:22 RILLANE_SSH_PUBLIC_USER=git
+/// RILLANE_SSH_PUBLIC_PIN=SHA256:+DiY…`）。
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn real_public_peer_handshake_pin_and_named_auth_refusal() {
+    let Ok(peer) = std::env::var("RILLANE_SSH_PUBLIC_PEER") else {
+        eprintln!("跳过：公网对端未设 (RILLANE_SSH_PUBLIC_PEER，如 github.com:22)");
+        return;
+    };
+    let pin =
+        std::env::var("RILLANE_SSH_PUBLIC_PIN").expect("公网对端在时须携 RILLANE_SSH_PUBLIC_PIN");
+    let user = std::env::var("RILLANE_SSH_PUBLIC_USER").unwrap_or_else(|_| "git".into());
+    let (host, port) = peer.rsplit_once(':').expect("host:port 形");
+    let port: u16 = port.parse().expect("端口");
+    if !Path::new(PEER_KEY).exists() {
+        eprintln!("跳过：本席私钥缺席 ({PEER_KEY})");
+        return;
+    }
+
+    // 本席 /tmp/sshpeer/user 未注册到公网服务器——真服务器应具名拒绝；
+    // 错误非「主机钥不符」即公开指纹钉扎命中在先
+    let connector =
+        SshConnector::new(host, port, user, None, Some(PEER_KEY.into()), None, pin).expect("构造");
+    let (flow, _client) = make_flow("127.0.0.1", 9);
+    let err = connector
+        .forward(flow)
+        .await
+        .expect_err("公网对端应拒未注册钥");
+    let m = format!("{err:#}");
+    assert!(!m.contains("主机钥不符"), "公网指纹钉扎应命中: {m}");
+    assert!(
+        m.contains("公钥认证被拒") || m.contains("认证被拒"),
+        "公网服务器具名拒绝: {m}"
+    );
+}
