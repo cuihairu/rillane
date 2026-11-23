@@ -633,14 +633,18 @@ armv7-ohos 桩）在对应小节如实记录。
 
 ## sudoku（Sudoku/ASCII）
 
-- **结论**：**无后端——自写受限于线格式规范缺失**（RIL-117，评估留证 2026-11-18；未交付任何东西，无目录条目、无 IR 变体）。评估扫查：
+- **结论**：**无后端——自写受限于混淆层线格式规范缺失**（RIL-117，评估留证 2026-11-18，边界更新 2026-11-23；未交付任何东西，无目录条目、无 IR 变体）。评估扫查：
   - crates.io（2026-11-18）：**零**协议 crate——`sudoku` 全部匹配都是数独游戏（解题器/生成器）；协议与游戏同名，注册表里只有游戏。
   - 参考实现是 **SUDOKU-ASCII/sudoku**（GPL-3.0，Go，437 星，推送 2026-10-31，发行 v0.5.2-1）：协议自家 README 宣告「已完成最后一次大更新」并转入慢速维护模式。代理**应用**——包二进制属 openssh/Chromium 拒绝族，且无论许可如何都无库面可链。
   - 生态是单实现：据 README，官方支持仅存在于 Mihomo（其本身 GPL）；Xray 携带同名协议但明确**不兼容**真实 Sudoku 协议；sing-box 支持仅限非官方分支。不存在可交叉核对线格式的第二独立实现。
-  - 无线格式规范：README 只有概念与流程（预共享钥生成同一数独映射表；握手 = 加密时间戳 + nonce；上行路径 数据 → AEAD（AES-128-GCM 或 ChaCha20-Poly1305，逐连接钥带轮换、严格 nonce 去重 + 时间戳偏差防重放）→ 切片 → 4x4 数独线索映射 → 任意填充；两种下行模式——纯数独编码，或 6-bit 切片复用填充池；畸形输入不掐断而是转发到诱饵站），但**没有**握手、目标寻址、掩码方案编码的任何字节级布局——精确线格式只存在于 GPL Go 源码中。从该源码派生的自写是本工作区不采取的 GPL 衍生姿态；剩余基础是对已发行对端二进制（`sudoku-linux-amd64.tar.gz`，v0.5.2-1——GPL 对端进程作为外部锚是仓内合法的，ssh/OpenSSH 同例）的黑盒探测，原则上可行但本矩阵中面最大（288 个非同构 4x4 数独枚举、多掩码方案含用户自定义 XVP、两种下行模式、PFS 钥轮换）且无规范可核对——「从未运行的自己对自己」拒绝在此甚至不能干净适用，因为不存在可判错的第二实现。
-  - 自写梯子：**原则开启、缺基础受阻**——记录为前置姿态；线基础不存在，范围不钉。
+  - 线格式状态（2026-11-23 探针，上游 raw 出网已恢复——`raw.githubusercontent.com` 复返 200，2026-11-18 的损坏 404 姿态已除）：**内层帧格式现已字节级规范**——`doc/README.md` §「Protocol (Wire Formats)」（GPL 仓内的 authored 文档；按 mieru 先例可作实现真源——GPL 源未读、未派生）给出精确布局：record 层（`body_len` uint16 大端 + 12 字节明文头 = `epoch` uint32 大端 + `seq` uint64 大端，兼作 nonce 与 AAD，`body_len` ≤ 65535，密文 = AEAD.Seal(nonce=header, plaintext, aad=header)）；KIP 控制帧（`kip` 3 ASCII + `type` uint8 + `payload_len` uint16 大端 + 载荷；ClientHello 0x01 / ServerHello 0x02 / OpenTCP 0x10 / StartMux 0x11 / StartUoT 0x12 / StartRev 0x13 / KeepAlive 0x14）；ClientHello 载荷（时间戳 uint64 大端 + user_hash 8 字节 = SHA256(client_private_key)[:8] + nonce 16 字节 + X25519 client_pub 32 字节 + features uint32 大端）；ServerHello 载荷（nonce 16 字节，须与客户端一致 + X25519 server_pub 32 字节 + selected_features uint32 大端）；SOCKS5 式地址（atyp 0x01 IPv4 / 0x03 域名 / 0x04 IPv6 + addr + port uint16 大端）；mux 流帧（frame_type uint8 Open 0x01 / Data 0x02 / Close 0x03 / Reset 0x04 + stream_id uint32 大端 + payload_len uint32 大端 + 载荷）；UoT 数据报帧（addr_len uint16 大端 + payload_len uint16 大端 + addr + 载荷，自定界且可合并——接收端必须流式解析，绝不假设一帧一 record）。README 流程仍是概念层（共享钥映射表；握手 = 加密时间戳 + nonce；数据 → AEAD（AES-128-GCM / ChaCha20-Poly1305）→ 切片 → 4x4 线索映射 → 任意填充；两种下行模式；畸形输入转发诱饵站）。
+  - **但产出实际上线字节的那层仍只有 high-level**：同一文档「How the Sudoku layer hides bytes」段明确标 high-level——由 `key`（+ `custom_table`/`custom_tables` 轮换，`xpxvvpvv` 布局 420 排列）确定性构造映射表、字节→4x4 数独线索编码、以唯一可解性校验插入/滤除任意填充、`prefer_ascii`/`prefer_entropy`/自定义 XVP 布局、packed 6-bit 下行——无表、线索编码、填充的任何字节级布局；文档明言真实网络上字节仍经 Sudoku 混淆层变换。PFS 会话钥派生同样未规范（README 声称 X25519 交换逐连接派生并长传输轮换，interop 套件跨过 KeyUpdateAfterBytes = 32 MiB，但无派生公式）。HTTP mask 的 stream/poll/auto/ws 会话机械除模式名外亦未文档化。
+  - **混淆层 wire 字节是实现耦合的**（changelog v0.5.2.0 证据）：「编码器随机数的抽取顺序有调整，wire 字节序列不同但解码等价（wire_compat 摘要重新生成）」——同载荷在参考版本间产出不同 wire 字节而解码等价，且设计本身给每字节多个合法编码（288 个非同构 4x4 数独）。故黑盒探测无法钉定确定性 wire 编码供自写核对——无规范可核对的基础在种类上未变且更强（目标 wire 是设计性非确定，而非仅未规范）。
+  - 对端锚可得（2026-11-23 姿态）：官方 Go 二进制发行（`sudoku-linux-amd64.tar.gz`，v0.5.2-1）、本席已持 go1.26.11（masque 对端时下载）、GPL 对端进程仓内合法（ssh/OpenSSH、mieru/mita 同例）；`sudoku-desktop`（官方桌面客户端）亦存在。参考互操套件（`tests/interop_test.go`，`SUDOKU_REF_BIN=sudoku-v0.5.1`，另有 v0.5.1 golden 向量固定解码行为）是上游真值——但那些向量在 GPL Go 测试源内，不可作自写基础。
+  - crates.io 复探（2026-11-23）：仍零协议 crate——100 条命中全是数独游戏（解题器/生成器）；协议与游戏同名，注册表里只有游戏。无非 GPL 公开参考：mihomo 是 GPL；「Anywhere」仅作为 changelog 中的互通伙伴被点名，无公开的宽松许可参考或规范；Xray 同名协议明确不兼容；sing-box 仅非官方分支。
+  - 自写梯子：**原则开启、缺混淆层基础受阻**——帧基础现已存在（2026-11-23）但线编码基础不存在；混淆层规范出现前不钉范围。
 - 版本/许可/平台/公开 API/旁路/取消/统计/复用/UDP/服务端面：**不钉**——无后端交付；无载具 crate、无线镜像、无连接器面。
-- 复开条件：出现字节级线格式规范、非 GPL 参考实现、或维护中的许可兼容 Rust sudoku 协议库——三者任一即解锁梯子。
+- 复开条件（2026-11-23 收窄）：出现混淆层（映射表构造 + 线索编码 + 填充编码）与 PFS 会话钥派生的 authored 字节级规范、且非源码派生形式——帧格式已规范，这是剩余线基础——或非 GPL 参考实现、或维护中的许可兼容 Rust sudoku 协议库。
 
 ## shadowquic
 
