@@ -16,12 +16,21 @@
 //!   "127.0.0.1", 0)` → `into_stream()`——通道流即统一 EgressConnector
 //!   面的流 IO；目标寻址用 host 字符串原样（由 sshd 解析），本面不查
 //!   fake-ip 池。
+//! - 平台旁路拨号面（RIL-113 验收「平台旁路」项）：`forward_over` 以
+//!   调用方既建底层流建立 SSH 会话（russh `client::connect_stream`）
+//!   ——底传输由平台/前置建立（经代理跳板、既有连接、fd 注入），
+//!   本面不做底拨号；`forward`（trait 面）= 自拨 TCP → 复用同一会话
+//!   逻辑，两路行为一致。
+//! - keepalive（连接生命周期）：`keepalive_interval` 30s +
+//!   `keepalive_max` 3（russh 缺省 None——长空闲流的收束面原本依
+//!   服务端 sshd 策略；配置后客户端主动探测，连续 3 次无回应即收束，
+//!   死连接不悬挂）。
 //!
-//! 交付边界（评估记录具名）：每流一条 SSH 连接（协议内建通道复用未
-//! 交付）；UDP 面不交付（direct-tcpip 仅 TCP，catalog udp=false）；
-//! 服务端面不交付；客户端 keepalive 未配置（russh 缺省 None——长空闲
-//! 流的收束面依服务端 sshd 策略）；russh 底部拨号旁路（`connect_stream`
-//! 接受现成流）结构性存在但首段不用。
+//! 交付边界（评估记录具名）：每流一条 SSH 连接（协议内建通道复用属
+//! 优化面，不在本项「出站隧道」交付口径）；UDP 面不交付（direct-tcpip
+//! 仅 TCP，catalog udp=false）；服务端面不交付（交付口径即出站隧道）；
+//! keepalive 探测的长空闲行为未在套件内行使（需 >90s 空闲窗口，配置
+//! 值有密闭断言）。
 
 use std::{
     sync::{Arc, Mutex},
@@ -33,6 +42,10 @@ use async_trait::async_trait;
 use rillane_core::{EgressConnector, Flow, FlowReport};
 use russh::client::{self, Handle, Handler};
 use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+};
 
 /// 拨号超时（与 hysteria/hysteria2/snell 同口径）
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -40,6 +53,20 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 /// 开通道超时（direct-tcpip 请求往返）
 const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+/// keepalive 探测间隔（连接生命周期：长空闲流不依服务端 sshd 策略）
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// keepalive 连续无回应上限（超过即收束死连接；russh 缺省 3）
+const KEEPALIVE_MAX: usize = 3;
+
+/// 客户端配置：缺省档 + keepalive（30s 探测 / 3 次无回应收束）。
+/// 抽出为函数供密闭测试断言配置值（探测的长空闲行为不入套件）。
+fn client_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        keepalive_interval: Some(KEEPALIVE_INTERVAL),
+        keepalive_max: KEEPALIVE_MAX,
+        ..Default::default()
+    })
+}
 
 /// 认证面（恰一选一，构造期强制）
 #[derive(Debug, Clone)]
@@ -185,24 +212,24 @@ fn named_connect_error(
     err.context(format!("SSH 连接失败: {addr}"))
 }
 
-#[async_trait]
-impl EgressConnector for SshConnector {
-    fn name(&self) -> &'static str {
-        "ssh"
-    }
-
-    async fn forward(&self, mut flow: Flow) -> Result<FlowReport> {
+impl SshConnector {
+    /// 平台旁路拨号面：以调用方既建底层流建立 SSH 会话（russh
+    /// `client::connect_stream`）——底传输由平台/前置建立，本面不做底
+    /// 拨号。`forward`（trait 面）自拨 TCP 后复用本方法，两路行为一致。
+    pub async fn forward_over<B>(&self, mut flow: Flow, bottom: B) -> Result<FlowReport>
+    where
+        B: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let addr = format!("{}:{}", self.server, self.port);
-        let config = Arc::new(client::Config::default());
 
-        // 连接 + 主机钥钉扎（15s 闸）；观测槽 Arc 在 handler 被 connect
-        // 消费后留存，错误路径据此对名
+        // 握手 + 主机钥钉扎（15s 闸）；观测槽 Arc 在 handler 被
+        // connect_stream 消费后留存，错误路径据此对名
         let observed: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let mut handle: Handle<HostKeyPin> = tokio::time::timeout(
             CONNECT_TIMEOUT,
-            client::connect(
-                config,
-                &addr,
+            client::connect_stream(
+                client_config(),
+                bottom,
                 HostKeyPin {
                     pin: self.host_key.clone(),
                     observed: observed.clone(),
@@ -276,6 +303,24 @@ impl EgressConnector for SshConnector {
             upstream: up,
             downstream: down,
         })
+    }
+}
+
+#[async_trait]
+impl EgressConnector for SshConnector {
+    fn name(&self) -> &'static str {
+        "ssh"
+    }
+
+    /// 自拨号面：底传输由本连接器拨（`server:port`），其余同
+    /// `forward_over`（平台旁路拨号面）。
+    async fn forward(&self, flow: Flow) -> Result<FlowReport> {
+        let addr = format!("{}:{}", self.server, self.port);
+        let socket = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
+            .await
+            .context("SSH 拨号超时")?
+            .with_context(|| format!("SSH 底层 TCP 拨号失败: {addr}"))?;
+        self.forward_over(flow, socket).await
     }
 }
 

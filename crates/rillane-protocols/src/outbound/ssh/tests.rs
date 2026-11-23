@@ -467,3 +467,85 @@ async fn missing_key_file_named_refusal() {
         "缺失具名: {err:#}"
     );
 }
+
+// -----------------------------------------------------------------------
+// 平台旁路拨号面 + keepalive 生命周期
+// -----------------------------------------------------------------------
+
+/// 平台旁路拨号面（RIL-113 验收「平台旁路」项）：底传输由调用方经前置
+/// 跳板建立（本地 TCP 前置 → sshd），`forward_over` 只做 SSH 会话——
+/// russh 从不拨号，会话骑在调用方拨的前置流上，与连接器配置的
+/// server/port 拨号路径解耦。
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn platform_bypass_forward_over_fronted_stream() {
+    #[allow(clippy::await_holding_lock)]
+    let _serial = PEER_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    if !peer_ready() {
+        eprintln!("跳过：真实 sshd 对端缺席 (127.0.0.1:23411)");
+        return;
+    }
+
+    // 前置跳板 = 本面之外的拨号路径（模拟平台前置/代理跳板）
+    let front = TcpListener::bind("127.0.0.1:0").await.expect("前置绑定");
+    let front_addr = front.local_addr().expect("前置地址");
+    let hop = tokio::spawn(async move {
+        let (mut down, _) = front.accept().await.expect("前置接受");
+        let mut up = TcpStream::connect(PEER_ADDR).await.expect("前置连 sshd");
+        let _ = tokio::io::copy_bidirectional(&mut down, &mut up).await;
+    });
+
+    let connector = SshConnector::new(
+        "127.0.0.1",
+        23411,
+        PEER_USER,
+        None,
+        Some(PEER_KEY.into()),
+        None,
+        host_pin(),
+    )
+    .expect("构造");
+    let (target, _accepted, _echo) = echo_target().await;
+    let (flow, mut client) = make_flow(&target.ip().to_string(), target.port());
+    let bottom = TcpStream::connect(front_addr).await.expect("调用方拨前置");
+
+    let relay = tokio::spawn(async move { connector.forward_over(flow, bottom).await });
+
+    client.write_all(b"platform bypass").await.expect("上行写");
+    client.shutdown().await.expect("上行半关");
+
+    let report = relay.await.expect("join").expect("forward_over 成功");
+
+    let mut got = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), client.read_to_end(&mut got))
+        .await
+        .expect("下行超时")
+        .expect("下行读");
+    assert_eq!(got, b"platform bypass", "前置底传输回环逐字节还原");
+    assert_eq!(
+        report.upstream,
+        b"platform bypass".len() as u64,
+        "上行计数（统计面走旁路拨号同样成立）"
+    );
+
+    drop(hop);
+}
+
+/// keepalive 配置（连接生命周期）：30s 探测 / 3 次无回应收束——密闭
+/// 断言配置值（russh 缺省 None，长空闲流原依服务端 sshd 策略；探测的
+/// 长空闲行为需 >90s 空闲窗口不入套件，具名边界）。
+#[test]
+fn client_config_carries_keepalive_lifecycle() {
+    let config = client_config();
+    assert_eq!(
+        config.keepalive_interval,
+        Some(Duration::from_secs(30)),
+        "keepalive 探测间隔"
+    );
+    assert_eq!(config.keepalive_max, 3, "keepalive 无回应上限");
+    let default = client::Config::default();
+    assert_eq!(
+        default.keepalive_interval, None,
+        "russh 缺省无 keepalive——探测面由本连接器注入而非库缺省"
+    );
+}
