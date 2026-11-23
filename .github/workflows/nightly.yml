@@ -23,10 +23,20 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-        R=$(gh run list -R "${{ github.repository }}" --branch main \
-          --workflow CI --limit 1 --json conclusion \
-          --jq '.[0].conclusion // "none"')
-        echo "latest CI conclusion: $R"
+        # gh is not installed on this self-hosted runner (2026-11-22 gate
+        # died with 'gh: command not found', exit 127). Query the REST API
+        # via curl/wget and extract the conclusion with grep/sed — no gh,
+        # no jq dependency. First entry of the ci.yml run list on main is
+        # the latest CI run; null conclusion (run in progress) fails the
+        # gate just like the old gh fallback "none" did.
+        url="https://api.github.com/repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=main&per_page=1"
+        if command -v curl >/dev/null 2>&1; then
+          payload=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$url")
+        else
+          payload=$(wget -qO- --header="Authorization: Bearer $GH_TOKEN" --header="Accept: application/vnd.github+json" "$url")
+        fi
+        R=$(printf '%s' "$payload" | grep -o '"conclusion": *"[a-z_]*"' | head -1 | sed 's/.*: *"//;s/"$//')
+        echo "latest CI conclusion: ${R:-none}"
         if [ "$R" = "success" ]; then
           echo "ok=true" >> "$GITHUB_OUTPUT"
         else
@@ -113,11 +123,24 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-        TAG=nightly
-        # 固定 rolling tag：先删旧 release（资产随删），再重建并上传
-        gh release delete "$TAG" -R "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
-        gh release create "$TAG" -R "${{ github.repository }}" \
-          --title "rillane nightly (rolling)" \
-          --notes "每日构建（rolling，只保留最新一版）。构建自 main@$(git -C "${GITHUB_WORKSPACE}" rev-parse --short HEAD 2>/dev/null || echo 'see SHA256SUMS')" \
-          --prerelease \
-          release/*.tar.gz release/SHA256SUMS
+        set -euo pipefail
+        # gh 不可用（自托管 runner 无 gh，2026-11-22 gate 'gh: command not found'
+        # 实证；此步此前从未跑到过，同样会 127）。改走 REST API：
+        # 删旧 release -> 建新 rolling release（tag 不存在则自动在默认分支建）->
+        # 逐个上传资产。curl 必须存在（构建链路已依赖网络工具）。
+        API="https://api.github.com/repos/${{ github.repository }}"
+        AUTH="Authorization: Bearer $GH_TOKEN"
+        command -v curl >/dev/null || { echo 'curl not found on runner' >&2; exit 127; }
+        RID=$(curl -sf -H "$AUTH" "$API/releases/tags/nightly" \
+              | grep -o '"id": *[0-9]*' | head -1 | grep -o '[0-9]*' || true)
+        if [ -n "${RID:-}" ]; then
+          curl -sf -X DELETE -H "$AUTH" "$API/releases/$RID"
+        fi
+        RID=$(curl -sf -X POST -H "$AUTH" -H 'Accept: application/vnd.github+json' \
+          -d '{"tag_name":"nightly","name":"rillane nightly (rolling)","prerelease":true,"body":"daily rolling build; only latest kept. See SHA256SUMS"}' \
+          "$API/releases" | grep -o '"id": *[0-9]*' | head -1 | grep -o '[0-9]*')
+        test -n "$RID"
+        for f in release/*.tar.gz release/SHA256SUMS; do
+          curl -sf -X POST -H "$AUTH" --data-binary @"$f" \
+            "$API/releases/$RID/assets?name=$(basename "$f")" >/dev/null
+        done
