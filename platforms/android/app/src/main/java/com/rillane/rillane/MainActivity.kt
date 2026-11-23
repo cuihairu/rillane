@@ -1,68 +1,47 @@
 package com.rillane.rillane
 
-import android.app.Activity
+import android.Manifest
 import android.content.Intent
-import android.graphics.Color
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.view.Gravity
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.fragment.app.Fragment
+import com.rillane.rillane.databinding.ActivityMainBinding
 
 /**
- * demo 主界面：start（VPN consent → 起 VpnService）/ stop / 状态轮询
- * （FFI statsJson 一秒刷新）。程序化 UI，零布局资源依赖。
+ * 主界面（RIL-150）：四 Tab（首页/节点/连接/设置）Material 3。
+ * 承载 BottomNavigationView + Fragment 容器；VPN consent 弹窗、FGS 启动
+ * 与 POST_NOTIFICATIONS 运行时请求；autostart 自动化入口保留。
  */
-class MainActivity : Activity() {
-    private lateinit var status: TextView
-    private val handler = Handler(Looper.getMainLooper())
+class MainActivity : AppCompatActivity() {
+    private lateinit var binding: ActivityMainBinding
 
-    private val poll = object : Runnable {
-        override fun run() {
-            refreshStatus()
-            handler.postDelayed(this, 1000)
-        }
-    }
+    private val home = HomeFragment()
+    private val nodes = NodesFragment()
+    private val connections = ConnectionsFragment()
+    private val settings = SettingsFragment()
+
+    private val requestNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(48, 64, 48, 48)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        binding.bottomNav.setOnItemSelectedListener { item ->
+            switchTab(item.itemId)
+            true
+        }
+        if (savedInstanceState == null) {
+            binding.bottomNav.selectedItemId = R.id.nav_home
         }
 
-        val title = TextView(this).apply {
-            text = "RILLANE 移动端 demo（rillane-ffi ${safeVersion()}）"
-            textSize = 18f
-        }
-        status = TextView(this).apply {
-            textSize = 13f
-            setTextColor(Color.DKGRAY)
-            setPadding(0, 32, 0, 32)
-            text = "未启动"
-        }
-
-        val startBtn = Button(this).apply {
-            text = "启动 VPN（建 tun + 一轮流量面）"
-            setOnClickListener { startVpn() }
-        }
-        val stopBtn = Button(this).apply {
-            text = "停止"
-            setOnClickListener {
-                startService(Intent(this@MainActivity, RillaneVpnService::class.java).apply {
-                    action = RillaneVpnService.ACTION_STOP
-                })
-            }
-        }
-
-        root.addView(title)
-        root.addView(status)
-        root.addView(startBtn)
-        root.addView(stopBtn)
-        setContentView(root)
+        requestNotificationPermissionIfNeeded()
 
         // 自动化入口：`adb shell am start -n com.rillane.rillane/.MainActivity --ez autostart true`
         // 直接走 startVpn()（配合 appops ACTIVATE_VPN allow 免弹窗，CI/模拟器验收路径）
@@ -71,7 +50,47 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun safeVersion(): String = try { RillaneFfi.version() } catch (t: Throwable) { "未加载" }
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private fun switchTab(itemId: Int): Boolean {
+        val fragment = when (itemId) {
+            R.id.nav_home -> home
+            R.id.nav_nodes -> nodes
+            R.id.nav_connections -> connections
+            R.id.nav_settings -> settings
+            else -> return false
+        }
+        supportFragmentManager.beginTransaction().apply {
+            // show/hide 保留各 Tab 状态（切换不回跳回顶部）
+            listOf(home, nodes, connections, settings).forEach { f ->
+                if (f.isAdded) hide(f)
+            }
+            if (fragment.isAdded) {
+                show(fragment)
+            } else {
+                add(R.id.fragment_container, fragment, fragmentTag(itemId))
+            }
+        }.commit()
+        return true
+    }
+
+    private fun fragmentTag(itemId: Int): String = when (itemId) {
+        R.id.nav_home -> "home"
+        R.id.nav_nodes -> "nodes"
+        R.id.nav_connections -> "connections"
+        else -> "settings"
+    }
+
+    /** 首页快捷工具跳 Tab */
+    fun showTab(itemId: Int) {
+        binding.bottomNav.selectedItemId = itemId
+    }
 
     private fun startVpn() {
         // consent 弹窗一次放行后 prepare 恒 null；CI/自动化可用
@@ -80,45 +99,23 @@ class MainActivity : Activity() {
         if (consent != null) {
             startActivityForResult(consent, REQUEST_CONSENT)
         } else {
-            connect()
+            connectNow()
         }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_CONSENT && resultCode == RESULT_OK) {
-            connect()
+            connectNow()
         }
     }
 
-    private fun connect() {
-        startService(Intent(this, RillaneVpnService::class.java))
-    }
-
-    private fun refreshStatus() {
-        val h = RillaneVpnService.ffiHandle
-        status.text = when {
-            h == 0L -> "未启动"
-            else -> {
-                val running = RillaneFfi.isRunning(h) == 1
-                val stats = RillaneFfi.statsJson(h)
-                buildString {
-                    append(if (running) "运行中" else "已停止")
-                    if (stats != null) append("\n$stats")
-                    RillaneFfi.lastError()?.let { append("\nlastError: $it") }
-                }
-            }
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        handler.post(poll)
-    }
-
-    override fun onPause() {
-        handler.removeCallbacks(poll)
-        super.onPause()
+    /** 启动 VPN 前台服务（HomeFragment 按钮/consent 回传共用入口） */
+    fun connectNow() {
+        val intent = Intent(this, RillaneVpnService::class.java)
+        // Android 12+ 前台服务从后台启动限制：ContextCompat.startForegroundService
+        // 保证应用处前台（点击/自动化触发）时合法
+        androidx.core.content.ContextCompat.startForegroundService(this, intent)
     }
 
     companion object {

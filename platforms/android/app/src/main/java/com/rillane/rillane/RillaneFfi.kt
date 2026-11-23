@@ -27,6 +27,27 @@ object RillaneFfi {
     /** 运行统计 JSON（与 rillaned 控制面 /stats 同形字段）；null = 句柄无效 */
     external fun statsJson(handle: Long): String?
 
+    // RIL-150 查询面：与 rillaned 控制面同字段口径（schema_version=1）；
+    // 全部 null = 句柄无效（取 lastError）。
+
+    /** 路由概要 JSON（mode/default_node/global_node/direct_node/groups/rules_count） */
+    external fun routingJson(handle: Long): String?
+
+    /** 节点 JSON（组实时质量 + 出口节点 name/type + 订阅源） */
+    external fun nodesJson(handle: Long): String?
+
+    /** DNS 统计 JSON（/dns/stats 同形；network.dns 缺席 = enabled:false） */
+    external fun dnsStatsJson(handle: Long): String?
+
+    /** DNS 解析器 JSON（/dns/resolvers 同形；块缺席 = enabled:false 空形态） */
+    external fun dnsResolversJson(handle: Long): String?
+
+    /** 活动/近期连接分页 JSON（/trace/flows 同形信封；limit=0 → error 信封） */
+    external fun flowsJson(handle: Long, offset: Long, limit: Long): String?
+
+    /** 单流详情 JSON（/trace/flow 同形；未知/无效 ID = found:false + 稳定码） */
+    external fun flowJson(handle: Long, flowId: String): String?
+
     /** 挂载 TUN fd（所有权移交 Rust，Java 侧 detachFd 后传入）。0 成功 / -1 失败 */
     external fun tunStart(handle: Long, fd: Int): Int
 

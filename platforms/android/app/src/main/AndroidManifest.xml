@@ -2,13 +2,23 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 切网标签：registerDefaultNetworkCallback 读取当前网络类型 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- API 33+：前台服务通知可见性（无权限 FGS 仍运行，仅通知不可见） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- API 34+：connectedDevice 前台服务类型须显式声明，否则启动即 SecurityException -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
     <application
-        android:label="RILLANE Demo"
+        android:label="@string/app_name"
         android:allowBackup="false"
-        android:theme="@android:style/Theme.Material.Light">
+        android:theme="@style/Theme.Rillane">
 
-        <activity android:name=".MainActivity" android:exported="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -16,10 +26,12 @@
         </activity>
 
         <!-- VpnService：系统以 BIND_VPN_SERVICE 守卫；consent 弹窗经
-             VpnService.prepare() 或 appops ACTIVATE_VPN 放行（CI 自动化路径） -->
+             VpnService.prepare() 或 appops ACTIVATE_VPN 放行（CI 自动化路径）。
+             foregroundServiceType 供 Android 14+ 前台服务类型校验。 -->
         <service
             android:name=".RillaneVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="connectedDevice"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.net.VpnService" />

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RILLANE Demo</string>
+
+    <!-- 底部导航 -->
+    <string name="nav_home">首页</string>
+    <string name="nav_nodes">节点</string>
+    <string name="nav_connections">连接</string>
+    <string name="nav_settings">设置</string>
+
+    <!-- 首页 -->
+    <string name="home_vpn_status">VPN 状态</string>
+    <string name="state_disconnected">未连接</string>
+    <string name="state_connecting">连接中</string>
+    <string name="state_connected">已连接</string>
+    <string name="state_error">错误</string>
+    <string name="state_revoked">已撤销</string>
+    <string name="home_start_vpn">启动 VPN</string>
+    <string name="home_stop_vpn">停止</string>
+    <string name="home_mode">选路模式</string>
+    <string name="mode_rule">规则</string>
+    <string name="mode_global">全局</string>
+    <string name="mode_direct">直连</string>
+    <string name="home_mode_readonly">模式切换需配置事务，移动端只读</string>
+    <string name="home_usage">用量</string>
+    <string name="home_no_data">无数据</string>
+    <string name="home_quick_tools">快捷工具</string>
+    <string name="home_go_nodes">节点列表</string>
+    <string name="home_go_connections">连接列表</string>
+    <string name="home_dev_tools">开发者规则</string>
+    <string name="home_dev_unavailable">桌面功能，移动端暂不可用</string>
+    <string name="network_label">网络</string>
+    <string name="network_unknown">未知</string>
+
+    <!-- 节点 -->
+    <string name="nodes_title">节点</string>
+    <string name="nodes_no_groups">未配置分组</string>
+    <string name="nodes_no_egress">无出口节点</string>
+    <string name="nodes_no_subs">无订阅源</string>
+    <string name="nodes_healthy">健康</string>
+    <string name="nodes_unhealthy">异常</string>
+    <string name="nodes_p95">p95</string>
+    <string name="nodes_loss">丢包</string>
+    <string name="nodes_selected">已选</string>
+
+    <!-- 连接 -->
+    <string name="connections_title">连接</string>
+    <string name="connections_empty">无连接记录</string>
+    <string name="connections_flow_id_hint">流 ID（如 flow-abc123）</string>
+    <string name="connections_query">查询</string>
+    <string name="connections_unknown_flow">未知流 ID</string>
+    <string name="flow_detail_title">连接详情</string>
+    <string name="flow_field_flow">流 ID</string>
+    <string name="flow_field_origin">起止语义</string>
+    <string name="flow_field_generation">代际</string>
+    <string name="flow_field_closed">终态</string>
+    <string name="flow_field_events">事件数</string>
+    <string name="flow_field_first_wall">起始时刻</string>
+    <string name="flow_field_last_code">末次原因码</string>
+    <string name="flow_events_section">事件</string>
+
+    <!-- 设置 -->
+    <string name="settings_title">设置</string>
+    <string name="settings_network_dns">网络与 DNS</string>
+    <string name="settings_dns_stats">DNS 统计</string>
+    <string name="settings_dns_resolvers">DNS 解析器</string>
+    <string name="settings_dns_disabled">DNS 未启用（配置未声明 network.dns）</string>
+    <string name="settings_pending_changes">待应用变更</string>
+    <string name="settings_tx_unavailable">配置事务仅在控制面可用</string>
+
+    <!-- 通用 -->
+    <string name="close">关闭</string>
+    <string name="yes">是</string>
+    <string name="no">否</string>
+</resources>

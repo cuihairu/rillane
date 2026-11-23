@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Rillane 主题：Material 3 DayNight（NoActionBar——底部导航承载导航面） -->
+    <style name="Theme.Rillane" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/rillane_primary</item>
+        <item name="colorOnPrimary">@color/rillane_on_primary</item>
+        <item name="colorPrimaryContainer">@color/rillane_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/rillane_on_primary_container</item>
+        <item name="colorSecondary">@color/rillane_secondary</item>
+        <item name="colorOnSecondary">@color/rillane_on_secondary</item>
+        <item name="android:colorBackground">@color/rillane_background</item>
+        <item name="colorOnBackground">@color/rillane_on_background</item>
+        <item name="colorSurface">@color/rillane_surface</item>
+        <item name="colorOnSurface">@color/rillane_on_surface</item>
+        <item name="colorSurfaceVariant">@color/rillane_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/rillane_on_surface_variant</item>
+        <item name="colorOutline">@color/rillane_outline</item>
+    </style>
+</resources>
