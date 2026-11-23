@@ -21,11 +21,18 @@
 //!   ——本面每方向跑显式读→写→flush 泵，EOF 排空尾包后半关闭（对端
 //!   见 EOF，半关闭语义），任一方向收束后另一方向给 5s 排空宽限。
 //!
+//! - 平台旁路拨号面：`forward_over_client(flow, client)` 把整个会话（隔离
+//!   派生 + 出口流 + 中继泵）跑在调用方既建客户端上（`TorClient::with_runtime`
+//!   自定运行时/通道工厂并引导后传入）——本连接器从不引导、不自建运行时，
+//!   与 SSH `forward_over`（调用方既建底层流）同形；标准面 `forward` 自引导
+//!   后复用同一会话逻辑（`relay_flow`）。
+//!
 //! 交付边界（评估记录具名）：UDP 面不交付（Tor 客户端流仅 TCP，
 //! catalog udp=false）；服务端面（onion service）不交付；目标寻址 host
 //! 字符串原样（出口解析，本面不查 fake-ip 池）；多 tor 节点各自引导
 //! （同一缺省存储路径由 sqlite 锁面承载并发，跨节点客户端共享池未交付）；
-//! arti 底部拨号旁路（`with_runtime` + 自带通道工厂）结构性存在但首段不用。
+//! bridge/可插拔传输不交付（通道前置代理是另一机制，对封锁 Tor 的网络
+//! 未必够用——抗封锁面目前限通道前置面）。
 
 use std::{fmt, future::Future, sync::Arc, time::Duration};
 
@@ -37,7 +44,7 @@ use rillane_core::{EgressConnector, Flow, FlowReport};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::OnceCell;
 use tor_chanmgr::ProxyProtocol;
-use tor_rtcompat::PreferredRuntime;
+use tor_rtcompat::{PreferredRuntime, Runtime};
 
 /// 引导超时（冷引导探针实测 25.6s；慢网络 + 目录权威多源余量）
 const TOR_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(180);
@@ -177,36 +184,59 @@ impl EgressConnector for TorConnector {
         let client = self.client().await?;
         // 逐流隔离：流间不共享电路（隔离客户端共享目录信息，无重复引导）
         let iso = client.isolated_client();
-        let target = format!("{}:{}", flow.target.host, flow.target.port);
-        let stream = tokio::time::timeout(
-            TOR_STREAM_TIMEOUT,
-            iso.connect((flow.target.host.as_str(), flow.target.port)),
-        )
-        .await
-        .context("Tor 出口流建立超时")?
-        .with_context(|| format!("Tor 出口流被拒: {target}"))?;
-
-        let (client_read, client_write) = tokio::io::split(flow.io);
-        let (tor_read, tor_write) = tokio::io::split(stream);
-        let up = pump(client_read, tor_write);
-        let down = pump(tor_read, client_write);
-        tokio::pin!(up, down);
-        // 任一方向收束（EOF/错）即结束转发；错误面直接传出（另一方向随
-        // future 丢弃撤销），EOF 面给另一方向排空宽限（半关闭残余送达）
-        let report = tokio::select! {
-            up = &mut up => {
-                let upstream = up.context("Tor 上行转发失败")?;
-                let downstream = drain(down).await;
-                FlowReport { upstream, downstream }
-            }
-            down = &mut down => {
-                let downstream = down.context("Tor 下行转发失败")?;
-                let upstream = drain(up).await;
-                FlowReport { upstream, downstream }
-            }
-        };
-        Ok(report)
+        relay_flow(&iso, flow).await
     }
+}
+
+impl TorConnector {
+    /// 平台旁路拨号面（RIL-114 验收「平台旁路」项）：整个会话（含数据面
+    /// 中继）跑在调用方既建客户端上——调用方经 `TorClient::with_runtime`
+    /// 自定运行时/通道工厂并完成引导后传入，本连接器从不引导、不自建
+    /// 运行时。与 SSH `forward_over`（调用方既建底层流）同形：会话逻辑
+    /// 共享，引导/拨号由调用方提供。
+    pub async fn forward_over_client<R: Runtime>(
+        &self,
+        flow: Flow,
+        client: Arc<TorClient<R>>,
+    ) -> Result<FlowReport> {
+        let iso = client.isolated_client();
+        relay_flow(&iso, flow).await
+    }
+}
+
+/// 逐流隔离会话（数据面中继）。`isolated_client` 的隔离客户端——流间不
+/// 共享电路。平台旁路面（`forward_over_client`）与标准面（`forward`）共用
+/// 同一会话逻辑：隔离派生 + 出口流 + 双向读→写→flush 泵。
+async fn relay_flow<R: Runtime>(iso: &TorClient<R>, flow: Flow) -> Result<FlowReport> {
+    let target = format!("{}:{}", flow.target.host, flow.target.port);
+    let stream = tokio::time::timeout(
+        TOR_STREAM_TIMEOUT,
+        iso.connect((flow.target.host.as_str(), flow.target.port)),
+    )
+    .await
+    .context("Tor 出口流建立超时")?
+    .with_context(|| format!("Tor 出口流被拒: {target}"))?;
+
+    let (client_read, client_write) = tokio::io::split(flow.io);
+    let (tor_read, tor_write) = tokio::io::split(stream);
+    let up = pump(client_read, tor_write);
+    let down = pump(tor_read, client_write);
+    tokio::pin!(up, down);
+    // 任一方向收束（EOF/错）即结束转发；错误面直接传出（另一方向随
+    // future 丢弃撤销），EOF 面给另一方向排空宽限（半关闭残余送达）
+    let report = tokio::select! {
+        up = &mut up => {
+            let upstream = up.context("Tor 上行转发失败")?;
+            let downstream = drain(down).await;
+            FlowReport { upstream, downstream }
+        }
+        down = &mut down => {
+            let downstream = down.context("Tor 下行转发失败")?;
+            let upstream = drain(up).await;
+            FlowReport { upstream, downstream }
+        }
+    };
+    Ok(report)
 }
 
 #[cfg(test)]
