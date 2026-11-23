@@ -583,11 +583,12 @@ armv7-ohos 桩）在对应小节如实记录。
 - **版本**：载具 `russh` 0.65.2（requirement `0.65`）+ `ssh-key` 0.7.0-rc.12（requirement 钉死 `=0.7.0-rc.12`——rc 线漂移，不钉死会在不兼容的 rc API 间静默浮动；russh 以 `russh::keys` 再导出同一 crate）
 - **许可**：russh Apache-2.0；ssh-key Apache-2.0 OR MIT——均与本仓许可兼容
 - **平台**：russh 协议层纯 Rust，但其加密提供者树牵入 `ring`/`aws-lc-rs`（aws-lc-rs 部分目标构建需 cmake——本机 linux-amd64 实证，交叉编译不证可用，口径同 wireguard）
-- **公开 API**：`SshConnector`（crates/rillane-protocols/src/outbound/ssh.rs）——`client::connect` 携 `Handler`，其 `check_server_key` 以 SHA256 指纹（`SHA256:` base64，`ssh_key::HashAlg::Sha256`）对照配置 `host_key` 钉扎服务器主机钥；认证恰一选一 `password` / `private_key`（`authenticate_password` 或 `authenticate_publickey` 携 `PrivateKeyWithHashAlg`，OpenSSH 格式私钥可带口令解码）；数据面 `channel_open_direct_tcpip(host, port, originator_ip, originator_port)` → `into_stream()`——通道流按统一 EgressConnector 面作流 IO
-- **旁路**：`russh::client::connect_stream` 接受现成流，底部拨号旁路结构性存在；首段用 russh 内建拨号（`client::connect`）——无传输池组合（具名）
+- **公开 API**：`SshConnector`（crates/rillane-protocols/src/outbound/ssh.rs）——`client::connect_stream` 携 `Handler`，其 `check_server_key` 以 SHA256 指纹（`SHA256:` base64，`ssh_key::HashAlg::Sha256`）对照配置 `host_key` 钉扎服务器主机钥；认证恰一选一 `password` / `private_key`（`authenticate_password` 或 `authenticate_publickey` 携 `PrivateKeyWithHashAlg`，OpenSSH 格式私钥可带口令解码）；数据面 `channel_open_direct_tcpip(host, port, originator_ip, originator_port)` → `into_stream()`——通道流按统一 EgressConnector 面作流 IO
+- **旁路**：交付并行使（RIL-113 验收「平台旁路」项）——`SshConnector::forward_over(flow, bottom)` 以调用方既建底层流跑整个 SSH 会话（钉扎/认证/通道/中继，`russh::client::connect_stream`）；`forward`（trait 面）自拨普通 TCP 后复用同一会话逻辑，两路行为一致。契约测试骑本机真实 sshd 过本地 TCP 前置跳板——会话跑在连接器从未拨过的传输上，FlowReport 对账在旁路面同样成立
 - **取消**：拨号超时（15s 族）包连接相；认证与开通道失败具名呈现；流随连接 drop 一并收束（对端 sshd 观测到连接关闭）
 - **统计**：SSH 通道无逐包观测点；流量对账复用 FlowReport 上下行字节数（copy_bidirectional 语义）；认证失败经统一 EgressConnector 面具名呈现
-- **复用**：SSH 本体即在单条传输连接上多路复用通道（每流 `channel_open`）——协议内建复用首段未交付（每流一条 SSH 连接，具名）；无预热组合
+- **keepalive**（连接生命周期）：`keepalive_interval` 30s + `keepalive_max` 3 注入客户端配置（russh 缺省 None——长空闲流原依服务端 sshd 策略；配置后客户端主动探测，连续 3 次无回应即收束）。长空闲探测行为未在套件内行使（需 >90s 空闲窗口）——配置值有密闭断言，具名边界
+- **复用**：SSH 本体即在单条传输连接上多路复用通道（每流 `channel_open`）——协议内建复用不交付（每流一条 SSH 连接，具名；属本项「出站隧道」交付口径外的优化面）；无预热组合
 - UDP：本段不交付（catalog udp=false）——direct-tcpip 仅 TCP；SSH 无通用部署中的标准化 UDP 转发面
 - 服务端面：不交付（具名）——rillane 入口面不编目 SSH 监听；验收打在本机真实 OpenSSH sshd（独立配置，端口 23411，探针钥料）
 - 版本边界：仅 SSH-2（russh 说 SSH-2，无 SSH-1 路径）。主机钥钉扎**必填**——无 `host_key` 节点构造期拒绝（不钉扎的 SSH 客户端默认首用即信，是本面按名拒绝的降级面）；指纹比对先剥可选 `SHA256:` 前缀。认证面：password / private-key 恰一选一，双带或缺一均构造期拒绝。direct-tcpip 目标寻址用 host 字符串原样（由 sshd 解析）——本面不查 fake-ip 池。
