@@ -108,3 +108,18 @@ Git HTTPS 走 HTTP(S)_PROXY 等受支持环境；SSH 不假定遵守 HTTP_PROXY�
 - **统计不落 0**：`StatValue::{Known,Unknown}` 让缺席字段显示「未知」；采集距今超过 `STALE_STATS_SECONDS`（30s）或不可达标为陈旧。空订阅 = `subscription_nodes == 0` → `Empty`，与 `Unknown` 区分。
 
 网络页（DNS/路由状态读面属管理员 grade，未晋升进闭合操作集）与开发者页（RIL-147 片段 + 写盘计划）为纯本地生成；`DeveloperSnippetView::can_write_files` 恒 false——页面/服务层不承诺写文件，落盘须经 CLI 显式授权。GUI 组件本身仍待各平台客户端批次实现。
+
+### Android 客户端基础交互（RIL-150）
+
+Android 应用（`platforms/android/app`）交付四 Tab Material 壳：首页/节点/连接/设置（`BottomNavigationView`，Material 3 明暗主题）加 `FlowDetailSheet` 底部弹层。数据经 JNI 走六个新 FFI 查询（`routing_json`/`nodes_json`/`dns_stats_json`/`dns_resolvers_json`/`flows_json`/`flow_json`，均 `schema_version:1`，字段名镜像控制面），数据源是共享发射器：冻结的 trace/flow JSON 形从控制面抽进 `rillane_core::trace_json`——`/trace/flow`、FFI 与客户端三者不可能漂移。
+
+状态同步是结构性的，不靠轮询纠正：`StateBus` 持 `@Volatile` 快照（`DISCONNECTED/CONNECTING/CONNECTED/ERROR/REVOKED` + 网络标签 + 原因），主线程派发；1 秒轮询只服务用量面板。诚实约束与桌面页面模型同构：
+
+- **`onRevoke` 有序拆除**：先停 tun fd 处理，再停 runtime，`stopForeground(REMOVE)`，发布 `REVOKED`，`stopSelf`。系统撤销路径以 `appops deny` 验证——UI 显示已撤销，不留陈旧「已连接」。
+- **`onTrimMemory` 绝不拆 VPN**——trim 提示不是终止；服务只重发快照让 UI 重读 FFI，隧道继续转发。
+- **切网只更新标签**：`registerDefaultNetworkCallback`（忽略 VPN transport）；Wi-Fi/蜂窝切换不重启隧道。
+- **无 UID 名单**：服务保持 `addAddress`+`addRoute`；`addAllowedApplication`/按进程列举在结构上缺席——分应用路由不是基础交互的前置。
+- **缺席数据不落 0**：`stats_json` 缺席字段显示「未知」；无 `network.dns` 配置块显示「DNS 未启用」（enabled:false 如实）；连接列表为空时如实「无连接记录」且采集器在跑——不是「追踪关闭」；未知流 ID 返回 `found:false` + 稳定码 + 收集器计数，绝不伪造轨迹。
+- **移动端模式只读**：三个选路模式钮渲染当前 `routing_json().mode` 但全部禁用——切换需配置事务面（RIL-073-077），移动端不假装可切。
+
+可访问性：状态色+文字双通道，切换时 `stateDescription` + `announceForAccessibility`；触控目标 ≥48dp；文本 sp 且换行。验收在 AVD 上跑：撤销/切网/低内存状态同步、1.5× 字号放大不裁切、uiautomator content/state description 走查替代 TalkBack（真机读屏审阅仍是诚实边界）。数据面仅 ICMP，UDP/TCP 落地前连接 Tab 如实为空。

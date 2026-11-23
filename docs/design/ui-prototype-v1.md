@@ -65,3 +65,18 @@ The six desktop pages' **data projection layer** now lives in `rillane-app::page
 - **Stats never fake zero**: `StatValue::{Known,Unknown}` shows absent fields as "unknown"; age beyond `STALE_STATS_SECONDS` (30s) or unreachable data is marked stale. Empty subscription = `subscription_nodes == 0` → `Empty`, distinct from `Unknown`.
 
 The network page (DNS/route-status reads are admin-grade, not promoted into the closed set) and developer page (RIL-147 snippets + write plan) are purely local generation; `DeveloperSnippetView::can_write_files` is always false — the page/service layer does not promise file writes, which require explicit CLI authorization. GUI components themselves await the per-platform client batches.
+
+### Android client basics (RIL-150)
+
+The Android app (`platforms/android/app`) ships the four-tab material shell: Home / Nodes / Connections / Settings with `BottomNavigationView`, Material 3 day-night theme, and a `FlowDetailSheet` bottom sheet. Data crosses the JNI boundary through six new FFI queries (`routing_json`/`nodes_json`/`dns_stats_json`/`dns_resolvers_json`/`flows_json`/`flow_json`, all `schema_version:1`, all mirroring control-plane field names), fed by a shared emitter: the frozen trace/flow JSON shapes moved from the control plane into `rillane_core::trace_json` so `/trace/flow`, FFI and the client cannot drift apart.
+
+State sync is structural, not polled-into-correctness: `StateBus` holds a `@Volatile` snapshot (`DISCONNECTED/CONNECTING/CONNECTED/ERROR/REVOKED` + network label + reason) and dispatches on the main thread; the 1-second poll covers only the usage panel. The honesty constraints mirror the desktop page model:
+
+- **`onRevoke` tears down in order**: stop tun fd handling first, then stop the runtime, `stopForeground(REMOVE)`, publish `REVOKED`, `stopSelf`. The system-revocation path is verified via `appops deny` → UI shows revoked, not a stale "connected".
+- **`onTrimMemory` never tears down the VPN** — a trim hint is not a termination; the service re-publishes the snapshot so the UI re-reads FFI, and the tunnel keeps forwarding.
+- **Network changes update the label only** via `registerDefaultNetworkCallback` (VPN transport ignored); switching Wi-Fi/cellular never restarts the tunnel.
+- **No UID allowlist**: the service keeps `addAddress`+`addRoute`; `addAllowedApplication`/per-app process listing is structurally absent — per-app routing is not a prerequisite for basic interaction.
+- **Absent data never fakes zero**: usage fields missing from `stats_json` render "unknown"; DNS without a `network.dns` config block renders "DNS not enabled" (enabled:false is honest); an empty connection list says "no connection records" with the collector running — not "tracing disabled"; an unknown flow id returns `found:false` + stable code + collector counters, never a fabricated trace.
+- **Mode switching is read-only on mobile**: the three routing-mode buttons render the current `routing_json().mode` but are all disabled — switching requires the config-transaction surface (RIL-073-077), which mobile does not fake.
+
+Accessibility: state is color+text dual-channel with `stateDescription` and `announceForAccessibility` on transitions; touch targets are ≥48dp; text uses sp and wraps. Acceptance runs on the AVD: revoke/network-switch/trim-memory state sync, 1.5× font scale without clipping, and a uiautomator walkthrough of content/state descriptions stand in for a TalkBack pass (real-device screen-reader review remains an honest boundary). ICMP-only dataplane means the connections tab is honestly empty until UDP/TCP lands.
