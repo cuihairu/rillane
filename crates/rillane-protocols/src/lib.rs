@@ -33,12 +33,12 @@ pub use outbound::{
     Hysteria2Connector, Hysteria2UdpConnector, Hysteria2UdpRelay, HysteriaConnector,
     HysteriaUdpConnector, HysteriaUdpRelay, MasqueConnector, MasqueUdpConnector, MasqueUdpRelay,
     MasqueUdpStats, MieruConnector, OpenConnectConnector, OpenVpnConnector, ShadowQuicConnector,
-    ShadowsocksConnector, ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector, SnellConnector,
-    Socks5Connector, Socks5UdpConnector, SshConnector, TailcatConnector, TailscaleConnector,
-    TorConnector, TrojanConnector, TrojanUdpConnector, TrustTunnelConnector,
-    TrustTunnelUdpConnector, TuicConnector, TuicStream, TuicUdpConnector, TuicUdpRelay,
-    VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity, VmessUdpConnector,
-    WireguardConnector, WireguardUdpConnector,
+    ShadowsocksConnector, ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector,
+    ShadowsocksrConnector, SnellConnector, Socks5Connector, Socks5UdpConnector, SshConnector,
+    TailcatConnector, TailscaleConnector, TorConnector, TrojanConnector, TrojanUdpConnector,
+    TrustTunnelConnector, TrustTunnelUdpConnector, TuicConnector, TuicStream, TuicUdpConnector,
+    TuicUdpRelay, VlessConnector, VlessUdpConnector, VmessConnector, VmessSecurity,
+    VmessUdpConnector, WireguardConnector, WireguardUdpConnector,
 };
 pub use pool::{
     BoxedIo, KeySnapshot, LeaseGuard, MockPoolClock, PoolClock, PoolPolicy, PoolSnapshot,

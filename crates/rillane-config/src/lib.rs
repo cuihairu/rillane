@@ -2788,6 +2788,28 @@ pub enum EgressConfig {
         username: String,
         password: String,
     },
+    /// ShadowsocksR 出口（RIL-115）：breakwa11 manyuser 分支（Apache-2.0
+    /// 参考实现）自写 TCP 客户端面——EVP_BytesToKey-MD5 流密码 +
+    /// auth_aes128_md5/sha1 协议 + plain/http_simple 混淆（评估与探针留证
+    /// protocol-backends.md#shadowsocksr）。仅 TCP 载具；UDP 面与服务端面
+    /// 未交付（catalog udp=false）；tls1.2_ticket_auth / auth_chain_a/b /
+    /// auth_sha1_v4 后段。凭据/线格式错误在连接期暴露（认证帧或解密失败
+    /// 具名）。
+    Shadowsocksr {
+        server: String,
+        port: u16,
+        /// 加密方法（aes-128/192/256-cfb|ctr、chacha20-ietf、rc4-md5）
+        method: String,
+        password: String,
+        /// 协议插件（auth_aes128_md5 / auth_aes128_sha1）
+        protocol: String,
+        /// 混淆插件（plain / http_simple）
+        obfs: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        obfs_param: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        protocol_param: Option<String>,
+    },
     /// TrustTunnel 出口（RIL-119）：官方 PROTOCOL.md v1.0 自写客户端面
     /// ——TLS（ALPN h2，证书校验必开）+ HTTP/2 CONNECT + Basic 认证
     /// （评估与探针留证 protocol-backends.md#trusttunnel）。TCP 面 CONNECT

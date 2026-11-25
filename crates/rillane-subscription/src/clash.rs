@@ -97,6 +97,7 @@ pub enum ClashProxyType {
     Snell,
     ShadowQuic,
     Mieru,
+    Ssr,
     TrustTunnel,
     Masque,
     Ssh,
@@ -181,6 +182,15 @@ pub struct ClashProxy {
     /// UDP 上的 QUIC，其余载具拨号期具名拒绝，转换面不判负节点）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
+    /// SSR: 协议参数（Clash 规范键 `protocol-param`，mihomo ssr schema
+    /// e.g. `"3411:abcd"`——uid:key 形；缺省空串同形透传（uid 0 + 空键））
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "protocol-param",
+        alias = "protocol_param"
+    )]
+    pub protocol_param: Option<String>,
     /// Hysteria: 上行带宽申报 Mbps（官方 mbpsToBps 口径）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub up: Option<u32>,
@@ -2368,6 +2378,45 @@ impl ClashConverter {
                     password,
                 })
             }
+            ClashProxyType::Ssr => {
+                // 密码与加密方法为硬必填（缺密码即无效节点按有效性丢弃，绝不
+                // 静默按空密码误连）；protocol/obfs 面边界同连接器构建期校验
+                let password = proxy
+                    .password
+                    .clone()
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| anyhow!("SSR 缺少 password"))?;
+                let method = proxy
+                    .cipher
+                    .clone()
+                    .filter(|c| !c.is_empty())
+                    .ok_or_else(|| anyhow!("SSR 缺少 cipher（加密方法）"))?;
+                // protocol/obfs 缺省同形（mihomo ssr schema 缺省 origin/plain）
+                // ——本仓仅交付 auth_aes128_md5/sha1 与 plain/http_simple 两族，
+                // 缺省 origin 是具名拒绝面：连连接器都不进，点名报缺 protocol
+                let protocol = proxy
+                    .protocol
+                    .clone()
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| {
+                        anyhow!("SSR 缺少 protocol（缺省 origin 未交付，仅 auth_aes128_md5/sha1）")
+                    })?;
+                let obfs = proxy
+                    .obfs
+                    .clone()
+                    .filter(|o| !o.is_empty())
+                    .unwrap_or_else(|| "plain".into());
+                Ok(EgressConfig::Shadowsocksr {
+                    server: proxy.server.clone(),
+                    port: proxy.port,
+                    method,
+                    password,
+                    protocol,
+                    obfs,
+                    obfs_param: proxy.obfs_param.clone(),
+                    protocol_param: proxy.protocol_param.clone(),
+                })
+            }
             ClashProxyType::TrustTunnel => {
                 let username = proxy
                     .username
@@ -2872,6 +2921,14 @@ impl ClashConverter {
                 proxy.username.as_deref().is_some_and(|u| !u.is_empty())
                     && proxy.password.as_deref().is_some_and(|p| !p.is_empty())
             }
+            // SSR：密码 + 加密方法为硬必填（缺失即无效节点按有效性过滤丢弃）。
+            // protocol 缺省 origin / obfs 边界不在此判——凭据齐全的边界节点
+            // 须抵达转换面具名拒绝（防静默按有效性丢弃掩埋真实原因），与
+            // mieru 同姿态
+            ClashProxyType::Ssr => {
+                proxy.password.as_deref().is_some_and(|p| !p.is_empty())
+                    && proxy.cipher.as_deref().is_some_and(|c| !c.is_empty())
+            }
             // TrustTunnel：认证面恰 username/password（缺失即无效节点按
             // 有效性过滤丢弃）。quic: true / name-cert-verify: false /
             // alpn 缺 h2 不在此判——凭据齐全的边界节点须抵达转换面具名
@@ -2922,6 +2979,7 @@ impl ClashConverter {
             ClashProxyType::Snell => "Snell",
             ClashProxyType::ShadowQuic => "ShadowQUIC",
             ClashProxyType::Mieru => "Mieru",
+            ClashProxyType::Ssr => "ShadowsocksR",
             ClashProxyType::TrustTunnel => "TrustTunnel",
             ClashProxyType::Masque => "MASQUE",
             ClashProxyType::Ssh => "SSH",
@@ -5260,5 +5318,85 @@ rules:
                 .expect_err("缺载具必填字段须拒绝");
             assert!(err.to_string().contains(omit), "缺 {omit} 须点名: {err}");
         }
+    }
+
+    #[test]
+    fn test_ssr_converted_to_egress() {
+        // RIL-115：mihomo ssr 键形（cipher/protocol/obfs/obfs-param/
+        // protocol-param）→ SSR IR
+        let yaml_content = r#"
+proxies:
+  - name: "test-ssr"
+    type: ssr
+    server: ssr.example.com
+    port: 8388
+    cipher: aes-128-ctr
+    password: "s3cret"
+    protocol: auth_aes128_sha1
+    obfs: http_simple
+    obfs-param: "cdn.example.com"
+    protocol-param: "3411:abcd"
+
+proxy-groups: []
+rules: []
+        "#;
+        let converter = ClashConverter::new();
+        let clash_config = converter.parse(yaml_content).unwrap();
+        let rillane_config = converter.convert_to_rillane(&clash_config).unwrap();
+        let ssr = rillane_config
+            .egress
+            .iter()
+            .find(|e| e.name == "test-ssr")
+            .expect("ssr egress");
+        match &ssr.spec {
+            EgressConfig::Shadowsocksr {
+                server,
+                port,
+                method,
+                password,
+                protocol,
+                obfs,
+                obfs_param,
+                protocol_param,
+            } => {
+                assert_eq!(server, "ssr.example.com");
+                assert_eq!(*port, 8388);
+                assert_eq!(method, "aes-128-ctr");
+                assert_eq!(password, "s3cret");
+                assert_eq!(protocol, "auth_aes128_sha1");
+                assert_eq!(obfs, "http_simple");
+                assert_eq!(obfs_param.as_deref(), Some("cdn.example.com"));
+                assert_eq!(protocol_param.as_deref(), Some("3411:abcd"));
+            }
+            other => panic!("unexpected egress config: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ssr_missing_protocol_refused_by_name() {
+        // 边界（RIL-115 评估留证 protocol-backends.md#shadowsocksr）：
+        // mihomo 缺省 protocol 为 origin（无认证面，未交付），故 protocol 键
+        // 必填——缺即点名拒绝（不静默按 origin 误连致隧道必败）
+        let yaml_content = r#"
+proxies:
+  - name: "ssr-edge"
+    type: ssr
+    server: ssr.example.com
+    port: 8388
+    cipher: aes-128-ctr
+    password: "s3cret"
+
+proxy-groups: []
+rules: []
+        "#;
+        let converter = ClashConverter::new();
+        let clash_config = converter.parse(yaml_content).unwrap();
+        let err = converter
+            .convert_proxies_to_egress(&clash_config.proxies, &mut Default::default())
+            .expect_err("缺 protocol 须拒绝");
+        assert!(
+            err.to_string().contains("protocol"),
+            "缺 protocol 须点名: {err}"
+        );
     }
 }

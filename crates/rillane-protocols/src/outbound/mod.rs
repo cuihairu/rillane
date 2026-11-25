@@ -18,6 +18,7 @@ mod openvpn;
 mod reality;
 mod shadowquic;
 mod shadowsocks;
+mod shadowsocksr;
 pub(crate) mod shadowtls;
 mod snell;
 mod socks5;
@@ -66,6 +67,7 @@ pub use reality::{
 };
 pub use shadowquic::ShadowQuicConnector;
 pub use shadowsocks::{ShadowsocksConnector, ShadowsocksUdpConnector};
+pub use shadowsocksr::ShadowsocksrConnector;
 pub use shadowtls::ShadowsocksShadowTlsConnector;
 pub use snell::{SnellConnector, SnellStream};
 pub use socks5::{Socks5Connector, Socks5UdpConnector};

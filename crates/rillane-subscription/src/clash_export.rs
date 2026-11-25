@@ -694,6 +694,34 @@ fn proxy_mapping(
             ins(&mut m, "transport", "tcp");
             Some(m)
         }
+        EgressConfig::Shadowsocksr {
+            server,
+            port,
+            method,
+            password,
+            protocol,
+            obfs,
+            obfs_param,
+            protocol_param,
+        } => {
+            // SSR（RIL-115）：键形随 mihomo ssr schema（cipher/protocol/obfs/
+            // obfs-param/protocol-param；cipher 为 mihomo ssr 键名，区别于
+            // Shadowsocks 的 cipher 同名但语义为加密方法）
+            ins(&mut m, "type", "ssr");
+            ins(&mut m, "server", server);
+            ins(&mut m, "port", *port as u64);
+            ins(&mut m, "cipher", method);
+            ins(&mut m, "password", password);
+            ins(&mut m, "protocol", protocol);
+            ins(&mut m, "obfs", obfs);
+            if let Some(o) = obfs_param {
+                ins(&mut m, "obfs-param", o);
+            }
+            if let Some(p) = protocol_param {
+                ins(&mut m, "protocol-param", p);
+            }
+            Some(m)
+        }
         EgressConfig::TrustTunnel {
             server,
             port,
@@ -1909,5 +1937,57 @@ mod tests {
         );
         assert!(!yaml.contains("grpc-opts:"), "{yaml}");
         assert!(!yaml.contains("ws-opts:"), "{yaml}");
+    }
+
+    /// SSR 导出往返（RIL-115）：键形落 mihomo ssr schema（cipher/protocol/
+    /// obfs/obfs-param/protocol-param），且导出 YAML 经 ClashConverter 再
+    /// 解析回 SSR IR 字段等值（真往返证据——缺省不落键同口径）
+    #[test]
+    fn ssr_export_roundtrips_via_reparse() {
+        let cfg = ProjectConfig {
+            egress: vec![EgressDescriptor {
+                name: "ssr-rt".into(),
+                spec: EgressConfig::Shadowsocksr {
+                    server: "ssr.example.com".into(),
+                    port: 8388,
+                    method: "aes-128-ctr".into(),
+                    password: "pw".into(),
+                    protocol: "auth_aes128_sha1".into(),
+                    obfs: "http_simple".into(),
+                    obfs_param: Some("cdn.example.com".into()),
+                    protocol_param: Some("3411:abcd".into()),
+                },
+            }],
+            ..serde_yaml::from_str(
+                "control:\n  api_bind: 127.0.0.1:1\ntelemetry:\n  log_level: info\n  enable_metrics: false\n  enable_tracing: false\ningress: []\negress: []\nrouting:\n  default_node: direct\n  groups: []\n  rules: []\n",
+            )
+            .unwrap()
+        };
+        let (yaml, report) = ClashExporter.export(&cfg).unwrap();
+        assert_eq!(report.exported_proxies, vec!["ssr-rt"], "{yaml}");
+        assert!(yaml.contains("type: ssr"), "{yaml}");
+        assert!(yaml.contains("cipher: aes-128-ctr"), "{yaml}");
+        assert!(yaml.contains("protocol: auth_aes128_sha1"), "{yaml}");
+        assert!(yaml.contains("obfs: http_simple"), "{yaml}");
+        assert!(yaml.contains("obfs-param: cdn.example.com"), "{yaml}");
+        assert!(yaml.contains("protocol-param: 3411:abcd"), "{yaml}");
+
+        // 再解析回 IR：字段等值（真往返）
+        let parsed = ClashConverter::new().parse(&yaml).unwrap();
+        let rillane = ClashConverter::new().convert_to_rillane(&parsed).unwrap();
+        assert_eq!(
+            rillane.egress[0].spec,
+            EgressConfig::Shadowsocksr {
+                server: "ssr.example.com".into(),
+                port: 8388,
+                method: "aes-128-ctr".into(),
+                password: "pw".into(),
+                protocol: "auth_aes128_sha1".into(),
+                obfs: "http_simple".into(),
+                obfs_param: Some("cdn.example.com".into()),
+                protocol_param: Some("3411:abcd".into()),
+            },
+            "ssr-rt 往返等值"
+        );
     }
 }

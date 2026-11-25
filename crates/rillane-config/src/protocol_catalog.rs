@@ -278,6 +278,21 @@ pub const CATALOG: &[CatalogEntry] = &[
         },
     },
     CatalogEntry {
+        kind: "shadowsocksr",
+        registration: Registration::Admitted {
+            evidence: "protocol-backends.md#shadowsocksr",
+        },
+        // RIL-115：breakwa11 manyuser 分支（Apache-2.0 参考实现）自写 TCP
+        // 客户端面（首段：流密码 aes-cfb/ctr+chacha20-ietf+rc4-md5、
+        // auth_aes128_md5/sha1、plain/http_simple；对端 = 本机 GPL ssr-server
+        // 进程黑盒）；UDP 面、服务端面、tls1.2_ticket_auth/auth_chain_a-b/
+        // auth_sha1_v4 后段未交付
+        udp: false,
+        backend: Backend::InTree {
+            path: "crates/rillane-protocols/src/outbound/shadowsocksr.rs",
+        },
+    },
+    CatalogEntry {
         kind: "trusttunnel",
         registration: Registration::Admitted {
             evidence: "protocol-backends.md#trusttunnel",
@@ -461,6 +476,7 @@ pub const fn egress_kind(spec: &EgressConfig) -> &'static str {
         EgressConfig::Snell { .. } => "snell",
         EgressConfig::ShadowQuic { .. } => "shadowquic",
         EgressConfig::Mieru { .. } => "mieru",
+        EgressConfig::Shadowsocksr { .. } => "shadowsocksr",
         EgressConfig::TrustTunnel { .. } => "trusttunnel",
         EgressConfig::Masque { .. } => "masque",
         EgressConfig::OpenConnect { .. } => "openconnect",
@@ -649,6 +665,16 @@ mod tests {
                 port: 23420,
                 username: "u".into(),
                 password: "pw".into(),
+            },
+            EgressConfig::Shadowsocksr {
+                server: "203.0.113.18".into(),
+                port: 8388,
+                method: "aes-128-ctr".into(),
+                password: "pw".into(),
+                protocol: "auth_aes128_md5".into(),
+                obfs: "http_simple".into(),
+                obfs_param: None,
+                protocol_param: None,
             },
             EgressConfig::TrustTunnel {
                 server: "203.0.113.16".into(),

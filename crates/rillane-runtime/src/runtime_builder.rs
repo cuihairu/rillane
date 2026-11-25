@@ -65,13 +65,13 @@ use rillane_protocols::{
     HysteriaConnector, HysteriaIngress, HysteriaUdpConnector, HysteriaUdpParts, MasqueConnector,
     MasqueUdpConnector, MieruConnector, MixedIngress, OpenConnectConnector, OpenVpnConnector,
     ShadowQuicConnector, ShadowTlsIngress, ShadowsocksConnector, ShadowsocksIngress,
-    ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector, ShadowsocksUdpParts, SnellConnector,
-    Socks5Connector, Socks5Ingress, Socks5UdpConnector, SshConnector, TailcatConnector,
-    TailscaleConnector, TlsConnectorFactory, TlsFingerprint, TorConnector, TransportKey,
-    TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector, TrojanUdpParts,
-    TrustTunnelConnector, TrustTunnelUdpConnector, TuicConnector, TuicUdpConnector, VlessConnector,
-    VlessIngress, VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress, VmessSecurity,
-    VmessUdpConnector, VmessUdpParts, WireguardConnector, WireguardUdpConnector,
+    ShadowsocksShadowTlsConnector, ShadowsocksUdpConnector, ShadowsocksUdpParts,
+    ShadowsocksrConnector, SnellConnector, Socks5Connector, Socks5Ingress, Socks5UdpConnector,
+    SshConnector, TailcatConnector, TailscaleConnector, TlsConnectorFactory, TlsFingerprint,
+    TorConnector, TransportKey, TransportPool, TrojanConnector, TrojanIngress, TrojanUdpConnector,
+    TrojanUdpParts, TrustTunnelConnector, TrustTunnelUdpConnector, TuicConnector, TuicUdpConnector,
+    VlessConnector, VlessIngress, VlessUdpConnector, VlessUdpParts, VmessConnector, VmessIngress,
+    VmessSecurity, VmessUdpConnector, VmessUdpParts, WireguardConnector, WireguardUdpConnector,
 };
 use rillane_routing::RoutingEngine;
 use rillane_subscription::SubscriptionConverter;
@@ -3199,6 +3199,7 @@ fn egress_server_host(e: &EgressConfig) -> Option<&str> {
         | EgressConfig::Snell { server, .. }
         | EgressConfig::ShadowQuic { server, .. }
         | EgressConfig::Mieru { server, .. }
+        | EgressConfig::Shadowsocksr { server, .. }
         | EgressConfig::TrustTunnel { server, .. }
         | EgressConfig::Masque { server, .. }
         | EgressConfig::OpenConnect { server, .. }
@@ -4385,6 +4386,41 @@ fn build_egress_outputs(
                 let connector: Arc<dyn EgressConnector> = Arc::new(
                     MieruConnector::new(server.clone(), *port, username.clone(), password.clone())
                         .with_context(|| format!("节点 {} 的 mieru 配置无效", desc.name))?,
+                );
+                let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
+                    desc.name.clone(),
+                    connector.clone(),
+                ));
+                outputs.insert(desc.name.clone(), flow_output);
+                connectors.insert(desc.name.clone(), connector);
+            }
+            EgressConfig::Shadowsocksr {
+                server,
+                port,
+                method,
+                password,
+                protocol,
+                obfs,
+                obfs_param,
+                protocol_param,
+            } => {
+                // ShadowsocksR（RIL-115）：breakwa11 manyuser 分支（Apache-2.0
+                // 参考实现）自写 TCP 客户端面（评估与探针留证
+                // protocol-backends.md#shadowsocksr）。method/protocol/obfs 名
+                // 校验归 new 内（节点级失败不拖垮整份订阅）；UDP 载具与服务端
+                // 面未交付（catalog udp=false）
+                let connector: Arc<dyn EgressConnector> = Arc::new(
+                    ShadowsocksrConnector::new(
+                        server.clone(),
+                        *port,
+                        method.clone(),
+                        password.clone(),
+                        protocol.clone(),
+                        obfs.clone(),
+                        obfs_param.clone(),
+                        protocol_param.clone(),
+                    )
+                    .with_context(|| format!("节点 {} 的 shadowsocksr 配置无效", desc.name))?,
                 );
                 let flow_output: Arc<dyn FlowOutput> = Arc::new(ConnectorFlowOutput::new(
                     desc.name.clone(),

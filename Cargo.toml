@@ -160,6 +160,13 @@ time = "0.3"
 # VMess AEAD（RustCrypto 面：GCM/ChaCha20Poly1305/SHAKE128/ECB 单块/IEEE CRC32）
 aes = "0.8"
 aes-gcm = "0.10"
+# SSR（RIL-115）自写面：legacy 流密码（EVP_BytesToKey-MD5 KDF 派钥）——
+# CFB/CTR/ChaCha20-IETF/RC4，均 RustCrypto MIT/Apache（cipher 0.4 系，与
+# aes 0.8/hmac 0.12 同栈；评估见 protocol-backends.md#shadowsocksr）
+cfb-mode = "0.8"
+ctr = "0.9"
+chacha20 = "0.9"
+rc4 = "0.1"
 # chacha20poly1305 0.10：XChaCha20Poly1305 无条件导出（Mieru 出站
 # outbound/mieru.rs 用其 24 字节 nonce AEAD——官方 protocol.md 口径）
 chacha20poly1305 = "0.10"
