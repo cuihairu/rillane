@@ -42,6 +42,10 @@ pub mod takeover;
 // 内核面=Linux（iptables/nftables）；Windows WFP / macOS pf 不在本项。
 #[cfg(target_os = "linux")]
 pub mod transparent;
+// nftables 规则规划面（RIL-041 OpenWrt 网关）：fw4/nftables 共存纪律
+// （专用表）+ 双栈；复用 transparent 的 TransparentRule argv 形状。
+#[cfg(target_os = "linux")]
+pub mod nft;
 // 生命周期恢复（RIL-031 OS 中立面 + RIL-035 Windows 复用）：崩溃日志
 // （持久化 JSONL）+ 网络切换恢复动作映射 OS 中立；Linux 执行入口
 // （recover/journaling_executor/handle_network_event）条目级门控在

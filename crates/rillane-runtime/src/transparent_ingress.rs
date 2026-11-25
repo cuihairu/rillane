@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use rillane_config::{TransparentBlockConfig, TransparentMode};
+use rillane_config::{TransparentBlockConfig, TransparentMode, TransparentRuleBackend};
 use rillane_core::{
     BoxedIo, Flow, FlowId, FlowMetadata, FlowOutput, FlowRouter, FlowTarget, IngressEndpoint,
     RouteDecision, TargetProto,
@@ -50,6 +50,9 @@ pub struct TransparentIngressConfig {
     pub intercept_ports: Vec<u16>,
     /// ip rule/route 逃逸表号（TPROXY 面）
     pub rule_table: u32,
+    /// 规则面后端（iptables = RIL-139 桌面面；nft = RIL-041 OpenWrt
+    /// fw4 共存面）
+    pub rule_backend: TransparentRuleBackend,
 }
 
 impl TransparentIngressConfig {
@@ -68,6 +71,7 @@ impl TransparentIngressConfig {
             mode: block.mode,
             intercept_ports: block.intercept_ports.clone(),
             rule_table: block.rule_table,
+            rule_backend: block.rule_backend,
         })
     }
 
@@ -159,13 +163,14 @@ impl TakeoverAccept for TproxyAccept {
     }
 }
 
-/// 透明接管入口：iptables REDIRECT/TPROXY 把目标流量重定向到本机监听，
-/// 入口恢复原目标并固定路由到配置 target 节点。
+/// 透明接管入口：REDIRECT/TPROXY 把目标流量重定向到本机监听（规则面
+/// 后端按配置分叉：iptables = RIL-139 桌面面；nft = RIL-041 OpenWrt
+/// fw4 共存面），入口恢复原目标并固定路由到配置 target 节点。
 ///
 /// 生命周期（规则 = 系统副作用，入口属主——同 TunIngress 属主化设备/
 /// 路由）：run() 起始应用规则（apply_rules），run() 退出（shutdown 信号或
 /// 错误）逆序撤销（undo_rules，幂等）。规则应用/撤销需 CAP_NET_ADMIN +
-/// iptables/ip 二进制——无权限具名拒绝（不静默降级）。
+/// iptables|nft/ip 二进制——无权限具名拒绝（不静默降级）。
 pub struct TransparentIngress {
     config: TransparentIngressConfig,
     /// 入口退出信号（stop 路径 → run 循环 break → 规则撤销）
@@ -180,7 +185,8 @@ pub struct TransparentIngress {
 }
 
 impl TransparentIngress {
-    /// 生产构造：规则计划（按 mode）+ 真执行器（shell-out iptables/ip）。
+    /// 生产构造：规则计划（按 mode + rule_backend）+ 真执行器（shell-out
+    /// iptables|nft/ip）。
     pub fn new(config: TransparentIngressConfig) -> Result<Arc<Self>> {
         let rules = plan_rules(&config);
         let (shutdown_tx, shutdown_rx) = watch::channel(());
@@ -217,8 +223,8 @@ impl TransparentIngress {
         Ok(())
     }
 
-    /// 逆序撤销规则：目标不存在（iptables "Bad rule"/ip "No such ..."）
-    /// 视为已撤销——幂等（重入/重复撤销无操作）。
+    /// 逆序撤销规则：目标不存在（iptables "Bad rule"/nft "No such table"/
+    /// ip "No such ..."）视为已撤销——幂等（重入/重复撤销无操作）。
     fn undo_rules(&self) -> Result<()> {
         let mut failures = Vec::new();
         for rule in self.rules.iter().rev() {
@@ -386,22 +392,41 @@ impl IngressEndpoint for TransparentIngress {
 
 /// 按 mode 规划规则（redirect 排除逃逸 mark；tproxy 带 ip rule/route 面）。
 fn plan_rules(config: &TransparentIngressConfig) -> Vec<TransparentRule> {
-    match config.mode {
-        TransparentMode::Redirect => transparent_face::plan_redirect_rules(
-            config.listen,
-            &config.intercept_ports,
-            transparent_face::DEFAULT_ESCAPE_MARK,
-        ),
-        TransparentMode::Tproxy => transparent_face::plan_tproxy_rules(
-            config.listen,
-            &config.intercept_ports,
-            config.rule_table,
-        ),
+    match (config.mode, config.rule_backend) {
+        (TransparentMode::Redirect, TransparentRuleBackend::Iptables) => {
+            transparent_face::plan_redirect_rules(
+                config.listen,
+                &config.intercept_ports,
+                transparent_face::DEFAULT_ESCAPE_MARK,
+            )
+        }
+        (TransparentMode::Redirect, TransparentRuleBackend::Nft) => {
+            rillane_platform::network::nft::plan_nft_redirect_rules(
+                config.listen,
+                &config.intercept_ports,
+                transparent_face::DEFAULT_ESCAPE_MARK,
+            )
+        }
+        (TransparentMode::Tproxy, TransparentRuleBackend::Iptables) => {
+            transparent_face::plan_tproxy_rules(
+                config.listen,
+                &config.intercept_ports,
+                config.rule_table,
+            )
+        }
+        (TransparentMode::Tproxy, TransparentRuleBackend::Nft) => {
+            rillane_platform::network::nft::plan_nft_tproxy_rules(
+                config.listen,
+                &config.intercept_ports,
+                config.rule_table,
+            )
+        }
     }
 }
 
 /// 应用幂等口径：已存在（ip rule fwmark 重复 add → EEXIST/"File exists"；
-/// iptables -A 重复规则 → "Rule exists"）视为成功（与 RIL-029 同语义）。
+/// iptables -A 重复规则 → "Rule exists"；nft add table/chain 重复 →
+/// "File exists"）视为成功（与 RIL-029 同语义）。
 fn is_already_applied(e: &io::Error) -> bool {
     let t = e.to_string();
     e.kind() == io::ErrorKind::AlreadyExists
@@ -532,7 +557,49 @@ mod tests {
             mode,
             intercept_ports: vec![443],
             rule_table: 100,
+            rule_backend: TransparentRuleBackend::Iptables,
         }
+    }
+
+    fn cfg_with_backend(
+        listen: &str,
+        mode: TransparentMode,
+        backend: TransparentRuleBackend,
+    ) -> TransparentIngressConfig {
+        TransparentIngressConfig {
+            rule_backend: backend,
+            ..cfg(listen, mode)
+        }
+    }
+
+    /// 后端选择面（RIL-041）：nft 档 plan_rules 落 nft argv（专用表）；
+    /// iptables 缺省档不变（RIL-139 面回归锚）。
+    #[test]
+    fn nft_backend_selects_nft_rule_family() {
+        let redirect = plan_rules(&cfg_with_backend(
+            "0.0.0.0:3128",
+            TransparentMode::Redirect,
+            TransparentRuleBackend::Nft,
+        ));
+        assert!(redirect.iter().all(|r| r.apply[0] == "nft"));
+        assert!(
+            redirect.iter().any(|r| r.apply.contains(&"inet".into())),
+            "redirect 用 inet 专用表（双栈）"
+        );
+
+        let tproxy = plan_rules(&cfg_with_backend(
+            "0.0.0.0:3129",
+            TransparentMode::Tproxy,
+            TransparentRuleBackend::Nft,
+        ));
+        assert!(tproxy.iter().filter(|r| r.apply[0] == "nft").count() >= 2);
+        // ip rule/route 步仍在（标记流量回本机监听）
+        assert!(tproxy.iter().any(|r| r.label == "tproxy:rule-v4"));
+        assert!(tproxy.iter().any(|r| r.label == "tproxy:rule-v6"));
+
+        // 缺省 iptables 档不回归：argv[0] = iptables/ip
+        let legacy = plan_rules(&cfg("0.0.0.0:3128", TransparentMode::Redirect));
+        assert!(legacy.iter().all(|r| r.apply[0] == "iptables"));
     }
 
     /// 固定目标契约：注入面喂已知原目标 → 出口收到 Direct{target} 决策 +

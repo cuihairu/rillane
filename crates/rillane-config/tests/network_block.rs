@@ -171,6 +171,7 @@ fn network_block_rejects_unimplemented_modes_and_locks_transparent() {
             target: "edge-1".to_string(),
             intercept_ports: vec![80],
             rule_table: 100,
+            rule_backend: Default::default(),
         }),
     };
     cfg.validate().expect("transparent 有块应通过");
@@ -188,6 +189,7 @@ fn network_block_rejects_unimplemented_modes_and_locks_transparent() {
             target: "edge-2".to_string(),
             intercept_ports: vec![443],
             rule_table: 100,
+            rule_backend: Default::default(),
         }),
     };
     let err = cfg.validate().expect_err("tun 下带 transparent 块应被拒");

@@ -29,6 +29,19 @@ routing:
 
 # 网络虚拟化（TUN 面）：需 kmod-tun；不接管设备时整块删除（本例仅登记
 # 设备网段与 DNS 回落源——network.dns.domestic 缺省回落 tun.dns_servers:53）
+#
+# 透明接管（RIL-041 网关面，可选）：fw4/nftables 世代（OpenWrt 22.03+ 默认
+# 无 iptables）须 rule_backend: nft——专用表 inet rillane 与 fw4 共存
+# （fw4 只管自己的表，reload 不触碰外来表），规则随 rillaned 启停自动
+# 应用/撤销。mode=redirect 为 LAN 客户端面（PREROUTING），本机出站经
+# OUTPUT 面并按逃逸 mark 自环豁免；target 恒指 egress 节点名。
+# network:
+#   transparent:
+#     mode: redirect
+#     listen: "0.0.0.0:12456"
+#     target: direct-main
+#     intercept_ports: [80, 443]
+#     rule_backend: nft
 network:
   tun:
     name: rillane0

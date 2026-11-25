@@ -54,6 +54,13 @@ respawn + UCI `rillane.@general[0].enabled` 预留开关）、`/usr/share/rillan
 Depends：`libc, kmod-tun`（TUN 虚拟化面；仅 socks 入口 + DNS 监听可不装 kmod-tun，
 `network` 块缺席即可）。LuCI 页面后置（见 当前实现 注记）。
 
+透明接管（RIL-041）：fw4/nftables 世代（OpenWrt 22.03+ 默认无 iptables/nft 兼容层
+未必装）须在 `network.transparent` 配 `rule_backend: nft`——规则落专用表
+（`inet rillane` / `ip rillane` / `ip6 rillane`），fw4 只管自己的 `inet fw4` 表、
+reload 不触碰外来表，规则随 rillaned 启停自动应用/撤销（模板见
+`rillane.yaml.example` 顶部注释块）。语法面经 nftables 1.1.6 `nft -c` 解析
+仲裁；规则真机生效/撤销验收归 OpenWrt 机批次（见 验证边界）。
+
 ## 验证边界（如实说明）
 
 本仓产线能验的与不能验的：
@@ -69,7 +76,9 @@ Depends：`libc, kmod-tun`（TUN 虚拟化面；仅 socks 入口 + DNS 监听可
 **未验（需要真机或目标架构仿真环境）**
 - 真机 opkg 安装/升级路径（DISTRIB_ARCH 命中、conffile 升级保留语义）；
 - procd 托管下的起停/respawn 行为；
-- TUN 数据面在 MIPS/ARM 内核上的吞吐与 kmod-tun 交互。
+- TUN 数据面在 MIPS/ARM 内核上的吞吐与 kmod-tun 交互；
+- 透明接管 nft 后端真机生效/撤销（专用表与 fw4 共存、fw4 reload 不清除
+  `rillane` 表——语法已 `nft -c` 仲裁，行为待真机）。
 
 宿主机有 qemu-user 时可加跑冒烟（`qemu-aarch64-static target/aarch64-.../release/rillaned --version`）；
 CI/真机到位后在 当前实现 注记回填。

@@ -397,6 +397,9 @@ pub struct TransparentBlockConfig {
     /// ip rule/route 逃逸表号（TPROXY 面；与 RIL-029 逃逸表 100 一致）
     #[serde(default = "default_transparent_rule_table")]
     pub rule_table: u32,
+    /// 规则面后端（缺省 iptables；OpenWrt fw4 世代选 nft）
+    #[serde(default)]
+    pub rule_backend: TransparentRuleBackend,
 }
 
 /// transparent.mode（serde 名 snake_case）
@@ -411,6 +414,20 @@ pub enum TransparentMode {
 
 const fn default_transparent_rule_table() -> u32 {
     100
+}
+
+/// transparent.rule_backend（RIL-041 OpenWrt 网关）：规则面后端。缺省
+/// iptables（桌面 Linux 现状，RIL-139 面）；OpenWrt 22.03+ 是 fw4/nftables
+/// 世代（默认无 iptables），网关部署选 nft（platform/network nft.rs 面，
+/// 专用表 fw4 共存 + 双栈）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TransparentRuleBackend {
+    /// iptables 规划面（RIL-139；桌面 Linux 缺省）
+    #[default]
+    Iptables,
+    /// nftables 规划面（RIL-041；OpenWrt fw4 世代 / 双栈）
+    Nft,
 }
 
 impl TransparentBlockConfig {
@@ -4497,8 +4514,26 @@ selections:
         assert_eq!(tp.mode, TransparentMode::Redirect);
         assert_eq!(tp.rule_table, 100, "缺省 100");
         assert!(tp.intercept_ports.is_empty(), "缺省全端口");
+        assert_eq!(
+            tp.rule_backend,
+            TransparentRuleBackend::Iptables,
+            "缺省 iptables（旧配置无此键照常解析——后向兼容）"
+        );
         tp.validate().expect("合法块校验通过");
         nb.validate().expect("network 块（transparent+块）校验通过");
+
+        // rule_backend: nft（RIL-041 OpenWrt fw4 世代）显式解析
+        let nft_yaml = "mode: transparent\ntransparent:\n  mode: redirect\n  listen: \"0.0.0.0:12345\"\n  target: tunnel-egress\n  rule_backend: nft\n";
+        let nb_nft: NetworkBlockConfig = serde_yaml::from_str(nft_yaml).expect("应解析");
+        assert_eq!(
+            nb_nft.transparent.as_ref().expect("块应在场").rule_backend,
+            TransparentRuleBackend::Nft
+        );
+        // 未知后端名拒绝（deny_unknown_fields + 枚举闭合）
+        assert!(serde_yaml::from_str::<NetworkBlockConfig>(
+            "mode: transparent\ntransparent:\n  mode: redirect\n  listen: \"0.0.0.0:12345\"\n  target: tunnel-egress\n  rule_backend: ebtables\n"
+        )
+        .is_err());
 
         // mode=transparent 缺块 → 拒绝
         let no_block = NetworkBlockConfig {
@@ -4521,6 +4556,7 @@ selections:
                 target: "tunnel-egress".into(),
                 intercept_ports: vec![],
                 rule_table: 100,
+                rule_backend: Default::default(),
             }),
             ..Default::default()
         };
@@ -4538,6 +4574,7 @@ selections:
             target: "t".into(),
             intercept_ports: vec![],
             rule_table: 100,
+            rule_backend: Default::default(),
         };
         assert!(bad_listen
             .validate()
@@ -4550,6 +4587,7 @@ selections:
             target: "   ".into(),
             intercept_ports: vec![],
             rule_table: 100,
+            rule_backend: Default::default(),
         };
         assert!(empty_target
             .validate()
@@ -4562,6 +4600,7 @@ selections:
             target: "t".into(),
             intercept_ports: vec![0],
             rule_table: 100,
+            rule_backend: Default::default(),
         };
         assert!(zero_port
             .validate()
@@ -4574,6 +4613,7 @@ selections:
             target: "t".into(),
             intercept_ports: vec![],
             rule_table: 0,
+            rule_backend: Default::default(),
         };
         assert!(zero_table
             .validate()

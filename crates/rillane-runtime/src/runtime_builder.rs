@@ -5625,7 +5625,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_surface_assembled_from_config_block() {
-        /// 最小可构建 config（socks 入口 + direct 出口）；仅 streaming 面可变
+        // 最小可构建 config（socks 入口 + direct 出口）；仅 streaming 面可变
         let mk_cfg = |streaming: Option<rillane_config::StreamingConfigBlock>| RillaneConfig {
             version: rillane_config::ConfigVersion::default(),
             control: rillane_config::ControlConfig {
@@ -6851,6 +6851,7 @@ routing:
                 target: "direct".to_string(),
                 intercept_ports: vec![],
                 rule_table: 100,
+                rule_backend: Default::default(),
             }),
             ..Default::default()
         });
@@ -6898,6 +6899,7 @@ routing:
                 target: "nonexistent".to_string(),
                 intercept_ports: vec![],
                 rule_table: 100,
+                rule_backend: Default::default(),
             }),
             ..Default::default()
         });
