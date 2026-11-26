@@ -166,6 +166,7 @@
   交付：最小签名设备实验验证批量 read/write、缓冲所有权、取消、吞吐/RSS 与 App/Extension 边界。验收：不依赖私有 fd；结论修订 RIL-043，缺少签名/设备明确未验证，不等正式 FFI 完成才试。
 - [ ] **RIL-043｜P1｜移动批次 FFI**；依赖：RIL-004、RIL-006、RIL-040、RIL-094。
   交付：包批次/缓冲所有权、线程、背压、取消、ABI 版本。验收：fd 与公开 packetFlow 都能桥接；无悬空指针、取消后回调或无界队列。
+- [x] **RIL-043（第一段，2026-11-26）**：JNI 符号面恰等门 `crates/rillane-ffi/tests/jni_symbol_face.rs` 3/3 绿——Kotlin 宿主 `RillaneFfi.kt`（`external fun`）↔ Rust `jni_bridge.rs`（`Java_com_rillane_rillane_RillaneFfi_*` 导出）方法名集合恰等（宿主桥接链接契约：Rust 多导出=死符号、Kotlin 多声明=加载期 UnsatisfiedLinkError）+ 已知 14 方法面钉死（4 生命周期/状态 + 8 查询 + 2 TUN fd）+ 幻影声明/幻影导出两处自证 panic；RIL-083 C 头门显式留给本门的 JNI 面由此接住。两语证据 `docs/acceptance-evidence/ril-043-jni-symbol-face{,.zh}.md` 并挂两语证据索引。如实边界：只钉静态符号面；fd 与公开 packetFlow 双向桥接、无悬空指针/取消后回调/无界队列、真机 ABI 版本面需真机批次（RIL-094 iOS 设备未决），主勾选保持关闭。全 workspace 测试绿（118 套件）、fmt/clippy -D warnings 干净、vitepress build 过。commit：c618f4e test: add jni symbol parity gate for RIL-043。
 - [ ] **RIL-044｜P1｜移动宿主生命周期契约**；依赖：RIL-019、RIL-043。
   交付：配置/秘密引用注入、启动停止、网络变化及有界诊断 IPC。验收：停止可重复调用，核心不假定移动 VPN 与宿主同 OS 进程。
 - [ ] **RIL-045｜P1｜Android 完整转发**；依赖：RIL-022、RIL-043、RIL-044。
