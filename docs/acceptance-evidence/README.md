@@ -12,6 +12,7 @@ Evidence documents backing `todo.md` acceptance items. Two honest kinds live her
 | RIL-034 Windows process owner | [ril-034-windows-owner](./ril-034-windows-owner) (zh) | Device | Verified on `imac` |
 | RIL-035 Windows service & exit recovery | [ril-035-windows-service-recovery](./ril-035-windows-service-recovery) (zh) | Device | Verified; suspend/resume is a named gap |
 | RIL-043 mobile FFI JNI symbol face | [ril-043-jni-symbol-face](./ril-043-jni-symbol-face) · [zh](./ril-043-jni-symbol-face.zh) | Local ledger | Kotlin↔Rust symbol parity pinned; device batches unchecked |
+| RIL-043 mobile FFI TUN fd injection face | [ril-043-tun-fd-injection](./ril-043-tun-fd-injection) · [zh](./ril-043-tun-fd-injection.zh) | Local ledger | Bad-fd rejection named + handle untainted (process-abort defect fixed); real TUN path in device batch |
 | RIL-044 mobile host lifecycle stop face | [ril-044-host-lifecycle](./ril-044-host-lifecycle) · [zh](./ril-044-host-lifecycle.zh) | Local ledger | Repeatable stop pinned on both halves; secret injection / network change / IPC still open |
 | RIL-084 six-platform artifact matrix | [ril-084-artifact-matrix](./ril-084-artifact-matrix) · [zh](./ril-084-artifact-matrix.zh) | Local ledger | Artifact face aligned; device/signing acceptance unchecked |
 | RIL-085 three-desktop e2e clause matrix | [ril-085-desktop-e2e-matrix](./ril-085-desktop-e2e-matrix) · [zh](./ril-085-desktop-e2e-matrix.zh) | Local ledger | Clause×platform ledger; browser/game grouped traces not run |

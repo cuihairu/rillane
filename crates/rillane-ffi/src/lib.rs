@@ -606,6 +606,14 @@ pub unsafe extern "C" fn rillane_ffi_tun_start(handle: *mut FfiHandle, fd: i32) 
 #[cfg(unix)]
 fn tun_start_inner(h: &FfiHandle, fd: i32) -> anyhow::Result<()> {
     tun_stop_inner(h);
+    // 注入面健壮性：宿主可能传来已关闭/伪造 fd（double-detach 等宿主侧
+    // 缺陷）。OwnedFd 接管前先以 F_GETFD 确认 fd 真实打开——坏 fd 若
+    // 直接接管，try_clone 失败后 File drop 的 close(EBADF) 会触发 std
+    // IO safety abort（整进程崩溃）而非本层的具名拒绝。
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1 {
+        let err = std::io::Error::last_os_error();
+        anyhow::bail!("fd {fd} 未打开（F_GETFD：{err}）");
+    }
     // 所有权转移：OwnedFd 接管 fd（Android 侧 pfd.detachFd() 后传入；线程
     // 结束时随 File drop 关闭）
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };

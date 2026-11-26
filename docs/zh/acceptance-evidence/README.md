@@ -12,6 +12,7 @@
 | RIL-034 Windows 进程归属 | [ril-034-windows-owner](../../acceptance-evidence/ril-034-windows-owner) | 真机 | `imac` 实机已验 |
 | RIL-035 Windows 服务与退出恢复 | [ril-035-windows-service-recovery](../../acceptance-evidence/ril-035-windows-service-recovery) | 真机 | 已验；休眠恢复为具名缺口 |
 | RIL-043 移动 FFI JNI 符号面 | [ril-043-jni-symbol-face](../../acceptance-evidence/ril-043-jni-symbol-face) · [中文](../../acceptance-evidence/ril-043-jni-symbol-face.zh) | 本地账本 | Kotlin↔Rust 符号恰等已钉；真机批次未勾 |
+| RIL-043 移动 FFI TUN fd 注入面 | [ril-043-tun-fd-injection](../../acceptance-evidence/ril-043-tun-fd-injection) · [中文](../../acceptance-evidence/ril-043-tun-fd-injection.zh) | 本地账本 | 坏 fd 具名拒绝 + 句柄不被污染（已修整进程 abort 缺陷）；真 TUN 通路归真机批次 |
 | RIL-044 移动宿主生命周期停止面 | [ril-044-host-lifecycle](../../acceptance-evidence/ril-044-host-lifecycle) · [中文](../../acceptance-evidence/ril-044-host-lifecycle.zh) | 本地账本 | 重复停止两侧半边已钉；秘密注入/网络变化/IPC 仍开放 |
 | RIL-084 六平台构建产物矩阵 | [ril-084-artifact-matrix](../../acceptance-evidence/ril-084-artifact-matrix) · [中文](../../acceptance-evidence/ril-084-artifact-matrix.zh) | 本地账本 | 产物面对齐；真机/签名验收未勾 |
 | RIL-085 三桌面进程端到端条款矩阵 | [ril-085-desktop-e2e-matrix](../../acceptance-evidence/ril-085-desktop-e2e-matrix) · [中文](../../acceptance-evidence/ril-085-desktop-e2e-matrix.zh) | 本地账本 | 条款×平台账本；浏览器/两款游戏分组轨迹未跑 |
