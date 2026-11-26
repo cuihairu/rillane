@@ -1,7 +1,7 @@
 # RIL-084 构建产物矩阵（第一段：本地可核验面，2026-11-26）
 
-机器可读真源 [`contracts/build_matrix_v1.json`](../../contracts/build_matrix_v1.json)，
-契约门 [`crates/rillane-platform/tests/artifact_matrix_contract.rs`](../../crates/rillane-platform/tests/artifact_matrix_contract.rs)
+机器可读真源 `contracts/build_matrix_v1.json`，
+契约门 `crates/rillane-platform/tests/artifact_matrix_contract.rs`
 （4 测，CI 纳入 `cargo test --workspace`）。本段只交付**目标架构 / 最低系统 /
 feature / 产物 / 签名 / 验证分层**的对齐面；六平台真机与签名产物验收未发生，
 RIL-084 勾选保持关闭（依赖 RIL-036/039/041/042/046/049 真机批次未决）。

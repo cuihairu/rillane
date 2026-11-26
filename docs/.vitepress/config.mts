@@ -23,6 +23,7 @@ function locale(zh: boolean): DefaultTheme.Config {
     page(zh ? '系统路由与网络接管' : 'Network capture and routing', '/networking'),
     page(zh ? '可选 Mesh' : 'Optional Mesh', '/mesh'),
     page(zh ? 'Grafana 仪表板' : 'Grafana dashboard', '/grafana/README'),
+    page(zh ? '验收证据' : 'Acceptance evidence', '/acceptance-evidence/README'),
   ]
   return {
     nav: [
