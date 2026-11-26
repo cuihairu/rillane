@@ -14,7 +14,7 @@ Rillane 是 Rust 代理内核项目。当前设计基线为 **v1**，目标是�
 - [Debug、路径与可选 MCP](docs/zh/design/debug-and-mcp.md)
 - [竞品研究与架构 SVG](docs/zh/research/proxy-architectures-2026-11-14.md)
 - [UI 原型与网络控制规格](docs/zh/design/ui-prototype-v1.md) · [10 张原型图](docs/zh/design/ui/README.md)
-- [152 项原子实施任务（含优先级、依赖和验收）](todo.md)
+- [154 项原子实施任务（含优先级、依赖和验收）](todo.md)
 
 旧设计、路线图与历史审计已从当前文档移除；追溯使用 Git 历史。按进程分流仅要求 Windows/macOS/Linux 本机，OpenWrt/Android/iOS 不要求识别任意应用 PID。
 
