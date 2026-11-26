@@ -35,6 +35,9 @@
 | GET | `/dns/resolvers` | 解析器形状快照：上游组、引导模式、各传输旁路态（RIL-144） | —（仅 REST） |
 | GET | `/plugins/stats` | 插件统计 | —（仅 REST） |
 | GET | `/runtime/stats` | runtime 统计 | —（仅 REST） |
+| GET | `/proxies` | Clash 兼容只读子集：每个出口名映射到 Clash 代理对象（`type`/`now`/`udp`/`history` 最小字段；metacubexd/yacd 可直连读取） | —（面板互通） |
+| GET | `/connections` | Clash 兼容只读子集：从 flow stats 派生（聚合语义显式化，RIL-056） | —（面板互通） |
+| GET | `/traffic` | Clash 兼容只读子集：runtime 全局流量 up/down | —（面板互通） |
 | GET | `/runtime/config` | 当前生效配置快照 | —（仅 REST） |
 | GET | `/events` | 事件日志（最近 N 行） | —（仅 REST） |
 | GET | `/logs` | 最近日志（需 `RILLANE_CAPTURE_LOGS=1`） | `diagnose`（采集） |
@@ -59,6 +62,7 @@
 | GET | `/trace/flow?id=` | 单流完整轨迹或显式缺席答复（`found:false` + 稳定码） | `trace flow` |
 | GET | `/trace/flow.svg?id=` | 单流路径 SVG 图（与 JSON 答复同一查询快照；标注路径层/时间/缺口） | `trace flow --svg` |
 | GET | `/trace/events?id=&from_seq=&limit=` | 事件增量读取（未知/缺席 ID → 404 + 稳定码） | `trace events` |
+| DELETE | `/trace/history` | 诊断历史显式清除（RIL-064 留存面：只删已关闭迹、活动流不拆；此后缺席答复带 `collector.flow.purged`；TTL 周期 sweeper 另有——本端点是操作员的显式「立即清」） | —（仅 REST） |
 | POST | `/explain` | 纯路由推演（生产求值器 + 冻结快照，零副作用；非法输入 → 400 + 稳定码） | `explain` |
 | GET | `/probe` | 探测作业列表（限额 + 作业快照） | `probe list` |
 | GET | `/probe/result?id=` | 单作业测量快照，或显式缺席答复（`found:false` + 稳定码） | `probe result` |
@@ -212,7 +216,8 @@ rillanectl config preview  --patch-file p.json [--scope routing]   # 只读：di
 rillanectl config propose  --owner cli:local --scope telemetry --patch-file p.json   # 登记提案（base 由 daemon 自填）
 rillanectl config approve  --proposal-id <ID> --owner cli:local                     # 签发凭证（一次性核销）
 rillanectl config apply    --idempotency-key k1 --proposal-id <ID> --approval-id <AID> --owner cli:local
-rillanectl config rollback --idempotency-key k2 --target-key k1 --owner cli:local    # 回滚提案 + 批准 + 执行一条龙
+rillanectl config rollback --idempotency-key k2 --target-key k1 --owner cli:local
+                       [--drain-deadline-ms <epoch-ms>]    # 可选排空时限；缺省仍产出回滚计划（回滚提案 + 批准 + 执行一条龙）
 rillanectl config receipts                               # 回执链（seq 降序）+ 对账
 ```
 

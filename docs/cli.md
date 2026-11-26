@@ -35,6 +35,9 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | GET | `/dns/resolvers` | Resolver shape snapshot: upstream groups, bootstrap mode, per-transport bypass state (RIL-144) | — (REST only) |
 | GET | `/plugins/stats` | plugin stats | — (REST only) |
 | GET | `/runtime/stats` | runtime stats | — (REST only) |
+| GET | `/proxies` | Clash-compatible read-only subset: one Clash proxy object per egress name (`type`/`now`/`udp`/`history` minimal fields; metacubexd/yacd can read directly) | — (dashboard interop) |
+| GET | `/connections` | Clash-compatible read-only subset derived from flow stats (aggregate semantics explicit, RIL-056) | — (dashboard interop) |
+| GET | `/traffic` | Clash-compatible read-only subset: runtime global up/down | — (dashboard interop) |
 | GET | `/runtime/config` | snapshot of the currently effective config | — (REST only) |
 | GET | `/events` | event log (last N lines) | — (REST only) |
 | GET | `/logs` | recent logs (requires `RILLANE_CAPTURE_LOGS=1`) | `diagnose` (collects) |
@@ -59,6 +62,7 @@ Reconciled against the routing table in `apps/rillaned/src/control_plane.rs` (20
 | GET | `/trace/flow?id=` | one flow's full trace, or an explicit absence answer (`found:false` + stable code) | `trace flow` |
 | GET | `/trace/flow.svg?id=` | one flow's path as SVG (same query snapshot as the JSON answer; layers/time/gaps annotated) | `trace flow --svg` |
 | GET | `/trace/events?id=&from_seq=&limit=` | incremental event read (unknown/absent id → 404 + stable code) | `trace events` |
+| DELETE | `/trace/history` | explicit closed-trace purge (RIL-064 retention face; active flows untouched; later absence answers carry `collector.flow.purged`; a periodic TTL sweeper also runs — this endpoint is the operator's explicit "purge now") | — (REST only) |
 | POST | `/explain` | pure route explanation (production evaluator + frozen snapshot, zero side effects; invalid input → 400 + stable code) | `explain` |
 | GET | `/probe` | probe job list (limits + job snapshots) | `probe list` |
 | GET | `/probe/result?id=` | one job's measurement snapshot, or an explicit absence answer (`found:false` + stable code) | `probe result` |
@@ -212,7 +216,8 @@ rillanectl config preview  --patch-file p.json [--scope routing]   # read-only: 
 rillanectl config propose  --owner cli:local --scope telemetry --patch-file p.json   # register proposal (base daemon-filled)
 rillanectl config approve  --proposal-id <ID> --owner cli:local                     # sign credential (single-use)
 rillanectl config apply    --idempotency-key k1 --proposal-id <ID> --approval-id <AID> --owner cli:local
-rillanectl config rollback --idempotency-key k2 --target-key k1 --owner cli:local    # rollback proposal + approve + execute
+rillanectl config rollback --idempotency-key k2 --target-key k1 --owner cli:local
+                       [--drain-deadline-ms <epoch-ms>]    # optional drain deadline; the rollback plan is still produced without it
 rillanectl config receipts                               # receipt chain (seq desc) + reconcile
 ```
 

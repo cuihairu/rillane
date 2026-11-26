@@ -1216,7 +1216,21 @@ fn run_ai_command(
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // 冻结语法（RIL-060/061 help 自述）：1=用法或连接错误 / 2=显式缺席。
+    // clap 默认给参数用法错误退出码 2，会顶掉缺席码 2（缺席码只属于
+    // daemon 应答的显式缺席；id 手工解析已隔离同类问题）——这里把用法
+    // 错误统一收敛到 1。help/version 照常 0。
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            let usage_error = !matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            );
+            let _ = e.print();
+            std::process::exit(if usage_error { 1 } else { 0 });
+        }
+    };
     match cli.command {
         Command::Check => {
             RillaneConfig::load_from_path(&cli.config)?;
