@@ -446,7 +446,10 @@ mod tests {
         // OUTPUT 80 排除逃逸 mark
         assert!(rules[1].apply.iter().any(|i| i == "OUTPUT"));
         assert!(rules[1].apply.iter().any(|i| i == "!"));
-        assert!(rules[1].apply.iter().any(|i| i.as_str() == DEFAULT_ESCAPE_MARK.to_string()));
+        assert!(rules[1]
+            .apply
+            .iter()
+            .any(|i| i.as_str() == DEFAULT_ESCAPE_MARK.to_string()));
         assert!(rules[1].apply.iter().any(|i| i == "mark"));
 
         // 全端口：单规则对
@@ -467,7 +470,10 @@ mod tests {
         assert!(rules[0].apply.iter().any(|i| i == "12345"));
         assert_eq!(rules[1].apply[0], "ip");
         assert_eq!(rules[1].apply[1], "rule");
-        assert!(rules[1].apply.iter().any(|i| i.as_str() == TPROXY_MARK.to_string()));
+        assert!(rules[1]
+            .apply
+            .iter()
+            .any(|i| i.as_str() == TPROXY_MARK.to_string()));
         assert!(rules[2].apply.iter().any(|i| i == "local"));
         assert!(rules[2].apply.iter().any(|i| i == "table"));
     }
