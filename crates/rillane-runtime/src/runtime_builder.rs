@@ -10,7 +10,7 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{Arc, OnceLock, RwLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{anyhow, Context as _, Result};
@@ -1219,8 +1219,8 @@ pub struct Runtime {
     transport_pool: Option<Arc<TransportPool>>,
     /// RIL-052/055：诊断事件采集器单例（控制面 /trace/* 查询面取数；
     /// 有界配置在 build 钉死——容量/上限/TTL 见 trace_collector_config）。
-    /// 会话执行面的 SessionTracer 接线随数据面装配推进；此前列表恒空
-    /// 属诚实空态（查询面回答 tracing 启用状态而非伪造活动流）。
+    /// RIL-083 第二段起：TCP 入口流的 SessionTracer 接线已落地
+    /// （TracedFlowOutput，start() 装配）；UDP 关联面归后续批次。
     trace_collector: Arc<std::sync::Mutex<rillane_core::collector::FlowCollector>>,
     /// P1-5 §4.1：TLS 连接器工厂单例（tls_resumption 独立于池生效）
     tls_factory: Option<Arc<TlsConnectorFactory>>,
@@ -1367,10 +1367,18 @@ impl Runtime {
 
         for (name, endpoint) in self.ingress_endpoints.iter() {
             let router = self.flow_router();
-            let output: Arc<dyn FlowOutput> = Arc::new(StatsFlowOutput::new(
+            // RIL-053/083 第二段：TracedFlowOutput 挂最外层（每流一轨，
+            // takeover→rule→plan→close），内层照旧 StatsFlowOutput（聚合
+            // 成功面计数）。装配失败面（采集器缺席不可能——build 恒造）
+            // 由 wrapper 内降级为不追踪。
+            let output: Arc<dyn FlowOutput> = Arc::new(TracedFlowOutput::new(
                 name.clone(),
-                output_router.clone(),
-                self.flow_stats.clone(),
+                Arc::new(StatsFlowOutput::new(
+                    name.clone(),
+                    output_router.clone(),
+                    self.flow_stats.clone(),
+                )),
+                self.trace_collector.clone(),
             ));
             let ingress = endpoint.clone();
             let label = name.clone();
@@ -2533,6 +2541,124 @@ impl FlowOutput for StatsFlowOutput {
             });
 
         Ok(report)
+    }
+}
+
+/// RIL-053/083 第二段：会话执行面 SessionTracer 生产接线——挂载在
+/// per-ingress 输出链最外层（start() 与 StatsFlowOutput 同一装配点，
+/// 每流一轨）。事件口径（全部内核可见事实，不造数）：
+/// takeover（接管，采集器准入锚点）→ rule（决策原因在场才发）→
+/// plan（路径摘要，预测证据）→ close（转发成败如实落终态：正常收口
+/// session.closed，转发 Err = session.failed）。生产数据面泵未逐次
+/// 测量首字节与拨号尝试——transfer/attempt 事件不出现（诚实面：
+/// 能答「谁被接走、路由为何、走没走通、搬了多少字节」，不假装测过
+/// 没测的东西）。UDP 关联面（独立泵，不走 FlowOutput 链）与 url-test
+/// 探测流（probe_via_output 直连出口 map，绕过入口链）不在本 wrapper
+/// 路径，归后续批次。
+struct TracedFlowOutput {
+    ingress: String,
+    inner: Arc<dyn FlowOutput>,
+    collector: Arc<std::sync::Mutex<rillane_core::collector::FlowCollector>>,
+}
+
+/// 进程级单调锚（轨迹 monotonic_ms 基准：首用起算恒单调；只服务轨迹内
+/// 耗时，跨进程对齐走 wall_ms——同 udp/clock.rs「基点无关紧要」口径）
+static TRACE_MONO_ANCHOR: OnceLock<Instant> = OnceLock::new();
+
+fn trace_clock_ms() -> (u64, u64) {
+    let mono = TRACE_MONO_ANCHOR
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis() as u64;
+    let wall = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    (mono, wall)
+}
+
+impl TracedFlowOutput {
+    fn new(
+        ingress: String,
+        inner: Arc<dyn FlowOutput>,
+        collector: Arc<std::sync::Mutex<rillane_core::collector::FlowCollector>>,
+    ) -> Self {
+        Self {
+            ingress,
+            inner,
+            collector,
+        }
+    }
+
+    /// 开轨（takeover 准入）+ 决策冻结（rule/plan 预测证据）。开轨失败
+    /// （flow id/代际空白——构造面不可能出现）降级为不追踪，转发不受
+    /// 影响。代际恒 `local`：流经构建期配置装配（RIL-016 来源语汇），
+    /// 热更新代际随流推进归 RIL-008 接线批次。
+    fn open_trace(
+        &self,
+        decision: &RouteDecision,
+        flow: &Flow,
+    ) -> Option<rillane_core::session_trace::SessionTracer> {
+        use rillane_core::session_trace::SessionTracer;
+        use rillane_core::trace::FlowId as TraceFlowId;
+
+        let (mono, wall) = trace_clock_ms();
+        let flow_id = TraceFlowId::new(flow.id.as_uuid().to_string()).ok()?;
+        let generation = rillane_core::GenerationRef::new("local")?;
+        let plan = rillane_core::RoutePlan::from_decision(decision, generation)?;
+        // takeover detail 进轨迹前按不可信文本消毒（目标主机来自对端
+        // 请求，RIL-057 同一消毒闸）
+        let detail = rillane_core::redact::sanitize_untrusted(
+            &format!(
+                "ingress {} {} {}:{}",
+                self.ingress,
+                match flow.target.proto {
+                    rillane_core::TargetProto::Tcp => "tcp",
+                    rillane_core::TargetProto::Udp => "udp",
+                    rillane_core::TargetProto::Quic => "quic",
+                },
+                flow.target.host,
+                flow.target.port
+            ),
+            128,
+        );
+        let mut tracer = SessionTracer::start(
+            Some(Arc::clone(&self.collector)),
+            flow_id,
+            rillane_core::trace::FlowOrigin::Stream,
+            "local",
+            mono,
+            wall,
+            detail,
+        )
+        .ok()?;
+        tracer.rule(&plan);
+        tracer.plan(&plan);
+        Some(tracer)
+    }
+}
+
+#[async_trait]
+impl FlowOutput for TracedFlowOutput {
+    async fn forward(&self, decision: RouteDecision, flow: Flow) -> Result<FlowReport> {
+        let mut traced = self.open_trace(&decision, &flow);
+        let report = self.inner.forward(decision, flow).await;
+        if let Some(tracer) = traced.as_mut() {
+            use rillane_core::outbound::EvidenceKind;
+            match &report {
+                Ok(r) => tracer.close(
+                    rillane_core::CODE_STREAM_CLOSED,
+                    EvidenceKind::Observed,
+                    format!("up={} down={}", r.upstream, r.downstream),
+                ),
+                Err(e) => tracer.close(
+                    rillane_core::CODE_STREAM_FAILED,
+                    EvidenceKind::Observed,
+                    // 错误文案可能携带出口/对端名——消毒后才进轨迹
+                    rillane_core::redact::sanitize_untrusted(&format!("{e:#}"), 128),
+                ),
+            }
+        }
+        report
     }
 }
 

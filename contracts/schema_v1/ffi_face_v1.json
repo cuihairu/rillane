@@ -105,8 +105,8 @@
         "first_wall_ms": "number",
         "last_code": "string"
       },
-      "verification": "pending_live_trace_wiring",
-      "note": "会话执行面 SessionTracer 接线随数据面装配推进（runtime_builder.rs 1222 注记）——此前 /trace/flows 恒空属诚实空态；接线落地批次须活面取证并摘除本标记"
+      "verification": "live_trace_wiring_ril083",
+      "note": "RIL-083 第二段活面取证：真实 socks5→direct→echo 流量经 TracedFlowOutput 产出轨迹，contract_query_face 从活 runtime 取数钉 exact 键集；UDP 关联面归后续批次"
     },
     "flows_invalid_page": {
       "mode": "exact",
@@ -125,8 +125,8 @@
         "trace": "object",
         "absence": "null"
       },
-      "verification": "pending_live_trace_wiring",
-      "note": "found 形需采集器内有迹；接线前 flow 详情只可活面取证缺席形（flow_absent）"
+      "verification": "live_trace_wiring_ril083",
+      "note": "RIL-083 第二段活面取证：真实 socks5→direct→echo 流量经 TracedFlowOutput 产出轨迹，contract_query_face 从活 runtime 取数钉 exact 键集；UDP 关联面归后续批次"
     },
     "flow_absent": {
       "mode": "exact",

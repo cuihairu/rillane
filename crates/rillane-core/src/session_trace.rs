@@ -53,6 +53,9 @@ pub const CODE_TRANSFER_FIRST_UP: &str = "transfer.first_up";
 pub const CODE_TRANSFER_FIRST_DOWN: &str = "transfer.first_down";
 /// 稳定原因码：流正常关闭（半关闭/EOF 全收口）
 pub const CODE_STREAM_CLOSED: &str = "session.closed";
+/// 稳定原因码：流转发失败（数据面观测——出口不可达/泵送中断等非正常
+/// 收口；与 session.closed 的正常 EOF 收口分立）
+pub const CODE_STREAM_FAILED: &str = "session.failed";
 /// 稳定原因码：关联正常关闭（出口/客户端读侧结束）
 pub const CODE_ASSOCIATION_CLOSED: &str = "association.closed";
 /// 稳定原因码：关联因控制链关闭回收（SOCKS5 UDP 控制连接结束/切网重建）

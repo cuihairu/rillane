@@ -4,12 +4,10 @@
 //! （contracts/schema_v1/README.md 的 schema_v2 目录事务）。
 //!
 //! 对账面**活面取证**：真实启动 runtime，七查询逐一断言；并经 socks5
-//! 入站 → direct 出口 → 本机 echo 监听的真实 TCP 往返钉「诚实空态」
-//! ——会话执行面 SessionTracer 接线随数据面装配推进（runtime_builder.rs
-//! 模块注记），此前 /trace/flows 恒空：真实流量过后 items 仍空、缺席形
-//! 携采集器实况。flows 条目面与 flow found 形**尚不可活面取证**，face
-//! 文件标 `verification: pending_live_trace_wiring`——接线落地批次须
-//! 活面取证并摘除标记（本门对标记在场的断言保证摘除是显式动作）。
+//! 入站 → direct 出口 → 本机 echo 监听的真实 TCP 往返验证诊断轨迹
+//! 活面——RIL-083 第二段起 TCP 入口流接 SessionTracer（TracedFlowOutput），
+//! 真实流量过后 flows 列表非空，flows_item 项面与 flow_found 详情面
+//! 均从活 daemon 取数钉死；未知 ID 仍走 flow_absent 稳定缺席码。
 //!
 //! C 头文件 ↔ Rust 导出符号集一致另钉一门——头文件是宿主桥接的编译
 //! 契约，符号漂移即宿主构建失败。JNI 符号面（android 目标）不在本门，
@@ -228,19 +226,73 @@ fn ffi_query_faces_match_frozen_contract() {
     }
     server.join().expect("echo 线程");
 
-    let page = unsafe { read_json(rillane_ffi::rillane_ffi_flows_json(h, 0, 50)) };
-    let items = page["items"].as_array().cloned().expect("items 数组");
-    assert!(
-        items.is_empty(),
-        "SessionTracer 接线落地前 flows 恒空（诚实空态）；此处非空说明接线已落地\
-         ——须按 face 文件 pending_live_trace_wiring 标记转正 flows_item/flow_found 活面取证"
+    // 流量收口在独立任务：有界重试等轨迹入采集器并到终态（2s 内应就绪），
+    // 超时仍具名失败——不把「迟到」当「恒空」放行
+    let mut live_page = None;
+    for _ in 0..100 {
+        let page = unsafe { read_json(rillane_ffi::rillane_ffi_flows_json(h, 0, 50)) };
+        let items = page["items"].as_array().cloned().expect("items 数组");
+        if items
+            .first()
+            .map(|i| i["state"] == serde_json::json!("closed"))
+            .unwrap_or(false)
+        {
+            live_page = Some(page);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let page = live_page.expect(
+        "TCP 入口流接线后，真实流量必须产出轨迹并收口——恒 active/恒空说明接线回退或轨迹未准入",
     );
 
-    // -- 待接线面标记在场断言：摘标记 = 显式过门动作 --
-    for pending_id in ["flows_item", "flow_found"] {
-        assert_eq!(
-            face["faces"][pending_id]["verification"], "pending_live_trace_wiring",
-            "面 {pending_id} 标记状态变化须同步改本门（接线落地 → 活面取证替换）"
+    // -- flows_item 活面：真实 socks5 流条目（接管→计划→关闭） --
+    let first = &page["items"].as_array().expect("items 数组")[0];
+    assert_face(first, face_of(&face, "flows_item"), "flows_item");
+    assert_eq!(first["origin"], serde_json::json!("stream"), "TCP 流语义");
+    assert_eq!(
+        first["state"],
+        serde_json::json!("closed"),
+        "流量收口后已关闭"
+    );
+    assert_eq!(
+        first["last_code"],
+        serde_json::json!("session.closed"),
+        "正常收口码（失败应为 session.failed）"
+    );
+    assert!(
+        first["events"].as_u64().unwrap_or(0) >= 3,
+        "轨迹至少含 takeover/plan/closed 三事件：{first}"
+    );
+    assert_eq!(
+        first["generation"],
+        serde_json::json!("local"),
+        "构建期配置代际"
+    );
+
+    // -- flow_found 活面：按条目流 ID 取详情，事件序列与列表口径一致 --
+    let flow_id = CString::new(first["flow"].as_str().expect("flow id 字符串")).expect("ID");
+    let found = unsafe { read_json(rillane_ffi::rillane_ffi_flow_json(h, flow_id.as_ptr())) };
+    assert_face(&found, face_of(&face, "flow_found"), "flow_found");
+    assert_eq!(found["found"], serde_json::json!(true), "活面流必须命中");
+    let trace = &found["trace"];
+    assert_eq!(trace["closed"], serde_json::json!(true));
+    assert_eq!(
+        trace["events"].as_array().map(Vec::len),
+        first["events"].as_u64().map(|n| n as usize),
+        "详情事件数与列表摘要一致"
+    );
+    assert_eq!(
+        trace["events"][0]["code"],
+        serde_json::json!("session.takeover"),
+        "轨迹首事件为接管（采集器准入锚点）"
+    );
+
+    // -- 活面取证后的面标记：pending 标记不得回潮（摘除是显式动作） --
+    for live_id in ["flows_item", "flow_found"] {
+        assert_ne!(
+            face["faces"][live_id]["verification"], "pending_live_trace_wiring",
+            "面 {live_id} 已活面取证（RIL-083 第二段）——pending 标记不得回潮"
         );
     }
 

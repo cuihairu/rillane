@@ -92,7 +92,8 @@ fn readme_quickstart_faces_exist() {
     if let Some(section) = help.split("Commands:\n").nth(1) {
         let section = section.split("\n\n").next().expect("Commands 段未闭合");
         for line in section.lines() {
-            if let Some(name) = line.trim_start().split_whitespace().next() {
+            // split_whitespace 已忽略前导空白（trim_start 冗余，clippy 1.100 同指）
+            if let Some(name) = line.split_whitespace().next() {
                 if name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
                     real_cmds.insert(name.to_string());
                 }

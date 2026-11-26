@@ -5679,7 +5679,8 @@ mod tests {
     }
 
     /// RIL-060：/trace/flows 空态诚实——schema_version=1 + total_matching=0
-    /// + 空 items（数据路径未接线 → 无流可报，不造数）
+    /// + 空 items（无流量 → 无迹可报，不造数；TCP 入口流接线后凡有流量
+    /// 即非空，活面取证归 ffi contract_query_face）
     #[tokio::test]
     async fn trace_flows_empty_state_is_versioned_and_honest() {
         let runtime = build_runtime(false, false).await;
