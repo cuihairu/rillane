@@ -11,6 +11,7 @@
 | RIL-033 Windows 接管/旁路 | [ril-033-windows-takeover](../../acceptance-evidence/ril-033-windows-takeover) | 真机 | `imac` 机批次已验；浏览器/游戏流与 DNS 劫持端到端为具名缺口 |
 | RIL-034 Windows 进程归属 | [ril-034-windows-owner](../../acceptance-evidence/ril-034-windows-owner) | 真机 | `imac` 实机已验 |
 | RIL-035 Windows 服务与退出恢复 | [ril-035-windows-service-recovery](../../acceptance-evidence/ril-035-windows-service-recovery) | 真机 | 已验；休眠恢复为具名缺口 |
+| RIL-043 移动 FFI JNI 符号面 | [ril-043-jni-symbol-face](../../acceptance-evidence/ril-043-jni-symbol-face) · [中文](../../acceptance-evidence/ril-043-jni-symbol-face.zh) | 本地账本 | Kotlin↔Rust 符号恰等已钉；真机批次未勾 |
 | RIL-084 六平台构建产物矩阵 | [ril-084-artifact-matrix](../../acceptance-evidence/ril-084-artifact-matrix) · [中文](../../acceptance-evidence/ril-084-artifact-matrix.zh) | 本地账本 | 产物面对齐；真机/签名验收未勾 |
 | RIL-085 三桌面进程端到端条款矩阵 | [ril-085-desktop-e2e-matrix](../../acceptance-evidence/ril-085-desktop-e2e-matrix) · [中文](../../acceptance-evidence/ril-085-desktop-e2e-matrix.zh) | 本地账本 | 条款×平台账本；浏览器/两款游戏分组轨迹未跑 |
 | RIL-086 六平台并行场景矩阵 | [ril-086-parallel-scenario-matrix](../../acceptance-evidence/ril-086-parallel-scenario-matrix) · [中文](../../acceptance-evidence/ril-086-parallel-scenario-matrix.zh) | 本地账本 | 条款×平台账本；真实网站/QUIC 与游戏并行矩阵未跑 |

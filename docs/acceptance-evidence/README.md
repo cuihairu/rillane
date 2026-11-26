@@ -11,6 +11,7 @@ Evidence documents backing `todo.md` acceptance items. Two honest kinds live her
 | RIL-033 Windows takeover/bypass | [ril-033-windows-takeover](./ril-033-windows-takeover) (zh) | Device | Machine batch verified on `imac`; browser/game flows and DNS hijack end-to-end are named gaps |
 | RIL-034 Windows process owner | [ril-034-windows-owner](./ril-034-windows-owner) (zh) | Device | Verified on `imac` |
 | RIL-035 Windows service & exit recovery | [ril-035-windows-service-recovery](./ril-035-windows-service-recovery) (zh) | Device | Verified; suspend/resume is a named gap |
+| RIL-043 mobile FFI JNI symbol face | [ril-043-jni-symbol-face](./ril-043-jni-symbol-face) · [zh](./ril-043-jni-symbol-face.zh) | Local ledger | Kotlin↔Rust symbol parity pinned; device batches unchecked |
 | RIL-084 six-platform artifact matrix | [ril-084-artifact-matrix](./ril-084-artifact-matrix) · [zh](./ril-084-artifact-matrix.zh) | Local ledger | Artifact face aligned; device/signing acceptance unchecked |
 | RIL-085 three-desktop e2e clause matrix | [ril-085-desktop-e2e-matrix](./ril-085-desktop-e2e-matrix) · [zh](./ril-085-desktop-e2e-matrix.zh) | Local ledger | Clause×platform ledger; browser/game grouped traces not run |
 | RIL-086 six-platform parallel scenario matrix | [ril-086-parallel-scenario-matrix](./ril-086-parallel-scenario-matrix) · [zh](./ril-086-parallel-scenario-matrix.zh) | Local ledger | Clause×platform ledger; real website/QUIC+game parallel matrix not run |
