@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "purpose": "RIL-082 移动/路由器诊断接入本地可核验账本：VPN 扩展无默认 MCP 服务/手机入站端口；FFI 导出面恰等；授权宿主 IPC/脱敏导出与桌面桥接说明在场；导出范围受控；OpenWrt 资源受限档可选且无 MCP 打包。",
+  "ffi": {
+    "crate": "crates/rillane-ffi",
+    "manifest": "crates/rillane-ffi/Cargo.toml",
+    "header": "crates/rillane-ffi/include/rillane_ffi.h",
+    "lib": "crates/rillane-ffi/src/lib.rs",
+    "kotlin_face": "platforms/android/app/src/main/java/com/rillane/rillane/RillaneFfi.kt",
+    "exports": [
+      "rillane_ffi_version",
+      "rillane_ffi_last_error",
+      "rillane_ffi_start",
+      "rillane_ffi_stop",
+      "rillane_ffi_is_running",
+      "rillane_ffi_stats_json",
+      "rillane_ffi_routing_json",
+      "rillane_ffi_nodes_json",
+      "rillane_ffi_dns_stats_json",
+      "rillane_ffi_dns_resolvers_json",
+      "rillane_ffi_flows_json",
+      "rillane_ffi_flow_json",
+      "rillane_ffi_tun_start",
+      "rillane_ffi_tun_stop",
+      "rillane_ffi_free_string"
+    ],
+    "features": {
+      "default": ["full"],
+      "full": ["rillane-runtime/plugins"],
+      "mobile": ["rillane-runtime/small"]
+    },
+    "forbidden_tokens": ["mcp", "rmcp", "jsonrpc", "ServerSocket", "TcpListener", "UdpSocket", "DatagramSocket", "NWListener"]
+  },
+  "hosts": [
+    {
+      "id": "android",
+      "sources": [
+        "platforms/android/app/src/main/AndroidManifest.xml",
+        "platforms/android/app/src/main/java/com/rillane/rillane"
+      ],
+      "configs": ["platforms/android/app/src/main/assets/rillane.yaml"],
+      "read_only_queries": ["flowsJson", "flowJson", "statsJson", "nodesJson", "dnsStatsJson", "dnsResolversJson", "routingJson"],
+      "service": {
+        "name": ".RillaneVpnService",
+        "permission": "android.permission.BIND_VPN_SERVICE",
+        "exported": false
+      },
+      "doc": "platforms/android/README.md"
+    },
+    {
+      "id": "ios",
+      "sources": ["platforms/ios/RillanePacketTunnelProvider.swift"],
+      "configs": ["platforms/ios/RillanePacketTunnelProvider.swift"],
+      "read_only_queries": [],
+      "service": {
+        "name": "NEPacketTunnelProvider",
+        "description": "App Group 配置 + FFI 句柄；无宿主入站监听、无 MCP 服务"
+      },
+      "doc": "platforms/ios/README.md"
+    },
+    {
+      "id": "openwrt",
+      "sources": ["platforms/openwrt/init.d/rillane"],
+      "configs": ["platforms/openwrt/rillane.yaml.example"],
+      "read_only_queries": [],
+      "service": {
+        "name": "rillaned (procd)",
+        "description": "daemon 控制面原则上 loopback；socks 入口为可选 LAN 面，非 MCP/管理入站端口"
+      },
+      "doc": "platforms/openwrt/README.md",
+      "build_script": "platforms/openwrt/build.sh",
+      "small_profile": {
+        "env": "RILLANE_SMALL",
+        "enabled_value": "1",
+        "flag": "--no-default-features --features small",
+        "packages": ["rillaned", "rillanectl"],
+        "forbidden_package": "rillane-mcp"
+      },
+      "loopback_only_keys": ["control.api_bind", "network.dns.listen_address"],
+      "allowed_lan_bind_keys": ["ingress[].bind", "network.transparent.listen"]
+    }
+  ],
+  "export": {
+    "cli": "apps/rillanectl/src/main.rs",
+    "scopes": ["safe", "full", "raw"],
+    "default_scope": "safe",
+    "raw_flags": ["--scope raw", "--no-redact"],
+    "secret_keys": ["admin_token", "password", "private_key", "preshared_key", "token", "access_token", "refresh_token"],
+    "policy_markers": ["review-before-sharing", "do-not-upload", "manual only - rillanectl never uploads the bundle anywhere"],
+    "redaction_helpers": ["strip_json_url_secrets", "sanitize_diagnostic_log", "redact_config_by_extension", "redact_yaml_value", "redact_json_value"]
+  },
+  "desktop_bridge": {
+    "design": ["docs/design/debug-and-mcp.md", "docs/zh/design/debug-and-mcp.md"],
+    "evidence": [
+      "docs/acceptance-evidence/ril-082-mobile-diagnostic-bridge.md",
+      "docs/acceptance-evidence/ril-082-mobile-diagnostic-bridge.zh.md"
+    ],
+    "required_statements": [
+      "no default MCP service in VPN extension",
+      "no phone inbound admin port",
+      "authorized host IPC or redacted export",
+      "desktop adapter consumes exported views",
+      "raw export is local-only and never auto-uploaded"
+    ]
+  },
+  "verification": {
+    "kind": "local_ledger",
+    "device_batches_open": true,
+    "note": "本机仅钉源码/清单/文档结构事实；真机 consent、arm64/iOS NE、OpenWrt opkg/procd/kmod-tun 与签名验收仍开放。"
+  }
+}

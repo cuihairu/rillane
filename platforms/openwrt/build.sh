@@ -5,6 +5,8 @@
 #   platforms/openwrt/build.sh                 # 三目标全量（缺省矩阵）
 #   platforms/openwrt/build.sh aarch64-unknown-linux-musl   # 指定目标
 #   OUT_DIR=/tmp/rillane-ipk platforms/openwrt/build.sh        # 产物目录覆盖
+#   RILLANE_SMALL=1 platforms/openwrt/build.sh                 # 资源受限档（RIL-082：
+#                                                              # small = 无 WASM/JIT）
 #
 # 依赖：docker（cross 走容器内 C 工具链）、cross、rustup（目标 std 自动装）。
 # 产物：$OUT_DIR/rillane_<版本>_<openwrt架构>.ipk（含 rillaned + rillanectl + init.d +
@@ -23,6 +25,12 @@ TARGETS=(${@:-aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf x86_64-u
 OUT_DIR=${OUT_DIR:-dist/openwrt}
 PKG_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' apps/rillaned/Cargo.toml | head -1)"
 PKG_RELEASE=1
+# 资源受限适配器（RIL-082）：显式 opt-in 才裁剪 WASM/JIT。
+# 缺省保持 full 档，不改变既有产物契约；small 档已本机 cargo check 验证。
+CARGO_FEATURE_ARGS=()
+if [ "${RILLANE_SMALL:-0}" = "1" ]; then
+    CARGO_FEATURE_ARGS=(--no-default-features --features small)
+fi
 
 # rust triple → OpenWrt DISTRIB_ARCH 映射（ABI 族代表值；实际设备按
 # /etc/openwrt_release 的 DISTRIB_ARCH 用 ROUTER_ARCH_<triple 大写下划线>
@@ -48,7 +56,8 @@ for target in "${TARGETS[@]}"; do
     # 交叉产物统一落仓库 ./target（环境 CARGO_TARGET_DIR 剔除——cross 需
     # workspace 内挂载点，外部路径会脱挂）
     env -u CARGO_TARGET_DIR CARGO_PROFILE_RELEASE_STRIP=symbols \
-        cross build --release --target "$target" -p rillaned -p rillanectl 1>&2
+        cross build --release --target "$target" "${CARGO_FEATURE_ARGS[@]}" \
+        -p rillaned -p rillanectl 1>&2
 
     bdir="target/$target/release"
     for bin in rillaned rillanectl; do
