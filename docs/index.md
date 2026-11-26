@@ -28,4 +28,4 @@ features:
     details: Separate Explain, Trace and Probe; MCP disabled by default, reads before controlled writes.
 ---
 
-Connection diagnostics follow real lists → per-flow timelines → rule explanation → active probes. See the [v1 diagnostic specification](design/debug-and-mcp.md). These remain design targets.
+Connection diagnostics follow real lists → per-flow timelines → rule explanation → active probes. The [v1 diagnostic specification](design/debug-and-mcp.md) remains the target baseline; the current CLI faces and optional MCP adapter are documented in the [CLI reference](cli.md) and [install/recover/debug examples](usage-bridge.md).

@@ -20,9 +20,9 @@ Old designs, roadmaps and audits are removed from active documentation; use Git 
 
 ## Implementation and usage
 
-Existing protocols, Linux TUN, presets, subscriptions and aggregates are reusable. Clash/Mihomo compatibility is partial; full platform integration, concurrent scenario policies, flow diagnostics and MCP still require implementation.
+Existing protocols, Linux TUN, presets, subscriptions and aggregates are reusable. Clash/Mihomo compatibility is partial; full platform integration and concurrent scenario policies remain targets. The optional MCP adapter and the Explain/Trace/Probe commands are implemented, with their own honest acceptance boundaries.
 
-[Implementation](docs/architecture.md) · [Configuration](docs/config.md) · [CLI](docs/cli.md) · [Protocols](docs/PROTOCOLS.md) · [Subscriptions](docs/subscription.md) · [Capture](docs/networking.md) · [Optional Mesh](docs/mesh.md)
+[Implementation](docs/architecture.md) · [Configuration](docs/config.md) · [CLI](docs/cli.md) · [Install, recover and debug](docs/usage-bridge.md) · [Protocols](docs/PROTOCOLS.md) · [Subscriptions](docs/subscription.md) · [Capture](docs/networking.md) · [Optional Mesh](docs/mesh.md)
 
 ```bash
 cargo run -p rillaned

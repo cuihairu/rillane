@@ -1,12 +1,13 @@
 # rillanectl CLI reference
 
-This page describes existing commands; use `rillanectl <command> --help` for current flags/defaults. See [subscriptions](subscription.md), [Mesh](mesh.md) and [capture](networking.md). v1 Explain/Trace/Probe/MCP are [proposed](design/debug-and-mcp.md), not current commands.
+This page describes existing commands; use `rillanectl <command> --help` for current flags/defaults. See [subscriptions](subscription.md), [Mesh](mesh.md), [capture](networking.md), and [install/recovery, Debug and MCP examples](usage-bridge.md). Explain, Trace and Probe are current commands; the [v1 design](design/debug-and-mcp.md) remains the target baseline, and platform acceptance is still tracked separately.
 
 ## Global options
 
 | Option | Description |
 |------|------|
 | `-c, --config <CONFIG>` | config file path (default `config/rillane.yaml`); control-plane commands use it to read `control.api_bind` / `control.admin_token` |
+| `-h, --help` | print command help (exit 0) |
 | `-V, --version` | print version |
 
 ## Data sources

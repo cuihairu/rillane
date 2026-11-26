@@ -20,9 +20,9 @@ Rillane 是 Rust 代理内核项目。当前设计基线为 **v1**，目标是�
 
 ## 当前实现与使用
 
-现有代理协议、Linux TUN、配置预设、订阅和统计接口可以复用。Clash/Mihomo 目前部分兼容；跨平台完整代理、并列场景策略、逐流诊断和 MCP 仍有待实施。
+现有代理协议、Linux TUN、配置预设、订阅和统计接口可以复用。Clash/Mihomo 目前部分兼容；跨平台完整代理和并列场景策略仍是目标。可选 MCP 适配器与 Explain/Trace/Probe 命令已实现，并带有各自的诚实验收边界。
 
-[当前实现](docs/zh/architecture.md) · [配置](docs/zh/config.md) · [CLI](docs/zh/cli.md) · [协议](docs/zh/PROTOCOLS.md) · [订阅](docs/zh/subscription.md) · [网络接管](docs/zh/networking.md) · [可选 Mesh](docs/zh/mesh.md)
+[当前实现](docs/zh/architecture.md) · [配置](docs/zh/config.md) · [CLI](docs/zh/cli.md) · [安装、恢复与 Debug](docs/zh/usage-bridge.md) · [协议](docs/zh/PROTOCOLS.md) · [订阅](docs/zh/subscription.md) · [网络接管](docs/zh/networking.md) · [可选 Mesh](docs/zh/mesh.md)
 
 ```bash
 cargo run -p rillaned

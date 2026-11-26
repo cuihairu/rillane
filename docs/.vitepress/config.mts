@@ -19,6 +19,7 @@ function locale(zh: boolean): DefaultTheme.Config {
     page(zh ? '平台支持与交付状态' : 'Platform support & delivery', '/platform-support'),
     page(zh ? '配置参考' : 'Configuration reference', '/config'),
     page(zh ? 'CLI 参考' : 'CLI reference', '/cli'),
+    page(zh ? '安装、恢复与 Debug 示例' : 'Install, recover and Debug', '/usage-bridge'),
     page(zh ? '协议支持' : 'Protocol support', '/PROTOCOLS'),
     page(zh ? '订阅指南' : 'Subscription guide', '/subscription'),
     page(zh ? '系统路由与网络接管' : 'Network capture and routing', '/networking'),

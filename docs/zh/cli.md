@@ -1,12 +1,13 @@
 # rillanectl CLI 参考
 
-本页只描述现有 CLI；旗标、默认值和可用命令以 `rillanectl <命令> --help` 为准。[订阅](subscription.md)、[Mesh](mesh.md)、[网络接管](networking.md)为现状参考。v1 的 Explain/Trace/Probe/MCP 仍是[目标设计](design/debug-and-mcp.md)，不能当成当前命令执行。
+本页只描述现有 CLI；旗标、默认值和可用命令以 `rillanectl <命令> --help` 为准。[订阅](subscription.md)、[Mesh](mesh.md)、[网络接管](networking.md)为现状参考，[安装/恢复、Debug 与 MCP 示例](usage-bridge.md)为配套操作页。Explain、Trace、Probe 已是当前命令；[v1 设计](design/debug-and-mcp.md)仍是目标基线，平台验收另行逐项跟踪。
 
 ## 全局选项
 
 | 选项 | 说明 |
 |------|------|
 | `-c, --config <CONFIG>` | 配置文件路径（缺省 `config/rillane.yaml`）；控制面命令用它读 `control.api_bind` / `control.admin_token` |
+| `-h, --help` | 打印命令帮助（退出码 0） |
 | `-V, --version` | 打印版本 |
 
 ## 取数口径
