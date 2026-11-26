@@ -387,9 +387,12 @@ async fn eof_closes_association_releasing_resources() {
     };
     let relay = udp_associate(&h, target.clone()).await;
     relay.send_to(&target, b"ping").await.expect("上行数据报");
+    // 活性断言（事件驱动回收必达），不是时延界——并行 workspace 全量下
+    // tokio 调度饥饿曾把 5s 打穿（2026-11-26，isolated 5/5 绿 0.23s）；
+    // 上界放宽到 30s，回收回归（永不回收）仍会被界抓到。
     wait_for(
         || h.table.snapshot().sessions_active == 1,
-        Duration::from_secs(5),
+        Duration::from_secs(30),
     )
     .await;
 
@@ -397,7 +400,7 @@ async fn eof_closes_association_releasing_resources() {
     drop(relay);
     wait_for(
         || h.table.snapshot().sessions_active == 0,
-        Duration::from_secs(5),
+        Duration::from_secs(30),
     )
     .await;
 }
