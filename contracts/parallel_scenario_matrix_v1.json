@@ -1,0 +1,271 @@
+{
+  "schema_version": 1,
+  "comment": "RIL-086 六平台并行场景验收账本：真实网站/QUIC 与游戏并行转发矩阵（条款 × 平台）。每格只允许四种诚实状态——verified_local（本机真实测试/真实应用流）/ verified_device（仓内真机证据）/ partial（仅协议/配置/调度面核验，无六平台并行真机运行）/ needs_device（平台真机未接入/签名面未过）。真实网站/QUIC 与游戏并行转发矩阵本身是六平台真机验收：Linux 仅协议/配置/调度单测面、Windows 仅 ping/curl 单应用面、其余平台真机未接入，全部如实记 needs_device/partial，绝不标 verified。契约门 crates/rillane-platform/tests/parallel_scenario_matrix_contract.rs 钉住封闭集合、证据文件存在、QUIC 与游戏并行矩阵不冒充实测、不支持项有明确拒绝/降级面。",
+  "platforms": [
+    "linux-systemd",
+    "openwrt",
+    "windows",
+    "macos-launchd",
+    "android",
+    "ios"
+  ],
+  "clauses": {
+    "dual_stack": {
+      "title": "IPv4/IPv6 双栈并行转发",
+      "cells": {
+        "linux-systemd": {
+          "status": "partial",
+          "evidence": ["crates/rillane-config/tests/network_block.rs"],
+          "note": "配置面（v6 路由/CIDR 校验）与 LinuxRouteTransaction v6 网关 %zone 解析有测试；六平台双栈并行转发真机矩阵未跑"
+        },
+        "openwrt": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "OpenWrt 真机未接入（RIL-042 未决）"
+        },
+        "windows": {
+          "status": "partial",
+          "evidence": ["docs/acceptance-evidence/ril-033-windows-takeover.md"],
+          "note": "Wintun 封环 + route print -6/netsh v6 快照形状真机解析过；主机无 v6 默认路由时 escape_bind_ip_v6=None 如实不猜；六平台双栈并行转发矩阵未跑"
+        },
+        "macos-launchd": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "mac 真机未接入（RIL-039/037/038 未决）"
+        },
+        "android": {
+          "status": "partial",
+          "evidence": ["docs/acceptance-evidence/ril-084-artifact-matrix.md"],
+          "note": "构建矩阵与 AVD 基础验收过（verified_emulator）；双栈并行转发真机面未跑"
+        },
+        "ios": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "iOS 签名开发者账号与设备未提供（RIL-049/047/094 未决）"
+        }
+      }
+    },
+    "dns": {
+      "title": "并行场景下的 DNS 解析/劫持面",
+      "cells": {
+        "linux-systemd": {
+          "status": "partial",
+          "evidence": ["crates/rillane-config/tests/dns_block.rs"],
+          "note": "DNS 上游/缓存配置校验与非法值拒绝有测试；运行时解析/劫持并行真机矩阵未跑"
+        },
+        "openwrt": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "OpenWrt 真机未接入（RIL-042 未决）"
+        },
+        "windows": {
+          "status": "partial",
+          "evidence": ["docs/acceptance-evidence/ril-033-windows-takeover.md"],
+          "note": "P3 旁路 UDP 真查询公网解析器 223.5.5.5 有应答（DNS/代理拨号不循环）；netsh dnsservers 劫持形状真机端到端未跑（改用户网络配置，留待独占时段）"
+        },
+        "macos-launchd": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "mac 真机未接入（RIL-039/037/038 未决）"
+        },
+        "android": {
+          "status": "partial",
+          "evidence": ["docs/acceptance-evidence/ril-084-artifact-matrix.md"],
+          "note": "构建矩阵过；DNS 并行真机面未跑"
+        },
+        "ios": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "iOS 签名开发者账号与设备未提供（RIL-049/047/094 未决）"
+        }
+      }
+    },
+    "mtu": {
+      "title": "MTU 分片/上限行为",
+      "cells": {
+        "linux-systemd": {
+          "status": "verified_local",
+          "evidence": [
+            "crates/rillane-core/tests/udp_egress_selection.rs",
+            "crates/rillane-protocols/tests/udp_egress.rs"
+          ],
+          "note": "WireGuard MTU 超限分类为 Timeout 且保留映射；wg connector 侧拦截超限包不发网络包（R8 丢弃）"
+        },
+        "openwrt": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "OpenWrt 真机未接入（RIL-042 未决）"
+        },
+        "windows": {
+          "status": "partial",
+          "evidence": ["docs/acceptance-evidence/ril-033-windows-takeover.md"],
+          "note": "Wintun 用户数据报分片/重组真机面未跑；构建矩阵过"
+        },
+        "macos-launchd": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "mac 真机未接入（RIL-039/037/038 未决）"
+        },
+        "android": {
+          "status": "partial",
+          "evidence": ["docs/acceptance-evidence/ril-084-artifact-matrix.md"],
+          "note": "构建矩阵过；MTU 真机面未跑"
+        },
+        "ios": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "iOS 签名开发者账号与设备未提供（RIL-049/047/094 未决）"
+        }
+      }
+    },
+    "network_change": {
+      "title": "切网事件与重放",
+      "cells": {
+        "linux-systemd": {
+          "status": "verified_local",
+          "evidence": ["crates/rillane-platform/src/network/recovery.rs"],
+          "note": "plan_for_event/handle_network_event：ConnectivityRestored/DefaultRouteChanged{Some} 幂等重放路由；Lost/SystemDnsChanged 不动系统态"
+        },
+        "openwrt": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "OpenWrt 真机未接入（RIL-042 未决）"
+        },
+        "windows": {
+          "status": "verified_device",
+          "evidence": ["docs/acceptance-evidence/ril-035-windows-service-recovery.md"],
+          "note": "P5：route delete → DefaultRouteChanged → reassert_routes 幂等重放 → 路由回位；真机实证"
+        },
+        "macos-launchd": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "mac 真机未接入（RIL-039/037/038 未决）"
+        },
+        "android": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "Android 切网服务面（RIL-046）未决"
+        },
+        "ios": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "iOS 签名开发者账号与设备未提供（RIL-049/047/094 未决）"
+        }
+      }
+    },
+    "exit_recovery": {
+      "title": "退出恢复与清理",
+      "cells": {
+        "linux-systemd": {
+          "status": "verified_local",
+          "evidence": [
+            "crates/rillane-platform/src/network/recovery.rs",
+            "crates/rillane-platform/tests/owner_linux_contract.rs"
+          ],
+          "note": "SIGTERM 优雅退出（runtime.stop TUN teardown/路由回滚）；CrashJournal 恢复后 pending 空、二次 recover 零动作（repeat_start_leaves_no_residue）；已关闭连接绝不返回 Known"
+        },
+        "openwrt": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "OpenWrt 真机未接入（RIL-042 未决）"
+        },
+        "windows": {
+          "status": "verified_device",
+          "evidence": ["docs/acceptance-evidence/ril-035-windows-service-recovery.md"],
+          "note": "P3 服务崩溃 → SCM 失败动作自动重启（不带参）→ SVC RECOVER 撤销崩溃前路由；P4/P7 停止/卸载清理幂等"
+        },
+        "macos-launchd": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "mac 真机未接入（RIL-039/037/038 未决）"
+        },
+        "android": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "Android 服务生命周期（RIL-046）未决"
+        },
+        "ios": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "iOS 签名开发者账号与设备未提供（RIL-049/047/094 未决）"
+        }
+      }
+    },
+    "real_site_quic_game_parallel": {
+      "title": "真实网站/QUIC 与游戏并行转发矩阵（核心场景）",
+      "cells": {
+        "linux-systemd": {
+          "status": "partial",
+          "evidence": [
+            "crates/rillane-core/src/schedule.rs",
+            "crates/rillane-protocols/tests/tuic_contract.rs"
+          ],
+          "note": "协议面（TUIC 会话复用单 QUIC 连接载多流、8KB 分片）+ 调度面（持续下载时游戏小包 0ms 尾延迟、网页不饥饿）单测过；**真实网站/QUIC 与游戏并行转发真机矩阵未跑**"
+        },
+        "openwrt": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "OpenWrt 真机未接入（RIL-042 未决）"
+        },
+        "windows": {
+          "status": "partial",
+          "evidence": ["docs/acceptance-evidence/ril-033-windows-takeover.md"],
+          "note": "ping.exe（UDP/ICMP 面）+ curl.exe（TCP HTTP 面）单应用入环实测；**真实网站/QUIC 与游戏并行转发矩阵未跑**"
+        },
+        "macos-launchd": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "mac 真机未接入（RIL-039/037/038 未决）"
+        },
+        "android": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "移动真机面未接入（RIL-046 未决）"
+        },
+        "ios": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "iOS 签名开发者账号与设备未提供（RIL-049/047/094 未决）"
+        }
+      }
+    },
+    "unsupported_reject_or_degrade": {
+      "title": "不支持项明确拒绝或按配置降级",
+      "cells": {
+        "linux-systemd": {
+          "status": "verified_local",
+          "evidence": [
+            "crates/rillane-core/tests/underlay_contract.rs",
+            "crates/rillane-core/tests/udp_egress_selection.rs"
+          ],
+          "note": "QUIC/WireGuard 原生承载不被强制 wrap/转栈（非法排列装配期拒绝）；MTU 超限映射保留待空闲回收；对端无 QUIC 数据报声明拒绝并点名"
+        },
+        "openwrt": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "OpenWrt 真机未接入（RIL-042 未决）"
+        },
+        "windows": {
+          "status": "verified_device",
+          "evidence": ["docs/acceptance-evidence/ril-034-windows-owner.md"],
+          "note": "权限不足（OpenProcess err=5 → 身份 None）、未知原因 NotFound、已关闭连接不返回 Known——真机拒绝面实证"
+        },
+        "macos-launchd": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "mac 真机未接入（RIL-039/037/038 未决）"
+        },
+        "android": {
+          "status": "partial",
+          "evidence": ["docs/acceptance-evidence/ril-084-artifact-matrix.md"],
+          "note": "构建矩阵过；不支持项真机拒绝/降级面未跑"
+        },
+        "ios": {
+          "status": "needs_device",
+          "evidence": [],
+          "note": "iOS 签名开发者账号与设备未提供（RIL-049/047/094 未决）"
+        }
+      }
+    }
+  }
+}
