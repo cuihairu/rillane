@@ -4642,6 +4642,62 @@ mod tests {
         String::from_utf8(body.to_vec()).unwrap()
     }
 
+    /// RIL-083 控制面 DTO 契约（contracts/schema_v1/control_face_v1.json）：
+    /// /runtime/stats、/dns/stats、/dns/resolvers 的键集 **恰等** 钉死——
+    /// 跨语言消费者（FFI 移动端 / MCP 工具 / 脚本）按字段名消费，加键减键
+    /// 都要求显式过门（README 的 schema_v2 目录事务）。shared_stats_subset
+    /// 是与 FFI stats_json 的公共必需子集——任一面收窄子集即失败（两面非
+    /// 全等，差异键如实记录于 README）。
+    fn assert_exact_keys(v: &serde_json::Value, face: &serde_json::Value, face_id: &str) {
+        let declared = face["keys"].as_object().expect("keys 对象");
+        let obj = v
+            .as_object()
+            .unwrap_or_else(|| panic!("面 {face_id}：实际投影不是对象"));
+        let declared_keys: std::collections::BTreeSet<&str> =
+            declared.keys().map(String::as_str).collect();
+        let actual_keys: std::collections::BTreeSet<&str> =
+            obj.keys().map(String::as_str).collect();
+        let missing: Vec<&str> = declared_keys.difference(&actual_keys).copied().collect();
+        let extra: Vec<&str> = actual_keys.difference(&declared_keys).copied().collect();
+        assert!(
+            missing.is_empty(),
+            "控制面漂移 @ {face_id}：缺键 {missing:?}（减键=破坏兼容，须过 schema_v2 事务）"
+        );
+        assert!(
+            extra.is_empty(),
+            "控制面漂移 @ {face_id}：多键 {extra:?}（加键=冻结形变更，须更新 face 并具名理由）"
+        );
+    }
+
+    #[tokio::test]
+    async fn control_dtos_match_frozen_contract_faces() {
+        let face_raw = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contracts/schema_v1/control_face_v1.json"),
+        )
+        .expect("读取 control_face_v1.json");
+        let face: serde_json::Value =
+            serde_json::from_str(&face_raw).expect("control_face_v1.json 解析");
+        let cp = build_runtime(false, false).await;
+        let cp = ControlPlane::new(cp, None, true);
+
+        let stats = get_body(&cp, "/runtime/stats").await;
+        let stats: serde_json::Value = serde_json::from_str(&stats).expect("JSON");
+        assert_exact_keys(&stats, &face["faces"]["runtime_stats"], "runtime_stats");
+
+        let dns = get_body(&cp, "/dns/stats").await;
+        let dns: serde_json::Value = serde_json::from_str(&dns).expect("JSON");
+        assert_exact_keys(&dns, &face["faces"]["dns_stats_absent"], "dns_stats_absent");
+
+        let resolvers = get_body(&cp, "/dns/resolvers").await;
+        let resolvers: serde_json::Value = serde_json::from_str(&resolvers).expect("JSON");
+        assert_exact_keys(
+            &resolvers,
+            &face["faces"]["dns_resolvers_absent"],
+            "dns_resolvers_absent",
+        );
+    }
+
     /// G2-14 Clash API 只读兼容子集：`/proxies` 返回出口映射、
     /// `/connections` 返回连接表、`/traffic` 返回全局 up/down。
     #[tokio::test]

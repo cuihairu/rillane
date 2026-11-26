@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "comment": "RIL-083 rillane-ffi 查询面 exact 面（RIL-150 冻结形）：移动端脚本按字段名消费，键集恰等。错误信封（query.page.invalid / flow 缺席）一并钉死。stats_json 与控制面 /runtime/stats 的公共子集见 control_face_v1.json shared_stats_subset。",
+  "faces": {
+    "stats_json": {
+      "mode": "exact",
+      "symbol": "rillane_ffi_stats_json",
+      "keys": {
+        "uptime_seconds": "number",
+        "total_connections": "number",
+        "active_connections": "number",
+        "total_bytes_transferred": "number",
+        "bytes_uploaded": "number",
+        "bytes_downloaded": "number",
+        "error_count": "number",
+        "is_running": "boolean",
+        "tun_fd": "number"
+      }
+    },
+    "routing_json": {
+      "mode": "exact",
+      "symbol": "rillane_ffi_routing_json",
+      "keys": {
+        "schema_version": "number",
+        "mode": "string",
+        "default_node": "string",
+        "global_node": "null",
+        "direct_node": "null",
+        "groups": "array",
+        "rules_count": "number"
+      }
+    },
+    "nodes_json": {
+      "mode": "exact",
+      "symbol": "rillane_ffi_nodes_json",
+      "keys": {
+        "schema_version": "number",
+        "groups": "array",
+        "egress": "array",
+        "subscriptions": "array"
+      }
+    },
+    "dns_stats_json": {
+      "mode": "exact",
+      "symbol": "rillane_ffi_dns_stats_json",
+      "keys": {
+        "schema_version": "number",
+        "enabled": "boolean",
+        "listen": "null",
+        "total_queries": "number",
+        "cache_hits": "number",
+        "cache_misses": "number",
+        "cache_hit_rate": "number",
+        "upstream_failures": "number",
+        "pollution_suspected": "number",
+        "domestic_queries": "number",
+        "trusted_queries": "number"
+      }
+    },
+    "dns_resolvers_json": {
+      "mode": "exact",
+      "symbol": "rillane_ffi_dns_resolvers_json",
+      "keys": {
+        "schema_version": "number",
+        "enabled": "boolean",
+        "listen": "null",
+        "domestic": "array",
+        "trusted": "array",
+        "bootstrap": "array",
+        "bootstrap_mode": "string",
+        "rules": "number",
+        "default_group": "string",
+        "anti_poison": "string",
+        "timeout_ms": "number",
+        "retries": "number",
+        "cache_enabled": "boolean",
+        "tls_skip_verify": "boolean",
+        "egress_mark": "number",
+        "udp_egress_marked": "boolean",
+        "dot_egress_marked": "boolean",
+        "doh_egress_marked": "boolean"
+      }
+    },
+    "flows_envelope": {
+      "mode": "exact",
+      "symbol": "rillane_ffi_flows_json",
+      "keys": {
+        "schema_version": "number",
+        "total_matching": "number",
+        "offset": "number",
+        "limit": "number",
+        "items": "array"
+      },
+      "note": "接线前恒空 items——本面连同「真实流量后仍空」的诚实空态一并钉死"
+    },
+    "flows_item": {
+      "mode": "exact",
+      "path": "flows.items[*]（接线后活面取证）",
+      "keys": {
+        "flow": "string",
+        "origin": "string",
+        "generation": "string",
+        "state": "string",
+        "events": "number",
+        "first_wall_ms": "number",
+        "last_code": "string"
+      },
+      "verification": "pending_live_trace_wiring",
+      "note": "会话执行面 SessionTracer 接线随数据面装配推进（runtime_builder.rs 1222 注记）——此前 /trace/flows 恒空属诚实空态；接线落地批次须活面取证并摘除本标记"
+    },
+    "flows_invalid_page": {
+      "mode": "exact",
+      "path": "flows(limit=0)",
+      "keys": {
+        "schema_version": "number",
+        "error": "string"
+      }
+    },
+    "flow_found": {
+      "mode": "exact",
+      "symbol": "rillane_ffi_flow_json",
+      "keys": {
+        "schema_version": "number",
+        "found": "boolean",
+        "trace": "object",
+        "absence": "null"
+      },
+      "verification": "pending_live_trace_wiring",
+      "note": "found 形需采集器内有迹；接线前 flow 详情只可活面取证缺席形（flow_absent）"
+    },
+    "flow_absent": {
+      "mode": "exact",
+      "path": "flow(未知 ID)",
+      "keys": {
+        "schema_version": "number",
+        "found": "boolean",
+        "trace": "null",
+        "absence": "object"
+      }
+    },
+    "flow_absence_body": {
+      "mode": "subset",
+      "path": "flow.absence",
+      "keys": {
+        "code": "string",
+        "note": "string"
+      }
+    }
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "comment": "RIL-083 rillaned 控制面 DTO exact 面（最小 runtime、无 DNS/mesh 装配的缺席形态——键集与装配态同形）。shared_stats_subset 是 /runtime/stats 与 FFI stats_json 的公共必需子集：任一面收窄该子集即失败（两面非全等——差异键如实记录于 README）。",
+  "faces": {
+    "runtime_stats": {
+      "mode": "exact",
+      "path": "/runtime/stats",
+      "keys": {
+        "uptime_seconds": "number",
+        "total_connections": "number",
+        "active_connections": "number",
+        "total_bytes_transferred": "number",
+        "bytes_uploaded": "number",
+        "bytes_downloaded": "number",
+        "mesh_nodes": "number",
+        "mesh_sessions": "number",
+        "network_interfaces": "number",
+        "subscription_nodes": "number",
+        "error_count": "number",
+        "last_updated_ago_seconds": "number"
+      }
+    },
+    "dns_stats_absent": {
+      "mode": "exact",
+      "path": "/dns/stats",
+      "keys": {
+        "enabled": "boolean",
+        "listen": "null",
+        "total_queries": "number",
+        "cache_hits": "number",
+        "cache_misses": "number",
+        "cache_hit_rate": "number",
+        "upstream_failures": "number",
+        "pollution_suspected": "number",
+        "domestic_queries": "number",
+        "trusted_queries": "number"
+      }
+    },
+    "dns_resolvers_absent": {
+      "mode": "exact",
+      "path": "/dns/resolvers",
+      "keys": {
+        "enabled": "boolean",
+        "listen": "null",
+        "domestic": "array",
+        "trusted": "array",
+        "bootstrap": "array",
+        "bootstrap_mode": "string",
+        "rules": "number",
+        "default_group": "string",
+        "anti_poison": "string",
+        "timeout_ms": "number",
+        "retries": "number",
+        "cache_enabled": "boolean",
+        "tls_skip_verify": "boolean",
+        "egress_mark": "number",
+        "udp_egress_marked": "boolean",
+        "dot_egress_marked": "boolean",
+        "doh_egress_marked": "boolean"
+      }
+    },
+    "shared_stats_subset": {
+      "mode": "subset",
+      "path": "⊆ /runtime/stats 且 ⊆ FFI stats_json",
+      "keys": {
+        "uptime_seconds": "number",
+        "total_connections": "number",
+        "active_connections": "number",
+        "total_bytes_transferred": "number",
+        "bytes_uploaded": "number",
+        "bytes_downloaded": "number",
+        "error_count": "number"
+      }
+    }
+  }
+}

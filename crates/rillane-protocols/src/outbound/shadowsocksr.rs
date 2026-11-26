@@ -1368,7 +1368,11 @@ mod tests {
         let head = String::from_utf8_lossy(&out);
         assert!(head.starts_with("GET /%"), "GET /%HH 起手");
         assert!(head.contains(" HTTP/1.1\r\nHost: 1.2.3.4:8388\r\n"));
-        assert!(head.contains("User-Agent: Mozilla/5.0"));
+        // UA 从 USER_AGENTS 随机取一（含一条 Mozilla/4.0）——断言「取了一
+        // 条固定列表里的 UA」，不写死具体版本，否则 1/12 概率 flaky。
+        assert!(USER_AGENTS
+            .iter()
+            .any(|ua| head.contains(&format!("User-Agent: {ua}\r\n"))));
         // 找到 \r\n\r\n，其后为原始剩余字节
         let pos = find_subslice(&out, b"\r\n\r\n").expect("头完整");
         assert_eq!(&out[pos + 4..], &wire[headlen_of(&out, &wire, 16, 7)..]);

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "comment": "RIL-083 诊断事件冻结形（RIL-051 schema 线格式，RIL-150 抽取共享发射器）：exact 面——键集恰等。控制面 /trace/* 与 FFI 查询共享同一发射器，本面是其字段真源。schema_version 升版 = 整库复制 schema_v2 事务，见 README。",
+  "faces": {
+    "trace_envelope": {
+      "mode": "exact",
+      "keys": {
+        "flow": "string",
+        "origin": "string",
+        "generation": "string",
+        "closed": "boolean",
+        "events": "array"
+      }
+    },
+    "trace_event": {
+      "mode": "exact",
+      "keys": {
+        "seq": "number",
+        "stage": "string",
+        "attempt": "number|null",
+        "code": "string",
+        "evidence": "string",
+        "monotonic_ms": "number",
+        "wall_ms": "number",
+        "detail": "string"
+      }
+    },
+    "collector_stats": {
+      "mode": "exact",
+      "keys": {
+        "traces_admitted": "number",
+        "traces_sampled_out": "number",
+        "flows_dropped_active_limit": "number",
+        "events_dropped_per_flow": "number",
+        "traces_dropped_overflow": "number",
+        "events_dropped_overflow": "number",
+        "traces_expired": "number",
+        "closed_pending": "number",
+        "active_traces": "number"
+      }
+    }
+  }
+}

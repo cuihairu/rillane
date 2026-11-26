@@ -1,0 +1,27 @@
+# RIL-083 契约样本：稳定核心块的最小合法配置。
+# 本样本只使用既有核心面（control/telemetry/ingress/egress/routing），
+# 不消费任何后期可选块——它是「老配置仍可解析」的活样本：
+# ir_face_v1.json 以 subset 语义钉住其 IR 投影必需键。
+control:
+  api_bind: 127.0.0.1:27995
+  admin_token: contract-sample-token
+telemetry:
+  log_level: warn
+  enable_metrics: false
+  enable_tracing: false
+ingress:
+  - name: socks-in
+    type: socks5
+    bind: 127.0.0.1:27590
+egress:
+  - name: direct-main
+    type: direct
+routing:
+  default_node: direct-main
+  groups: []
+  rules:
+    - name: contract-sample-direct
+      matches:
+        - type: domain_suffix
+          values: ["example.org"]
+      target: direct-main

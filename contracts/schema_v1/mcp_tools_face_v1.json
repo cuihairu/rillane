@@ -1,0 +1,702 @@
+{
+  "schema_version": 1,
+  "tools": [
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": true
+      },
+      "description": "运行时总览（采集器/出口池/追踪开关等计数快照，脱敏读）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "runtime_stats",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Read",
+      "title": "Runtime overview"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": true
+      },
+      "description": "组实时质量（成员数据源/p95/SLO 门控/当前选中端点，脱敏读）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "routing_quality",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Read",
+      "title": "Group quality"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": true
+      },
+      "description": "活动/近期连接分页列表（匹配总数诚实、近期优先；摘要脱敏）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "origin": {
+            "enum": [
+              "stream",
+              "association"
+            ],
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "closed"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "flow_list",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Read",
+      "title": "List flows"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": true
+      },
+      "description": "单流完整轨迹或显式缺席（found:false + 稳定码——缺席是正常答复不是错误）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 256,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "flow_trace",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "DetailedIdentity",
+      "title": "Flow trace"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": true
+      },
+      "description": "流事件增量读取（from_seq 起的增量页；事件序号连续、证据类型保留）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "from_seq": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "flow_events",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "DetailedIdentity",
+      "title": "Flow events"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": true
+      },
+      "description": "流路径图 SVG（与 JSON 答复同一查询快照；正文是 image/svg+xml 文本）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 256,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "flow_svg",
+      "output_schema": null,
+      "scope": "DetailedIdentity",
+      "title": "Flow path SVG"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": true
+      },
+      "description": "纯路由推演（生产求值器 + 冻结快照——无 DNS/拨号/OS 查询，零副作用；证据缺口逐项列出，条件性结论不冒充确定）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "annotations": {
+            "additionalProperties": {
+              "maxLength": 256,
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "domain_source": {
+            "enum": [
+              "unknown",
+              "user_provided",
+              "dns_observed",
+              "sniffed"
+            ],
+            "type": "string"
+          },
+          "generation_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "host": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "ingress": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "port": {
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "process_name": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "process_path": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "proto": {
+            "enum": [
+              "tcp",
+              "udp",
+              "quic"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "port",
+          "proto"
+        ],
+        "type": "object"
+      },
+      "name": "explain",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Read",
+      "title": "Explain route"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": true
+      },
+      "description": "探测作业列表（限额 + 作业快照；纯读）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "probe_list",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Read",
+      "title": "List probes"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": false,
+        "open_world_hint": true,
+        "read_only_hint": false
+      },
+      "description": "发起探测作业（dns/connect/udp_echo；目标限服务端登记表——范围外以稳定码拒绝；唯一网络副作用入口，独立探测授权）",
+      "input_schema": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "host": {
+                "maxLength": 256,
+                "type": "string"
+              },
+              "kind": {
+                "const": "dns"
+              }
+            },
+            "required": [
+              "kind",
+              "host"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "addr": {
+                "maxLength": 64,
+                "type": "string"
+              },
+              "kind": {
+                "const": "connect"
+              }
+            },
+            "required": [
+              "kind",
+              "addr"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "addr": {
+                "maxLength": 64,
+                "type": "string"
+              },
+              "kind": {
+                "const": "udp_echo"
+              },
+              "payload_len": {
+                "maximum": 1500,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "addr",
+              "payload_len"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "name": "probe_submit",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Probe",
+      "title": "Run probe"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": false
+      },
+      "description": "取消探测作业（排队中立即终态、运行中协作取消；幂等）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "probe_cancel",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Probe",
+      "title": "Cancel probe"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": true
+      },
+      "description": "探测作业测量快照或显式缺席（测量只含执行器实际观测——无回应即 null，绝不造数）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "probe_result",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Read",
+      "title": "Probe result"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": true
+      },
+      "description": "配置补丁预检（只读投影：现役为基的规范化 diff/诊断/范围越界，秘密值脱敏；不落提案、不激活任何配置）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "patch": {
+            "type": "object"
+          },
+          "scope": {
+            "items": {
+              "maxLength": 16,
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "patch"
+        ],
+        "type": "object"
+      },
+      "name": "validate_config",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Read",
+      "title": "Validate config change"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": false,
+        "open_world_hint": false,
+        "read_only_hint": false
+      },
+      "description": "登记配置变更提案（返回服务端提案 ID/基础代际/有效期与提案期预检 diff 与限制；批准与应用须操作员另行完成——本工具不激活任何配置）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "patch": {
+            "type": "object"
+          },
+          "scope": {
+            "items": {
+              "maxLength": 16,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ttl_ms": {
+            "maximum": 86400000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "patch"
+        ],
+        "type": "object"
+      },
+      "name": "preview_config_change",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Write",
+      "title": "Propose config change"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": false
+      },
+      "description": "应用配置变更提案（消费操作员已签发的批准凭证——本工具不签发凭证；幂等：同参数重试领同一回执；版本冲突/过期/已核销以服务端稳定码拒绝）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "proposal_id": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposal_id",
+          "approval_id"
+        ],
+        "type": "object"
+      },
+      "name": "apply_config_change",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Write",
+      "title": "Apply config change"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": false
+      },
+      "description": "按回执回滚配置（两阶段：无凭证参数时登记回滚提案并返回待批准的提案 ID——须操作员经 CLI 批准；携凭证时执行回滚并给出排空计划与连接真相；盲覆盖防线在服务端——现役已被带外推进即拒）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "drain_deadline_ms": {
+            "maximum": 3600000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "proposal_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "target_key": {
+            "maxLength": 128,
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_key"
+        ],
+        "type": "object"
+      },
+      "name": "rollback_config",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Write",
+      "title": "Roll back config"
+    },
+    {
+      "annotations": {
+        "destructive_hint": false,
+        "idempotent_hint": true,
+        "open_world_hint": false,
+        "read_only_hint": true
+      },
+      "description": "配置事务回执链与对账摘要（seq 降序；回执面与现役代际的 reconcile 对账——只读审计）",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "config_audit",
+      "output_schema": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "type": "object"
+      },
+      "scope": "Read",
+      "title": "Config audit"
+    }
+  ]
+}

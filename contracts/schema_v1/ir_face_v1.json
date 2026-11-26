@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "comment": "RIL-083 IR 投影 subset 面：必需键 + serde_json 类型。实际面多出键不失败（配置增量演进零差异纪律）；缺键 / 改名 / 类型漂移在测试门具名失败。类型词表：object|array|string|number|boolean|null。",
+  "faces": {
+    "ir_root": {
+      "mode": "subset",
+      "path": "$",
+      "keys": {
+        "control": "object",
+        "telemetry": "object",
+        "ingress": "array",
+        "egress": "array",
+        "routing": "object"
+      }
+    },
+    "control": {
+      "mode": "subset",
+      "path": "$.control",
+      "keys": {
+        "api_bind": "string",
+        "admin_token": "string"
+      }
+    },
+    "telemetry": {
+      "mode": "subset",
+      "path": "$.telemetry",
+      "keys": {
+        "log_level": "string",
+        "enable_metrics": "boolean",
+        "enable_tracing": "boolean"
+      }
+    },
+    "ingress_entry": {
+      "mode": "subset",
+      "path": "$.ingress[0]",
+      "keys": {
+        "name": "string",
+        "type": "string",
+        "bind": "string"
+      }
+    },
+    "egress_entry": {
+      "mode": "subset",
+      "path": "$.egress[0]",
+      "keys": {
+        "name": "string",
+        "type": "string"
+      }
+    },
+    "routing": {
+      "mode": "subset",
+      "path": "$.routing",
+      "keys": {
+        "mode": "string",
+        "default_node": "string",
+        "groups": "array",
+        "rules": "array"
+      }
+    },
+    "rule_entry": {
+      "mode": "subset",
+      "path": "$.routing.rules[0]",
+      "keys": {
+        "name": "string",
+        "matches": "array",
+        "target": "string"
+      }
+    },
+    "match_entry": {
+      "mode": "subset",
+      "path": "$.routing.rules[0].matches[0]",
+      "keys": {
+        "type": "string"
+      }
+    }
+  }
+}
