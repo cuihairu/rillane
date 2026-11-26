@@ -15,6 +15,8 @@ use std::time::Instant;
 const FLOWS: usize = 8_000;
 /// 查询面命中测量的取样数
 const LOOKUPS: usize = 2_000;
+/// 查询时延重复轮数（取各轮 p99 中位数，容忍并行 CI 单样本调度尖峰）
+const LOOKUP_ROUNDS: usize = 5;
 
 /// 驻留内存（KiB；linux /proc/self/statm，其余平台 0 = 不测）
 fn rss_kb() -> u64 {
@@ -102,20 +104,29 @@ fn overhead_modes_measured_and_within_conservative_bounds() {
     let full_admit_us = per_admit_ns.iter().sum::<u64>() as f64 / FLOWS as f64 / 1e3;
     let rss1 = rss_kb();
 
-    // 查询面命中时延（容量 1024 线性扫描——找「最旧」命中以量最坏档）
+    // 查询面命中时延（容量 1024 线性扫描——找「最旧」命中以量最坏档）。
+    // 多轮取样：单轮 p99 在并行 workspace 全量下会被 OS 调度尖峰单样本
+    // 打穿（2026-11-26 实测 2.08ms，isolated 5/5 绿）——取各轮 p99 的
+    // 中位数，容忍单次调度抖动，二次方退化的量级差照旧盖得住。
     let svc = FlowQueryService::new(Arc::new(Mutex::new(full)));
-    let mut per_lookup_us = Vec::with_capacity(LOOKUPS);
-    for i in 0..LOOKUPS {
-        // 跨步取样命中（环内最旧的命中档——线性扫描最坏段）
-        let idx = i * (FLOWS / LOOKUPS);
-        let id = FlowId::new(format!("full-{idx}")).unwrap();
-        let t0 = Instant::now();
-        let _ = svc.flow(&id);
-        per_lookup_us.push(t0.elapsed().as_micros() as u64);
+    let mut round_p99s = Vec::with_capacity(LOOKUP_ROUNDS);
+    let mut last_round = Vec::with_capacity(LOOKUPS);
+    for _ in 0..LOOKUP_ROUNDS {
+        let mut per_lookup_us = Vec::with_capacity(LOOKUPS);
+        for i in 0..LOOKUPS {
+            // 跨步取样命中（环内最旧的命中档——线性扫描最坏段）
+            let idx = i * (FLOWS / LOOKUPS);
+            let id = FlowId::new(format!("full-{idx}")).unwrap();
+            let t0 = Instant::now();
+            let _ = svc.flow(&id);
+            per_lookup_us.push(t0.elapsed().as_micros() as u64);
+        }
+        round_p99s.push(percentile(per_lookup_us.clone(), 0.99));
+        last_round = per_lookup_us;
     }
-    let p50 = percentile(per_lookup_us.clone(), 0.50);
-    let p95 = percentile(per_lookup_us.clone(), 0.95);
-    let p99 = percentile(per_lookup_us.clone(), 0.99);
+    let p50 = percentile(last_round.clone(), 0.50);
+    let p95 = percentile(last_round.clone(), 0.95);
+    let p99 = percentile(round_p99s.clone(), 0.50);
 
     println!("---- RIL-064 diagnostics overhead (debug build, this machine) ----");
     println!("mode        flows   admit-avg(us)   admitted   rss-delta-kb");
@@ -142,6 +153,6 @@ fn overhead_modes_measured_and_within_conservative_bounds() {
     );
     assert!(
         p99 < 2_000,
-        "查询命中 p99 应为十微秒级（1024 迹线性扫描），实测 {p99}µs"
+        "查询命中 p99 中位数应为十微秒级（1024 迹线性扫描；{LOOKUP_ROUNDS} 轮取中位），实测 {p99}µs"
     );
 }

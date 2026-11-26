@@ -1,0 +1,260 @@
+//! 六平台构建产物矩阵契约（RIL-084）：`contracts/build_matrix_v1.json`
+//! 是机器可读真源——目标/最低系统/feature/产物/签名/验证层一表钉死。
+//! 本门从 CI workflow、平台 build.sh、README 验真，防止「清单写一套、
+//! 产线跑另一套」：
+//! - CI `cross check` 与 nightly `cross build` 目标必须被矩阵覆盖
+//!   （每个目标必须归属恰一平台，且出现在该平台脚本或产物清单）；
+//! - 每个平台目录/脚本/证据文件必须在场；
+//! - `release_signed` 恒 false（仓内无签名产物），Android 仅 debug key；
+//! - `run_verification` 只允许四个诚实值——`verified_emulator`
+//!   （AVD 实测）、`needs_os` / `needs_device` / `needs_signing`（未验）；
+//!   cross-check 只证明可编译，绝不冒充运行通过。
+//!
+//! 验收依赖未决（RIL-036/039/041/042/046/049 真机批次）——本门只钉
+//! 本地可核验的产物面，不勾选 RIL-084 运行验收；真机证据出现后须
+//! 显式更新矩阵 `run_verification`（本门对语义值域钉死，不会静默
+//! 把 needs_* 升成 verified_*）。
+
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+
+fn repo_root(rel: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+}
+
+fn load_matrix() -> Value {
+    let path = repo_root("contracts/build_matrix_v1.json");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("无法读取构建矩阵 {}: {e}", path.display()));
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("构建矩阵 JSON 解析失败: {e}"))
+}
+
+/// 从 workflow 文本里提取 `cross check/build --target <目标>` 行里的 ${{ matrix.target }}，
+/// 再回到该文件 `target:` 段收集实际三元组值（形如 `  - x86_64-unknown-linux-gnu`）。
+fn workflow_targets(path: &str, step_marker: &str) -> BTreeSet<String> {
+    let raw =
+        std::fs::read_to_string(repo_root(path)).unwrap_or_else(|e| panic!("无法读取 {path}: {e}"));
+    assert!(
+        raw.contains(step_marker),
+        "{path} 缺 {step_marker}（产线步骤被移除 → 矩阵口径需同步）"
+    );
+    let lines: Vec<&str> = raw.lines().collect();
+    let marker_line = lines
+        .iter()
+        .position(|l| l.contains(step_marker))
+        .expect("step_marker 行号");
+    // 向前面最近一个 `      matrix:` 倒查，其后连续 `        target:` 段到下一个
+    // 同级 `    steps:` 前的所有 `- <triple>` 都是矩阵值。
+    let matrix_line = lines[..marker_line]
+        .iter()
+        .rposition(|l| l.trim() == "matrix:")
+        .expect("workflow matrix 段");
+    let targets: BTreeSet<String> = lines[matrix_line..marker_line]
+        .iter()
+        .filter_map(|l| {
+            let trimmed = l.trim();
+            let val = trimmed.strip_prefix("- ")?;
+            if val.starts_with("x86_64-")
+                || val.starts_with("aarch64-")
+                || val.starts_with("armv7-")
+            {
+                Some(val.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(!targets.is_empty(), "{path} matrix 内未提取到目标三元组");
+    targets
+}
+
+fn script_text(rel: &str) -> String {
+    let p = repo_root(rel);
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("无法读取平台脚本 {}: {e}", p.display()))
+}
+
+#[test]
+fn build_matrix_covers_ci_and_nightly_targets() {
+    let matrix = load_matrix();
+    assert_eq!(matrix["schema_version"], serde_json::json!(1u32));
+    let platforms = matrix["platforms"].as_object().expect("platforms 对象");
+    assert_eq!(platforms.len(), 6, "六平台恰好六个条目");
+
+    // 每个目标的唯一归属：CI/nightly 目标 → 至少一平台声明支持。
+    let mut known: BTreeMap<String, String> = BTreeMap::new();
+    for (key, p) in platforms {
+        for t in p["triples"].as_array().expect("triples 数组") {
+            let t = t.as_str().expect("三元组字符串");
+            let prior = known.insert(t.to_string(), key.to_string());
+            assert!(prior.is_none(), "目标 {t} 被 {key} 与 {prior:?} 重复登记");
+        }
+    }
+
+    for (label, (path, marker)) in [
+        (
+            "CI cross check",
+            (
+                ".github/workflows/ci.yml",
+                "run: cross check --target ${{ matrix.target }}",
+            ),
+        ),
+        (
+            "nightly cross build",
+            (
+                ".github/workflows/nightly.yml",
+                "run: cross build --release --target ${{ matrix.target }} --workspace",
+            ),
+        ),
+    ] {
+        for t in workflow_targets(path, marker) {
+            assert!(
+                known.contains_key(&t),
+                "{label} 目标 {t} 未登记在 build_matrix_v1.json（清单落后于产线）"
+            );
+        }
+    }
+
+    // 每个平台的产物目标 ⊆ 声明目标；ci_check_only 与产物目标不重叠
+    // （既有交叉编译门禁不冒充交付产物）。
+    for (key, p) in platforms {
+        let triples: BTreeSet<&str> = p["triples"]
+            .as_array()
+            .expect("triples")
+            .iter()
+            .map(|v| v.as_str().expect("str"))
+            .collect();
+        let artifacts: BTreeSet<&str> = p["artifact_triples"]
+            .as_array()
+            .expect("artifact_triples")
+            .iter()
+            .map(|v| v.as_str().expect("str"))
+            .collect();
+        let check_only: BTreeSet<&str> = p["ci_check_only_triples"]
+            .as_array()
+            .expect("ci_check_only_triples")
+            .iter()
+            .map(|v| v.as_str().expect("str"))
+            .collect();
+        assert!(
+            artifacts.is_subset(&triples),
+            "{key} 产物目标 {artifacts:?} 不在声明目标内"
+        );
+        assert!(
+            check_only.is_subset(&triples),
+            "{key} 仅检查目标 {check_only:?} 不在声明目标内"
+        );
+        assert!(
+            artifacts.is_disjoint(&check_only),
+            "{key} 同一目标既算产物又算仅检查（cross-check 冒充运行/交付证据）"
+        );
+    }
+}
+
+#[test]
+fn platform_files_and_build_scripts_exist() {
+    let matrix = load_matrix();
+    for (key, p) in matrix["platforms"].as_object().expect("platforms") {
+        let dir = p["directory"].as_str().expect("directory");
+        assert!(repo_root(dir).is_dir(), "{key} 平台目录 {dir} 不存在");
+        let script = p["build_script"].as_str().expect("build_script");
+        assert!(
+            repo_root(script).is_file(),
+            "{key} 构建脚本 {script} 不存在"
+        );
+        for ev in p["evidence"].as_array().expect("evidence") {
+            let ev = ev.as_str().expect("str");
+            assert!(repo_root(ev).is_file(), "{key} 证据文件 {ev} 不存在");
+        }
+        // 产物目标必须在脚本或其 README 中被点名——清单不能凭空列目标。
+        let text = format!(
+            "{}{}",
+            script_text(script),
+            script_text(&format!("{dir}/README.md"))
+        );
+        for t in p["artifact_triples"].as_array().expect("artifact_triples") {
+            let t = t.as_str().expect("str");
+            assert!(
+                text.contains(t),
+                "{key} 产物目标 {t} 未在 {script} 或 {dir}/README.md 出现"
+            );
+        }
+    }
+}
+
+#[test]
+fn honest_signing_and_verification_boundaries() {
+    let matrix = load_matrix();
+    for (key, p) in matrix["platforms"].as_object().expect("platforms") {
+        let s = &p["signing"];
+        assert_eq!(
+            s["release_signed"], false,
+            "{key} release_signed=true——仓内无签名产物，须附签名证据才允许改"
+        );
+        assert!(
+            !s["detail"].as_str().expect("detail").is_empty(),
+            "{key} 签名边界缺具名说明"
+        );
+        // Android 是唯一 debug-key 面（debug APK）；其余不得借调试签名冒充签名产物。
+        assert_eq!(
+            s["debug_key_only"],
+            key == "android",
+            "{key} debug_key_only 与已知产物形态不符"
+        );
+        let verification = p["run_verification"].as_str().expect("run_verification");
+        assert!(
+            matches!(
+                verification,
+                "verified_emulator" | "needs_os" | "needs_device" | "needs_signing"
+            ),
+            "{key} run_verification={verification:?} 不在诚实值域"
+        );
+        assert!(
+            !p["run_note"].as_str().expect("run_note").is_empty(),
+            "{key} 运行验收边界缺具名说明"
+        );
+    }
+    // 已知唯一实测面是 Android AVD（ICMP 回环，不含完整转发）；其余三态
+    // 不得静默升格——这条断言把「不把 cross-check 当运行通过」钉死。
+    let android = &matrix["platforms"]["android"];
+    assert_eq!(
+        android["run_verification"], "verified_emulator",
+        "Android AVD 实测面变更须同步契约（升级/降级都显式）"
+    );
+    for key in [
+        "linux-systemd",
+        "openwrt",
+        "windows",
+        "macos-launchd",
+        "ios",
+    ] {
+        assert_ne!(
+            matrix["platforms"][key]["run_verification"], "verified_emulator",
+            "{key} 无真机证据不得标实测"
+        );
+    }
+}
+
+/// 对账器自证：篡改矩阵（伪造 macOS 已验）→ 本门必须点名失败
+/// （防止值域断言被静默绕过）。
+#[test]
+#[should_panic(expected = "macos-launchd 无真机证据不得标实测")]
+fn comparator_bites_on_faked_device_evidence() {
+    let mut matrix = load_matrix();
+    matrix["platforms"]["macos-launchd"]["run_verification"] =
+        serde_json::json!("verified_emulator");
+    for key in [
+        "linux-systemd",
+        "openwrt",
+        "windows",
+        "macos-launchd",
+        "ios",
+    ] {
+        assert_ne!(
+            matrix["platforms"][key]["run_verification"], "verified_emulator",
+            "{key} 无真机证据不得标实测"
+        );
+    }
+}

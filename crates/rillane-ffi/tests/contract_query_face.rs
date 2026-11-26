@@ -205,8 +205,11 @@ fn ffi_query_faces_match_frozen_contract() {
     });
     {
         use std::io::{Read, Write};
-        let mut sock =
-            std::net::TcpStream::connect(("127.0.0.1", SOCKS_PORT)).expect("连 socks 入站");
+        // start 返回与入站监听 bind 完成之间有竞态（并行 workspace 全量
+        // 下曾见 ConnectionRefused）——有界重试只等监听就绪，超时仍具名失败。
+        let mut sock = (0..100)
+            .find_map(|_| std::net::TcpStream::connect(("127.0.0.1", SOCKS_PORT)).ok())
+            .expect("连 socks 入站（2s 内监听应就绪）");
         sock.write_all(&[0x05, 0x01, 0x00]).expect("greeting");
         let mut reply = [0u8; 2];
         sock.read_exact(&mut reply).expect("method reply");

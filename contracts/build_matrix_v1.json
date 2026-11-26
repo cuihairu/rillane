@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "comment": "RIL-084 六平台构建产物矩阵（机器可读真源）：目标架构/最低系统/feature/产物/签名/验证层。契约门 crates/rillane-platform/tests/artifact_matrix_contract.rs 钉住：CI 与 nightly 的 cross 目标必须被本矩阵覆盖、产物目标必须出现在对应 build.sh、release_signed 一律 false（仓内无签名产物）、verified_device 一律不得出现（六平台均无真机签名证据）。cross-check 只证明可编译，绝不等于运行通过——run_verification 的取值是诚实分层的结果。",
+  "platforms": {
+    "linux-systemd": {
+      "platform": "Linux (systemd/deb)",
+      "directory": "platforms/systemd",
+      "triples": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "armv7-unknown-linux-gnueabihf"
+      ],
+      "artifact_triples": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ],
+      "ci_check_only_triples": [
+        "armv7-unknown-linux-gnueabihf"
+      ],
+      "min_os": "未声明发行版下限（glibc 目标随构建机；debian 包不锁最低 glibc）",
+      "features": [
+        "default",
+        "network.tun（kmod-tun；仅 Linux）",
+        "systemd service（Restart=on-failure）"
+      ],
+      "artifact": "deb: rillane_<ver>-1_amd64.deb / rillane_<ver>-1_arm64.deb（rillaned + rillanectl + unit + yaml 示例）",
+      "build_script": "platforms/systemd/build.sh",
+      "build_evidence": "L1/L2 本机：cross/cargo 构建 + file ELF64 架构断言 + dpkg-deb 布局齐件断言 + 可用时 qemu-aarch64 抽取冒烟；日志落 .build-log.txt",
+      "signing": {
+        "release_signed": false,
+        "debug_key_only": false,
+        "requires_developer_account": false,
+        "detail": "deb 未签名；仓内不产签名工件"
+      },
+      "run_verification": "needs_os",
+      "run_note": "systemd enable/start 真机面（L4）不在本机能力面；见 platforms/systemd/README.md 验证边界",
+      "evidence": [
+        "platforms/systemd/README.md",
+        "platforms/systemd/build.sh"
+      ]
+    },
+    "openwrt": {
+      "platform": "OpenWrt (musl/ipk)",
+      "directory": "platforms/openwrt",
+      "triples": [
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "armv7-unknown-linux-musleabihf"
+      ],
+      "artifact_triples": [
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+        "armv7-unknown-linux-musleabihf"
+      ],
+      "ci_check_only_triples": [],
+      "min_os": "OpenWrt 22.03+（fw4/nftables 默认；透明接管须 rule_backend: nft）",
+      "features": [
+        "musl 静态链接",
+        "procd init（respawn）",
+        "network.tun（kmod-tun）",
+        "透明接管 nft 后端（RIL-041 真机待验）"
+      ],
+      "artifact": "ipk: rillane_<ver>_<arch>.ipk（三 musl 目标；含 rillaned + rillanectl + init.d + yaml 示例）",
+      "build_script": "platforms/openwrt/build.sh",
+      "build_evidence": "L1/L2 本机（记录性）：cross 三目标零失败 + file/readelf 输出入 .build-log.txt + ar 成员名记录；无 static/control 字段/齐件断言",
+      "signing": {
+        "release_signed": false,
+        "debug_key_only": false,
+        "requires_developer_account": false,
+        "detail": "ipk 未签名；opkg 侧无签名校验面"
+      },
+      "run_verification": "needs_device",
+      "run_note": "真机 opkg 安装/升级、procd 起停/respawn、kmod-tun 数据面、nft 专用表生效/撤销均未验；见 platforms/openwrt/README.md 验证边界",
+      "evidence": [
+        "platforms/openwrt/README.md",
+        "platforms/openwrt/build.sh"
+      ]
+    },
+    "windows": {
+      "platform": "Windows (windows-gnu/zip)",
+      "directory": "platforms/windows",
+      "triples": [
+        "x86_64-pc-windows-gnu"
+      ],
+      "artifact_triples": [
+        "x86_64-pc-windows-gnu"
+      ],
+      "ci_check_only_triples": [],
+      "min_os": "未验证最低版本（windows-gnu 交叉仅编译级；运行行为需 Windows 真机）",
+      "features": [
+        "x86_64 only",
+        "无 network.tun（Linux-only；Windows 隧道归平台增量）",
+        "zip 交付包 + sc.exe 服务脚本（SCM 1053 缺口：rillaned 未实现 SCM 控制协议）"
+      ],
+      "artifact": "zip: rillane_<ver>_x86_64_windows.zip（rillaned.exe + rillanectl.exe + install/uninstall-service.ps1 + README.txt + yaml 示例）",
+      "build_script": "platforms/windows/build.sh",
+      "build_evidence": "L1/L2 本机：build.sh 语法 + ps1 审读 + cross 构建 + file PE32+ x86-64 断言 + zip 布局齐件断言；日志落 .build-log.txt",
+      "signing": {
+        "release_signed": false,
+        "debug_key_only": false,
+        "requires_developer_account": false,
+        "detail": "exe 未签名（无 Authenticode）"
+      },
+      "run_verification": "needs_os",
+      "run_note": "L3 运行冒烟（rillaned.exe --version / socks 入口 / direct 出口）与 L4 SCM 服务安装均需 Windows；见 platforms/windows/README.md 验证边界",
+      "evidence": [
+        "platforms/windows/README.md",
+        "platforms/windows/build.sh"
+      ]
+    },
+    "macos-launchd": {
+      "platform": "macOS (launchd/universal2)",
+      "directory": "platforms/launchd",
+      "triples": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin"
+      ],
+      "artifact_triples": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin"
+      ],
+      "ci_check_only_triples": [],
+      "min_os": "未声明（universal2；Apple SDK 再分发限制，须 macOS 原生构建）",
+      "features": [
+        "universal2（arm64 + x86_64，lipo 合并）",
+        "launchd LaunchDaemon（KeepAlive SuccessfulExit=false）",
+        "无 network.tun 模板（macOS 隧道走 NEPacketTunnelProvider 方向）"
+      ],
+      "artifact": "tar.gz: rillane_<ver>_macos_universal2.tar.gz（rillaned + rillanectl + plist + install/uninstall.sh + yaml 示例）",
+      "build_script": "platforms/launchd/build.sh",
+      "build_evidence": "L1 本机 Linux：build.sh/install.sh/uninstall.sh bash -n + plist 结构断言；L2 Mach-O 断言随脚本交付但本机不产 Mach-O",
+      "signing": {
+        "release_signed": false,
+        "debug_key_only": false,
+        "requires_developer_account": false,
+        "detail": "tar.gz 未签名/未 notarize"
+      },
+      "run_verification": "needs_os",
+      "run_note": "L2 Mach-O 实产、L3/L4 tar 实产与 launchctl bootstrap/kickstart 均需 macOS；见 platforms/launchd/README.md 验证边界",
+      "evidence": [
+        "platforms/launchd/README.md",
+        "platforms/launchd/build.sh"
+      ]
+    },
+    "android": {
+      "platform": "Android (VpnService/APK)",
+      "directory": "platforms/android",
+      "triples": [
+        "aarch64-linux-android",
+        "x86_64-linux-android"
+      ],
+      "artifact_triples": [
+        "aarch64-linux-android",
+        "x86_64-linux-android"
+      ],
+      "optional_triples": [
+        "armv7-linux-androideabi：可选 32 位面；Cross.toml 现缺该 target 段，cross 走官方旧镜像撞 libunwind 缺失"
+      ],
+      "ci_check_only_triples": [],
+      "min_os": "Android 7.0 / API 24（minSdk）；demo targetSdk 33、compileSdk 35",
+      "sdk": {
+        "min_sdk": 24,
+        "target_sdk": 33,
+        "compile_sdk": 35
+      },
+      "features": [
+        "ABI arm64-v8a + x86_64（默认）；armeabi-v7a 可选未接通",
+        "VpnService fd 注入（detachFd → rillane_ffi_tun_start）",
+        "无默认 MCP 入站服务、无手机入站端口"
+      ],
+      "artifact": "APK（debug 签名）：platforms/android/app/build/outputs/apk/debug/app-debug.apk",
+      "build_script": "platforms/android/build.sh",
+      "build_evidence": "L1/L2 本机：cross cdylib（NDK r27c）+ gradle assembleDebug 出包 + 双 ABI .so 入包断言",
+      "signing": {
+        "release_signed": false,
+        "debug_key_only": true,
+        "requires_developer_account": false,
+        "detail": "仅 debug keystore；release 签名未做（无签名产物）"
+      },
+      "run_verification": "verified_emulator",
+      "run_note": "AVD seep-demo API 33 x86_64：安装/autostart/撤销/切网/onTrimMemory/字体放大/四 Tab 渲染已验；数据面仅 ICMP 回环（ping 10.111.0.1），完整 TCP/UDP 转发归 RIL-045/046 未交付",
+      "evidence": [
+        "platforms/android/README.md",
+        "platforms/android/build.sh"
+      ]
+    },
+    "ios": {
+      "platform": "iOS (PacketTunnel/NE)",
+      "directory": "platforms/ios",
+      "triples": [
+        "aarch64-apple-ios",
+        "aarch64-apple-ios-sim",
+        "x86_64-apple-ios"
+      ],
+      "artifact_triples": [
+        "aarch64-apple-ios",
+        "aarch64-apple-ios-sim",
+        "x86_64-apple-ios"
+      ],
+      "ci_check_only_triples": [],
+      "min_os": "未声明（需签名设备 + 付费开发者账号；NE 扩展不支持模拟器运行）",
+      "features": [
+        "xcframework（device arm64 + sim arm64/x86_64）",
+        "NEPacketTunnelProvider（fd 交 rillane_ffi_tun_start；当前私有 KVC fd 待换公开 packetFlow 批次接口）",
+        "无默认 MCP 入站服务"
+      ],
+      "artifact": "xcframework: platforms/ios/build/rillane_ffi.xcframework（无宿主 App/扩展构建产物）",
+      "build_script": "platforms/ios/build.sh",
+      "build_evidence": "L1 仅源码与脚本（本机 Linux 无 Xcode；Swift 未过编译）；xcodebuild -create-xcframework 断言随脚本交付、实跑待 macOS",
+      "signing": {
+        "release_signed": false,
+        "debug_key_only": false,
+        "requires_developer_account": true,
+        "detail": "Network Extension entitlement 需付费开发者账号；仓内无签名/描述文件"
+      },
+      "run_verification": "needs_signing",
+      "run_note": "无签名设备与开发者账号（RIL-094 BLOCKED）；fd 交接与 NE 生命周期未在真机运行",
+      "evidence": [
+        "platforms/ios/README.md",
+        "platforms/ios/build.sh"
+      ]
+    }
+  }
+}
