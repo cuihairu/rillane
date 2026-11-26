@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "comment": "RIL-085 三桌面进程端到端验收矩阵（条款 × 平台证据账本）：每格只允许五种诚实状态——verified_local（本机真实测试）/ verified_device（仓内真机证据文档）/ partial（部分面）/ needs_runtime（需图形桌面与浏览器/游戏会话）/ needs_mac_ssh（mac 真机未接入）。契约门 crates/rillane-platform/tests/desktop_e2e_matrix_contract.rs 钉住：verified_* 必须指向存在的证据文件、needs_* 不得携带证据（不冒充实测）、macOS 除平台无关规则来源外全部 needs_mac_ssh、核心场景「相同目标浏览器/两个游戏分组轨迹」与「故障样例」在六平台均未实测（Windows 仅 HTTP 客户端/服务恢复的 partial 面）。",
+  "platforms": ["linux", "windows", "macos"],
+  "clauses": {
+    "tcp": {
+      "title": "TCP 流捕获与归属",
+      "cells": {
+        "linux": {
+          "status": "verified_local",
+          "evidence": ["crates/rillane-platform/tests/owner_linux_contract.rs"],
+          "note": "真实同 uid TCP 连接归因到自身 pid，启动身份在场"
+        },
+        "windows": {
+          "status": "verified_device",
+          "evidence": [
+            "docs/acceptance-evidence/ril-032-windows-probe.md",
+            "docs/acceptance-evidence/ril-033-windows-takeover.md"
+          ],
+          "note": "imac 真机：TCP owner 表归因 + 真实 SYN/ACK/GET 三段入环并经内核闭合"
+        },
+        "macos": {
+          "status": "needs_mac_ssh",
+          "evidence": [],
+          "note": "RIL-036/037/038 未交付（Intel mac 待接入 fleet）"
+        }
+      }
+    },
+    "udp": {
+      "title": "UDP 归属与数据报",
+      "cells": {
+        "linux": {
+          "status": "verified_local",
+          "evidence": ["crates/rillane-platform/tests/owner_linux_contract.rs"],
+          "note": "真实 UDP 端点归因到自身 pid"
+        },
+        "windows": {
+          "status": "verified_device",
+          "evidence": [
+            "docs/acceptance-evidence/ril-032-windows-probe.md",
+            "docs/acceptance-evidence/ril-034-windows-owner.md"
+          ],
+          "note": "UDP owner 表归因 + 真实数据报入环"
+        },
+        "macos": {
+          "status": "needs_mac_ssh",
+          "evidence": [],
+          "note": "RIL-038 未交付"
+        }
+      }
+    },
+    "name_path": {
+      "title": "进程名称/完整路径",
+      "cells": {
+        "linux": {
+          "status": "verified_local",
+          "evidence": ["crates/rillane-platform/tests/owner_linux_contract.rs"],
+          "note": "exe readlink 完整路径独立可得；comm 受内核 15 字符上限并如实标截断"
+        },
+        "windows": {
+          "status": "verified_device",
+          "evidence": [
+            "docs/acceptance-evidence/ril-032-windows-probe.md",
+            "docs/acceptance-evidence/ril-034-windows-owner.md"
+          ],
+          "note": "Get-Process/Win32_Process 完整路径 + 启动时间一致"
+        },
+        "macos": {
+          "status": "needs_mac_ssh",
+          "evidence": [],
+          "note": "RIL-038 未交付"
+        }
+      }
+    },
+    "permission_denied": {
+      "title": "权限不足路径",
+      "cells": {
+        "linux": {
+          "status": "needs_runtime",
+          "evidence": [],
+          "note": "现契约覆盖关闭连接/截止/能力面；跨属主 /proc 拒绝面需另一 uid 进程实测，尚未跑"
+        },
+        "windows": {
+          "status": "verified_device",
+          "evidence": ["docs/acceptance-evidence/ril-034-windows-owner.md"],
+          "note": "std 降权 token 下 OpenProcess err=5 → 身份 None（真实拒绝，非伪造）"
+        },
+        "macos": {
+          "status": "needs_mac_ssh",
+          "evidence": [],
+          "note": "RIL-038 未交付"
+        }
+      }
+    },
+    "pid_reuse": {
+      "title": "PID 复用防护",
+      "cells": {
+        "linux": {
+          "status": "verified_local",
+          "evidence": ["crates/rillane-platform/tests/owner_linux_contract.rs"],
+          "note": "启动时间戳在场（复用判据）；复用翻转实测见 Windows 证据"
+        },
+        "windows": {
+          "status": "verified_device",
+          "evidence": [
+            "docs/acceptance-evidence/ril-032-windows-probe.md",
+            "docs/acceptance-evidence/ril-034-windows-owner.md"
+          ],
+          "note": "StartTime/CreationDate 一致；退出后表行消失、负缓存仍回验"
+        },
+        "macos": {
+          "status": "needs_mac_ssh",
+          "evidence": [],
+          "note": "RIL-038 未交付"
+        }
+      }
+    },
+    "port_reuse": {
+      "title": "端口复用/同目标多进程",
+      "cells": {
+        "linux": {
+          "status": "needs_runtime",
+          "evidence": [],
+          "note": "Linux 侧端口复用/多进程同目标实测归桌面批次；当前仅 Windows 有 P4/P4b 证据"
+        },
+        "windows": {
+          "status": "verified_device",
+          "evidence": ["docs/acceptance-evidence/ril-034-windows-owner.md"],
+          "note": "3 helper 同目标零串扰；UDP 固定口 A→B、TCP SO_REUSEADDR 重绑 C→D 均翻缓存"
+        },
+        "macos": {
+          "status": "needs_mac_ssh",
+          "evidence": [],
+          "note": "RIL-038 未交付"
+        }
+      }
+    },
+    "rule_source": {
+      "title": "规则来源可查",
+      "cells": {
+        "linux": {
+          "status": "verified_local",
+          "evidence": [
+            "crates/rillane-routing/tests/subscription_to_execution.rs",
+            "crates/rillane-routing/tests/explain_contract.rs"
+          ],
+          "note": "规则名 matched_by + 代际 + Explain 预测=实际出口；纯决策面平台无关"
+        },
+        "windows": {
+          "status": "verified_local",
+          "evidence": [
+            "crates/rillane-routing/tests/subscription_to_execution.rs",
+            "crates/rillane-routing/tests/explain_contract.rs"
+          ],
+          "note": "平台无关纯决策/回放面；Windows 真机流量接入规则来源查询随运行面批次"
+        },
+        "macos": {
+          "status": "verified_local",
+          "evidence": [
+            "crates/rillane-routing/tests/subscription_to_execution.rs",
+            "crates/rillane-routing/tests/explain_contract.rs"
+          ],
+          "note": "平台无关纯决策/回放面"
+        }
+      }
+    },
+    "browser_grouped_trace": {
+      "title": "相同目标浏览器/两个游戏的分组轨迹",
+      "cells": {
+        "linux": {
+          "status": "needs_runtime",
+          "evidence": [],
+          "note": "需图形桌面会话驱动真实浏览器与两款游戏；尚未跑（RIL-085 核心场景）"
+        },
+        "windows": {
+          "status": "partial",
+          "evidence": ["docs/acceptance-evidence/ril-033-windows-takeover.md"],
+          "note": "curl.exe 真实 HTTP 事务闭合（HTTP 客户端流），非浏览器/游戏分组轨迹；目标浏览器与两款游戏未跑"
+        },
+        "macos": {
+          "status": "needs_mac_ssh",
+          "evidence": [],
+          "note": "RIL-036/037 未交付"
+        }
+      }
+    },
+    "fault_samples": {
+      "title": "故障样例",
+      "cells": {
+        "linux": {
+          "status": "needs_runtime",
+          "evidence": [],
+          "note": "浏览器/游戏中断类故障样例未跑；订阅接管/启停恢复测试不属本条款"
+        },
+        "windows": {
+          "status": "partial",
+          "evidence": ["docs/acceptance-evidence/ril-035-windows-service-recovery.md"],
+          "note": "服务崩溃/切网/卸载恢复有真机证据；浏览器/游戏故障样例未跑"
+        },
+        "macos": {
+          "status": "needs_mac_ssh",
+          "evidence": [],
+          "note": "RIL-039 未交付"
+        }
+      }
+    }
+  }
+}
