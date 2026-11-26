@@ -437,22 +437,22 @@ mod tests {
         assert_eq!(rules.len(), 4, "两端口 × PREROUTING/OUTPUT");
         // PREROUTING 80
         assert_eq!(rules[0].label, "redirect:prerouting:80");
-        assert!(rules[0].apply.contains(&"-A".to_string()));
-        assert!(rules[0].apply.contains(&"PREROUTING".to_string()));
-        assert!(rules[0].apply.contains(&"--dport".to_string()));
-        assert!(rules[0].apply.contains(&"--to-ports".to_string()));
-        assert!(rules[0].apply.contains(&"12345".to_string()));
-        assert!(rules[0].undo.contains(&"-D".to_string()));
+        assert!(rules[0].apply.iter().any(|i| i == "-A"));
+        assert!(rules[0].apply.iter().any(|i| i == "PREROUTING"));
+        assert!(rules[0].apply.iter().any(|i| i == "--dport"));
+        assert!(rules[0].apply.iter().any(|i| i == "--to-ports"));
+        assert!(rules[0].apply.iter().any(|i| i == "12345"));
+        assert!(rules[0].undo.iter().any(|i| i == "-D"));
         // OUTPUT 80 排除逃逸 mark
-        assert!(rules[1].apply.contains(&"OUTPUT".to_string()));
-        assert!(rules[1].apply.contains(&"!".to_string()));
-        assert!(rules[1].apply.contains(&DEFAULT_ESCAPE_MARK.to_string()));
-        assert!(rules[1].apply.contains(&"mark".to_string()));
+        assert!(rules[1].apply.iter().any(|i| i == "OUTPUT"));
+        assert!(rules[1].apply.iter().any(|i| i == "!"));
+        assert!(rules[1].apply.iter().any(|i| i.as_str() == DEFAULT_ESCAPE_MARK.to_string()));
+        assert!(rules[1].apply.iter().any(|i| i == "mark"));
 
         // 全端口：单规则对
         let rules_all = plan_redirect_rules(listen, &[], DEFAULT_ESCAPE_MARK);
         assert_eq!(rules_all.len(), 2);
-        assert!(!rules_all[0].apply.contains(&"--dport".to_string()));
+        assert!(!rules_all[0].apply.iter().any(|i| i == "--dport"));
     }
 
     /// TPROXY 规则规划：mangle TPROXY + ip rule + ip route；undo 逆序。
@@ -462,13 +462,13 @@ mod tests {
         let rules = plan_tproxy_rules(listen, &[443], 100);
         assert_eq!(rules.len(), 3, "mangle + ip rule + ip route");
         assert_eq!(rules[0].label, "tproxy:mangle:443");
-        assert!(rules[0].apply.contains(&"TPROXY".to_string()));
-        assert!(rules[0].apply.contains(&"--on-port".to_string()));
-        assert!(rules[0].apply.contains(&"12345".to_string()));
+        assert!(rules[0].apply.iter().any(|i| i == "TPROXY"));
+        assert!(rules[0].apply.iter().any(|i| i == "--on-port"));
+        assert!(rules[0].apply.iter().any(|i| i == "12345"));
         assert_eq!(rules[1].apply[0], "ip");
         assert_eq!(rules[1].apply[1], "rule");
-        assert!(rules[1].apply.contains(&TPROXY_MARK.to_string()));
-        assert!(rules[2].apply.contains(&"local".to_string()));
-        assert!(rules[2].apply.contains(&"table".to_string()));
+        assert!(rules[1].apply.iter().any(|i| i.as_str() == TPROXY_MARK.to_string()));
+        assert!(rules[2].apply.iter().any(|i| i == "local"));
+        assert!(rules[2].apply.iter().any(|i| i == "table"));
     }
 }

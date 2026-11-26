@@ -2625,18 +2625,18 @@ dependencies = [
 
 [[package]]
 name = "etherparse"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b119b9796ff800751a220394b8b3613f26dd30c48f254f6837e64c464872d1c7"
+checksum = "2340cbdfdf603f2dbf0ca8c9163c86e360f35e1db276a2d31e87ca30499e9543"
 dependencies = [
  "arrayvec",
 ]
 
 [[package]]
 name = "etherparse"
-version = "0.21.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17304d06addb3283cdc4bd528e42dd95e73c8ee2d6492ffce415e93660885449"
+checksum = "c78ea1640fbca18d7d2c7459be6db63705ca8cce8a18be4045f4ad7a1e7c4311"
 dependencies = [
  "arrayvec",
 ]
@@ -7552,7 +7552,7 @@ dependencies = [
  "cc",
  "clap",
  "educe 0.8.2",
- "etherparse 0.21.0",
+ "etherparse 0.21.1",
  "futures-util",
  "hotpath",
  "http-body-util",
@@ -9972,7 +9972,7 @@ checksum = "b6659e791fc463dbc2d956032da664ac89f4c52ace920e963b6c2b3147b004c5"
 dependencies = [
  "bitrs",
  "bytes",
- "etherparse 0.19.0",
+ "etherparse 0.19.1",
  "itertools 0.14.0",
  "tokio",
  "tracing",

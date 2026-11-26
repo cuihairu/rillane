@@ -357,7 +357,7 @@ mod tests {
         let out80 = &rules[6];
         assert_eq!(out80.label, "nft:redirect-output-80");
         assert_eq!(out80.apply[6..10], ["meta", "mark", "!=", "24173"]);
-        assert!(out80.apply.contains(&":3128".to_string()));
+        assert!(out80.apply.iter().any(|i| i == ":3128"));
     }
 
     #[test]
@@ -368,7 +368,7 @@ mod tests {
             .find(|r| r.label == "nft:redirect-prerouting-all")
             .expect("all-ports prerouting rule");
         assert!(
-            !prerouting.apply.contains(&"tcp".to_string()),
+            !prerouting.apply.iter().any(|i| i == "tcp"),
             "全端口无协议过滤"
         );
         assert!(prerouting
@@ -444,7 +444,7 @@ mod tests {
             .iter()
             .find(|r| r.label == "nft:tproxy-ip6-443")
             .expect("v6 443 rule");
-        assert!(r443v6.apply.contains(&"ip6".to_string()));
+        assert!(r443v6.apply.iter().any(|i| i == "ip6"));
         assert!(r443v6.apply.iter().any(|a| a.contains("3128")));
     }
 
