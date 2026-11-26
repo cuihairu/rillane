@@ -12,7 +12,7 @@
 |---|---|---|
 | `ir_face_v1.json` | rillane-config IR 投影（**subset 面**：必需键 + 类型；新增可选字段不算破坏） | `crates/rillane-config/tests/contract_ir_sample.rs` |
 | `trace_face_v1.json` | 诊断事件冻结形（schema_version=1：trace/event/collector 九计数） | `crates/rillane-core/tests/contract_trace_face.rs` |
-| `control_face_v1.json` | rillaned 控制面 DTO（/runtime/stats、/dns/stats、/dns/resolvers） | `apps/rillaned`（control_plane.rs 内联测试） |
+| `control_face_v1.json` | rillaned 控制面 DTO（/runtime/stats、/dns/stats、/dns/resolvers） | `apps/rillaned/src/control_plane.rs`（内联测试） |
 | `ffi_face_v1.json` | rillane-ffi 查询面（stats/routing/nodes/dns×2/flows/flow + 错误信封）与 C 头文件↔导出符号集 | `crates/rillane-ffi/tests/contract_query_face.rs` |
 | `mcp_tools_face_v1.json` | MCP 工具目录冻结契约（16 工具 name/title/description/scope/注解/输入输出 schema） | `crates/rillane-app/tests/contract_tools_face.rs` |
 
