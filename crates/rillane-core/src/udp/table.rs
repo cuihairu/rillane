@@ -14,6 +14,7 @@ use crate::udp::metrics::{
     Dir, DropReason, ExpireReason, SessionSnapshot, TableMetrics, TableSnapshot,
 };
 use crate::udp::relay::{DownlinkPacket, UdpRelay};
+use crate::udp::trace::{egress_node_of, takeover_detail, UdpSessionTrace, UdpTraceWiring};
 use crate::udp::ChainFailureEvent;
 use crate::{
     FailureType, FlowContext, FlowId, FlowMetadata, FlowRouter, FlowTarget, RouteDecision,
@@ -62,6 +63,10 @@ pub struct UdpSessionTable {
     pub(crate) sessions: DashMap<UdpSessionKey, Arc<UdpSessionInner>>,
     pub(crate) shutdown_tx: watch::Sender<bool>,
     pub(crate) shutdown_rx: watch::Receiver<bool>,
+    /// 关联面轨迹接线（RIL-083 第四段）：采集器在 Runtime build 后段才
+    /// 存在，装配走 attach_trace_wiring（attach_chain_events 同先例）；
+    /// 装配前诞生的会话无轨迹，不回填
+    pub(crate) trace_wiring: std::sync::OnceLock<Arc<UdpTraceWiring>>,
 }
 
 /// 错误分类（udp-relay-path.md §3.6）：发送失败 → FailureType 记账。
@@ -118,6 +123,7 @@ impl UdpSessionTable {
             sessions: DashMap::new(),
             shutdown_tx,
             shutdown_rx,
+            trace_wiring: std::sync::OnceLock::new(),
         }))
     }
 
@@ -186,6 +192,12 @@ impl UdpSessionTable {
             Entry::Occupied(e) => Ok(Arc::clone(e.get())),
             Entry::Vacant(slot) => {
                 let id = FlowId::new();
+                // RIL-083 第四段：takeover 随会话诞生落轨（采集器准入锚点）。
+                // 接线装配前 = 无轨迹（生产装配序 attach 先于任何流量），不回填。
+                let trace = self
+                    .trace_wiring
+                    .get()
+                    .map(|w| UdpSessionTrace::start(w, &id, takeover_detail(key)));
                 let (tx, rx) = mpsc::channel(self.config.downlink_capacity);
                 let inner = Arc::new(UdpSessionInner {
                     key: key.clone(),
@@ -198,6 +210,7 @@ impl UdpSessionTable {
                     last_activity: AtomicU64::new(self.now()),
                     created_at_epoch: self.now(),
                     decisions: AtomicU64::new(0),
+                    trace,
                 });
                 slot.insert(Arc::clone(&inner));
                 self.metrics.sessions_total.fetch_add(1, Ordering::Relaxed);
@@ -241,6 +254,11 @@ impl UdpSessionTable {
     pub fn force_revoke(&self, key: &UdpSessionKey) -> bool {
         match self.sessions.remove(key) {
             Some((_, inner)) => {
+                // RIL-083 第四段：显式吊销即终态（控制链关闭/协议会话收口
+                // /管理吊销共用本路径——先于空闲回收的 reclaimed 语义）
+                if let Some(t) = &inner.trace {
+                    t.close_revoked("revoked by control/session teardown");
+                }
                 let removed = close_all_mappings(&inner);
                 self.metrics
                     .mappings_active
@@ -288,6 +306,19 @@ impl UdpSessionTable {
             }
         }
         revoked_total
+    }
+
+    /// 装配关联面轨迹接线（RIL-083 第四段；Runtime start() 与 TCP 面
+    /// TracedFlowOutput 同一装配点调用）。重复调用以首装为准——热更新
+    /// 重建整个 Runtime 与表，同表二次装配是编程错误面，幂等不覆盖。
+    pub fn attach_trace_wiring(
+        self: &Arc<Self>,
+        collector: Arc<std::sync::Mutex<crate::collector::FlowCollector>>,
+        generation: &str,
+    ) {
+        let wiring =
+            UdpTraceWiring::new(collector, generation).expect("UDP 轨迹代际不得为空（编程错误）");
+        let _ = self.trace_wiring.set(Arc::new(wiring));
     }
 
     /// 订阅链路故障事件流（runtime 接线点；测试直接调 handle_chain_failure）
@@ -470,6 +501,10 @@ impl SessionRef {
         self.inner.ledger.on_route_changed(&decision);
         self.inner.ledger.attach_chain(&chain_id_of(&decision));
         *self.inner.decision.write().unwrap() = Some(Arc::clone(&decision));
+        // RIL-083 第四段：决策产出/重路由如实落轨（rule 原因在场才发）
+        if let Some(t) = &self.inner.trace {
+            t.decision(&decision);
+        }
         Ok(decision)
     }
 
@@ -531,6 +566,11 @@ impl SessionRef {
             .metrics
             .mappings_active
             .fetch_add(1, Ordering::Relaxed);
+        // RIL-083 第四段：association.mapped——映射建成即观测事实
+        //（Reused 复用不发，首绑时已发；决策此时必已产出）
+        if let (Some(t), Some(decision)) = (&self.inner.trace, self.decision()) {
+            t.mapped(&egress_node_of(&decision), &target.host, target.port);
+        }
 
         // forwarder task（表侧持有，udp-relay-path.md §4）
         let fwd = ForwarderTask {

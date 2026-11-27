@@ -23,6 +23,7 @@ pub mod table;
 
 mod inner;
 mod reclaim;
+mod trace;
 
 pub use associate::{
     encode_udp_header, parse_udp_header, UdpAssociateService, UdpHeaderError, UdpIngressMetrics,

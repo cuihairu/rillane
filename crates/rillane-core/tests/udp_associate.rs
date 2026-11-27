@@ -590,3 +590,129 @@ async fn fake_ip_datagram_target_backfills_domain() {
         "池段假地址不得直达路由（必须反查回域名）"
     );
 }
+
+// ---------- RIL-083 第四段：关联面轨迹接线（活面取证） ----------
+
+use rillane_core::collector::{CollectorConfig, FlowCollector};
+use rillane_core::trace::{FlowOrigin, FlowTrace};
+use rillane_core::udp::sweep_once;
+use rillane_core::udp::MockUdpRelay;
+
+/// 真实 ASSOCIATE 往返 → 控制链 EOF 吊销：轨迹四落点逐一核对
+///（takeover → plan → association.mapped → association.reclaimed）。
+#[tokio::test]
+async fn trace_wiring_records_association_lifecycle() {
+    let svc = make_service(false);
+    let collector = Arc::new(Mutex::new(FlowCollector::new(
+        CollectorConfig::new(64, 16, 64, 3_600_000, 1, true).unwrap(),
+    )));
+    svc.table()
+        .attach_trace_wiring(Arc::clone(&collector), "local");
+    let echo = spawn_echo_server().await;
+    let (control, relay_port, handle) = associate(&svc).await;
+    let target = FlowTarget {
+        host: "127.0.0.1".into(),
+        port: echo.port(),
+        proto: TargetProto::Udp,
+    };
+    let frame = encode_udp_header(&target, 5).unwrap();
+    let mut pkt = frame;
+    pkt.extend_from_slice(b"hello");
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client
+        .send_to(&pkt, format!("127.0.0.1:{relay_port}"))
+        .await
+        .unwrap();
+    let mut buf = [0u8; 512];
+    let (n, _) = timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .expect("回声超时")
+        .unwrap();
+    assert_eq!(&buf[n - 5..n], b"hello", "回声载荷逐字节还原");
+    // 控制链 EOF → force_revoke → reclaimed 终态
+    drop(control);
+    let _ = handle.await;
+
+    let guard = collector.lock().unwrap();
+    let assoc: &FlowTrace = guard
+        .iter_traces()
+        .find(|t| t.origin == FlowOrigin::Association)
+        .expect("关联轨迹应入采集器（采样=全采）");
+    assert!(assoc.closed, "吊销后轨迹应到终态");
+    assert_eq!(assoc.generation, "local", "接线装配的代际");
+    assert_eq!(assoc.events[0].code, "session.takeover", "首事件为接管");
+    assert_eq!(
+        assoc.events.last().unwrap().code,
+        "association.reclaimed",
+        "控制链收口吊销 = reclaimed 终态"
+    );
+    assert!(
+        assoc.events.iter().any(|e| e.code == "association.mapped"),
+        "映射建成应有观测事件"
+    );
+    assert!(
+        assoc.events.iter().any(|e| e.code == "route.plan"),
+        "决策应产 plan 事件（FixedRouter 无 reason → 无 rule 事件，不造数）"
+    );
+    assert!(
+        !assoc.events.iter().any(|e| e.code.starts_with("transfer.")),
+        "生产泵未逐次测量首字节——transfer 事件不得凭空出现"
+    );
+    assoc.validate().expect("轨迹自校验（序号连续/时间单调）");
+    assert!(guard.stats().traces_admitted >= 1, "采集器准入计数");
+}
+
+/// 空闲回收路径：MockClock 拨过空闲上限 → sweep → association.closed
+/// 终态（与 reclaimed 分立的正常收口码）。
+#[tokio::test]
+async fn trace_wiring_records_idle_expiry_close() {
+    use rillane_core::udp::Clock;
+    let config = UdpSessionConfig::default();
+    let clock = rillane_core::udp::MockClock::new();
+    let table = rillane_core::udp::UdpSessionTable::new(
+        config,
+        Arc::new(FixedRouter) as Arc<dyn FlowRouter>,
+        Arc::clone(&clock) as Arc<dyn Clock>,
+    )
+    .unwrap();
+    let svc = UdpAssociateService::new(table, Arc::new(DirectUdpConnector), false, 256, None);
+    let collector = Arc::new(Mutex::new(FlowCollector::new(
+        CollectorConfig::new(64, 16, 64, 3_600_000, 1, true).unwrap(),
+    )));
+    svc.table()
+        .attach_trace_wiring(Arc::clone(&collector), "local");
+    let key = UdpSessionKey::new("127.0.0.1:41000".parse::<SocketAddr>().unwrap());
+    let target = FlowTarget {
+        host: "127.0.0.1".into(),
+        port: 53,
+        proto: TargetProto::Udp,
+    };
+    let sref = svc.table().resolve(&key, &target).await.unwrap();
+    let (relay, _tx) = MockUdpRelay::new(target.clone());
+    assert_eq!(
+        sref.bind_mapping(&target, relay).await.unwrap(),
+        rillane_core::udp::table::BindOutcome::Created,
+        "首绑应创建映射"
+    );
+
+    clock.advance(181);
+    let st = sweep_once(svc.table());
+    assert_eq!(st.sessions_expired, 1, "拨过空闲上限应回收整会话");
+
+    let guard = collector.lock().unwrap();
+    let assoc: &FlowTrace = guard
+        .iter_traces()
+        .find(|t| t.origin == FlowOrigin::Association)
+        .expect("空闲回收会话应有轨迹");
+    assert!(assoc.closed, "回收后轨迹应到终态");
+    assert_eq!(
+        assoc.events.last().unwrap().code,
+        "association.closed",
+        "空闲回收 = closed 终态（非 reclaimed）"
+    );
+    assert!(
+        assoc.events.iter().any(|e| e.code == "association.mapped"),
+        "绑定的映射建成事件在场"
+    );
+    assoc.validate().expect("轨迹自校验");
+}

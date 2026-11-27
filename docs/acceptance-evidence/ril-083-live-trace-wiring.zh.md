@@ -47,10 +47,9 @@ FFI 查询面直到轨迹到终态：
 
 ## 诚实边界
 
-- UDP 关联流走 `FlowOutput` 链之外的独立泵，其轨迹（关联
-  mapped/reclaimed/closed）不在本段接线范围。
-- url-test 探测直连出口 `FlowOutput`，绕过入口链；探测流量不出现在
-  `/trace/*`。
+- UDP 关联流与 url-test 探测流原为本段具名缺口；已于第四段接线
+  （会话表侧 `attach_trace_wiring` 与探测 `TracedFlowOutput` 包装），
+  见 [ril-083-udp-association-trace](ril-083-udp-association-trace)。
 - 在 `FlowOutput.forward` 之前被拒的流（路由失败）与无原因的决策按
   设计不产 `rule` 事件；不为凑事件序列造数。
 - 真机验收（Android/iOS 宿主，RIL-043/094）不变；本段只是本地可核验

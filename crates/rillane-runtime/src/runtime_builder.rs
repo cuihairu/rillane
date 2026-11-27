@@ -240,11 +240,28 @@ impl RuntimeBuilder {
             }
         }
 
+        // RIL-052/055：诊断采集器提前到 build 前段装配（RIL-083 第四段起
+        // 探测 handler 包装也要取它——原建在 Runtime 字面量里够不到）。
+        // 有界默认：1024 迹/256 活动/256 事件/1h TTL/全采 1/启用；
+        // RIL-064 做开销与留存对照后如需调整，改这里一处。
+        let trace_collector = Arc::new(std::sync::Mutex::new(
+            rillane_core::collector::FlowCollector::new(
+                rillane_core::collector::CollectorConfig::new(1024, 256, 256, 3_600_000, 1, true)
+                    .expect("诊断采集器有界默认配置合法"),
+            ),
+        ));
         // G1-9 url-test 成员探测句柄注入（出口面就绪后）：按节点名取其出口，
         // 经出口 forward 管道对探测目标发 HTTP HEAD 读首字节判活（实现见
         // rillane-core `probe_via_output`）。调度/间隔门控在路由引擎
         // `perform_health_checks`；未配置 url_test 的组不产生任何探测流量。
         let probe_outputs = self.flow_outputs.clone();
+        // RIL-083 第四段：探测流经 TracedFlowOutput 包装——url-test 合成
+        // duplex 流经出口 forward 管道时与普通入口流同形，轨迹如实落轨
+        // （origin=stream、rule=「url-test probe」、代际 local）；内层是
+        // 出口表已装配的完整链（含 StatsFlowOutput），包装不重复计数。
+        // 探测超时返回 Err 而转发任务随后自行收口——轨迹终态以转发真实
+        // 完成时刻为准，不按探测返回造数。
+        let probe_trace_collector = Arc::clone(&trace_collector);
         router.set_probe_handler(Arc::new(
             move |node: &str, host: &str, port: u16, path: &str, timeout: Duration| {
                 // 先落 own 再进 async 块：返回 future 与入参引用生命周期解耦
@@ -252,9 +269,13 @@ impl RuntimeBuilder {
                 let host = host.to_string();
                 let path = path.to_string();
                 let output = probe_outputs.get(node.as_str()).cloned();
+                let collector = std::sync::Arc::clone(&probe_trace_collector);
                 Box::pin(async move {
                     let output = output.ok_or_else(|| format!("节点 {node} 无对应出口"))?;
-                    rillane_core::probe_via_output(output, &node, &host, port, &path, timeout).await
+                    let traced: std::sync::Arc<dyn rillane_core::FlowOutput> = std::sync::Arc::new(
+                        TracedFlowOutput::new("url-test-probe".to_string(), output, collector),
+                    );
+                    rillane_core::probe_via_output(traced, &node, &host, port, &path, timeout).await
                 }) as Pin<Box<dyn Future<Output = Result<u64, String>> + Send>>
             },
         ));
@@ -805,17 +826,9 @@ impl RuntimeBuilder {
             flow_outputs: Arc::new(RwLock::new(self.flow_outputs)),
             egress_connectors: Arc::new(RwLock::new(self.egress_connectors)),
             flow_stats: Arc::new(DashMap::new()),
-            // RIL-052/055：诊断采集器（有界默认：1024 迹/256 活动/256 事件/
-            // 1h TTL/全采 1/启用）——RIL-064 做开销与留存对照后如需调整，
-            // 改这里一处
-            trace_collector: Arc::new(std::sync::Mutex::new(
-                rillane_core::collector::FlowCollector::new(
-                    rillane_core::collector::CollectorConfig::new(
-                        1024, 256, 256, 3_600_000, 1, true,
-                    )
-                    .expect("诊断采集器有界默认配置合法"),
-                ),
-            )),
+            // RIL-052/055：诊断采集器（build 前段装配，探测 handler 同源）——
+            // 有界默认见上段装配点注释
+            trace_collector,
             mesh_registry,
             chain_manager,
             chain_failure_tx,
@@ -1219,8 +1232,9 @@ pub struct Runtime {
     transport_pool: Option<Arc<TransportPool>>,
     /// RIL-052/055：诊断事件采集器单例（控制面 /trace/* 查询面取数；
     /// 有界配置在 build 钉死——容量/上限/TTL 见 trace_collector_config）。
-    /// RIL-083 第二段起：TCP 入口流的 SessionTracer 接线已落地
-    /// （TracedFlowOutput，start() 装配）；UDP 关联面归后续批次。
+    /// RIL-083 第二段起 TCP 入口流接 TracedFlowOutput、第四段起 UDP 关联面
+    /// 经会话表 attach_trace_wiring、url-test 探测流经 TracedFlowOutput
+    /// 包装接线（start()/build() 装配）。
     trace_collector: Arc<std::sync::Mutex<rillane_core::collector::FlowCollector>>,
     /// P1-5 §4.1：TLS 连接器工厂单例（tls_resumption 独立于池生效）
     tls_factory: Option<Arc<TlsConnectorFactory>>,
@@ -1363,6 +1377,15 @@ impl Runtime {
                     );
                 }
             }
+        }
+
+        // RIL-083 第四段：UDP 关联面轨迹接线（会话表侧 SessionTracer：
+        // takeover→rule/plan→association.mapped→reclaimed/closed），采集
+        // 器与 TCP 面同源；代际口径同 TracedFlowOutput（local，热更新代
+        // 际归 RIL-008）。attach 幂等（stop/start 复启首装为准）。
+        if let Some(udp) = &self.udp_service {
+            udp.table()
+                .attach_trace_wiring(std::sync::Arc::clone(&self.trace_collector), "local");
         }
 
         for (name, endpoint) in self.ingress_endpoints.iter() {
@@ -2552,9 +2575,11 @@ impl FlowOutput for StatsFlowOutput {
 /// session.closed，转发 Err = session.failed）。生产数据面泵未逐次
 /// 测量首字节与拨号尝试——transfer/attempt 事件不出现（诚实面：
 /// 能答「谁被接走、路由为何、走没走通、搬了多少字节」，不假装测过
-/// 没测的东西）。UDP 关联面（独立泵，不走 FlowOutput 链）与 url-test
-/// 探测流（probe_via_output 直连出口 map，绕过入口链）不在本 wrapper
-/// 路径，归后续批次。
+/// 没测的东西）。UDP 关联面（独立泵，不走 FlowOutput 链）自 RIL-083
+/// 第四段起经会话表接线（attach_trace_wiring，origin=association）；
+/// url-test 探测流自同段起经本 wrapper 包装落轨（origin=stream，
+/// rule=「url-test probe」——探测是合成 duplex 流，经出口 forward
+/// 管道时与普通流同形）。
 struct TracedFlowOutput {
     ingress: String,
     inner: Arc<dyn FlowOutput>,

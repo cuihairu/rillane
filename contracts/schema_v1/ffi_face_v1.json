@@ -107,7 +107,7 @@
         "last_code": "string"
       },
       "verification": "live_trace_wiring_ril083",
-      "note": "RIL-083 第二段活面取证：真实 socks5→direct→echo 流量经 TracedFlowOutput 产出轨迹，contract_query_face 从活 runtime 取数钉 exact 键集；UDP 关联面归后续批次"
+      "note": "RIL-083 第二段活面取证：真实 socks5→direct→echo 流量经 TracedFlowOutput 产出轨迹，contract_query_face 从活 runtime 取数钉 exact 键集；第四段起 UDP 关联面（会话表接线）同产轨迹，origin=association 条目同面同门"
     },
     "flows_invalid_page": {
       "mode": "exact",
@@ -127,7 +127,7 @@
         "absence": "null"
       },
       "verification": "live_trace_wiring_ril083",
-      "note": "RIL-083 第二段活面取证：真实 socks5→direct→echo 流量经 TracedFlowOutput 产出轨迹，contract_query_face 从活 runtime 取数钉 exact 键集；UDP 关联面归后续批次"
+      "note": "RIL-083 第二段活面取证：真实 socks5→direct→echo 流量经 TracedFlowOutput 产出轨迹，contract_query_face 从活 runtime 取数钉 exact 键集；第四段起 UDP 关联面（会话表接线）同产轨迹，详情面对 association 轨迹同一形状"
     },
     "flow_absent": {
       "mode": "exact",

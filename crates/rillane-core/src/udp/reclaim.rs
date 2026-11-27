@@ -62,6 +62,14 @@ pub fn sweep_once(table: &UdpSessionTable) -> SweepStats {
 
     for (key, reason) in expired_sessions {
         if let Some((_, inner)) = table.sessions.remove(&key) {
+            // RIL-083 第四段：空闲/寿命回收 = 关联正常收口（观测事实）
+            if let Some(t) = &inner.trace {
+                let detail = match reason {
+                    ExpireReason::Lifetime => "session lifetime exceeded",
+                    _ => "session idle beyond limit",
+                };
+                t.close_expired(detail);
+            }
             let mut map = inner.mappings.lock().unwrap();
             let remaining = map.len();
             for (_, m) in map.drain() {

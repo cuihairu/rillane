@@ -55,10 +55,10 @@ must not return" — marker removal is an explicit, gated action.
 
 ## Honest boundaries
 
-- UDP association flows use a separate pump outside the `FlowOutput` chain;
-  their traces (association mapped/reclaimed/closed) are not wired here.
-- url-test probes call the egress `FlowOutput` directly, bypassing the
-  ingress chain; probe traffic does not appear in `/trace/*`.
+- UDP association flows and url-test probes were this segment's named gaps;
+  both are wired as of the fourth segment (table-side
+  `attach_trace_wiring` and probe `TracedFlowOutput` wrapping), see
+  [ril-083-udp-association-trace](ril-083-udp-association-trace).
 - Rejected flows (route failure before `FlowOutput.forward`) and route
   decisions without a reason produce no `rule` event by design; no fact is
   fabricated to fill the sequence.

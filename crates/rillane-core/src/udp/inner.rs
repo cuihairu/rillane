@@ -5,6 +5,7 @@
 use crate::udp::key::UdpSessionKey;
 use crate::udp::ledger::SessionLedger;
 use crate::udp::relay::{DownlinkPacket, UdpRelay};
+use crate::udp::trace::UdpSessionTrace;
 use crate::{FlowId, FlowTarget, RouteDecision, TargetProto};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,6 +84,9 @@ pub struct UdpSessionInner {
     pub created_at_epoch: u64,
     /// 本会话累计做出的路由决策数（首次为 1；>1 的增量计入 reroutes 指标）
     pub decisions: AtomicU64,
+    /// 关联面轨迹（RIL-083 第四段）：接线装配后的会话各持一份；
+    /// None = 装配前诞生的会话（生产装配序不发生），不回填
+    pub(crate) trace: Option<UdpSessionTrace>,
 }
 
 impl UdpSessionInner {

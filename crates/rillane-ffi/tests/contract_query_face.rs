@@ -20,6 +20,7 @@ use std::ffi::{CStr, CString};
 const CONTROL_PORT: u16 = 27996;
 const SOCKS_PORT: u16 = 27592;
 const ECHO_PORT: u16 = 27593;
+const UDP_ECHO_PORT: u16 = 27594;
 
 fn test_config() -> String {
     format!(
@@ -43,6 +44,8 @@ routing:
   default_node: direct-main
   groups: []
   rules: []
+udp:
+  enabled: true
 "#
     )
 }
@@ -227,6 +230,53 @@ fn ffi_query_faces_match_frozen_contract() {
     }
     server.join().expect("echo 线程");
 
+    // -- RIL-083 第四段：真实 SOCKS5 UDP ASSOCIATE → direct → 本机 UDP
+    //    echo 往返，控制链 EOF 吊销后关联轨迹必须入活面（origin
+    //    association / last_code association.reclaimed / 映射事件在场）--
+    let udp_echo = std::net::UdpSocket::bind(("127.0.0.1", UDP_ECHO_PORT)).expect("UDP echo 绑定");
+    udp_echo
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("UDP echo 超时");
+    let udp_server = std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        if let Ok((n, peer)) = udp_echo.recv_from(&mut buf) {
+            let _ = udp_echo.send_to(&buf[..n], peer);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    });
+    {
+        use std::io::{Read, Write};
+        let mut control = std::net::TcpStream::connect(("127.0.0.1", SOCKS_PORT))
+            .expect("连 socks 入站（UDP ASSOCIATE 控制链）");
+        control.write_all(&[0x05, 0x01, 0x00]).expect("greeting");
+        let mut method = [0u8; 2];
+        control.read_exact(&mut method).expect("method reply");
+        assert_eq!(method, [0x05, 0x00]);
+        control
+            .write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .expect("ASSOCIATE 请求");
+        let mut reply = [0u8; 10];
+        control.read_exact(&mut reply).expect("ASSOCIATE 应答");
+        assert_eq!(reply[1], 0x00, "ASSOCIATE 应成功");
+        let relay_port = u16::from_be_bytes([reply[8], reply[9]]);
+        let relay = std::net::UdpSocket::bind(("127.0.0.1", 0)).expect("UDP 客户端");
+        relay
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("UDP 超时");
+        // SOCKS5 UDP 请求头：ATYP=IPv4 + DST 127.0.0.1:UDP_ECHO_PORT + payload
+        let mut req = vec![0, 0, 0, 1, 127, 0, 0, 1];
+        req.extend_from_slice(&UDP_ECHO_PORT.to_be_bytes());
+        req.extend_from_slice(b"udp-contract");
+        let relay_addr = format!("127.0.0.1:{relay_port}");
+        relay.send_to(&req, &relay_addr).expect("UDP 上行");
+        let mut buf = [0u8; 64];
+        let (n, _) = relay.recv_from(&mut buf).expect("UDP 回声");
+        assert_eq!(&buf[n - 12..n], b"udp-contract", "UDP 往返逐字节还原");
+        // 控制链 EOF → force_revoke → 轨迹 association.reclaimed 终态
+        drop(control);
+    }
+    udp_server.join().expect("UDP echo 线程");
+
     // 流量收口在独立任务：有界重试等轨迹入采集器并到终态（2s 内应就绪），
     // 超时仍具名失败——不把「迟到」当「恒空」放行
     let mut live_page = None;
@@ -247,8 +297,14 @@ fn ffi_query_faces_match_frozen_contract() {
         "TCP 入口流接线后，真实流量必须产出轨迹并收口——恒 active/恒空说明接线回退或轨迹未准入",
     );
 
-    // -- flows_item 活面：真实 socks5 流条目（接管→计划→关闭） --
-    let first = &page["items"].as_array().expect("items 数组")[0];
+    // -- flows_item 活面：真实 socks5 流条目（接管→计划→关闭）。
+    //    RIL-083 第四段起列表含 UDP 关联条目，按 origin 取 TCP 流条目核对 --
+    let first = page["items"]
+        .as_array()
+        .expect("items 数组")
+        .iter()
+        .find(|i| i["origin"] == serde_json::json!("stream"))
+        .expect("TCP 流条目必须在场");
     assert_face(first, face_of(&face, "flows_item"), "flows_item");
     assert_eq!(first["origin"], serde_json::json!("stream"), "TCP 流语义");
     assert_eq!(
@@ -287,6 +343,73 @@ fn ffi_query_faces_match_frozen_contract() {
         trace["events"][0]["code"],
         serde_json::json!("session.takeover"),
         "轨迹首事件为接管（采集器准入锚点）"
+    );
+
+    // -- RIL-083 第四段：UDP 关联活面——真实 SOCKS5 UDP 往返后列表必含
+    //    origin=association 的闭合轨迹，association.mapped 与 reclaimed
+    //    终码在场（同一 exact flows_item 面，语义分侧不另立面） --
+    let udp_item = {
+        let mut found = None;
+        for _ in 0..100 {
+            let page = unsafe { read_json(rillane_ffi::rillane_ffi_flows_json(h, 0, 50)) };
+            found = page["items"]
+                .as_array()
+                .expect("items 数组")
+                .iter()
+                .find(|i| i["origin"] == serde_json::json!("association"))
+                .cloned();
+            if found
+                .as_ref()
+                .is_some_and(|i| i["state"] == serde_json::json!("closed"))
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        found.expect("UDP 关联面接线后真实流量必须产出轨迹——恒缺席说明 attach_trace_wiring 回退")
+    };
+    assert_face(&udp_item, face_of(&face, "flows_item"), "flows_item");
+    assert_eq!(udp_item["state"], serde_json::json!("closed"));
+    assert_eq!(
+        udp_item["last_code"],
+        serde_json::json!("association.reclaimed"),
+        "控制链 EOF 吊销 = reclaimed 终码"
+    );
+    assert_eq!(
+        udp_item["generation"],
+        serde_json::json!("local"),
+        "关联面代际与 TCP 面同源"
+    );
+    assert!(
+        udp_item["events"].as_u64().unwrap_or(0) >= 4,
+        "关联轨迹至少 takeover/plan/mapped/reclaimed 四事件：{udp_item}"
+    );
+    let udp_id = CString::new(udp_item["flow"].as_str().expect("flow id")).expect("ID");
+    let udp_found = unsafe { read_json(rillane_ffi::rillane_ffi_flow_json(h, udp_id.as_ptr())) };
+    assert_face(&udp_found, face_of(&face, "flow_found"), "flow_found");
+    assert_eq!(udp_found["found"], serde_json::json!(true));
+    let udp_trace = &udp_found["trace"];
+    assert_eq!(
+        udp_trace["events"][0]["code"],
+        serde_json::json!("session.takeover")
+    );
+    assert!(
+        udp_trace["events"]
+            .as_array()
+            .expect("events 数组")
+            .iter()
+            .any(|e| e["code"] == serde_json::json!("association.mapped")),
+        "详情轨迹必含映射建立观测事件"
+    );
+    assert!(
+        !udp_trace["events"]
+            .as_array()
+            .expect("events 数组")
+            .iter()
+            .any(|e| e["code"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("transfer."))),
+        "首字节未逐次测量——不造数"
     );
 
     // -- 活面取证后的面标记：pending 标记不得回潮（摘除是显式动作） --
