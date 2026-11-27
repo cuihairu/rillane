@@ -41,6 +41,10 @@ mod tun;
 #[cfg(unix)]
 pub use tun::echo_reply;
 
+// 有界诊断 IPC（RIL-044 第四段）：unix 域套接字只读桥，宿主显式起停
+#[cfg(unix)]
+mod diagnostic_ipc;
+
 #[cfg(target_os = "android")]
 mod jni_bridge;
 
@@ -52,7 +56,9 @@ mod jni_bridge;
 pub struct FfiHandle {
     /// 实例私有 tokio runtime：单实例隔离，stop 时 shutdown_timeout 收尾
     tokio_rt: tokio::runtime::Runtime,
-    rillane: rillane_runtime::runtime_builder::Runtime,
+    /// `Arc` 共享：诊断 IPC 桥的 accept 线程按只读快照取数（RIL-044 第四段），
+    /// `Runtime` 查询面全部 `&self`，共享零可变面
+    rillane: Arc<rillane_runtime::runtime_builder::Runtime>,
     /// TUN 线程停止旗标（poll 超时 200ms 内可见，见 tun::spawn）
     tun_stop: Arc<AtomicBool>,
     /// 当前 TUN 线程（Some = 在跑）；stop/rillane_ffi_tun_stop 时 join
@@ -318,6 +324,256 @@ fn json_to_raw(value: serde_json::Value) -> *mut c_char {
     }
 }
 
+/// C 查询面与有界诊断 IPC 共用的 DTO 构造（同一份字段口径——两面漂移即
+/// 宿主诊断读到的形状与 C ABI 不同，契约门按逐字 JSON 相等钉死）。
+type CoreRuntime = rillane_runtime::runtime_builder::Runtime;
+
+fn stats_value(r: &CoreRuntime, tun_fd: &AtomicI32) -> serde_json::Value {
+    let stats = r.get_stats();
+    serde_json::json!({
+        "uptime_seconds": stats.uptime_seconds,
+        "total_connections": stats.total_connections,
+        "active_connections": stats.active_connections,
+        "total_bytes_transferred": stats.total_bytes_transferred,
+        "bytes_uploaded": stats.bytes_uploaded,
+        "bytes_downloaded": stats.bytes_downloaded,
+        "error_count": stats.error_count,
+        "is_running": r.is_running(),
+        "tun_fd": tun_fd.load(Ordering::Relaxed),
+    })
+}
+
+fn routing_value(r: &CoreRuntime) -> serde_json::Value {
+    let cfg = r.get_config();
+    let groups = serde_json::to_value(&cfg.routing.groups).unwrap_or(serde_json::Value::Null);
+    serde_json::json!({
+        "schema_version": 1u32,
+        "mode": cfg.routing.mode,
+        "default_node": cfg.routing.default_node,
+        "global_node": cfg.routing.global_node,
+        "direct_node": cfg.routing.direct_node,
+        "groups": groups,
+        "rules_count": cfg.routing.rules.len(),
+    })
+}
+
+fn nodes_value(r: &CoreRuntime) -> serde_json::Value {
+    let cfg = r.get_config();
+    let quality = serde_json::to_value(r.get_routing_quality()).unwrap_or(serde_json::Value::Null);
+    let egress: Vec<serde_json::Value> = cfg
+        .egress
+        .iter()
+        .map(|e| {
+            let spec = serde_json::to_value(&e.spec).unwrap_or(serde_json::Value::Null);
+            serde_json::json!({
+                "name": e.name,
+                "type": spec.get("type").cloned().unwrap_or(serde_json::Value::Null),
+            })
+        })
+        .collect();
+    let subscriptions: Vec<serde_json::Value> = match r.get_subscription_manager() {
+        Some(m) => m
+            .list_subscriptions()
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "enabled": s.enabled,
+                    "type": s.r#type,
+                })
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    serde_json::json!({
+        "schema_version": 1u32,
+        "groups": quality,
+        "egress": egress,
+        "subscriptions": subscriptions,
+    })
+}
+
+fn dns_stats_value(r: &CoreRuntime) -> serde_json::Value {
+    match r.get_dns_service() {
+        Some(svc) => {
+            let s = svc.stats_snapshot();
+            serde_json::json!({
+                "schema_version": 1u32,
+                "enabled": true,
+                "listen": svc.listen().to_string(),
+                "total_queries": s.total_queries,
+                "cache_hits": s.cache_hits,
+                "cache_misses": s.cache_misses,
+                "cache_hit_rate": s.cache_hit_rate,
+                "upstream_failures": s.upstream_failures,
+                "pollution_suspected": s.pollution_suspected,
+                "domestic_queries": s.domestic_queries,
+                "trusted_queries": s.trusted_queries,
+            })
+        }
+        None => serde_json::json!({
+            "schema_version": 1u32,
+            "enabled": false,
+            "listen": null,
+            "total_queries": 0u64,
+            "cache_hits": 0u64,
+            "cache_misses": 0u64,
+            "cache_hit_rate": 0.0,
+            "upstream_failures": 0u64,
+            "pollution_suspected": 0u64,
+            "domestic_queries": 0u64,
+            "trusted_queries": 0u64,
+        }),
+    }
+}
+
+fn dns_resolvers_value(r: &CoreRuntime) -> serde_json::Value {
+    match r.get_dns_service() {
+        Some(svc) => {
+            let s = svc.resolver_snapshot();
+            serde_json::json!({
+                "schema_version": 1u32,
+                "enabled": true,
+                "listen": svc.listen().to_string(),
+                "domestic": s.domestic,
+                "trusted": s.trusted,
+                "bootstrap": s.bootstrap,
+                "bootstrap_mode": s.bootstrap_mode,
+                "rules": s.rules,
+                "default_group": s.default_group,
+                "anti_poison": s.anti_poison,
+                "timeout_ms": s.timeout_ms,
+                "retries": s.retries,
+                "cache_enabled": s.cache_enabled,
+                "tls_skip_verify": s.tls_skip_verify,
+                "egress_mark": s.egress_mark,
+                "udp_egress_marked": s.udp_egress_marked,
+                "dot_egress_marked": s.dot_egress_marked,
+                "doh_egress_marked": s.doh_egress_marked,
+            })
+        }
+        None => serde_json::json!({
+            "schema_version": 1u32,
+            "enabled": false,
+            "listen": null,
+            "domestic": Vec::<String>::new(),
+            "trusted": Vec::<String>::new(),
+            "bootstrap": Vec::<String>::new(),
+            "bootstrap_mode": "",
+            "rules": 0usize,
+            "default_group": "",
+            "anti_poison": "",
+            "timeout_ms": 0u64,
+            "retries": 0u32,
+            "cache_enabled": false,
+            "tls_skip_verify": false,
+            "egress_mark": 0u32,
+            "udp_egress_marked": false,
+            "dot_egress_marked": false,
+            "doh_egress_marked": false,
+        }),
+    }
+}
+
+fn flows_value(r: &CoreRuntime, offset: usize, limit: usize) -> serde_json::Value {
+    if limit == 0 {
+        return serde_json::json!({
+            "schema_version": 1u32,
+            "error": "query.page.invalid",
+        });
+    }
+    let page = match r
+        .flow_query()
+        .list(&FlowQueryFilter::default(), offset, limit)
+    {
+        Ok(page) => page,
+        Err(err) => {
+            return serde_json::json!({
+                "schema_version": 1u32,
+                "error": err.code(),
+            })
+        }
+    };
+    let items: Vec<serde_json::Value> = page
+        .items
+        .iter()
+        .map(|summary| {
+            serde_json::json!({
+                "flow": summary.flow.as_str(),
+                "origin": summary.origin.as_str(),
+                "generation": summary.generation,
+                "state": match summary.state {
+                    FlowState::Active => "active",
+                    FlowState::Closed => "closed",
+                },
+                "events": summary.events,
+                "first_wall_ms": summary.first_wall_ms,
+                "last_code": summary.last_code,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "schema_version": 1u32,
+        "total_matching": page.total_matching,
+        "offset": page.offset,
+        "limit": limit,
+        "items": items,
+    })
+}
+
+/// IPC 只读句柄：仅持有 runtime 的 `Arc` 与 TUN fd 观测计数器，不含可变面。
+/// `Clone` 只增加引用计数——accept 线程与调用句柄的生命周期解耦。
+#[derive(Clone)]
+pub(crate) struct IpcHandle {
+    rillane: Arc<CoreRuntime>,
+    tun_fd: Arc<AtomicI32>,
+}
+
+impl IpcHandle {
+    /// 动词白名单内分派；返回与 C 查询面逐字相同的 JSON 形状。
+    fn dispatch(&self, verb: &str) -> Result<String, &'static str> {
+        let value = match verb {
+            "stats" => stats_value(&self.rillane, &self.tun_fd),
+            "routing" => routing_value(&self.rillane),
+            "nodes" => nodes_value(&self.rillane),
+            "dns_stats" => dns_stats_value(&self.rillane),
+            "dns_resolvers" => dns_resolvers_value(&self.rillane),
+            // 行帧协议无参数面：固定首页分页（0/100），与 C 面同 DTO
+            "flows" => flows_value(&self.rillane, 0, 100),
+            _ => return Err("ipc.request.unknown_verb"),
+        };
+        Ok(value.to_string())
+    }
+}
+
+/// 从 FFI 句柄抽取 IPC 只读投影（不复制 tokio runtime，不移交所有权）
+#[cfg(unix)]
+fn clone_handle_for_ipc(handle: &FfiHandle) -> IpcHandle {
+    IpcHandle {
+        rillane: handle.rillane.clone(),
+        tun_fd: handle.tun_fd.clone(),
+    }
+}
+
+/// 读取 NUL 结尾 C 串（IPC 路径入参）；NULL/非 UTF-8 一律 None（已写 last_error）
+///
+/// # Safety
+/// `s` 须为有效 NUL 结尾 C 串或 NULL。
+#[cfg(unix)]
+unsafe fn read_c_string(s: *const c_char) -> Option<String> {
+    if s.is_null() {
+        set_last_error("ipc.start.path 空指针".into());
+        return None;
+    }
+    match unsafe { CStr::from_ptr(s) }.to_str() {
+        Ok(v) => Some(v.to_string()),
+        Err(e) => {
+            set_last_error(format!("ipc.start.path 非 UTF-8：{e}"));
+            None
+        }
+    }
+}
+
 fn start_inner(yaml: &str) -> anyhow::Result<*mut FfiHandle> {
     let config: RillaneConfig = serde_yaml::from_str(yaml)?;
     // 移动端 worker=2：ingress/DNS/订阅面任务量小，多核让位省电（桌面 rillaned
@@ -326,7 +582,7 @@ fn start_inner(yaml: &str) -> anyhow::Result<*mut FfiHandle> {
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let rillane = RuntimeBuilder::new(config).build()?;
+    let rillane = Arc::new(RuntimeBuilder::new(config).build()?);
     tokio_rt.block_on(rillane.start())?;
     Ok(Box::into_raw(Box::new(FfiHandle {
         tokio_rt,
@@ -359,12 +615,71 @@ pub unsafe extern "C" fn rillane_ffi_stop(handle: *mut FfiHandle) -> i32 {
 }
 
 fn stop_inner(h: Box<FfiHandle>) {
+    // 有界诊断 IPC 先行收桥：accept 线程持 `Arc<Runtime>` 与句柄同生，
+    // 收桥后 stop 期间不再产生新查询连接（RIL-044 第四段）
+    #[cfg(unix)]
+    let _ = diagnostic_ipc::ipc_stop();
     tun_stop_inner(&h);
     let _ = h.tokio_rt.block_on(h.rillane.stop());
     // 收尾 shutdown：上限 2s，防个别收尾任务拖住调用线程（普通 async 任务
     // 在 await 点被取消，无阻塞线程滞留面）；Box 部分移出 tokio_rt 合法
     // （FfiHandle 无 Drop）
     h.tokio_rt.shutdown_timeout(Duration::from_secs(2));
+}
+
+/// 有界诊断 IPC 启动（RIL-044 第四段）：在宿主自选 UDS 路径上起只读诊断桥。
+///
+/// 设计边界（`docs/design/debug-and-mcp.md`）：移动端不默认跑 MCP/手机入站
+/// 管理端口；本面是**授权宿主 IPC**——宿主显式传路径才起监听，进程默认零
+/// 监听面。行帧协议（一请求一行）、动词白名单只读（stats/routing/nodes/
+/// dns_stats/dns_resolvers/flows）、双向长度上限、一连接一请求；稳定错误码
+/// 见 last_error（`ipc.start.duplicate_path` / `ipc.request.oversize` /
+/// `ipc.request.unknown_verb` 等）。与 C 查询面逐字同形状（同一 DTO 构造）。
+///
+/// 返回 0 成功 / -1 失败（NULL 句柄 / 路径非法 / 重复路径 / 绑定失败）。
+///
+/// # Safety
+/// `handle` 须为有效句柄或 NULL（NULL → -1 + last_error）；`path` 须为
+/// 有效 NUL 结尾 C 串（宿主显式路径，无默认路径）。
+#[no_mangle]
+#[cfg(unix)]
+pub unsafe extern "C" fn rillane_ffi_diagnostic_ipc_start(
+    handle: *const FfiHandle,
+    path: *const c_char,
+) -> i32 {
+    if handle.is_null() {
+        set_last_error(diagnostic_ipc::ERR_NULL_HANDLE.into());
+        return -1;
+    }
+    let path = match unsafe { read_c_string(path) } {
+        Some(p) => p,
+        None => return -1, // read_c_string 已写 last_error
+    };
+    match diagnostic_ipc::ipc_start(unsafe { &*handle }, &path) {
+        Ok(()) => 0,
+        Err(code) => {
+            set_last_error(code);
+            -1
+        }
+    }
+}
+
+/// 停止诊断桥（幂等可重复；未起 = -1 + `ipc.stop.already_stopped` 稳定码）
+///
+/// 返回 0 成功 / -1 未运行。
+///
+/// # Safety
+/// 无入参；句柄停用另以 `rillane_ffi_stop` 收尾（自动先收桥）。
+#[no_mangle]
+#[cfg(unix)]
+pub unsafe extern "C" fn rillane_ffi_diagnostic_ipc_stop() -> i32 {
+    match diagnostic_ipc::ipc_stop() {
+        Ok(()) => 0,
+        Err(code) => {
+            set_last_error(code);
+            -1
+        }
+    }
 }
 
 /// 通知核心宿主底层网络已变化（RIL-044 生命周期契约「网络变化」面的核心半边）
@@ -427,21 +742,7 @@ pub unsafe extern "C" fn rillane_ffi_stats_json(handle: *const FfiHandle) -> *mu
         return ptr::null_mut();
     }
     let h = unsafe { &*handle };
-    let stats = h.rillane.get_stats();
-    let dto = serde_json::json!({
-        // RuntimeStats 未实现 Serialize（Instant 不可序列化）——FFI 面自持
-        // DTO，字段名与 rillaned 控制面 /stats 形态对齐，移动端脚本可直接复用
-        "uptime_seconds": stats.uptime_seconds,
-        "total_connections": stats.total_connections,
-        "active_connections": stats.active_connections,
-        "total_bytes_transferred": stats.total_bytes_transferred,
-        "bytes_uploaded": stats.bytes_uploaded,
-        "bytes_downloaded": stats.bytes_downloaded,
-        "error_count": stats.error_count,
-        "is_running": h.is_running(),
-        "tun_fd": h.tun_fd.load(Ordering::Relaxed),
-    });
-    json_to_raw(dto)
+    json_to_raw(stats_value(&h.rillane, &h.tun_fd))
 }
 
 // ---------------------------------------------------------------------------
@@ -462,17 +763,7 @@ pub unsafe extern "C" fn rillane_ffi_routing_json(handle: *const FfiHandle) -> *
         return ptr::null_mut();
     }
     let h = unsafe { &*handle };
-    let cfg = h.rillane.get_config();
-    let groups = serde_json::to_value(&cfg.routing.groups).unwrap_or(serde_json::Value::Null);
-    json_to_raw(serde_json::json!({
-        "schema_version": 1u32,
-        "mode": cfg.routing.mode,
-        "default_node": cfg.routing.default_node,
-        "global_node": cfg.routing.global_node,
-        "direct_node": cfg.routing.direct_node,
-        "groups": groups,
-        "rules_count": cfg.routing.rules.len(),
-    }))
+    json_to_raw(routing_value(&h.rillane))
 }
 
 /// 节点 JSON（组实时质量报告 + 出口节点名/类型 + 订阅源——节点 Tab；
@@ -487,40 +778,7 @@ pub unsafe extern "C" fn rillane_ffi_nodes_json(handle: *const FfiHandle) -> *mu
         return ptr::null_mut();
     }
     let h = unsafe { &*handle };
-    let cfg = h.rillane.get_config();
-    let quality =
-        serde_json::to_value(h.rillane.get_routing_quality()).unwrap_or(serde_json::Value::Null);
-    let egress: Vec<serde_json::Value> = cfg
-        .egress
-        .iter()
-        .map(|e| {
-            let spec = serde_json::to_value(&e.spec).unwrap_or(serde_json::Value::Null);
-            serde_json::json!({
-                "name": e.name,
-                "type": spec.get("type").cloned().unwrap_or(serde_json::Value::Null),
-            })
-        })
-        .collect();
-    let subscriptions: Vec<serde_json::Value> = match h.rillane.get_subscription_manager() {
-        Some(m) => m
-            .list_subscriptions()
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "name": s.name,
-                    "enabled": s.enabled,
-                    "type": s.r#type,
-                })
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    json_to_raw(serde_json::json!({
-        "schema_version": 1u32,
-        "groups": quality,
-        "egress": egress,
-        "subscriptions": subscriptions,
-    }))
+    json_to_raw(nodes_value(&h.rillane))
 }
 
 /// DNS 统计 JSON（`/dns/stats` DTO 同款字段——设置 DNS 卡；
@@ -535,38 +793,7 @@ pub unsafe extern "C" fn rillane_ffi_dns_stats_json(handle: *const FfiHandle) ->
         return ptr::null_mut();
     }
     let h = unsafe { &*handle };
-    let dto = match h.rillane.get_dns_service() {
-        Some(svc) => {
-            let s = svc.stats_snapshot();
-            serde_json::json!({
-                "schema_version": 1u32,
-                "enabled": true,
-                "listen": svc.listen().to_string(),
-                "total_queries": s.total_queries,
-                "cache_hits": s.cache_hits,
-                "cache_misses": s.cache_misses,
-                "cache_hit_rate": s.cache_hit_rate,
-                "upstream_failures": s.upstream_failures,
-                "pollution_suspected": s.pollution_suspected,
-                "domestic_queries": s.domestic_queries,
-                "trusted_queries": s.trusted_queries,
-            })
-        }
-        None => serde_json::json!({
-            "schema_version": 1u32,
-            "enabled": false,
-            "listen": null,
-            "total_queries": 0u64,
-            "cache_hits": 0u64,
-            "cache_misses": 0u64,
-            "cache_hit_rate": 0.0,
-            "upstream_failures": 0u64,
-            "pollution_suspected": 0u64,
-            "domestic_queries": 0u64,
-            "trusted_queries": 0u64,
-        }),
-    };
-    json_to_raw(dto)
+    json_to_raw(dns_stats_value(&h.rillane))
 }
 
 /// DNS 解析器形状 JSON（`/dns/resolvers` DTO 同款字段——设置 DNS 卡；
@@ -581,52 +808,7 @@ pub unsafe extern "C" fn rillane_ffi_dns_resolvers_json(handle: *const FfiHandle
         return ptr::null_mut();
     }
     let h = unsafe { &*handle };
-    let dto = match h.rillane.get_dns_service() {
-        Some(svc) => {
-            let s = svc.resolver_snapshot();
-            serde_json::json!({
-                "schema_version": 1u32,
-                "enabled": true,
-                "listen": svc.listen().to_string(),
-                "domestic": s.domestic,
-                "trusted": s.trusted,
-                "bootstrap": s.bootstrap,
-                "bootstrap_mode": s.bootstrap_mode,
-                "rules": s.rules,
-                "default_group": s.default_group,
-                "anti_poison": s.anti_poison,
-                "timeout_ms": s.timeout_ms,
-                "retries": s.retries,
-                "cache_enabled": s.cache_enabled,
-                "tls_skip_verify": s.tls_skip_verify,
-                "egress_mark": s.egress_mark,
-                "udp_egress_marked": s.udp_egress_marked,
-                "dot_egress_marked": s.dot_egress_marked,
-                "doh_egress_marked": s.doh_egress_marked,
-            })
-        }
-        None => serde_json::json!({
-            "schema_version": 1u32,
-            "enabled": false,
-            "listen": null,
-            "domestic": Vec::<String>::new(),
-            "trusted": Vec::<String>::new(),
-            "bootstrap": Vec::<String>::new(),
-            "bootstrap_mode": "",
-            "rules": 0usize,
-            "default_group": "",
-            "anti_poison": "",
-            "timeout_ms": 0u64,
-            "retries": 0u32,
-            "cache_enabled": false,
-            "tls_skip_verify": false,
-            "egress_mark": 0u32,
-            "udp_egress_marked": false,
-            "dot_egress_marked": false,
-            "doh_egress_marked": false,
-        }),
-    };
-    json_to_raw(dto)
+    json_to_raw(dns_resolvers_value(&h.rillane))
 }
 
 /// 活动/近期连接分页 JSON（`/trace/flows` 同款信封与项字段——连接 Tab）。
@@ -645,50 +827,7 @@ pub unsafe extern "C" fn rillane_ffi_flows_json(
         return ptr::null_mut();
     }
     let h = unsafe { &*handle };
-    if limit == 0 {
-        return json_to_raw(serde_json::json!({
-            "schema_version": 1u32,
-            "error": "query.page.invalid",
-        }));
-    }
-    let page = match h
-        .rillane
-        .flow_query()
-        .list(&FlowQueryFilter::default(), offset, limit)
-    {
-        Ok(page) => page,
-        Err(err) => {
-            return json_to_raw(serde_json::json!({
-                "schema_version": 1u32,
-                "error": err.code(),
-            }))
-        }
-    };
-    let items: Vec<serde_json::Value> = page
-        .items
-        .iter()
-        .map(|summary| {
-            serde_json::json!({
-                "flow": summary.flow.as_str(),
-                "origin": summary.origin.as_str(),
-                "generation": summary.generation,
-                "state": match summary.state {
-                    FlowState::Active => "active",
-                    FlowState::Closed => "closed",
-                },
-                "events": summary.events,
-                "first_wall_ms": summary.first_wall_ms,
-                "last_code": summary.last_code,
-            })
-        })
-        .collect();
-    json_to_raw(serde_json::json!({
-        "schema_version": 1u32,
-        "total_matching": page.total_matching,
-        "offset": page.offset,
-        "limit": limit,
-        "items": items,
-    }))
+    json_to_raw(flows_value(&h.rillane, offset, limit))
 }
 
 /// 单流详情 JSON（`/trace/flow` 同款信封——连接详情；未知/无效 ID =

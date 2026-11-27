@@ -12,6 +12,7 @@ use std::os::raw::c_char;
 
 use crate::FfiHandle;
 use crate::{
+    rillane_ffi_diagnostic_ipc_start, rillane_ffi_diagnostic_ipc_stop,
     rillane_ffi_dns_resolvers_json, rillane_ffi_dns_stats_json, rillane_ffi_flow_json,
     rillane_ffi_flows_json, rillane_ffi_free_string, rillane_ffi_is_running,
     rillane_ffi_last_error, rillane_ffi_nodes_json, rillane_ffi_routing_json,
@@ -249,6 +250,37 @@ pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_flowJson(
         .into_owned();
     unsafe { rillane_ffi_free_string(s) };
     jstring_from(&mut env, &raw)
+}
+
+/// 有界诊断 IPC（RIL-044 第四段）：路径由宿主显式传入（无默认监听面），
+/// jstring → CString 保 NUL 终止（与 flowJson 同纪律）。
+#[no_mangle]
+pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_diagnosticIpcStart(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    path: JString,
+) -> jint {
+    let bytes = match env.get_string(&path) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return -1,
+    };
+    let path = match std::ffi::CString::new(bytes) {
+        Ok(c) => c,
+        Err(_) => {
+            crate::set_last_error("ipc.start.bad_path".into());
+            return -1;
+        }
+    };
+    unsafe { rillane_ffi_diagnostic_ipc_start(handle_from(handle), path.as_ptr()) }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_diagnosticIpcStop(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    unsafe { rillane_ffi_diagnostic_ipc_stop() }
 }
 
 #[no_mangle]

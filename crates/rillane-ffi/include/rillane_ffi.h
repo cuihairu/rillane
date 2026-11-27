@@ -91,6 +91,17 @@ char *rillane_ffi_flows_json(const rillane_ffi_handle_t *handle, size_t offset, 
 char *rillane_ffi_flow_json(const rillane_ffi_handle_t *handle, const char *flow_id);
 
 /*
+ * 有界诊断 IPC（RIL-044 第四段）：宿主显式调起停，进程默认零监听面。
+ * start 在宿主自选 UDS 路径上起只读诊断桥——行帧协议（一请求一行）、
+ * 动词白名单只读（stats/routing/nodes/dns_stats/dns_resolvers/flows）、
+ * 双向长度上限、一连接一请求；与 C 查询面逐字同形状。重复路径/坏路径/
+ * 绑定失败/空路径 = -1（稳定码见 last_error）。stop 未运行返回 -1
+ * （ipc.stop.already_stopped）；句柄停用自动收桥。
+ */
+int32_t rillane_ffi_diagnostic_ipc_start(const rillane_ffi_handle_t *handle, const char *path);
+int32_t rillane_ffi_diagnostic_ipc_stop(void);
+
+/*
  * 挂载 TUN fd 并起最小数据通路（ICMP echo 轮转）。
  * fd 所有权转移至本层（调用方 detach 后不得再关闭）；
  * 重复挂载先停旧再起新。0 成功 / -1 失败。

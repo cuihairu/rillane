@@ -64,6 +64,18 @@ object RillaneFfi {
     /** 单流详情 JSON（/trace/flow 同形；未知/无效 ID = found:false + 稳定码） */
     external fun flowJson(handle: Long, flowId: String): String?
 
+    /**
+     * 有界诊断 IPC（RIL-044 第四段）：在宿主自选 UDS 路径上起只读诊断桥
+     * ——进程默认零监听面，本调用前无监听。行帧（一请求一行）、动词白名单
+     * 只读（stats/routing/nodes/dns_stats/dns_resolvers/flows）、双向长度
+     * 上限、一连接一请求；与 C 查询面逐字同形状。重复路径/空路径/坏路径/
+     * 绑定失败 = -1（取 lastError，稳定码 ipc.start.*）。0 成功。
+     */
+    external fun diagnosticIpcStart(handle: Long, path: String): Int
+
+    /** 停止诊断桥（幂等；未运行返回 -1 + ipc.stop.already_stopped） */
+    external fun diagnosticIpcStop(): Int
+
     /** 挂载 TUN fd（所有权移交 Rust，Java 侧 detachFd 后传入）。0 成功 / -1 失败 */
     external fun tunStart(handle: Long, fd: Int): Int
 

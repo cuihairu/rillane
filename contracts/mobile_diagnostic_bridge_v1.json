@@ -24,6 +24,8 @@
       "rillane_ffi_flow_json",
       "rillane_ffi_tun_start",
       "rillane_ffi_tun_stop",
+      "rillane_ffi_diagnostic_ipc_start",
+      "rillane_ffi_diagnostic_ipc_stop",
       "rillane_ffi_free_string"
     ],
     "features": {

@@ -91,9 +91,10 @@ fn kotlin_face_matches_jni_exports() {
         kotlin_only.is_empty(),
         "Kotlin 面多声明 {kotlin_only:?}（加载期 UnsatisfiedLinkError——补 Rust 导出或删声明）"
     );
-    // 已知桥接面形状：16 个方法（4 生命周期/状态 + 8 查询 + 2 TUN fd 面
-    // + 1 秘密引用启动 + 1 网络变化通知——RIL-044 第三段显式过门）。
-    assert_eq!(externals.len(), 16, "桥接面方法数变化须显式过本门");
+    // 已知桥接面形状：18 个方法（4 生命周期/状态 + 8 查询 + 2 TUN fd 面
+    // + 1 秘密引用启动 + 1 网络变化通知 + 2 有界诊断 IPC 面——RIL-044
+    // 第三/四段显式过门）。
+    assert_eq!(externals.len(), 18, "桥接面方法数变化须显式过本门");
     for must in [
         "version",
         "lastError",
@@ -109,6 +110,8 @@ fn kotlin_face_matches_jni_exports() {
         "dnsResolversJson",
         "flowsJson",
         "flowJson",
+        "diagnosticIpcStart",
+        "diagnosticIpcStop",
         "tunStart",
         "tunStop",
     ] {
