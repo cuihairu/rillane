@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "comment": "RIL-085 三桌面进程端到端验收矩阵（条款 × 平台证据账本）：每格只允许五种诚实状态——verified_local（本机真实测试）/ verified_device（仓内真机证据文档）/ partial（部分面）/ needs_runtime（需图形桌面与浏览器/游戏会话）/ needs_mac_ssh（mac 真机未接入）。契约门 crates/rillane-platform/tests/desktop_e2e_matrix_contract.rs 钉住：verified_* 必须指向存在的证据文件、needs_* 不得携带证据（不冒充实测）、macOS 除平台无关规则来源外全部 needs_mac_ssh、核心场景「相同目标浏览器/两个游戏分组轨迹」与「故障样例」在六平台均未实测（Windows 仅 HTTP 客户端/服务恢复的 partial 面）。",
+  "comment": "RIL-085 三桌面进程端到端验收矩阵（条款 × 平台证据账本）：每格只允许五种诚实状态——verified_local（本机真实测试）/ verified_device（仓内真机证据文档）/ partial（部分面）/ needs_runtime（需图形桌面与浏览器/游戏会话）/ needs_mac_ssh（mac 真机未接入）。契约门 crates/rillane-platform/tests/desktop_e2e_matrix_contract.rs 钉住：verified_* 必须指向存在的证据文件、needs_* 不得携带证据（不冒充实测）、macOS 除平台无关规则来源外全部 needs_mac_ssh、核心场景「相同目标浏览器/两个游戏分组轨迹」与「故障样例」在六平台均未实测（Windows 仅 HTTP 客户端/服务恢复的 partial 面）。Linux 的权限不足（跨 uid 进程 /proc 盲区）与端口复用（同目标多进程各自归因）已以真实进程实测升格 verified_local（RIL-085 第二段），其余 needs_runtime 面仍如实未跑。",
   "platforms": ["linux", "windows", "macos"],
   "clauses": {
     "tcp": {
@@ -76,9 +76,11 @@
       "title": "权限不足路径",
       "cells": {
         "linux": {
-          "status": "needs_runtime",
-          "evidence": [],
-          "note": "现契约覆盖关闭连接/截止/能力面；跨属主 /proc 拒绝面需另一 uid 进程实测，尚未跑"
+          "status": "verified_local",
+          "evidence": [
+            "crates/rillane-platform/tests/owner_linux_permission_contract.rs"
+          ],
+          "note": "sudo -n + setpriv 以 nobody(65534) 拉起真实跨 uid 进程，socket inode 可见但 /proc/<pid>/fd 不可列 → PermissionDenied 具名；同监听口同 uid 控制连接仍归因到自身。无 sudo 环境 skip 不冒充实测"
         },
         "windows": {
           "status": "verified_device",
@@ -119,9 +121,11 @@
       "title": "端口复用/同目标多进程",
       "cells": {
         "linux": {
-          "status": "needs_runtime",
-          "evidence": [],
-          "note": "Linux 侧端口复用/多进程同目标实测归桌面批次；当前仅 Windows 有 P4/P4b 证据"
+          "status": "verified_local",
+          "evidence": [
+            "crates/rillane-platform/tests/owner_linux_port_reuse_contract.rs"
+          ],
+          "note": "两个独立进程连同一目标：四元组本地端口区分、各自归因到自身 pid 且零串扰、启动身份在场；同 uid 多进程真实实测（PID 复用翻转见 Windows P4b 证据）"
         },
         "windows": {
           "status": "verified_device",

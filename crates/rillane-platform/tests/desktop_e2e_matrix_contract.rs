@@ -28,6 +28,10 @@ fn repo_root(rel: &str) -> PathBuf {
         .join(rel)
 }
 
+fn read_text(rel: &str) -> String {
+    std::fs::read_to_string(repo_root(rel)).unwrap_or_else(|e| panic!("读取 {rel}: {e}"))
+}
+
 fn load_matrix() -> Value {
     let path = repo_root("contracts/desktop_e2e_matrix_v1.json");
     let raw = std::fs::read_to_string(&path)
@@ -241,8 +245,55 @@ fn comparator_bites_on_faked_macos_device() {
     }
 }
 
-/// 对账器自证：把核心场景（Windows 浏览器分组轨迹）升格为 verified_device →
-/// 「核心场景不得实测」断言必须点名 panic。
+/// Linux 权限不足/端口复用两格的已升格状态必须有真实可跑的证据文件
+/// 且在源码中真做跨 uid / 多进程（不是纯文本门冒充真机进程实测）。
+#[test]
+#[cfg(target_os = "linux")]
+fn linux_permission_and_port_reuse_cells_point_at_real_process_tests() {
+    let matrix = load_matrix();
+    for (clause, marker, label) in [
+        (
+            "permission_denied",
+            "setpriv",
+            "跨 uid 权限不足（sudo -n + setpriv 真实进程）",
+        ),
+        (
+            "port_reuse",
+            "current_exe()",
+            "同目标多进程端口复用（两个独立 helper 进程）",
+        ),
+    ] {
+        let (status, evidence) = cell(&matrix, clause, "linux");
+        assert_eq!(
+            status, "verified_local",
+            "Linux {clause} 格应为 verified_local"
+        );
+        assert_eq!(evidence.len(), 1, "Linux {clause} 应恰指向一份证据");
+        let src = read_text(&evidence[0]);
+        assert!(
+            src.contains("#[test]") && src.contains(marker),
+            "Linux {clause} 证据 {ev} 未含真实进程测试形态（{label}）",
+            ev = evidence[0]
+        );
+    }
+}
+
+/// 对账器自证：把 Linux 权限不足格降回 needs_runtime → 本门须点名。
+#[test]
+#[cfg(target_os = "linux")]
+#[should_panic(expected = "Linux permission_denied 格应为 verified_local")]
+fn comparator_bites_on_stale_linux_permission_cell() {
+    let mut matrix = load_matrix();
+    matrix["clauses"]["permission_denied"]["cells"]["linux"]["status"] =
+        serde_json::json!("needs_runtime");
+    let (status, _) = cell(&matrix, "permission_denied", "linux");
+    assert_eq!(
+        status, "verified_local",
+        "Linux permission_denied 格应为 verified_local"
+    );
+}
+
+/// 对账器自证：Windows 浏览器轨迹冒充实测仍须被拒（原门保留）。
 #[test]
 #[should_panic(expected = "浏览器/游戏分组轨迹与故障样例在六平台均未实测")]
 fn comparator_bites_on_faked_browser_trace() {

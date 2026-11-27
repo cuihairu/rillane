@@ -4,7 +4,7 @@
 
 机器可读验收账本 `contracts/desktop_e2e_matrix_v1.json`：RIL-085 验收条款 ×
 三桌面平台（Linux / Windows / macOS），由
-`crates/rillane-platform/tests/desktop_e2e_matrix_contract.rs` 钉门（7/7 绿）。
+`crates/rillane-platform/tests/desktop_e2e_matrix_contract.rs` 钉门（9/9 绿）。
 每格只允许一种诚实状态，可指认时附仓内证据文件路径：
 
 | 状态 | 含义 |
@@ -17,8 +17,10 @@
 
 对账器钉住封闭的九条款集与三平台集；所有 `verified_*` 格必须指向真实文件；
 `needs_*` 格不得携带证据；macOS 除平台无关的「规则来源可查」面外一律
-`needs_mac_ssh`；两个核心场景永不标实测。两个 `#[should_panic]` 自证门
-故意篡改矩阵（伪造 macOS 实测、伪造浏览器轨迹实测），证明对账器会点名失败。
+`needs_mac_ssh`；两处 Linux 进程门保持诚实（权限不足格必指向真实 `setpriv`
+进程测试、端口复用格必指向真实双 helper 进程测试）；两个核心场景永不标实测。
+三个 `#[should_panic]` 自证门故意篡改矩阵（伪造 macOS 实测、伪造浏览器轨迹
+实测、陈旧 Linux 权限格），证明对账器会点名失败。
 
 ## 逐条款证据账
 
@@ -35,8 +37,18 @@
   决策面平台无关（`crates/rillane-routing/tests/subscription_to_execution.rs`、
   `crates/rillane-routing/tests/explain_contract.rs`）。这**不**表示该平台上的
   真实流量已归因到规则。
-- **权限不足 / 端口复用（Linux）**：`needs_runtime`——跨属主 `/proc` 拒绝面
-  与同目标多进程场景需要桌面会话夹具，尚未跑。
+- **权限不足（Linux）**：`verified_local`，凭据
+  `crates/rillane-platform/tests/owner_linux_permission_contract.rs`——`sudo -n` +
+  `setpriv` 以 `nobody`(65534) 拉起真实 helper 进程；连接 socket inode 在
+  `/proc/net/tcp` 可见，但跨 uid 的 `/proc/<pid>/fd` 不可列——
+  `ProcOwnerResolver` 返回 `Unknown(PermissionDenied)`（具名、不伪造、不降级为
+  `NotFound`）。同一监听口上同 uid 的控制连接仍归因到本进程，证明盲区是跨 uid
+  而非解析器整体失效。无 sudo/setpriv 环境打印 `skip`，不冒充实测。
+- **端口复用（Linux）**：`verified_local`，凭据
+  `crates/rillane-platform/tests/owner_linux_port_reuse_contract.rs`——两个独立
+  helper 进程连同一目标、本地端口各异；每条 `(本地端口, 远端)` 元组归到正确
+  helper pid、启动身份在场、零串扰。这补上了「PID/端口复用实测」此前仅有
+  Windows P4/P4b 真机证据的 Linux 半边。
 - **macOS**：除规则来源外所有条款皆 `needs_mac_ssh`——RIL-036/037/038
   未决；cross-check 与单测不升格为真机验收。
 
