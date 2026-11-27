@@ -147,5 +147,10 @@
         "note": "string"
       }
     }
+  },
+  "ril_043_ownership_face": {
+    "gate": "crates/rillane-ffi/tests/ownership_concurrency_contract.rs",
+    "landed": "2026-11-27",
+    "comment": "RIL-043 第三段落地（2026-11-27），具名理由：缓冲所有权/ABI 版本是行为语义（指针家族、读后即清、版本对齐）而非键集形，故以注记入账、不冒充 exact 键面。机器可核断言：堆族每次独立分配 + 恰一次归还；version() 进程级静态同指针且与根 Cargo.toml [workspace.package].version 逐字等；缺席编码 NULL；last_error 读后即清；4 线程并发查询不阻塞真实 SOCKS5 传输。"
   }
 }

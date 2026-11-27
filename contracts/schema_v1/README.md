@@ -47,9 +47,10 @@ structuredContent 三处各自落地为 `1`；本库的 exact 面把每处的
 
 ## 边界（如实）
 
-- 移动 FFI 增量（RIL-043 批次的批次缓冲 / ABI 版本面）落地下
-  在此追加 `ffi_face_v1.json` 新面并留具名理由——本版不含未落地
-  面的占位。
+- 移动 FFI 增量（RIL-043 批次的批次缓冲 / ABI 版本面）已随
+  RIL-043 第三段（2026-11-27）落地，以 `ffi_face_v1.json` 的
+  `ril_043_ownership_face` 注记入账并留具名理由（行为面非键集形，
+  不冒充 exact 面）；后续移动 FFI 增量同此例。
 - MCP 协议层（握手 / 信封 / 错误码）行为面由 sdk-acceptance
   驱动（apps/rillane-mcp）+ rillane-app mcp.rs 常量钉住；本库只钉
   **工具目录快照**，不重复钉协议层。
