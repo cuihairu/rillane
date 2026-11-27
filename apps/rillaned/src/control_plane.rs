@@ -6896,4 +6896,45 @@ mod tests {
             "旧提案必须撞版本门"
         );
     }
+    /// RIL-083 第五段：破坏兼容自证——面保持冻结，动真实投影。
+    /// 实现丢一个已声明键（减键=破坏兼容）必须被以「缺键」点名。
+    #[tokio::test]
+    #[should_panic(expected = "控制面漂移 @ runtime_stats：缺键 [\"total_connections\"]")]
+    async fn comparator_bites_on_dropped_key() {
+        let face_raw = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contracts/schema_v1/control_face_v1.json"),
+        )
+        .expect("读取 control_face_v1.json");
+        let face: serde_json::Value =
+            serde_json::from_str(&face_raw).expect("control_face_v1.json 解析");
+        let cp = build_runtime(false, false).await;
+        let cp = ControlPlane::new(cp, None, true);
+        let stats = get_body(&cp, "/runtime/stats").await;
+        let mut stats: serde_json::Value = serde_json::from_str(&stats).expect("JSON");
+        stats
+            .as_object_mut()
+            .expect("runtime/stats 投影应为对象")
+            .remove("total_connections");
+        assert_exact_keys(&stats, &face["faces"]["runtime_stats"], "runtime_stats");
+    }
+
+    /// 实现多出一个面外键（加键=冻结形变更）必须被以「多键」点名。
+    #[tokio::test]
+    #[should_panic(expected = "控制面漂移 @ runtime_stats：多键 [\"phantom\"]")]
+    async fn comparator_bites_on_extra_key() {
+        let face_raw = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contracts/schema_v1/control_face_v1.json"),
+        )
+        .expect("读取 control_face_v1.json");
+        let face: serde_json::Value =
+            serde_json::from_str(&face_raw).expect("control_face_v1.json 解析");
+        let cp = build_runtime(false, false).await;
+        let cp = ControlPlane::new(cp, None, true);
+        let stats = get_body(&cp, "/runtime/stats").await;
+        let mut stats: serde_json::Value = serde_json::from_str(&stats).expect("JSON");
+        stats["phantom"] = serde_json::json!(1u64);
+        assert_exact_keys(&stats, &face["faces"]["runtime_stats"], "runtime_stats");
+    }
 }

@@ -507,3 +507,22 @@ fn comparator_bites_on_face_lagging_reality() {
     });
     assert_face(&stats, face_of(&face, "stats_json"), "stats_json");
 }
+
+/// 对账器自证：实现丢一个已声明键（减键=破坏兼容）→ 本门以「缺键」点名
+/// 失败（面保持冻结不动，丢键的是实际投影——消费方按字段名取数即断）。
+#[test]
+#[should_panic(expected = "ffi 面漂移 @ stats_json：缺键 [\"uptime_seconds\"]")]
+fn comparator_bites_on_dropped_key() {
+    let face = load_face();
+    let stats = serde_json::json!({
+        "total_connections": 0u64,
+        "active_connections": 0u64,
+        "total_bytes_transferred": 0u64,
+        "bytes_uploaded": 0u64,
+        "bytes_downloaded": 0u64,
+        "error_count": 0u64,
+        "is_running": true,
+        "tun_fd": 0i64,
+    });
+    assert_face(&stats, face_of(&face, "stats_json"), "stats_json");
+}

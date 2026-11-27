@@ -22,6 +22,16 @@ fn read_text(rel: &str) -> String {
     std::fs::read_to_string(repo_root(rel)).unwrap_or_else(|e| panic!("读取 {rel}: {e}"))
 }
 
+/// schema_version 冻结检查（RIL-083 第五段提取为可调用对账器）：任一面
+/// 版本漂移（升 v2 未走整目录复制事务）即以「版本漂移」点名失败。
+fn assert_face_version_frozen(v: &serde_json::Value, path: &str) {
+    assert_eq!(
+        v["schema_version"],
+        serde_json::json!(1u32),
+        "{path} 版本漂移"
+    );
+}
+
 #[test]
 fn schema_v1_faces_and_gates_are_wired() {
     let gates = [
@@ -60,11 +70,7 @@ fn schema_v1_faces_and_gates_are_wired() {
         let raw = read_text(&path);
         let v: serde_json::Value =
             serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{path} JSON 解析失败: {e}"));
-        assert_eq!(
-            v["schema_version"],
-            serde_json::json!(1u32),
-            "{path} 版本漂移"
-        );
+        assert_face_version_frozen(&v, &path);
         assert!(
             readme.contains(face) && readme.contains(gate),
             "schema_v1 README 未登记 {face} ↔ {gate} 的门"
@@ -126,4 +132,13 @@ fn comparator_bites_on_unwired_face() {
         src.contains(face),
         "门 {gate} 未读取 {face}（README 声明的门与实现脱节）"
     );
+}
+
+/// 对账器自证（RIL-083 第五段）：面样本版本升到 2 而未走整目录复制事务
+/// → 版本冻结检查必须点名失败。
+#[test]
+#[should_panic(expected = "contracts/schema_v1/ffi_face_v1.json 版本漂移")]
+fn comparator_bites_on_version_bump() {
+    let bumped = serde_json::json!({ "schema_version": 2u32 });
+    assert_face_version_frozen(&bumped, "contracts/schema_v1/ffi_face_v1.json");
 }
