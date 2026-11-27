@@ -17,6 +17,7 @@ function locale(zh: boolean): DefaultTheme.Config {
   const guides = [
     page(zh ? '当前实现与边界' : 'Current implementation', '/architecture'),
     page(zh ? '平台支持与交付状态' : 'Platform support & delivery', '/platform-support'),
+    page(zh ? '功能矩阵' : 'Feature matrix', '/feature-matrix'),
     page(zh ? '配置参考' : 'Configuration reference', '/config'),
     page(zh ? 'CLI 参考' : 'CLI reference', '/cli'),
     page(zh ? '安装、恢复与 Debug 示例' : 'Install, recover and Debug', '/usage-bridge'),

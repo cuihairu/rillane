@@ -44,4 +44,4 @@ RouteDecision/RoutePath 已包含组、链路与原因；v1 的 RoutePlan 在其
 
 `rillaned` 从 `RILLANE_CONFIG` 读取启动配置；没有通用文件 watch、SIGHUP 重载或 `rillanectl reload`。已有订阅和控制面更新路径不等于 v1 的跨 OS 代际事务。路由/DNS/防火墙变更的副作用契约（`side_effects`：变更日志、所有权登记、幂等撤销——只撤销本实例条目，既有系统配置只登记不撤销）已就位，Linux 执行侧接线归配置发布协调器（RIL-019）。当前按名称追加的合并、组语义与 interval 单位缺陷见[研究证据](research/proxy-architectures-2026-11-14.md#verified-gaps)。
 
-使用说明：[协议](PROTOCOLS.md)、[配置](config.md)、[订阅](subscription.md)、[网络接管](networking.md)、[可选 Mesh](mesh.md)、[安装/恢复/Debug/MCP 示例](usage-bridge.md)、[平台支持](platform-support.md)、[验收证据](../acceptance-evidence/README)。新实现按根目录 `todo.md` 的依赖和验收条件推进。
+使用说明：[功能矩阵](feature-matrix.md)、[协议](PROTOCOLS.md)、[配置](config.md)、[订阅](subscription.md)、[网络接管](networking.md)、[可选 Mesh](mesh.md)、[安装/恢复/Debug/MCP 示例](usage-bridge.md)、[平台支持](platform-support.md)、[验收证据](../acceptance-evidence/README)。新实现按根目录 `todo.md` 的依赖和验收条件推进。
