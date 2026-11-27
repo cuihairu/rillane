@@ -8,7 +8,7 @@ systemd unit + deb 组装产线。设计定稿与验证分层见
 | 文件 | 落位（deb 内） | 说明 |
 |---|---|---|
 | `rillane.service` | `/lib/systemd/system/rillane.service` | `Type=simple` + 专用系统用户 `rillane` + `Environment=RILLANE_CONFIG=/etc/rillane/rillane.yaml`（rillaned 无 `--config` 旗标）+ `Restart=on-failure` + 硬化旗标组 |
-| `build.sh` | —（产线） | 原生 amd64 + cross arm64 → `dist/deb/rillane_<版本>_ {amd64,arm64}.deb`；file 静态核验 + dpkg 布局断言 + 抽取冒烟全入 `.build-log.txt` |
+| `build.sh` | —（产线） | 原生 amd64 + cross arm64 → `dist/deb/rillane_<version>-<release>_{amd64,arm64}.deb`（`build.sh` 从 `apps/rillaned/Cargo.toml` 取版本，`PKG_RELEASE=1`）；file 静态核验 + dpkg 布局断言 + 抽取冒烟全入 `.build-log.txt` |
 | `rillane.yaml.example` | `/etc/rillane/rillane.yaml.example` | 装机最小可运行模板（socks 入口 + direct 出口 + DNS 分流）；示例文件自身登记 conffile（升级不覆盖），真配置由部署者 cp 落位 |
 
 deb 维护脚本（build.sh 内联）：`postinst`（建系统用户 → chown → daemon-reload → **只 enable 不 start**）、`prerm`（stop + disable，保留配置）。

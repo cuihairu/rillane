@@ -31,9 +31,10 @@ references in the config YAML from a JSON secret map before assembly:
 - **Secrets stay out of diagnostics**: after real traffic, the raw output of
   every query face (stats/routing/nodes/dns_stats/dns_resolvers/flows)
   contains neither the secret value nor the `${secret:` marker.
-- **Bridge faces in lockstep**: the JNI symbol parity gate now pins 15
-  methods (adds `startWithSecrets` on both the Kotlin and Rust sides), and
-  the C header ↔ Rust export parity gate passes with the new declaration.
+- **Bridge faces in lockstep**: the JNI face gained `startWithSecrets` on
+  both the Kotlin and Rust sides (the parity gate now pins 18 methods after
+  later RIL-044 segments), and the C header ↔ Rust export parity gate passes
+  with the new declaration.
 
 ## Honest boundary
 
@@ -41,5 +42,7 @@ This gate pins the FFI resolution half only. The Kotlin host half — where the
 secret values come from (Keystore/EncryptedSharedPreferences), the runtime
 discipline that values never reach logs, and a real device run of
 `startWithSecrets` — belongs to the RIL-043 device batch and stays open.
-Network change notification and bounded diagnostic IPC (the remaining RIL-044
-deliverables) are likewise unstarted. The parent checkbox stays unchecked.
+The network change notification and bounded diagnostic IPC core halves have
+since landed as separate local ledgers — [network change](./ril-044-network-change)
+and [bounded diagnostic IPC](./ril-044-diagnostic-ipc). The parent checkbox
+stays unchecked.

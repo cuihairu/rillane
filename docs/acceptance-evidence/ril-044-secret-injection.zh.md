@@ -24,12 +24,13 @@
 - **秘密不进诊断面**：真实流量后，全部查询面（stats/routing/nodes/
   dns_stats/dns_resolvers/flows）原始输出既不含秘密值也不含 `${secret:`
   标记。
-- **桥接面同步**：JNI 符号恰等门现钉 15 方法（Kotlin 与 Rust 两侧同步加
-  `startWithSecrets`），C 头 ↔ Rust 导出恰等门随新声明通过。
+- **桥接面同步**：Kotlin 与 Rust 两侧同步加 `startWithSecrets`（后续 RIL-044
+  段落后 JNI 恰等门现钉 18 方法），C 头 ↔ Rust 导出恰等门随新声明通过。
 
 ## 如实边界
 
 本门只钉 FFI 解析半边。Kotlin 宿主半边——秘密值来源（Keystore/
 EncryptedSharedPreferences）、值不进日志的运行期纪律、`startWithSecrets`
-真机运行——归 RIL-043 真机批次，保持开放。RIL-044 其余交付（网络变化通知、
-有界诊断 IPC）未开工。主勾选保持关闭。
+真机运行——归 RIL-043 真机批次，保持开放。网络变化通知与有界诊断 IPC 的
+核心半边已分别作为本地账本交付——[网络变化](./ril-044-network-change.zh)、
+[有界诊断 IPC](./ril-044-diagnostic-ipc.zh)。主勾选保持关闭。

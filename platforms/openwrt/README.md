@@ -52,7 +52,7 @@ ipk 内容：`/usr/bin/rillaned`、`/usr/bin/rillanectl`、`/etc/init.d/rillane`
 respawn + UCI `rillane.@general[0].enabled` 预留开关）、`/usr/share/rillane/rillane.yaml.example`
 （首装复制为 `/etc/rillane.yaml`，conffile 语义——升级保留本地改动）。
 Depends：`libc, kmod-tun`（TUN 虚拟化面；仅 socks 入口 + DNS 监听可不装 kmod-tun，
-`network` 块缺席即可）。LuCI 页面后置（见 当前实现 注记）。
+`network` 块缺席即可）。LuCI 页面后置（见下方「验证边界」）。
 
 透明接管（RIL-041）：fw4/nftables 世代（OpenWrt 22.03+ 默认无 iptables/nft 兼容层
 未必装）须在 `network.transparent` 配 `rule_backend: nft`——规则落专用表
@@ -81,4 +81,4 @@ reload 不触碰外来表，规则随 rillaned 启停自动应用/撤销（模�
   `rillane` 表——语法已 `nft -c` 仲裁，行为待真机）。
 
 宿主机有 qemu-user 时可加跑冒烟（`qemu-aarch64-static target/aarch64-.../release/rillaned --version`）；
-CI/真机到位后在 当前实现 注记回填。
+CI/真机到位后在上方「构建矩阵」与本节回填。

@@ -23,10 +23,11 @@ commit) tells the core that the host's underlying network changed:
   reads `enabled:false`.
 - **NULL handle named**: NULL → -1 with a stable `last_error`, never
   conflated with success 0.
-- **Bridge faces in lockstep**: the JNI symbol parity gate now pins 16
-  methods (adds `networkChanged` on both sides), the C header ↔ Rust export
-  parity gate passes, and the RIL-082 diagnostic ledger registers the new
-  export (`contracts/mobile_diagnostic_bridge_v1.json` transaction).
+- **Bridge faces in lockstep**: `networkChanged` was added on both Kotlin and
+  Rust sides (the parity gate now pins 18 methods after later RIL-044
+  segments), the C header ↔ Rust export parity gate passes, and the RIL-082
+  diagnostic ledger registers the new export
+  (`contracts/mobile_diagnostic_bridge_v1.json` transaction).
 
 ## Honest boundary
 
@@ -37,6 +38,6 @@ boundary, and network change follows it (old-network streams fail naturally;
 the host must not rely on this call to kill streams). The Kotlin
 `onAvailable → networkChanged` wiring is a text-disciplined structural face;
 live network switching (Wi-Fi ↔ cellular) on a device belongs to the RIL-046
-device batch and stays open. Bounded diagnostic IPC is delivered in the next
-segment — [ril-044-diagnostic-ipc](./ril-044-diagnostic-ipc). The parent
-checkbox stays unchecked.
+device batch and stays open. The bounded diagnostic IPC core half has since
+landed as its own local ledger — [ril-044-diagnostic-ipc](./ril-044-diagnostic-ipc).
+The parent checkbox stays unchecked.

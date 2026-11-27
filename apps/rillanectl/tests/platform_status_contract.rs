@@ -1,0 +1,471 @@
+//! RIL-091 第七段：平台支持状态页与移动 FFI / RIL-044 / RIL-082 证据页对齐契约门。
+//!
+//! 前六段交付了站点、平台视图、命令 help、README、操作示例与功能矩阵，但
+//! 后续 RIL-043/044 段把 JNI 面从 14 推到 18 方法、C ABI 从 15 推到 19 导出，
+//! 历史证据页和平台视图没有跟上：仍有 14/15/16 方法、15 C ABI 符号的说法，
+//! 仍把已交付的秘密注入/网络变化/IPC 写成「仍开放/未开工/下一段交付」。
+//! 本门把这些事实从产物取数钉死：
+//! - Kotlin `external fun` 恰 18 方法，平台视图与 RIL-043/044 证据页的计数
+//!   与之相符，平台视图逐名列出四个新增方法（含原有的 version/lastError）；
+//! - RIL-082 证据页的 C ABI 计数与机器账本 `ffi.exports` 长度恰等；
+//! - RIL-044 四个本地账本在两语证据索引逐条配对、指向真实文档与契约测试；
+//!   已交付面的「未开工/下一阶段」措辞禁入，真机层边界必须在诚实边界节内；
+//! - 两语索引引用的机器账本集合涵盖证据页引用的全部 `contracts/*.json`；
+//! - OpenWrt README 无悬空「当前实现 注记」交叉引用，systemd README 的 deb
+//!   文件名模板与 build.sh 实际产物一致。
+//!
+//! 对账器自证：幻影方法数、抹掉索引条目、注入「未开工」措辞、篡改 C ABI
+//! 计数、注入悬空交叉引用，门必须点名失败。自证调用的是生产检查函数本身，
+//! 不是复制的断言。本门只钉结构事实与措辞纪律；真机边界仍由各自证据文档
+//! 与 FFI 契约门承担。
+
+use serde_json::Value;
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn read_repo(rel: &str) -> String {
+    std::fs::read_to_string(repo_root().join(rel)).unwrap_or_else(|e| panic!("读取 {rel}: {e}"))
+}
+
+/// Kotlin 侧 `external fun <name>(` 声明（与 jni_symbol_face 同扫描纪律）
+fn kotlin_externals(text: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("external fun ") else {
+            continue;
+        };
+        if let Some(name) = rest.split('(').next() {
+            let name = name.trim();
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+const NEW_METHODS: [&str; 4] = [
+    "startWithSecrets",
+    "networkChanged",
+    "diagnosticIpcStart",
+    "diagnosticIpcStop",
+];
+
+/// 页面 → 当前 JNI 方法数短语（与 Kotlin 源码取出的数字核对）
+const JNI_COUNT_PHRASES: [(&str, &str); 7] = [
+    ("docs/platform-support.md", "18-symbol JNI face"),
+    ("docs/zh/platform-support.md", "18 符号 JNI 面"),
+    (
+        "docs/acceptance-evidence/ril-043-jni-symbol-face.md",
+        "18-method face",
+    ),
+    (
+        "docs/acceptance-evidence/ril-043-jni-symbol-face.zh.md",
+        "18 方法面",
+    ),
+    (
+        "docs/acceptance-evidence/ril-044-secret-injection.md",
+        "18 methods",
+    ),
+    (
+        "docs/acceptance-evidence/ril-044-secret-injection.zh.md",
+        "18 方法",
+    ),
+    (
+        "docs/acceptance-evidence/ril-044-network-change.md",
+        "18 methods",
+    ),
+];
+
+/// 剩余 JNI 相关证据页：诊断 IPC 页已写 18，网络变化中文页同数
+const EXTRA_JNI_COUNT_PHRASES: [(&str, &str); 2] = [
+    (
+        "docs/acceptance-evidence/ril-044-network-change.zh.md",
+        "18 方法",
+    ),
+    (
+        "docs/acceptance-evidence/ril-044-diagnostic-ipc.zh.md",
+        "18 方法",
+    ),
+];
+
+/// 已交付面禁用的历史时点措辞
+const STALE_JNI_COUNTS: [&str; 6] = [
+    "14-method face",
+    "14 方法面",
+    "15 methods",
+    "15 方法",
+    "16 methods",
+    "16 方法",
+];
+const STALE_DELIVERY_PHRASES: [&str; 6] = [
+    "IPC still open",
+    "IPC 仍开放",
+    "IPC）未开工",
+    "ipc not started",
+    "未开工",
+    "delivered in the next segment",
+];
+const STALE_DELIVERY_PHRASES_ZH: [&str; 2] = ["有界诊断 IPC 在下一段交付", "RIL-044 其余交付"];
+
+/// RIL-044 四个核心半边证据：条目锚点、证据文档、契约测试
+const RIL_044_EVIDENCE: [(&str, &str, &str); 4] = [
+    (
+        "ril-044-host-lifecycle",
+        "docs/acceptance-evidence/ril-044-host-lifecycle.md",
+        "crates/rillane-ffi/tests/host_lifecycle_contract.rs",
+    ),
+    (
+        "ril-044-secret-injection",
+        "docs/acceptance-evidence/ril-044-secret-injection.md",
+        "crates/rillane-ffi/tests/secret_injection_contract.rs",
+    ),
+    (
+        "ril-044-network-change",
+        "docs/acceptance-evidence/ril-044-network-change.md",
+        "crates/rillane-ffi/tests/network_changed_contract.rs",
+    ),
+    (
+        "ril-044-diagnostic-ipc",
+        "docs/acceptance-evidence/ril-044-diagnostic-ipc.md",
+        "crates/rillane-ffi/tests/diagnostic_ipc_contract.rs",
+    ),
+];
+
+/// 证据文档 → 中文证据文档（`.md` → `.zh.md`）
+fn zh_doc_path(doc_path: &str) -> String {
+    doc_path.strip_suffix(".md").unwrap_or(doc_path).to_string() + ".zh.md"
+}
+
+/// 两语索引条目锚点数：单语沉行即点名
+fn evidence_anchors(doc: &str) -> Vec<String> {
+    RIL_044_EVIDENCE
+        .iter()
+        .filter(|(anchor, _, _)| doc.contains(anchor))
+        .map(|(anchor, _, _)| anchor.to_string())
+        .collect()
+}
+
+/// 生产检查：页面方法数短语必须等于 Kotlin 侧真实方法数
+fn check_jni_count(path: &str, doc: &str, actual_count: usize) {
+    let (_, phrase) = JNI_COUNT_PHRASES
+        .iter()
+        .chain(EXTRA_JNI_COUNT_PHRASES.iter())
+        .find(|(p, _)| *p == path)
+        .unwrap_or_else(|| panic!("{path} 不在 JNI 计数钉法清单中"));
+    assert_eq!(
+        actual_count, 18,
+        "Kotlin FFI 面方法数变化：现为 {actual_count}，须同步两语平台页与证据页并过本门"
+    );
+    assert!(
+        doc.contains(phrase),
+        "{path} 的 JNI 方法数已漂移——Kotlin 侧有 {actual_count} 个 external fun，必须写「{phrase}」"
+    );
+    for stale in STALE_JNI_COUNTS {
+        assert!(
+            !doc.contains(stale),
+            "{path} 仍写旧方法数「{stale}」——历史时点措辞须更新为「{phrase}」"
+        );
+    }
+}
+
+/// 生产检查：证据索引条目逐条配对且不把已交付面写成仍开放
+fn check_evidence_index(lang: &str, doc: &str) {
+    let anchors = evidence_anchors(doc);
+    assert_eq!(
+        anchors.len(),
+        RIL_044_EVIDENCE.len(),
+        "{lang} 证据索引 RIL-044 条目漂移：找到 {anchors:?}，四个本地账本必须逐条在索引中"
+    );
+    for phrase in STALE_DELIVERY_PHRASES
+        .iter()
+        .chain(STALE_DELIVERY_PHRASES_ZH.iter())
+    {
+        assert!(
+            !doc.contains(phrase),
+            "{lang} 证据索引仍陈旧声称「{phrase}」——RIL-044 核心半边已交付本地账本"
+        );
+    }
+}
+
+/// 生产检查：证据页诚实边界节内保留真机层缺口、不含已交付面的「未开工」措辞
+fn check_evidence_body(lang: &str, anchor: &str, doc: &str) {
+    let (boundary, gap_token) = if lang == "zh" {
+        let section = doc
+            .split("## 如实边界")
+            .nth(1)
+            .or_else(|| doc.split("## 诚实边界").nth(1))
+            .unwrap_or_else(|| {
+                panic!("{lang} {anchor} 证据页缺诚实边界节（「如实边界」或「诚实边界」）")
+            });
+        (section, "真机")
+    } else {
+        let section = doc
+            .split("## Honest boundary")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{lang} {anchor} 证据页缺「## Honest boundary」节"));
+        (section, "device")
+    };
+    assert!(
+        boundary.contains(gap_token),
+        "{lang} {anchor} 诚实边界节缺真机层缺口声明——本地账本不能冒充设备验收"
+    );
+    for phrase in STALE_DELIVERY_PHRASES_ZH
+        .iter()
+        .chain(STALE_DELIVERY_PHRASES.iter())
+    {
+        assert!(
+            !doc.contains(phrase),
+            "{lang} {anchor} 证据页仍把已交付面写成「{phrase}」——事实漂移须修"
+        );
+    }
+}
+
+/// 生产检查：RIL-082 证据页的 C ABI 计数与机器账本 exports 长度恰等
+fn check_bridge_export_count(path: &str, doc: &str, declared: usize) {
+    let phrase = if path.ends_with(".zh.md") {
+        format!("{declared} 个 C ABI 符号")
+    } else {
+        format!("{declared} C ABI symbols")
+    };
+    assert!(
+        doc.contains(&phrase),
+        "{path} 的 C ABI 导出数与机器账本不一致——账本声明 {declared} 个，页内必须写「{phrase}」"
+    );
+    for stale in ["15 C ABI symbols", "15 个 C ABI 符号"] {
+        assert!(
+            !doc.contains(stale),
+            "{path} 仍写旧导出数「{stale}」——账本已随 RIL-044 段扩展"
+        );
+    }
+}
+
+/// 证据页声明的机器账本引用（「The machine-readable source is `contracts/…json`」
+/// 或「机器可读真源为 `contracts/…json`」形态；散文里的历史文件名不算账本声明）
+fn declared_ledgers(doc: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in doc.lines() {
+        if line.contains("machine-readable source") || line.contains("机器可读真源") {
+            let mut rest = line;
+            while let Some(pos) = rest.find("contracts/") {
+                let tail = &rest[pos..];
+                let end = tail
+                    .find(|c: char| {
+                        !(c.is_ascii_alphanumeric() || c == '_' || c == '/' || c == '.')
+                    })
+                    .unwrap_or(tail.len());
+                let token = &tail[..end];
+                if token.ends_with(".json") {
+                    out.push(token.to_string());
+                }
+                rest = &tail[end.min(tail.len())..];
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn platform_and_evidence_pages_pin_current_jni_face() {
+    let kotlin = read_repo("platforms/android/app/src/main/java/com/rillane/rillane/RillaneFfi.kt");
+    let methods = kotlin_externals(&kotlin);
+    assert_eq!(
+        methods.len(),
+        18,
+        "Kotlin FFI 面方法数变化：须同步 jni_symbol_face、平台页与证据页并过本门"
+    );
+    for name in NEW_METHODS {
+        assert!(
+            methods.contains(name),
+            "Kotlin 面缺已知方法 {name}——平台页声称的方法数不可信"
+        );
+    }
+    for (path, phrase) in JNI_COUNT_PHRASES
+        .iter()
+        .chain(EXTRA_JNI_COUNT_PHRASES.iter())
+    {
+        check_jni_count(path, &read_repo(path), methods.len());
+        assert!(
+            read_repo(path).contains(phrase),
+            "{path} 计数短语丢面（扫描器失效兜底）"
+        );
+    }
+    // 平台视图逐名列出完整面（含 version/lastError 与四个新增方法）
+    for path in ["docs/platform-support.md", "docs/zh/platform-support.md"] {
+        let doc = read_repo(path);
+        for name in NEW_METHODS.iter() {
+            assert!(
+                doc.contains(name),
+                "{path} 未列出已知 JNI 方法 {name}——运行面描述必须跟上产物"
+            );
+        }
+    }
+}
+
+#[test]
+fn ril_044_evidence_index_pairs_and_grounds() {
+    let en = read_repo("docs/acceptance-evidence/README.md");
+    let zh = read_repo("docs/zh/acceptance-evidence/README.md");
+    check_evidence_index("en", &en);
+    check_evidence_index("zh", &zh);
+    assert_eq!(
+        evidence_anchors(&en),
+        evidence_anchors(&zh),
+        "两语 RIL-044 证据条目集合不配对——沉掉一行必须两语同沉"
+    );
+
+    for (anchor, doc_path, test_path) in RIL_044_EVIDENCE {
+        let zh_path = zh_doc_path(doc_path);
+        for path in [doc_path, zh_path.as_str(), test_path] {
+            assert!(
+                repo_root().join(path).exists(),
+                "{anchor} 悬空：{path} 不存在"
+            );
+        }
+        for (lang, path) in [("en", doc_path), ("zh", zh_path.as_str())] {
+            check_evidence_body(lang, anchor, &read_repo(path));
+        }
+    }
+}
+
+#[test]
+fn evidence_index_lists_every_machine_ledger_it_cites() {
+    let mut cited = BTreeSet::new();
+    for entry in
+        std::fs::read_dir(repo_root().join("docs/acceptance-evidence")).expect("读证据目录")
+    {
+        let path = entry.expect("目录项").path();
+        if path.extension().is_some_and(|e| e == "md") {
+            cited.extend(declared_ledgers(
+                &std::fs::read_to_string(&path).expect("读证据页"),
+            ));
+        }
+    }
+    assert!(
+        cited.contains("contracts/mobile_diagnostic_bridge_v1.json"),
+        "证据页引用的诊断桥账本未纳入扫描（扫描器失效兜底）"
+    );
+    for (lang, index_path) in [
+        ("en", "docs/acceptance-evidence/README.md"),
+        ("zh", "docs/zh/acceptance-evidence/README.md"),
+    ] {
+        let doc = read_repo(index_path);
+        for token in &cited {
+            assert!(
+                doc.contains(token),
+                "{lang} 索引机器账本清单漏掉 {token}——证据页引用了它，索引必须列出"
+            );
+        }
+    }
+}
+
+#[test]
+fn ril_082_export_count_matches_ledger() {
+    let ledger: Value =
+        serde_json::from_str(&read_repo("contracts/mobile_diagnostic_bridge_v1.json"))
+            .expect("解析诊断桥账本");
+    let declared = ledger["ffi"]["exports"]
+        .as_array()
+        .expect("ffi.exports 数组")
+        .len();
+    assert!(declared >= 19, "账本导出数缩水疑为账本损坏");
+    for path in [
+        "docs/acceptance-evidence/ril-082-mobile-diagnostic-bridge.md",
+        "docs/acceptance-evidence/ril-082-mobile-diagnostic-bridge.zh.md",
+    ] {
+        check_bridge_export_count(path, &read_repo(path), declared);
+    }
+}
+
+#[test]
+fn platform_readmes_have_no_dangling_notes_or_wrong_deb_template() {
+    let openwrt = read_repo("platforms/openwrt/README.md");
+    assert!(
+        !openwrt.contains("当前实现 注记"),
+        "platforms/openwrt/README.md 仍有悬空交叉引用「当前实现 注记」——仓内无该节"
+    );
+    assert!(
+        openwrt.contains("## 验证边界"),
+        "platforms/openwrt/README.md 缺「验证边界」节——回填目标必须在场"
+    );
+    let systemd = read_repo("platforms/systemd/README.md");
+    let build = read_repo("platforms/systemd/build.sh");
+    assert!(
+        build.contains("rillane_${PKG_VERSION}-${PKG_RELEASE}_${arch}.deb"),
+        "systemd/build.sh 的 deb 命名模板变了——请同步本门"
+    );
+    assert!(
+        systemd.contains("rillane_<version>-<release>_{amd64,arm64}.deb"),
+        "platforms/systemd/README.md 的 deb 模板与 build.sh 不符（release 段不可漏）"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 对账器自证：全部调用生产检查函数，不复制断言
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "JNI 方法数已漂移")]
+fn comparator_bites_on_stale_method_count() {
+    let doc = read_repo("docs/platform-support.md").replacen(
+        "18-symbol JNI face",
+        "14-symbol JNI face",
+        1,
+    );
+    check_jni_count("docs/platform-support.md", &doc, 18);
+}
+
+#[test]
+#[should_panic(expected = "四个本地账本必须逐条在索引中")]
+fn comparator_bites_on_missing_evidence_row() {
+    let doc: String = read_repo("docs/acceptance-evidence/README.md")
+        .lines()
+        .filter(|line| !line.contains("ril-044-diagnostic-ipc"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    check_evidence_index("en", &doc);
+}
+
+#[test]
+#[should_panic(expected = "事实漂移须修")]
+fn comparator_bites_on_stale_open_claim() {
+    let doc = read_repo("docs/acceptance-evidence/ril-044-secret-injection.md").replacen(
+        "## Honest boundary",
+        "## Honest boundary\n\nRIL-044 其余交付（网络变化通知、有界诊断 IPC）未开工。",
+        1,
+    );
+    check_evidence_body("en", "ril-044-secret-injection", &doc);
+}
+
+#[test]
+#[should_panic(expected = "C ABI 导出数与机器账本不一致")]
+fn comparator_bites_on_stale_export_count() {
+    let doc = read_repo("docs/acceptance-evidence/ril-082-mobile-diagnostic-bridge.md").replacen(
+        "19 C ABI symbols",
+        "15 C ABI symbols",
+        1,
+    );
+    check_bridge_export_count(
+        "docs/acceptance-evidence/ril-082-mobile-diagnostic-bridge.md",
+        &doc,
+        19,
+    );
+}
+
+#[test]
+#[should_panic(expected = "仍有悬空交叉引用")]
+fn comparator_bites_on_dangling_note() {
+    let doc = read_repo("platforms/openwrt/README.md").replacen(
+        "见下方「验证边界」",
+        "见 当前实现 注记",
+        1,
+    );
+    assert!(
+        !doc.contains("当前实现 注记"),
+        "platforms/openwrt/README.md 仍有悬空交叉引用「当前实现 注记」——仓内无该节"
+    );
+}

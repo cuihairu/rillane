@@ -13,8 +13,8 @@ Evidence documents backing `todo.md` acceptance items. Two honest kinds live her
 | RIL-035 Windows service & exit recovery | [ril-035-windows-service-recovery](./ril-035-windows-service-recovery) (zh) | Device | Verified; suspend/resume is a named gap |
 | RIL-043 mobile FFI JNI symbol face | [ril-043-jni-symbol-face](./ril-043-jni-symbol-face) · [zh](./ril-043-jni-symbol-face.zh) | Local ledger | Kotlin↔Rust symbol parity pinned; device batches unchecked |
 | RIL-043 mobile FFI TUN fd injection face | [ril-043-tun-fd-injection](./ril-043-tun-fd-injection) · [zh](./ril-043-tun-fd-injection.zh) | Local ledger | Bad-fd rejection named + handle untainted (process-abort defect fixed); real TUN path in device batch |
-| RIL-044 mobile host lifecycle stop face | [ril-044-host-lifecycle](./ril-044-host-lifecycle) · [zh](./ril-044-host-lifecycle.zh) | Local ledger | Repeatable stop pinned on both halves; secret injection / network change / IPC still open |
-| RIL-044 mobile host secret reference injection face | [ril-044-secret-injection](./ril-044-secret-injection) · [zh](./ril-044-secret-injection.zh) | Local ledger | `${secret:` refs resolved via real RFC1929 round trip, fail-closed stable codes; Kotlin host half / network change / IPC still open |
+| RIL-044 mobile host lifecycle stop face | [ril-044-host-lifecycle](./ril-044-host-lifecycle) · [zh](./ril-044-host-lifecycle.zh) | Local ledger | Repeatable stop pinned on both halves; secret injection / network change / IPC delivered as local ledgers (see rows below); device batches open |
+| RIL-044 mobile host secret reference injection face | [ril-044-secret-injection](./ril-044-secret-injection) · [zh](./ril-044-secret-injection.zh) | Local ledger | `${secret:` refs resolved via real RFC1929 round trip, fail-closed stable codes; network change / IPC delivered as local ledgers (see rows below); Kotlin host half / device batch open |
 | RIL-044 mobile host network change face | [ril-044-network-change](./ril-044-network-change) · [zh](./ril-044-network-change.zh) | Local ledger | `network_changed` flushes DNS cache proven by real resolution round trip, idempotent, absent-DNS honest no-op; live device switch still open |
 | RIL-044 bounded host diagnostic IPC | [ril-044-diagnostic-ipc](./ril-044-diagnostic-ipc) · [zh](./ril-044-diagnostic-ipc.zh) | Local ledger | Explicit-start UDS bridge, read-only verbs, bounded framing and named codes proven by real round trips; host consent / device batch open |
 | RIL-082 mobile/router diagnostic bridge | [ril-082-mobile-diagnostic-bridge](./ril-082-mobile-diagnostic-bridge) · [zh](./ril-082-mobile-diagnostic-bridge.zh) | Local ledger | No default MCP/inbound port, scoped redacted export and OpenWrt small profile pinned; device batches open |
@@ -25,7 +25,8 @@ Evidence documents backing `todo.md` acceptance items. Two honest kinds live her
 
 The ledgers' machine-readable sources live outside the docs tree:
 `contracts/build_matrix_v1.json`, `contracts/desktop_e2e_matrix_v1.json`,
-`contracts/parallel_scenario_matrix_v1.json`; contract gates run as part of
+`contracts/parallel_scenario_matrix_v1.json`,
+`contracts/mobile_diagnostic_bridge_v1.json`; contract gates run as part of
 `cargo test --workspace` under `crates/rillane-platform/tests/`.
 
 Statuses never claim more than the linked document shows: a `partial` or

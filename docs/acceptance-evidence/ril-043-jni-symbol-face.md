@@ -13,8 +13,9 @@ method set. This is the host-bridge link contract:
 - Kotlin declares a method Rust does not export → `UnsatisfiedLinkError` at
   library load time (a runtime failure, not compile time).
 
-The gate also pins the known 14-method face (4 lifecycle/status + 8 query +
-2 TUN fd methods) so shrinking the bridge is an explicit action, and carries
+The gate also pins the known 18-method face (4 lifecycle/status + 8 query +
+2 TUN fd methods + secret injection, network change and two bounded IPC
+methods) so shrinking the bridge is an explicit action, and carries
 two `#[should_panic]` self-tests that inject a phantom Kotlin declaration and
 a phantom Rust export to prove the comparator names the drifting side.
 

@@ -17,8 +17,8 @@
 - **DNS 块缺席 = 诚实 no-op**：无 `network.dns` 的 runtime 返回 0（冲刷空
   即成功），`dns_stats` 面如实读出 `enabled:false`。
 - **NULL 句柄具名**：NULL → -1 + 稳定 `last_error`，绝不与成功 0 混同。
-- **桥接面同步**：JNI 符号恰等门升到 16 方法（两侧同加 `networkChanged`），
-  C 头 ↔ Rust 导出恰等门过，RIL-082 诊断账本登记新导出
+- **桥接面同步**：两侧同加 `networkChanged`（后续 RIL-044 段落后 JNI 恰等门
+  现钉 18 方法），C 头 ↔ Rust 导出恰等门过，RIL-082 诊断账本登记新导出
   （`contracts/mobile_diagnostic_bridge_v1.json` 账本事务）。
 
 ## 如实边界
@@ -27,5 +27,5 @@
 在途转发流不主动斩断——排空归 RIL-022/023 消费侧边界，网络变化沿同一
 边界（旧网流自然失败，宿主不得依赖本调用斩流）。Kotlin
 `onAvailable → networkChanged` 接线是文本纪律门钉的结构面；真机活切网
-（Wi-Fi ↔ 蜂窝）归 RIL-046 真机批次开放。有界诊断 IPC 在下一段交付
-——[ril-044-diagnostic-ipc](./ril-044-diagnostic-ipc.zh)。主勾选保持关闭。
+（Wi-Fi ↔ 蜂窝）归 RIL-046 真机批次开放。有界诊断 IPC 的核心半边已作为独立
+本地账本交付——[ril-044-diagnostic-ipc](./ril-044-diagnostic-ipc.zh)。主勾选保持关闭。

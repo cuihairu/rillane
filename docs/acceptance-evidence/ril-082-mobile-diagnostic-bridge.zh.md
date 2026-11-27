@@ -6,7 +6,7 @@
 
 ## 已钉住的面
 
-- **无默认 MCP 服务、无手机入站管理端口**：FFI 导出恰为账本声明的 15 个 C ABI 符号（头文件 ↔ Rust 导出 ↔ 账本，精确集合）；`crates/rillane-ffi` 无 MCP 依赖，FFI/manifest/Kotlin/iOS/OpenWrt 源码不含 MCP/JSON-RPC/监听 socket 标记。Android `VpnService` 非 `exported`，受 `android.permission.BIND_VPN_SERVICE` 守卫；仅 launcher activity 导出。移动配置控制面落 `127.0.0.1:9090`。
+- **无默认 MCP 服务、无手机入站管理端口**：FFI 导出恰为账本声明的 19 个 C ABI 符号（头文件 ↔ Rust 导出 ↔ 账本，精确集合）；`crates/rillane-ffi` 无 MCP 依赖，FFI/manifest/Kotlin/iOS/OpenWrt 源码不含 MCP/JSON-RPC/监听 socket 标记。Android `VpnService` 非 `exported`，受 `android.permission.BIND_VPN_SERVICE` 守卫；仅 launcher activity 导出。移动配置控制面落 `127.0.0.1:9090`。
 - **授权宿主 IPC/脱敏导出**：移动宿主进程内直读 FFI 查询函数（flows/flow/stats/nodes/DNS/routing），无入站监听或模型协议端点。桌面侧集成消费**导出视图**，不是手机 MCP 服务。`rillanectl diagnose` 保持 `safe`（默认）、`full`、`raw` 三档、秘密键表与脱敏助手；`raw`（`--scope raw` / `--no-redact`）仅本地留存不脱敏文件，并显式标注 `do-not-upload`/`review-before-sharing` 与「永不自动上传诊断包」政策。
 - **OpenWrt 可选资源受限适配器**：`platforms/openwrt/build.sh` 接受 `RILLANE_SMALL=1`，以 `--no-default-features --features small`（无 WASM/JIT）构建 `rillaned`+`rillanectl`。缺省档契约不变。ipk 不打包 `rillane-mcp`；模板控制面保持 loopback。本机 `cargo check -p rillaned -p rillanectl --no-default-features --features small` 与 `cargo test -p rillane-ffi --no-default-features --features mobile` 通过。
 - **桌面桥接说明**：`docs/design/debug-and-mcp.md` 及其中文对照明确 Android/iOS 不在 VPN 服务/扩展内默认运行 MCP、不新增手机入站管理端口、先走授权宿主 IPC/脱敏导出，必要时由桌面适配器接入。

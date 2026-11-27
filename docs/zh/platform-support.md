@@ -15,7 +15,7 @@
 | OpenWrt | 3 个产物三元组；下限 OpenWrt 22.03+（fw4/nftables，`rule_backend: nft`） | 网关接线脚手架 | 零真机验收——RIL-041/042 未跑 | 缺 OpenWrt 设备：接线、运维与资源验收全未跑 |
 | Windows | x86_64 windows-gnu 交叉（仅编译级）；最低版本未验证 | 接管/旁路、进程归属、服务与退出恢复 | `imac` 机批次已验（RIL-032–035）：身份/接管/归属/服务恢复；规则来源本地已验（平台无关决策面） | 浏览器/游戏分组轨迹与故障样例（仅跑过 curl.exe HTTP 面）；DNS 劫持端到端；休眠恢复 |
 | macOS (launchd) | 2 个 universal2 产物三元组；须 macOS 原生构建（Apple SDK 再分发限制） | 仅构建/宿主脚手架 | 全条款待 macOS SSH 接入（仅平台无关的规则来源面本地已验） | RIL-036–039 未交付——Intel mac 待接入 fleet |
-| Android | 2 个三元组 + demo 应用（minSdk 24 / targetSdk 33） | FFI 库：14 符号 JNI 面、宿主生命周期停止面、TUN fd 注入面、查询面、最小 ICMP 回声通路——均有本地契约门钉住 | 真机批次未跑（RIL-043–046 未勾） | 完整转发（TunIngress 自开 `/dev/net/tun` 不收外来 fd、无 protect 钩子——具名未来工作）；真机生命周期/切网 |
+| Android | 2 个三元组 + demo 应用（minSdk 24 / targetSdk 33） | FFI 库：18 符号 JNI 面（`start`、`startWithSecrets`、`networkChanged`、`diagnosticIpcStart`、`diagnosticIpcStop`、stop/isRunning、stats + 6 查询面、TUN fd 起停）、宿主生命周期停止面、TUN fd 注入面、最小 ICMP 回声通路——均有本地契约门钉住 | 真机批次未跑（RIL-043–046 未勾） | 完整转发（TunIngress 自开 `/dev/net/tun` 不收外来 fd、无 protect 钩子——具名未来工作）；真机生命周期/切网 |
 | iOS | 3 个产物三元组（交叉编译） | 私有 fd 集成脚手架 | 零——NE 扩展不在模拟器运行；需签名设备 + 付费开发者账号 | RIL-094/047–049/149 阻塞在签名接入 |
 
 ## 提案，未交付

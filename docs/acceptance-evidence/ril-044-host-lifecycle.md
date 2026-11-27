@@ -29,9 +29,14 @@ keeping freed memory reachable.
 
 ## Honest boundary
 
-RIL-044's remaining deliverables — config/secret reference injection, network
-change notification, bounded diagnostic IPC — need the real RIL-043 device
-face (buffer ownership, threading, backpressure, ABI version) and stay open.
+At this segment's date, config/secret reference injection, network change
+notification and bounded diagnostic IPC were still ahead. Their core halves
+have since landed as separate local ledgers — [secret injection](./ril-044-secret-injection),
+[network change](./ril-044-network-change) and
+[bounded diagnostic IPC](./ril-044-diagnostic-ipc). The real RIL-043 device
+face (buffer ownership, threading, backpressure, ABI version) and the Kotlin
+host halves stay open.
+
 "Core does not assume the mobile VPN and host share an OS process" is carried
 structurally by the FFI fd-injection boundary (`rillane_ffi_tun_start`
 receives the host-held tun fd; no shared stack objects, no same-process VPN
