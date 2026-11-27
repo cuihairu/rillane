@@ -6426,6 +6426,7 @@ dependencies = [
  "libc",
  "rillane-config",
  "rillane-core",
+ "rillane-platform",
  "rillane-runtime",
  "serde_json",
  "serde_yaml_ng",

@@ -226,7 +226,10 @@ fn feature_matrix_pages_pair_and_ground_in_artifacts() {
     let real = real_rillanectl_cmds();
     assert!(real.len() > 20, "命令面解析失效兜底");
     for cmd in ["diagnose", "trace", "explain", "probe"] {
-        assert!(real.contains(cmd), "功能矩阵 F-10 声明的命令不在二进制面：{cmd}");
+        assert!(
+            real.contains(cmd),
+            "功能矩阵 F-10 声明的命令不在二进制面：{cmd}"
+        );
     }
 
     // -- 平台视图与证据索引互链在场（能力视图 ≠ 平台视图，双向可达）--
@@ -234,7 +237,10 @@ fn feature_matrix_pages_pair_and_ground_in_artifacts() {
         ("docs/feature-matrix.md", &en),
         ("docs/zh/feature-matrix.md", &zh),
     ] {
-        assert!(doc.contains("platform-support.md"), "{doc_path} 缺平台视图互链");
+        assert!(
+            doc.contains("platform-support.md"),
+            "{doc_path} 缺平台视图互链"
+        );
         assert!(
             doc.contains("acceptance-evidence/README"),
             "{doc_path} 缺验收证据索引互链"

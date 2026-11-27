@@ -33,3 +33,8 @@ libc = "0.2"
 [target.'cfg(target_os = "android")'.dependencies]
 # JNI 桥（Kotlin System.loadLibrary 直连）；仅 android 目标编译，宿主面零负担
 jni = "0.21"
+
+[dev-dependencies]
+# RIL-044 第三段：network_changed 契约门的 DNS mock 复用平台 DNS 线格式
+# 编解码（encode_query/encode_response）——mock 与解析器同一方言，零失配面
+rillane-platform = { path = "../rillane-platform" }

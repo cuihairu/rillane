@@ -207,7 +207,10 @@ class RillaneVpnService : VpnService() {
         connectivityManager = cm
         try {
             cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) = refreshNetworkLabel(cm)
+                override fun onAvailable(network: Network) {
+                    notifyNetworkChanged("available")
+                    refreshNetworkLabel(cm)
+                }
                 override fun onLost(network: Network) = refreshNetworkLabel(cm)
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
                     refreshNetworkLabel(cm)
@@ -223,6 +226,21 @@ class RillaneVpnService : VpnService() {
         if (label != lastNetworkLabel) {
             lastNetworkLabel = label
             StateBus.update(networkType = label)
+        }
+    }
+
+    /**
+     * 切网通知核心（RIL-044）：onAvailable 即新底层网络就绪的语义时刻——
+     * 冲刷 DNS 缓存，旧网缓存应答不再复用。守卫非零句柄；-1 只记日志不
+     * 动句柄（本调用不改变句柄有效性）。首次注册的当下网络回调也走此路
+     * （幂等冲刷，无害）。真机切换（Wi-Fi↔蜂窝）验收归 RIL-046 批次。
+     */
+    private fun notifyNetworkChanged(cause: String) {
+        val h = ffiHandle
+        if (h == 0L) return
+        val rc = RillaneFfi.networkChanged(h)
+        if (rc != 0) {
+            Log.w(TAG, "networkChanged($cause) 失败 rc=$rc: ${RillaneFfi.lastError() ?: "未知错误"}")
         }
     }
 

@@ -107,6 +107,15 @@ pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_startWithSecrets(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_networkChanged(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jint {
+    unsafe { rillane_ffi_network_changed(handle_from(handle)) }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_stop(
     _env: JNIEnv,
     _class: JClass,

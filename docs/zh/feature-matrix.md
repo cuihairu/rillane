@@ -22,7 +22,7 @@
 | F-10 | Debug 诊断 | `diagnose`（safe/full/raw 脱敏档，永不自动上传）、`trace`（list/flow/svg/events/inspect，显式缺席退出码 2）、`explain`（零副作用）、`probe`（显式登记目标，未启用 503）；TCP 入口流由 SessionTracer 活面追踪 | [安装、恢复与 Debug](usage-bridge.md)；UDP 关联面与真机批次开放——[活面轨迹证据](acceptance-evidence/README.md) |
 | F-11 | 可选 MCP 适配器 | stdio 适配器，冻结版本 2026-07-28；16 工具；read/detailed/probe/write scope，`-32001 mcp.scope.denied` 执行拒绝；每分钟限速；官方 SDK 验收驱动（12 场景、零模型） | 默认关闭——无监听端口、无后台进程；[usage-bridge MCP 节](usage-bridge.md)；RIL-090 证据在 `apps/rillane-mcp/sdk-acceptance/EVIDENCE.md` |
 | F-12 | 平台接管面 | Linux 透明/iptables 本地已验；Windows Wintun 数据面、进程归属、SCM 服务与恢复在 `imac` 真机已验；OpenWrt ipk + procd init；macOS 构建脚手架 | 逐平台状态与具名缺口见[平台支持](platform-support.md)——本行绝不把构建面升格成设备验收 |
-| F-13 | 移动 FFI 面 | 15 方法 JNI 面（`start`、`startWithSecrets`、stop/isRunning、stats + 6 查询面、TUN fd start/stop）；`${secret:` 引用注入 fail-closed；坏 fd 拒绝且句柄不被污染；Rust/Kotlin 两半边停止可重复 | JNI 恰等门与 C 头恰等门随 `cargo test --workspace` 运行；真机批次（packetFlow、ABI、线程/背压）开放——[FFI 证据](acceptance-evidence/README.md) |
+| F-13 | 移动 FFI 面 | 16 方法 JNI 面（`start`、`startWithSecrets`、`networkChanged`、stop/isRunning、stats + 6 查询面、TUN fd start/stop）；`${secret:` 引用注入 fail-closed；网络变化冲刷 DNS 缓存；坏 fd 拒绝且句柄不被污染；Rust/Kotlin 两半边停止可重复 | JNI 恰等门与 C 头恰等门随 `cargo test --workspace` 运行；真机批次（packetFlow、ABI、线程/背压、活切网）开放——[FFI 证据](acceptance-evidence/README.md) |
 | F-14 | 可选 Mesh 与插件 | 能力协商拒绝不可信信道与 UDP 安全承载未完成（绝不明文旁路发布）；full 档 wasm 插件与策略面隔离；small/mobile 档依赖图无 wasmtime | 标准代理产物关闭扩展可用——[Mesh](mesh.md)；构建档位由 CI `small` job 钉住（RIL-040） |
 | F-15 | 性能账本 | 并行负载对照含 p50/p95、抖动、有效丢包、TTFB、吞吐、CPU/RSS 与重复次数；调度重演报告回退与无收益条件 | debug 构建回环实测、范围如实——[并行负载](parallel-load.md) |
 

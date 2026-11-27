@@ -12,6 +12,7 @@
       "rillane_ffi_last_error",
       "rillane_ffi_start",
       "rillane_ffi_start_with_secrets",
+      "rillane_ffi_network_changed",
       "rillane_ffi_stop",
       "rillane_ffi_is_running",
       "rillane_ffi_stats_json",

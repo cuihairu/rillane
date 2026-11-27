@@ -367,6 +367,38 @@ fn stop_inner(h: Box<FfiHandle>) {
     h.tokio_rt.shutdown_timeout(Duration::from_secs(2));
 }
 
+/// 通知核心宿主底层网络已变化（RIL-044 生命周期契约「网络变化」面的核心半边）
+///
+/// 当下语义：冲刷 DNS 缓存（`DnsService::clear_cache` 透传）——换网后旧网
+/// 缓存应答不再复用，后续解析走新网重查；DNS 块缺席/关闭 = 诚实 no-op 仍
+/// 0（冲刷空即成功）。可重复调用（无状态、幂等）。在途转发流不主动斩断：
+/// 会话排空边界归 RIL-022/023 消费侧（publisher 只记账），网络变化沿同一
+/// 边界——旧网流自然失败，宿主不必也不得依赖本面斩流。
+///
+/// 返回 0 成功 / -1 句柄无效（NULL → -1 + last_error）。
+///
+/// # Safety
+/// `handle` 须为有效句柄或 NULL（NULL → -1）。
+#[no_mangle]
+pub unsafe extern "C" fn rillane_ffi_network_changed(handle: *const FfiHandle) -> i32 {
+    if handle.is_null() {
+        set_last_error("rillane_ffi_network_changed：句柄为空".into());
+        return -1;
+    }
+    let h = unsafe { &*handle };
+    match catch_unwind(AssertUnwindSafe(|| {
+        if let Some(svc) = h.rillane.get_dns_service() {
+            svc.clear_cache();
+        }
+    })) {
+        Ok(()) => 0,
+        Err(_) => {
+            set_last_error("网络变化处理 panic（已拦截）".into());
+            -1
+        }
+    }
+}
+
 /// 运行状态（1 运行 / 0 停止 / -1 句柄无效）
 ///
 /// # Safety

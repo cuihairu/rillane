@@ -27,6 +27,13 @@ object RillaneFfi {
      */
     external fun startWithSecrets(configYaml: String, secretsJson: String): Long
 
+    /**
+     * 通知核心宿主底层网络已变化（RIL-044）：冲刷 DNS 缓存（换网后旧网
+     * 缓存应答不再复用）；DNS 缺席/关闭 = 诚实 no-op 仍 0。可重复调用
+     * （幂等）；在途流不主动斩断（排空归消费侧边界）。0 成功 / -1 句柄无效。
+     */
+    external fun networkChanged(handle: Long): Int
+
     /** 停止并释放句柄（句柄此后不得复用）。0 成功 / -1 失败 */
     external fun stop(handle: Long): Int
 

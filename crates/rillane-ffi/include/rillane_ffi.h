@@ -46,6 +46,14 @@ rillane_ffi_handle_t *rillane_ffi_start(const char *config_yaml, size_t config_l
 rillane_ffi_handle_t *rillane_ffi_start_with_secrets(const char *config_yaml, size_t config_len,
                                                      const char *secrets_json, size_t secrets_len);
 
+/*
+ * 通知核心宿主底层网络已变化（RIL-044「网络变化」面）：冲刷 DNS 缓存
+ * （换网后旧网缓存应答不再复用）；DNS 缺席/关闭 = 诚实 no-op 仍 0。
+ * 可重复调用（幂等）。在途转发流不主动斩断（会话排空归 RIL-022/023
+ * 消费侧边界）。0 成功 / -1 句柄无效（错误见 last_error）。
+ */
+int32_t rillane_ffi_network_changed(const rillane_ffi_handle_t *handle);
+
 /* 停止并释放句柄（TUN 线程先行收尾；句柄此后悬空）。0 成功 / -1 失败 */
 int32_t rillane_ffi_stop(rillane_ffi_handle_t *handle);
 
