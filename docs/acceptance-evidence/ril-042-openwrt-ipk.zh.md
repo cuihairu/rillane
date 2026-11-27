@@ -26,6 +26,25 @@
 7. 包内 `init.d` 与 `platforms/openwrt/init.d/rillane` 逐字同形（trim 后）——
    装配漂移即失败。
 
+## 执行面运维语义（第二段）
+
+postinst 与 init.d 在临时根下用 `sh` **真跑**：平台专有命令
+（`logger`/`config_get`/`procd_*`）替换为记录调用的桩，分支逻辑跑的仍是
+包内脚本本体。钉死：
+
+1. `postinst` 首装把示例配置落到 `/etc/rillane.yaml`；运维改过配置后再次
+   执行**不覆盖**改动（脚本层面的升级 conffile 保留）。
+2. `init.d start_service` 在 `enabled=0` 下零 procd 事件。
+3. `enabled=1` 且 `config_load` 缺席（首次开机）照常起服务：config_get
+   问了 enabled 值、procd_open/close 包住 `command "$PROG"`、
+   `env RILLANE_CONFIG=...`、`respawn 3600 5 0`、`stdout 1`、`stderr 1`、
+   `limits core=0 0`。
+4. 缺配置 → 具名拒绝（退出 1 + 日志行），零 procd 事件。
+5. `reload_service` = 先 `stop` 后 `start`，按此精确顺序记录。
+
+脚本只做了路径本地化（绝对路径 `/etc/...`、`/usr/...` 改写到沙箱根）；
+分支与参数一律不改写，不是另写的模拟脚本。
+
 ## 复现
 
 ```sh

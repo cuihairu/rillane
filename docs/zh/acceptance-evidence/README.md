@@ -11,7 +11,7 @@
 | RIL-033 Windows 接管/旁路 | [ril-033-windows-takeover](../../acceptance-evidence/ril-033-windows-takeover) | 真机 | `imac` 机批次已验；浏览器/游戏流与 DNS 劫持端到端为具名缺口 |
 | RIL-034 Windows 进程归属 | [ril-034-windows-owner](../../acceptance-evidence/ril-034-windows-owner) | 真机 | `imac` 实机已验 |
 | RIL-035 Windows 服务与退出恢复 | [ril-035-windows-service-recovery](../../acceptance-evidence/ril-035-windows-service-recovery) | 真机 | 已验；休眠恢复为具名缺口 |
-| RIL-042 OpenWrt ipk 包结构 | [ril-042-openwrt-ipk](../../acceptance-evidence/ril-042-openwrt-ipk) · [中文](../../acceptance-evidence/ril-042-openwrt-ipk.zh) | 本地账本 | 真包拆解：ar 成员、control/conffiles/postinst、data 文件与 procd init 形状已钉；opkg/procd 真机批次开放 |
+| RIL-042 OpenWrt ipk 包结构 | [ril-042-openwrt-ipk](../../acceptance-evidence/ril-042-openwrt-ipk) · [中文](../../acceptance-evidence/ril-042-openwrt-ipk.zh) | 本地账本 | 真包拆解（ar 成员、control/conffiles/postinst、procd init 形状）**并已真跑运维脚本**（升级保留运维配置、enabled=0/缺配置拒绝、reload=先停后起）；opkg/procd 真机批次开放 |
 | RIL-043 移动 FFI JNI 符号面 | [ril-043-jni-symbol-face](../../acceptance-evidence/ril-043-jni-symbol-face) · [中文](../../acceptance-evidence/ril-043-jni-symbol-face.zh) | 本地账本 | Kotlin↔Rust 符号恰等已钉；真机批次未勾 |
 | RIL-043 移动 FFI TUN fd 注入面 | [ril-043-tun-fd-injection](../../acceptance-evidence/ril-043-tun-fd-injection) · [中文](../../acceptance-evidence/ril-043-tun-fd-injection.zh) | 本地账本 | 坏 fd 具名拒绝 + 句柄不被污染（已修整进程 abort 缺陷）；真 TUN 通路归真机批次 |
 | RIL-044 移动宿主生命周期停止面 | [ril-044-host-lifecycle](../../acceptance-evidence/ril-044-host-lifecycle) · [中文](../../acceptance-evidence/ril-044-host-lifecycle.zh) | 本地账本 | 重复停止两侧半边已钉；秘密注入/网络变化/IPC 已作为本地账本交付（见下行）；真机批次开放 |

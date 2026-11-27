@@ -72,8 +72,11 @@ reload 不触碰外来表，规则随 rillaned 启停自动应用/撤销（模�
 - ipk 结构：`ar t` 成员名记日志；包内结构另由 RIL-042 契约门
   `crates/rillane-platform/tests/openwrt_ipk_contract.rs` 对已产 ipk 做真包
   拆解断言（ar 三成员 + 两个 tar 可解、control 字段/conffiles/postinst、
-  二进制与 init.d 齐件、procd 要素、仓内脚本与包内同形）——该门仅在
-  本机有 `dist/openwrt/*.ipk` 时实测，缺包跳过不冒充实测。
+  二进制与 init.d 齐件、procd 要素、仓内脚本与包内同形），并把 postinst/
+  init.d 的运维语义**真 shell 执行**一遍：首装落配置、二次执行不覆盖
+  运维改动（升级保留）、`enabled=0` 拒绝起服务、缺配置具名拒绝、
+  `reload_service` 先停后起——桩替代平台专有命令，分支逻辑跑的是包内
+  脚本本体。该门仅在本机有 `dist/openwrt/*.ipk` 时实测，缺包跳过不冒充实测。
 
 **未验（需要真机或目标架构仿真环境）**
 - 真机 opkg 安装/升级路径（DISTRIB_ARCH 命中、conffile 升级保留语义）；
