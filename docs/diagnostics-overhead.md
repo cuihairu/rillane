@@ -2,7 +2,7 @@
 
 Comparison of the diagnostic collection face (bounded event collector + per-connection query service) across the default limits and the off / sampled / full modes, plus the retention contract.
 
-**Honest scope:** the session data path is not wired to the collector yet (trace admission has no production call site until that landing), so this report measures the collector + query face itself — not end-to-end per-connection overhead. Numbers below are debug-build measurements from the overhead harness (`cargo test -p rillane-core --test collector_overhead -- --nocapture`); release builds are faster. Re-measure after the data-path wiring lands.
+**Honest scope:** production trace admission exists (`TracedFlowOutput` wraps runtime outputs and the RIL-083 live-trace evidence records TCP ingress traces through that path); this report still measures the collector + query face in isolation via the overhead harness, not end-to-end per-connection overhead after the forwarding path. Numbers below are debug-build measurements from the overhead harness (`cargo test -p rillane-core --test collector_overhead -- --nocapture`); release builds are faster. End-to-end data-path overhead is a separately named gap; these numbers must not be read as that measurement.
 
 ## Modes compared (daemon default shape: capacity 1024 / active cap 256 / per-flow 256 / TTL 1h; only the switch and sample denominator change)
 
