@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "comment": "RIL-086 六平台并行场景验收账本：真实网站/QUIC 与游戏并行转发矩阵（条款 × 平台）。每格只允许四种诚实状态——verified_local（本机真实测试/真实应用流）/ verified_device（仓内真机证据）/ partial（仅协议/配置/调度面核验，无六平台并行真机运行）/ needs_device（平台真机未接入/签名面未过）。真实网站/QUIC 与游戏并行转发矩阵本身是六平台真机验收：Linux 仅协议/配置/调度单测面、Windows 仅 ping/curl 单应用面、其余平台真机未接入，全部如实记 needs_device/partial，绝不标 verified。契约门 crates/rillane-platform/tests/parallel_scenario_matrix_contract.rs 钉住封闭集合、证据文件存在、QUIC 与游戏并行矩阵不冒充实测、不支持项有明确拒绝/降级面。",
+  "comment": "RIL-086 六平台并行场景验收账本：真实网站/QUIC 与游戏并行转发矩阵（条款 × 平台）。每格只允许四种诚实状态——verified_local（本机真实测试/真实应用流）/ verified_device（仓内真机证据）/ partial（仅协议/配置/调度面核验，无六平台并行真机运行）/ needs_device（平台真机未接入/签名面未过）。Linux 双栈条款已由真实运行时回环测试实测（IPv4/IPv6 并行转发，仅回环非外网/真机）；Linux DNS/协议与 Windows 均为 partial（单应用/单测面），其余平台真机未接入，全部如实记 needs_device/partial。真实网站/QUIC 与游戏并行转发矩阵本身仍是六平台真机验收，绝不标 verified。契约门 crates/rillane-platform/tests/parallel_scenario_matrix_contract.rs 钉住封闭集合、证据文件存在、QUIC 与游戏并行矩阵不冒充实测、不支持项有明确拒绝/降级面。",
   "platforms": [
     "linux-systemd",
     "openwrt",
@@ -14,9 +14,12 @@
       "title": "IPv4/IPv6 双栈并行转发",
       "cells": {
         "linux-systemd": {
-          "status": "partial",
-          "evidence": ["crates/rillane-config/tests/network_block.rs"],
-          "note": "配置面（v6 路由/CIDR 校验）与 LinuxRouteTransaction v6 网关 %zone 解析有测试；六平台双栈并行转发真机矩阵未跑"
+          "status": "verified_local",
+          "evidence": [
+            "crates/rillane-config/tests/network_block.rs",
+            "crates/rillane-runtime/tests/dual_stack_parallel_acceptance.rs"
+          ],
+          "note": "配置面（v6 路由/CIDR 校验）与 LinuxRouteTransaction v6 网关 %zone 解析有测试；真实运行时同实例 SOCKS5 入口→direct 出口：IPv4 ATYP=0x01 与 IPv6 ATYP=0x04 两条 ::1/127.0.0.1 回环流并行逐字节往返通过。仅回环实测，本机无 v6 默认路由；六平台双栈并行转发真机矩阵未跑"
         },
         "openwrt": {
           "status": "needs_device",

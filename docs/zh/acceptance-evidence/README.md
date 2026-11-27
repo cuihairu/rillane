@@ -22,7 +22,7 @@
 | RIL-083 UDP 关联与探测流轨迹接线 | [ril-083-udp-association-trace](../../acceptance-evidence/ril-083-udp-association-trace) · [中文](../../acceptance-evidence/ril-083-udp-association-trace.zh) | 本地账本 | UDP 关联生命周期活面轨迹（mapped/reclaimed/closed）+ url-test 探测流轨迹；真机批次开放 |
 | RIL-084 六平台构建产物矩阵 | [ril-084-artifact-matrix](../../acceptance-evidence/ril-084-artifact-matrix) · [中文](../../acceptance-evidence/ril-084-artifact-matrix.zh) | 本地账本 | 产物面对齐；真机/签名验收未勾 |
 | RIL-085 三桌面进程端到端条款矩阵 | [ril-085-desktop-e2e-matrix](../../acceptance-evidence/ril-085-desktop-e2e-matrix) · [中文](../../acceptance-evidence/ril-085-desktop-e2e-matrix.zh) | 本地账本 | 条款×平台账本；Linux 跨 uid 权限不足与端口复用已真实进程实测；浏览器/两款游戏分组轨迹未跑 |
-| RIL-086 六平台并行场景矩阵 | [ril-086-parallel-scenario-matrix](../../acceptance-evidence/ril-086-parallel-scenario-matrix) · [中文](../../acceptance-evidence/ril-086-parallel-scenario-matrix.zh) | 本地账本 | 条款×平台账本；真实网站/QUIC 与游戏并行矩阵未跑 |
+| RIL-086 六平台并行场景矩阵 | [ril-086-parallel-scenario-matrix](../../acceptance-evidence/ril-086-parallel-scenario-matrix) · [中文](../../acceptance-evidence/ril-086-parallel-scenario-matrix.zh) | 本地账本 | 条款×平台账本；Linux 双栈回环转发已实测；真实网站/QUIC 与游戏并行矩阵未跑 |
 
 账本的机器可读真源在 docs 树外：`contracts/build_matrix_v1.json`、
 `contracts/desktop_e2e_matrix_v1.json`、`contracts/parallel_scenario_matrix_v1.json`、

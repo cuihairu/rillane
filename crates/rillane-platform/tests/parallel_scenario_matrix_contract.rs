@@ -31,6 +31,10 @@ fn load_matrix() -> Value {
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("并行场景矩阵 JSON 解析失败: {e}"))
 }
 
+fn read_text(rel: &str) -> String {
+    std::fs::read_to_string(repo_root(rel)).unwrap_or_else(|e| panic!("读取 {rel}: {e}"))
+}
+
 fn cell(matrix: &Value, clause: &str, platform: &str) -> (String, Vec<String>) {
     let c = &matrix["clauses"][clause]["cells"][platform];
     let status = c["status"]
@@ -170,6 +174,42 @@ fn unsupported_reject_and_degrade_has_real_evidence() {
             "不支持项拒绝/降级面 {platform} 至少要有可查证据（{status}）"
         );
     }
+}
+
+/// Linux 双栈格的已升格状态必须有真实可跑的运行时证据文件，且源码中
+/// 真的发起 IPv4/IPv6 两个 ATYP 的双栈转发（不是纯文本门冒充实测）。
+#[test]
+#[cfg(target_os = "linux")]
+fn linux_dual_stack_cell_points_at_real_runtime_test() {
+    let matrix = load_matrix();
+    let (status, evidence) = cell(&matrix, "dual_stack", "linux-systemd");
+    assert_eq!(status, "verified_local", "Linux 双栈格应为 verified_local");
+    assert_eq!(
+        evidence.len(),
+        2,
+        "Linux 双栈应指向配置面 + 运行时实测两份证据"
+    );
+    let src = read_text(&evidence[1]);
+    assert!(
+        src.contains("#[tokio::test]")
+            && src.contains("0x04")
+            && src.contains("Ipv6Addr::LOCALHOST")
+            && src.contains("tokio::join!"),
+        "Linux 双栈证据 {} 未含真实 IPv6 ATYP 并行往返测试形态",
+        evidence[1]
+    );
+}
+
+/// 对账器自证：把 Linux 双栈格降回 partial → 本门须点名。
+#[test]
+#[cfg(target_os = "linux")]
+#[should_panic(expected = "Linux 双栈格应为 verified_local")]
+fn comparator_bites_on_stale_linux_dual_stack_cell() {
+    let mut matrix = load_matrix();
+    matrix["clauses"]["dual_stack"]["cells"]["linux-systemd"]["status"] =
+        serde_json::json!("partial");
+    let (status, _) = cell(&matrix, "dual_stack", "linux-systemd");
+    assert_eq!(status, "verified_local", "Linux 双栈格应为 verified_local");
 }
 
 /// 对账器自证：伪造核心场景 Windows 实测 → 必须点名 panic。

@@ -1,10 +1,10 @@
-# RIL-086 six-platform parallel scenario acceptance matrix (local verifiable segment, 2026-11-26)
+# RIL-086 six-platform parallel scenario acceptance matrix (local verifiable segment, 2026-11-27)
 
 ## What is delivered
 
 `contracts/parallel_scenario_matrix_v1.json` is a machine-readable ledger for
 RIL-086's seven acceptance clauses × six platforms, enforced by
-`crates/rillane-platform/tests/parallel_scenario_matrix_contract.rs` (6/6 green).
+`crates/rillane-platform/tests/parallel_scenario_matrix_contract.rs` (8/8 green).
 Each cell uses one honest status:
 
 | Status | Meaning |
@@ -18,8 +18,11 @@ The comparator pins the closed seven-clause / six-platform sets, requires every
 `verified_*` cell to point at a real repository file, forbids evidence on
 `needs_device` cells (no cross-check or artifact promoted to acceptance), and
 forbids any platform from marking the core "real website/QUIC + game parallel"
-matrix as verified. Two `#[should_panic]` self-tests corrupt the matrix to prove
-the comparator bites.
+matrix as verified. Three `#[should_panic]` self-tests corrupt the matrix to prove
+the comparator bites. A Linux `dual_stack` gate additionally requires the
+`verified_local` cell to point at a real runtime test that actually issues
+IPv4 (ATYP 0x01) and IPv6 (ATYP 0x04) targets in parallel — a config-only
+source is rejected.
 
 ## Evidence ledger by clause
 
@@ -35,6 +38,15 @@ the comparator bites.
   `route delete` → `DefaultRouteChanged` → idempotent `reassert_routes`, and
   SCM crash restart → `SVC RECOVER` undo → clean uninstall, per
   `docs/acceptance-evidence/ril-035-windows-service-recovery.md`.
+- **Dual-stack (Linux)**: `verified_local` for the loopback slice. Config-surface
+  tests (`crates/rillane-config/tests/network_block.rs`) plus a real runtime
+  test (`crates/rillane-runtime/tests/dual_stack_parallel_acceptance.rs`) where
+  one Runtime instance (SOCKS5 ingress → Direct egress) carries an IPv4
+  (ATYP 0x01) and an IPv6 (ATYP 0x04) loopback stream **concurrently**, each
+  round-tripping 64 KiB byte-exactly. The same test also exercises two SOCKS5
+  ingress bindings (v4 + v6) on one instance. This is loopback only — this
+  machine has no IPv6 default route; no external v6 reachability or six-platform
+  matrix is claimed.
 - **DNS, dual-stack, single-application traffic (Windows)**: `partial`.
   Real `ping.exe` ICMP/UDP and `curl.exe` HTTP transactions enter the Wintun
   ring (`ril-033`); escape-bind UDP DNS query to `223.5.5.5` succeeds
@@ -55,10 +67,11 @@ the comparator bites.
 RIL-086's deliverable is a real website/QUIC + game parallel forwarding matrix
 reporting dual-stack, DNS, MTU, network-change, and exit-recovery behavior per
 platform, with explicit rejection or configured degradation for unsupported
-items. That core matrix has **not** been run. Linux has protocol and scheduling
-unit tests; Windows has single-application ping/curl loopback evidence; neither
-is a parallel browser/game run. The RIL-086 parent checkbox stays unchecked;
-RIL-039/042/046/049 device dependencies remain unresolved.
+items. That core matrix has **not** been run. Linux has protocol/scheduling unit
+tests and now a real IPv4/IPv6 loopback forwarding test; Windows has
+single-application ping/curl loopback evidence; none is a parallel browser/game
+run. The RIL-086 parent checkbox stays unchecked; RIL-039/042/046/049 device
+dependencies remain unresolved.
 
 Full workspace tests, `cargo fmt --all -- --check`, and clippy with `-D warnings`
 were run green before committing. No release version, tag, or formal GitHub
