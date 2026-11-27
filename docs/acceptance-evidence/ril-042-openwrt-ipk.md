@@ -50,6 +50,28 @@ The script is only path-localized to the temp root (absolute paths
 `/etc/...`, `/usr/...` rewritten to the sandbox); no branch or parameter is
 re-written into a test-only simulation.
 
+## Small-profile runtime smoke (third segment)
+
+`RILLANE_SMALL_SMOKE_BIN=<path> cargo test -p rillane-platform --test openwrt_ipk_contract small_profile_daemon_serves_control_and_socks`
+starts a `--no-default-features --features small` `rillaned` with the OpenWrt
+template minus its `network` block, on ephemeral loopback ports. It waits for
+both the control plane and the SOCKS5 ingress, performs a raw HTTP
+`GET /config/state` with the template token, and then a real SOCKS5 CONNECT
+through the ingress to the control plane, asserting an HTTP response comes
+back through the forwarder. The binary path is supplied by env because the
+test harness cannot recursively `cargo build`; without it the test prints a
+skip instead of fabricating a pass. Build the binary first:
+
+```sh
+cargo build --release -p rillaned --no-default-features --features small
+RILLANE_SMALL_SMOKE_BIN=target/release/rillaned \
+  cargo test -p rillane-platform --test openwrt_ipk_contract
+```
+
+Boundary: this is a **native small-profile** runtime check, not the cross-built
+musl ipk and not a router. RSS/CPU/throughput ceilings on target hardware
+remain unmeasured in the OpenWrt device batch.
+
 ## Reproduce
 
 ```sh

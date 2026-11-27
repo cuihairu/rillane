@@ -213,6 +213,207 @@ fn repo_init_script_matches_ipk_content() {
     );
 }
 
+// ---------- 第三段：small 档（低内存默认预算）真进程冒烟 ----------
+
+/// 启用 small profile 的 `rillaned` 可执行文件由测试自身构建（release），
+/// 用 OpenWrt 模板的最小配置真起进程 + 控制面 HTTP 探针 + 真 SOCKS5 往返，
+/// 证明裁剪档不是只能编译的空壳。产物不在仓库时打印 skip；本测试不构建
+/// 交叉 musl ipk（那归产物批次），只钉本机 small 档运行面。
+#[test]
+fn small_profile_daemon_serves_control_and_socks() {
+    let manifest = repo_root().join("apps/rillaned/Cargo.toml");
+    if !manifest.is_file() {
+        eprintln!("skip: small 档源码不在");
+        return;
+    }
+    let env_bin = "RILLANE_SMALL_SMOKE_BIN";
+    let bin = match std::env::var(env_bin) {
+        Ok(p) if PathBuf::from(&p).is_file() => PathBuf::from(p),
+        _ => {
+            eprintln!("skip: 设置 {env_bin}=<built small rillaned> 后才跑 small 档进程冒烟");
+            return;
+        }
+    };
+
+    let dir = std::env::temp_dir().join(format!(
+        "rillane-small-smoke-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("small 冒烟临时目录");
+
+    // 模板改端口到未占用回环口（避免与真机/他席 :9090/:7890 冲突）。
+    let template = read_text("platforms/openwrt/rillane.yaml.example");
+    let api_port = free_port();
+    let socks_port = free_port();
+    assert_ne!(api_port, socks_port, "控制口与 SOCKS 口须不同");
+    // 只取模板的 control/ingress/egress/routing 段并改端口；network 块整块
+    // 不取——模板自述「不接管设备时整块删除」，本机无 tun 设备正合此面。
+    let head = template.split("\n# 网络虚拟化").next().expect("模板分段");
+    let config = head
+        .replace(
+            "api_bind: 127.0.0.1:9090",
+            &format!("api_bind: 127.0.0.1:{api_port}"),
+        )
+        .replace(
+            "bind: 0.0.0.0:7890",
+            &format!("bind: 127.0.0.1:{socks_port}"),
+        );
+    let cfg_path = dir.join("rillane.yaml");
+    std::fs::write(&cfg_path, config).expect("写 small 冒烟配置");
+
+    let stdout = dir.join("stdout");
+    let stderr = dir.join("stderr");
+    let mut child = Command::new(&bin)
+        .env("RILLANE_CONFIG", &cfg_path)
+        .env("RILLANE_MESH_MTLS", "0")
+        .env("RILLANE_MESH_ALLOW_PLAINTEXT", "1")
+        .stdout(std::fs::File::create(&stdout).expect("stdout"))
+        .stderr(std::fs::File::create(&stderr).expect("stderr"))
+        .spawn()
+        .expect("启动 small 档 rillaned");
+
+    let result = (|| -> Result<(), String> {
+        let control = format!("127.0.0.1:{api_port}");
+        let socks = format!("127.0.0.1:{socks_port}");
+        wait_tcp(&control, &mut child, &stderr)?;
+        wait_tcp(&socks, &mut child, &stderr)?;
+        // 控制面 GET /config/state 必须可答（鉴权 token=change-me）。
+        let text = http_get(&control, "/config/state", "change-me")?;
+        assert!(
+            text.contains("generation") || text.contains("config"),
+            "控制面答复不含状态字段：{text}"
+        );
+        // 真 SOCKS5 握手往返（CONNECT 127.0.0.1 的控制口）。
+        socks5_roundtrip(&socks, &control)?;
+        Ok(())
+    })();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    result.unwrap_or_else(|e| {
+        panic!(
+            "small 档冒烟失败：{e}\nstderr:\n{}",
+            std::fs::read_to_string(&stderr).unwrap_or_default()
+        )
+    });
+}
+
+fn free_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("临时端口");
+    l.local_addr().expect("临时端口地址").port()
+}
+
+fn wait_tcp(addr: &str, child: &mut std::process::Child, stderr: &PathBuf) -> Result<(), String> {
+    for _ in 0..100 {
+        if let Some(code) = child.try_wait().map_err(|e| e.to_string())? {
+            return Err(format!(
+                "small rillaned 提前退出（{code}）：{}",
+                std::fs::read_to_string(stderr).unwrap_or_default()
+            ));
+        }
+        if std::net::TcpStream::connect(addr).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Err(format!("small rillaned 5s 内未监听 {addr}"))
+}
+
+fn http_get(addr: &str, path: &str, token: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(addr).map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|e| e.to_string())?;
+    write!(
+        s,
+        "GET {path} HTTP/1.0\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\n\r\n"
+    )
+    .map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 4096];
+    let mut got = Vec::new();
+    loop {
+        let n = s.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+        if got.len() > 256 * 1024 {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&got).to_string();
+    if !text.starts_with("HTTP/1.") || text.contains(" 401 ") || text.contains(" 403 ") {
+        return Err(format!("控制面非成功答复：{text}"));
+    }
+    Ok(text)
+}
+
+fn socks5_roundtrip(bind: &str, target: &str) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(bind).map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|e| e.to_string())?;
+    s.write_all(&[5, 1, 0]).map_err(|e| e.to_string())?; // no-auth only
+    let mut hello = [0u8; 2];
+    s.read_exact(&mut hello).map_err(|e| e.to_string())?;
+    if hello != [5, 0] {
+        return Err(format!("SOCKS5 协商失败：{hello:?}"));
+    }
+    let host: std::net::Ipv4Addr = "127.0.0.1".parse().unwrap();
+    let port: u16 = target.rsplit(':').next().unwrap().parse().unwrap();
+    let mut req = vec![5, 1, 0, 1];
+    req.extend_from_slice(&host.octets());
+    req.extend_from_slice(&port.to_be_bytes());
+    s.write_all(&req).map_err(|e| e.to_string())?;
+    let mut reply = [0u8; 4];
+    s.read_exact(&mut reply).map_err(|e| e.to_string())?;
+    if reply[1] != 0 {
+        return Err(format!("SOCKS5 CONNECT 失败：{reply:?}"));
+    }
+    match reply[3] {
+        1 => {
+            let mut b = [0u8; 4];
+            s.read_exact(&mut b).map_err(|e| e.to_string())?;
+        }
+        3 => {
+            let mut len = [0u8; 1];
+            s.read_exact(&mut len).map_err(|e| e.to_string())?;
+            let mut b = vec![0u8; len[0] as usize + 2];
+            s.read_exact(&mut b).map_err(|e| e.to_string())?;
+        }
+        4 => {
+            let mut b = [0u8; 16];
+            s.read_exact(&mut b).map_err(|e| e.to_string())?;
+        }
+        x => return Err(format!("未知 ATYP {x}")),
+    }
+    write!(s, "GET /config/state HTTP/1.0\r\nHost: {target}\r\n\r\n").map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 4096];
+    let mut got = Vec::new();
+    for _ in 0..20 {
+        let n = s.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+        if got.windows(7).any(|w| w == b"HTTP/1.") {
+            break;
+        }
+    }
+    if !got.windows(7).any(|w| w == b"HTTP/1.") {
+        return Err(format!(
+            "SOCKS5 转发无 HTTP 答复：{:?}",
+            &got[..got.len().min(64)]
+        ));
+    }
+    Ok(())
+}
+
 // ---------- 第二段：包内运维脚本的真执行语义 ----------
 
 /// 取解包目录；缺 ar/tar 或 dist 未产返回 None（打印 skip，不冒充实测）。

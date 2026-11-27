@@ -45,6 +45,25 @@ postinst 与 init.d 在临时根下用 `sh` **真跑**：平台专有命令
 脚本只做了路径本地化（绝对路径 `/etc/...`、`/usr/...` 改写到沙箱根）；
 分支与参数一律不改写，不是另写的模拟脚本。
 
+## small 档运行时冒烟（第三段）
+
+`RILLANE_SMALL_SMOKE_BIN=<path> cargo test -p rillane-platform --test openwrt_ipk_contract small_profile_daemon_serves_control_and_socks`
+用 OpenWrt 模板去掉 `network` 块、临时回环端口启动
+`--no-default-features --features small` 的 `rillaned`：等控制面与 SOCKS5
+入口都监听，发原始 HTTP `GET /config/state`（模板 token），再经 SOCKS5
+CONNECT 穿过转发器到控制面，断言回程是真实 HTTP 答复。二进制路径由环境
+变量提供（测试进程不能递归 `cargo build`）；未提供时打印 skip，不伪造
+通过。构建命令：
+
+```sh
+cargo build --release -p rillaned --no-default-features --features small
+RILLANE_SMALL_SMOKE_BIN=target/release/rillaned \
+  cargo test -p rillane-platform --test openwrt_ipk_contract
+```
+
+边界：这是**本机原生 small 档**运行面，不是交叉 musl ipk、不是路由器；
+真机 RSS/CPU/吞吐上限仍在 OpenWrt 设备批次未测。
+
 ## 复现
 
 ```sh
