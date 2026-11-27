@@ -27,5 +27,5 @@
 在途转发流不主动斩断——排空归 RIL-022/023 消费侧边界，网络变化沿同一
 边界（旧网流自然失败，宿主不得依赖本调用斩流）。Kotlin
 `onAvailable → networkChanged` 接线是文本纪律门钉的结构面；真机活切网
-（Wi-Fi ↔ 蜂窝）归 RIL-046 真机批次开放，有界诊断 IPC（RIL-044 其余交付）
-同样未开工。主勾选保持关闭。
+（Wi-Fi ↔ 蜂窝）归 RIL-046 真机批次开放。有界诊断 IPC 在下一段交付
+——[ril-044-diagnostic-ipc](./ril-044-diagnostic-ipc.zh)。主勾选保持关闭。

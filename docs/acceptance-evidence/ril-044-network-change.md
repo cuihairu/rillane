@@ -37,5 +37,6 @@ boundary, and network change follows it (old-network streams fail naturally;
 the host must not rely on this call to kill streams). The Kotlin
 `onAvailable → networkChanged` wiring is a text-disciplined structural face;
 live network switching (Wi-Fi ↔ cellular) on a device belongs to the RIL-046
-device batch and stays open, as does bounded diagnostic IPC (the remaining
-RIL-044 deliverable). The parent checkbox stays unchecked.
+device batch and stays open. Bounded diagnostic IPC is delivered in the next
+segment — [ril-044-diagnostic-ipc](./ril-044-diagnostic-ipc). The parent
+checkbox stays unchecked.
