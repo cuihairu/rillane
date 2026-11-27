@@ -71,6 +71,18 @@
       },
       "run_verification": "needs_device",
       "run_note": "真机 opkg 安装/升级、procd 起停/respawn、kmod-tun 数据面、nft 专用表生效/撤销均未验；见 platforms/openwrt/README.md 验证边界",
+      "unsupported_architectures": [
+        {
+          "arch": "mips / mipsel (32-bit)",
+          "reason": "rust 1.99+ 不再分发 32 位 mips musl 预编译 std（两端序皆弃）；aws-lc-sys（rustls 默认密码学后端）不支持 mips",
+          "reopen": "nightly -Z build-std + ring 供给改造后另行落地"
+        },
+        {
+          "arch": "armv7-unknown-linux-musleabihf (small/full 交叉产物)",
+          "reason": "LuaJIT 32 位宿主阶段（minilua 以 cc -m32 构建）缺 multilib 头文件，经 shadowquic 缺省特性进入；档位无关（full 同样失败），本工作区从未成功过该交叉",
+          "reopen": "带 multilib 宿主头文件的定制 cross 镜像，或上游 shadowquic 将 lua plugin 特性改为可选"
+        }
+      ],
       "evidence": [
         "platforms/openwrt/README.md",
         "platforms/openwrt/build.sh",

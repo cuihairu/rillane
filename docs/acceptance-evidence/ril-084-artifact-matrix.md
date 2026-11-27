@@ -28,6 +28,13 @@ RIL-084 勾选保持关闭（依赖 RIL-036/039/041/042/046/049 真机批次未�
    开发者账号。`run_verification` 只允许 `verified_emulator` / `needs_os` /
    `needs_device` / `needs_signing` 四值；除 Android AVD 外一律不得标实测。
 5. 自证门：伪造 macOS `verified_emulator` 即刻点名失败。
+6. **不支持架构具名入账（RIL-042 第四段）**：OpenWrt 条目的
+   `unsupported_architectures` 逐项列架构 + 根因 + 重开条件——32 位
+   mips/mipsel（rust 1.99+ 无预编译 musl std + aws-lc-sys 不支持；重开须
+   `-Z build-std` + ring）、armv7 musl 交叉（LuaJIT 32 位宿主阶段缺
+   multilib 头文件，档位无关；重开须定制镜像或上游特性可选化）。契约门
+   核对 build.sh/README 出处、禁止该面与 `run_verification` 升格冲突，
+   并有删条目自证 panic。
 
 ## 验证边界（如实）
 

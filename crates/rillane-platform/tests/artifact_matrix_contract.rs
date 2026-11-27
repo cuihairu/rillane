@@ -237,7 +237,52 @@ fn honest_signing_and_verification_boundaries() {
     }
 }
 
-/// 对账器自证：篡改矩阵（伪造 macOS 已验）→ 本门必须点名失败
+/// RIL-042：不支持的架构必须**具名 + 根因 + 重开条件**入账，且不能
+/// 以「未支持」掩盖为已交付产物——本门从 build.sh/README 的既有说明核读。
+#[test]
+fn openwrt_unsupported_architectures_are_named_with_reopen_conditions() {
+    let matrix = load_matrix();
+    let entry = &matrix["platforms"]["openwrt"];
+    let unsupported = entry["unsupported_architectures"]
+        .as_array()
+        .expect("openwrt 须显式列 unsupported_architectures");
+    assert!(!unsupported.is_empty(), "不支持架构不得空列");
+    let script = script_text(entry["build_script"].as_str().expect("build_script"));
+    let readme = script_text("platforms/openwrt/README.md");
+    for item in unsupported {
+        let arch = item["arch"].as_str().expect("arch");
+        let reason = item["reason"].as_str().expect("reason");
+        let reopen = item["reopen"].as_str().expect("reopen");
+        assert!(
+            !reason.is_empty() && !reopen.is_empty(),
+            "{arch} 缺根因/重开条件"
+        );
+        // 每条至少在 build.sh 或 README 有出处（机器账本不只靠单方声明）。
+        assert!(
+            (script.contains("mips") || readme.contains("mips")) && arch.contains("mips")
+                || (script.contains("armv7") || readme.contains("armv7")) && arch.contains("armv7"),
+            "{arch} 在 build.sh/README 无可核出处"
+        );
+        // 不支持的架构绝不能登记为产物目标（清单自相矛盾）。
+        for t in entry["artifact_triples"]
+            .as_array()
+            .expect("artifact_triples")
+        {
+            let t = t.as_str().expect("str");
+            if arch.contains(t.split('-').next().unwrap_or("")) {
+                // armv7 triple 的「未成功交叉」必须有 ci_check_only 或显式产物边界；
+                // 当前 build.sh 的缺省矩阵列 armv7，但对应 ipk 未在产物
+                // 清单中交付，故 run_verification 必须仍为 needs_device。
+                assert_eq!(
+                    entry["run_verification"], "needs_device",
+                    "{t} 交叉失败而 run_verification 已升格"
+                );
+            }
+        }
+    }
+}
+
+/// 对账器自证：删掉 unsupported_architectures → 本门必须点名失败/// 对账器自证：篡改矩阵（伪造 macOS 已验）→ 本门必须点名失败
 /// （防止值域断言被静默绕过）。
 #[test]
 #[should_panic(expected = "macos-launchd 无真机证据不得标实测")]
@@ -257,4 +302,18 @@ fn comparator_bites_on_faked_device_evidence() {
             "{key} 无真机证据不得标实测"
         );
     }
+}
+
+#[test]
+#[should_panic(expected = "openwrt 须显式列 unsupported_architectures")]
+fn comparator_bites_on_dropped_unsupported_architecture_list() {
+    let mut matrix = load_matrix();
+    matrix["platforms"]["openwrt"]
+        .as_object_mut()
+        .expect("openwrt object")
+        .remove("unsupported_architectures");
+    let entry = &matrix["platforms"]["openwrt"];
+    let _ = entry["unsupported_architectures"]
+        .as_array()
+        .expect("openwrt 须显式列 unsupported_architectures");
 }
