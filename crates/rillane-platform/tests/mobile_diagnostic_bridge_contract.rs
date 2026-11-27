@@ -288,6 +288,90 @@ fn diagnose_export_scope_is_controlled() {
     }
 }
 
+/// Android 移动构建档检查体（门与自证同源——吃账本 + 脚本全文）。
+fn android_mobile_profile_check(ledger: &Value, script: &str) {
+    let android = ledger["hosts"]
+        .as_array()
+        .expect("hosts")
+        .iter()
+        .find(|h| h["id"] == "android")
+        .expect("android 主机");
+    let profile = &android["mobile_profile"];
+    let flag = profile["flag"].as_str().expect("flag");
+    let forbidden = profile["forbidden_feature"]
+        .as_str()
+        .expect("forbidden_feature");
+
+    assert!(
+        script.contains(flag),
+        "Android build 缺移动构建档 {flag}（default=full 会把 wasmtime/JIT 打进移动 cdylib）"
+    );
+    // 禁面扫描只看有效代码（shell `#` 注释剥离——说明性散文不算构建面），
+    // 本脚本无 heredoc、字符串内无 `#`，行级剥离即精确。
+    let code_only = script
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !code_only.contains(forbidden),
+        "Android build 代码面出现禁面特征 {forbidden}（移动宿主无 WASM 插件面）"
+    );
+    // 产物面在脚本在场（账本 mobile_profile.packages）
+    for pkg in profile["packages"].as_array().expect("packages") {
+        let pkg = pkg.as_str().expect("package");
+        assert!(script.contains(pkg), "Android build 脚本未产出 {pkg}");
+    }
+    // manifest 档位自洽：mobile 转发 small、default 挂 full（与账本 ffi.features 一致）
+    let manifest = read_text(ledger["ffi"]["manifest"].as_str().expect("manifest"));
+    assert!(
+        manifest.contains("mobile = [\"rillane-runtime/small\"]"),
+        "FFI manifest mobile 档转发面漂移（账本 ffi.features.mobile=rillane-runtime/small）"
+    );
+}
+
+/// Android 移动构建档：build 脚本必须以 mobile 档交叉 FFI（default=full 档
+/// 会把 wasmtime/JIT 插件面打进移动 cdylib——RIL-040 档位纪律 + RIL-082 第二段
+/// 修真漂移），代码面不得出现 forbidden_feature。
+#[test]
+fn android_mobile_profile_builds_ffi_without_wasmtime() {
+    let ledger = load_ledger();
+    let script = read_text(
+        ledger["hosts"]
+            .as_array()
+            .expect("hosts")
+            .iter()
+            .find(|h| h["id"] == "android")
+            .expect("android 主机")["build_script"]
+            .as_str()
+            .expect("build_script"),
+    );
+    android_mobile_profile_check(&ledger, &script);
+}
+
+/// 对账器自证：脚本退回 default=full 漂移形 → 本门必须点名。
+#[test]
+#[should_panic(expected = "Android build 缺移动构建档")]
+fn comparator_bites_on_android_full_profile_build() {
+    let ledger = load_ledger();
+    let script = read_text(
+        ledger["hosts"]
+            .as_array()
+            .expect("hosts")
+            .iter()
+            .find(|h| h["id"] == "android")
+            .expect("android 主机")["build_script"]
+            .as_str()
+            .expect("build_script"),
+    );
+    let tampered = script.replace(
+        "--no-default-features --features mobile",
+        "--features mobile", // 退回 default=full 的漂移形（注释同剥，恰似回退提交）
+    );
+    assert_ne!(tampered, script, "篡改形与原形相同（自证失效）");
+    android_mobile_profile_check(&ledger, &tampered);
+}
+
 /// OpenWrt 资源受限档可选、不打包 MCP、控制面 loopback。
 #[test]
 fn openwrt_small_profile_is_opt_in_without_mcp() {

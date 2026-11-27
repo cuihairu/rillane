@@ -36,10 +36,15 @@ triple_of() {
 }
 
 # ---- rillane-ffi 交叉（cross 容器；产物统一落仓库 ./target 同 openwrt）----
+# 移动宿主构建档（RIL-040/RIL-082）：--no-default-features --features mobile
+# ——default 是 full 档（wasmtime/JIT），移动 cdylib 不带 WASM 插件面
+# （rillane-ffi Cargo.toml 档位注记 + mobile_diagnostic_bridge_v1.json 钉死）。
+FFI_FEATURE_ARGS=(--no-default-features --features mobile)
 for abi in "${ABIS[@]}"; do
     triple="$(triple_of "$abi")"
-    echo "=== [$abi → $triple] cross build --release -p rillane-ffi"
-    env -u CARGO_TARGET_DIR cross build --release -p rillane-ffi --target "$triple"
+    echo "=== [$abi → $triple] cross build --release -p rillane-ffi ${FFI_FEATURE_ARGS[*]}"
+    env -u CARGO_TARGET_DIR cross build --release -p rillane-ffi \
+        --target "$triple" "${FFI_FEATURE_ARGS[@]}"
     so="target/$triple/release/librillane_ffi.so"
     [ -f "$so" ] || { echo "缺产物 $so" >&2; exit 1; }
     file "$so" | grep -qE "ARM aarch64|Intel 80386|x86-64|ELF" \

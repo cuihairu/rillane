@@ -49,6 +49,12 @@
         "permission": "android.permission.BIND_VPN_SERVICE",
         "exported": false
       },
+      "build_script": "platforms/android/build.sh",
+      "mobile_profile": {
+        "flag": "--no-default-features --features mobile",
+        "packages": ["librillane_ffi.so"],
+        "forbidden_feature": "wasmtime"
+      },
       "doc": "platforms/android/README.md"
     },
     {

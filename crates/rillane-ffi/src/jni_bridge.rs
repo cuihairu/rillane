@@ -15,8 +15,9 @@ use crate::{
     rillane_ffi_diagnostic_ipc_start, rillane_ffi_diagnostic_ipc_stop,
     rillane_ffi_dns_resolvers_json, rillane_ffi_dns_stats_json, rillane_ffi_flow_json,
     rillane_ffi_flows_json, rillane_ffi_free_string, rillane_ffi_is_running,
-    rillane_ffi_last_error, rillane_ffi_nodes_json, rillane_ffi_routing_json,
-    rillane_ffi_stats_json, rillane_ffi_stop, rillane_ffi_tun_start, rillane_ffi_tun_stop,
+    rillane_ffi_last_error, rillane_ffi_network_changed, rillane_ffi_nodes_json,
+    rillane_ffi_routing_json, rillane_ffi_stats_json, rillane_ffi_stop, rillane_ffi_tun_start,
+    rillane_ffi_tun_stop,
 };
 
 fn handle_from(j: jlong) -> *mut FfiHandle {

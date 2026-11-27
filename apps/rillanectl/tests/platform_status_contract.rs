@@ -588,7 +588,7 @@ fn comparator_bites_on_stale_open_claim() {
 }
 
 #[test]
-#[should_panic(expected = "C ABI 导出数与机器账本不一致")]
+#[should_panic(expected = "旧导出数")]
 fn comparator_bites_on_stale_export_count() {
     let doc = read_repo("docs/acceptance-evidence/ril-082-mobile-diagnostic-bridge.md").replacen(
         "19 C ABI symbols",
