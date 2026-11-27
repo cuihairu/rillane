@@ -12,6 +12,8 @@
 - **跨编译 small/mobile 二进制产物（2026-11-27 批次）**：`RILLANE_SMALL=1 platforms/openwrt/build.sh x86_64-unknown-linux-musl aarch64-unknown-linux-musl` 产出两个 ipk（`dist/openwrt/rillane_0.1.0-1_{x86_64,aarch64_generic}.ipk`，26M/28M）——musl 静态 stripped ELF、ar 三成员结构完整（`.build-log.txt`）；`platforms/android/build.sh arm64-v8a x86_64` 产出两 ABI 的 mobile 档 FFI cdylib + debug APK（214M，两个 `.so` 均在包内）。**跨编译抓到并修复真实漂移**：`rillane_ffi_network_changed` 加入后 `jni_bridge.rs`（仅 android 编译）的 import 表从未同步——宿主 `cargo test` 不编译 android 门桥，产线一直静默坏着；现已修 import 且跨编译通过，产物恰 19 个 C ABI + 18 个 JNI 符号、零 `wasmtime` 符号（mobile 档在产物层核实，非仅源码）。Android build 脚本也已修正为按文档用 mobile 档交叉（此前用 default=full 把 wasmtime/JIT 打进移动 cdylib），Dockerfile 的 NDK 下载改为断点续传+重试；两条均由契约门钉死（`android mobile profile builds FFI without wasmtime` + 一条 `#[should_panic]` 自证）。
 - **桌面桥接说明**：`docs/design/debug-and-mcp.md` 及其中文对照明确 Android/iOS 不在 VPN 服务/扩展内默认运行 MCP、不新增手机入站管理端口、先走授权宿主 IPC/脱敏导出，必要时由桌面适配器接入。
 
+- **脱敏出口语义真调用（2026-11-27 批次）**：`rillanectl` 内联测试模块 `diagnose_export_redaction_tests`（3 测）——三个出口助手不再只是 CLI 源码里"在场"：`redact_config_by_extension` 对 YAML/JSON 配置递归剥除秘密键（`admin_token`/`password`/`private_key` 等账本键表）且保留非秘密身份字段；`strip_json_url_secrets` 对 `subscription_url`/`url` 类字符串剥除 userinfo 与 `token`/`password`/`secret`/`key`/`sign` 查询参数，保留 host 与非秘密参数；`sanitize_diagnostic_log` 整体剥 PEM 私钥块并逐行消毒 `key=value` 秘密对。契约门 `diagnose_export_scope_is_controlled` 同步升级：账本 `export.runtime_gate` 必指向该模块、断言测试真调用三助手、并核对 `#[test]` 计数——脱敏面从"文本在场"升为"真调用钉死"；新增 3 条 `#[should_panic]` 对账器自证在旧结构下失效。
+
 ## 具名缺口（本批未验）
 
 - 真机 Android consent/性能（arm64）与付费开发者账号 iOS Network Extension entitlement/生命周期；iOS Swift 仅语法自查（Linux 开发主机，无 Xcode）。

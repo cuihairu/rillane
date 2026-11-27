@@ -5604,3 +5604,93 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+#[cfg(test)]
+mod diagnose_export_redaction_tests {
+    use super::*;
+
+    /// safe/full 档配置导出：秘密键递归剥除，非秘密身份字段保留。
+    #[test]
+    fn redact_config_strips_secret_keys_recursively() {
+        let yaml = r#"
+control:
+  api_bind: 127.0.0.1:9090
+  admin_token: super-secret
+ingress:
+  - name: socks-in
+    password: hunter2
+    bind: 127.0.0.1:7890
+egress:
+  - name: main
+    type: ss
+    private_key: PEM-SECRET
+routing:
+  default_node: main
+"#;
+        let out = redact_config_by_extension(yaml, "rillane.yaml");
+        assert!(!out.contains("super-secret"), "admin_token 未剥：{out}");
+        assert!(!out.contains("hunter2"), "password 未剥：{out}");
+        assert!(!out.contains("PEM-SECRET"), "private_key 未剥：{out}");
+        assert!(out.contains("REDACTED"), "缺剥除占位：{out}");
+        // 非秘密身份字段保留（诊断仍需可定位）。
+        assert!(out.contains("socks-in"), "入口名被误剥：{out}");
+        assert!(out.contains("127.0.0.1:7890"), "bind 被误剥：{out}");
+        assert!(out.contains("main"), "出口名被误剥：{out}");
+
+        let json = r#"{"control":{"admin_token":"t","api_bind":"127.0.0.1:9090"},"egress":[{"name":"n","token":"s"}]}"#;
+        let out = redact_config_by_extension(json, "rillane.json");
+        assert!(
+            !out.contains("\"t\"") && !out.contains("\"s\""),
+            "JSON 秘密未剥：{out}"
+        );
+        assert!(
+            out.contains("127.0.0.1:9090") && out.contains("\"n\""),
+            "JSON 非秘密被误剥：{out}"
+        );
+    }
+
+    /// 订阅 URL：userinfo 与 token/密码查询参数剥除，host 与路径保留。
+    #[test]
+    fn strip_json_url_secrets_removes_credentials_but_keeps_endpoint() {
+        let mut v = serde_json::json!({
+            "subscriptions": [{
+                "name": "sub",
+                "subscription_url": "https://user:pass@example.test/path?token=abc&tag=work#frag",
+                "url": "ss://YWVz:pass@host.test:8388/?plugin=obfs#name"
+            }]
+        });
+        strip_json_url_secrets(&mut v);
+        let text = v.to_string();
+        assert!(!text.contains("user:pass"), "userinfo 未剥：{text}");
+        assert!(!text.contains("token=abc"), "token 参数未剥：{text}");
+        assert!(!text.contains("YWVz:pass"), "ss URL 密码未剥：{text}");
+        assert!(
+            text.contains("example.test") && text.contains("host.test"),
+            "host 被误剥：{text}"
+        );
+        assert!(text.contains("tag=work"), "非秘密查询参数被误剥：{text}");
+        assert!(text.contains("sub"), "名称被误剥：{text}");
+    }
+
+    /// 日志/事件出口：PEM 私钥块与 key=value 秘密对剥除。
+    #[test]
+    fn sanitize_diagnostic_log_strips_pem_and_secret_pairs() {
+        let raw = concat!(
+            " INFO request ok\n",
+            "ERROR auth failed token=supersecret password=hunter2\n",
+            "-----BEGIN PRIVATE KEY-----\n",
+            "MIIEvgIBADANBg\n",
+            "-----END PRIVATE KEY-----\n",
+            " INFO done\n",
+        );
+        let out = sanitize_diagnostic_log(raw);
+        assert!(!out.contains("supersecret"), "token 值未剥：{out}");
+        assert!(!out.contains("hunter2"), "password 值未剥：{out}");
+        assert!(!out.contains("MIIEvgIBADANBg"), "私钥块未剥：{out}");
+        assert!(!out.contains("BEGIN PRIVATE KEY"), "PEM 边界未剥：{out}");
+        assert!(
+            out.contains("request ok") && out.contains("done"),
+            "普通日志行被误删：{out}"
+        );
+    }
+}

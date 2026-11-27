@@ -12,6 +12,20 @@ The machine-readable source is `contracts/mobile_diagnostic_bridge_v1.json`, enf
 - **Cross-compiled small/mobile artifacts as shipped** (2026-11-27 batch): `RILLANE_SMALL=1 platforms/openwrt/build.sh x86_64-unknown-linux-musl aarch64-unknown-linux-musl` produced two ipk (`dist/openwrt/rillane_0.1.0-1_{x86_64,aarch64_generic}.ipk`, 26M/28M) with static stripped musl ELF and intact ar three-member ipk structure (`.build-log.txt`); `platforms/android/build.sh arm64-v8a x86_64` produced the mobile-profile FFI cdylib cross-built for both ABIs and the debug APK (214M) with both `.so` inside. **The mobile-profile build caught and fixed a real drift**: `jni_bridge.rs` had never been compiled for Android since `rillane_ffi_network_changed` was added (its import list missed the name) — host `cargo test` doesn't compile the android-gated bridge, so the 产线 was silently broken; the import list is now fixed and the cross build compiles, exporting exactly the 19 C ABI symbols and 18 JNI symbols with zero `wasmtime` symbols (mobile profile verified at artifact level, not just source). The android build script was also fixed to honor the documented mobile profile (it previously cross-built the default `full` profile — wasmtime/JIT into a mobile cdylib) and the Dockerfile NDK fetch is now resume+retry robust; both facts are pinned by the contract gate (`android mobile profile builds FFI without wasmtime`, one `#[should_panic]` self-check).
 - **Desktop bridge documentation**: `docs/design/debug-and-mcp.md` and its Chinese counterpart state that Android/iOS do not run MCP by default in the VPN service/extension, that no inbound phone admin port is added, and that authorized host IPC/redacted export comes first, with a desktop adapter where needed.
 
+- **Redaction helper semantics, real calls (2026-11-27 batch)**: `rillanectl` inline module
+  `diagnose_export_redaction_tests` (3 tests) — the three export helpers are not merely
+  "present" in CLI source: `redact_config_by_extension` recursively strips secret keys
+  (`admin_token`/`password`/`private_key` etc. from the ledger key table) in YAML/JSON
+  configs while keeping non-secret identity fields; `strip_json_url_secrets` removes
+  userinfo and `token`/`password`/`secret`/`key`/`sign` query params from
+  `subscription_url`/`url` strings while keeping hosts and non-secret params;
+  `sanitize_diagnostic_log` strips PEM private key blocks wholesale and sanitizes
+  `key=value` secret pairs per line. The contract gate `diagnose_export_scope_is_controlled`
+  was upgraded in step: `export.runtime_gate` must point at this module, the gate asserts
+  the tests really call the three helpers and checks the `#[test]` count — redaction went
+  from "text presence" to "real-call pinned". The previous 9-test gate (3 `#[should_panic]`
+  self-proofs) stays as-is underneath.
+
 ## Named gaps (not verified here)
 
 - Real-device Android consent/performance (arm64) and iOS Network Extension entitlement/lifecycle on a paid developer account; iOS Swift is syntax-checked only (Linux dev host, no Xcode).

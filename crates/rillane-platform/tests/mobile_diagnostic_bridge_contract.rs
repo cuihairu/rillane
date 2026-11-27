@@ -282,6 +282,30 @@ fn diagnose_export_scope_is_controlled() {
         let helper = helper.as_str().expect("helper");
         assert!(cli.contains(helper), "CLI 脱敏助手 {helper} 未在场");
     }
+    // 文本在场不够：账本必指向 CLI 内联真测（真调用上述助手并断言剥除语义），
+    // 且该测必须存在、确为 #[test]、覆盖三个出口面。
+    let gate = export["runtime_gate"].as_str().expect("runtime_gate");
+    let (path, module) = gate.split_once(':').expect("runtime_gate 路径:模块");
+    let gate_src = read_text(path);
+    assert!(
+        gate_src.contains(&format!("mod {module}")),
+        "CLI 缺内联脱敏测试模块 {module}"
+    );
+    assert!(
+        gate_src.contains("strip_json_url_secrets(&mut v)")
+            && gate_src.contains("redact_config_by_extension(yaml")
+            && gate_src.contains("sanitize_diagnostic_log(raw"),
+        "内联脱敏测试未真调用三个出口助手"
+    );
+    let count = export["runtime_gate_tests"].as_u64().expect("test count");
+    let marker = format!("mod {module}");
+    let module_start = gate_src.find(&marker).expect("module start");
+    let module_src = &gate_src[module_start..];
+    assert_eq!(
+        module_src.matches("#[test]").count() as u64,
+        count,
+        "内联脱敏测试计数与账本不符"
+    );
     for marker in export["policy_markers"].as_array().expect("markers") {
         let marker = marker.as_str().expect("marker");
         assert!(cli.contains(marker), "诊断导出政策标记缺失: {marker}");

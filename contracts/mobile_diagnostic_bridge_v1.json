@@ -97,7 +97,9 @@
     "raw_flags": ["--scope raw", "--no-redact"],
     "secret_keys": ["admin_token", "password", "private_key", "preshared_key", "token", "access_token", "refresh_token"],
     "policy_markers": ["review-before-sharing", "do-not-upload", "manual only - rillanectl never uploads the bundle anywhere"],
-    "redaction_helpers": ["strip_json_url_secrets", "sanitize_diagnostic_log", "redact_config_by_extension", "redact_yaml_value", "redact_json_value"]
+    "redaction_helpers": ["strip_json_url_secrets", "sanitize_diagnostic_log", "redact_config_by_extension", "redact_yaml_value", "redact_json_value"],
+    "runtime_gate": "apps/rillanectl/src/main.rs:diagnose_export_redaction_tests",
+    "runtime_gate_tests": 3
   },
   "desktop_bridge": {
     "design": ["docs/design/debug-and-mcp.md", "docs/zh/design/debug-and-mcp.md"],
