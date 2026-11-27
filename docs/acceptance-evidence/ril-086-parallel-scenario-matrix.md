@@ -4,7 +4,7 @@
 
 `contracts/parallel_scenario_matrix_v1.json` is a machine-readable ledger for
 RIL-086's seven acceptance clauses × six platforms, enforced by
-`crates/rillane-platform/tests/parallel_scenario_matrix_contract.rs` (8/8 green).
+`crates/rillane-platform/tests/parallel_scenario_matrix_contract.rs` (10/10 green).
 Each cell uses one honest status:
 
 | Status | Meaning |
@@ -18,10 +18,11 @@ The comparator pins the closed seven-clause / six-platform sets, requires every
 `verified_*` cell to point at a real repository file, forbids evidence on
 `needs_device` cells (no cross-check or artifact promoted to acceptance), and
 forbids any platform from marking the core "real website/QUIC + game parallel"
-matrix as verified. Three `#[should_panic]` self-tests corrupt the matrix to prove
-the comparator bites. A Linux `dual_stack` gate additionally requires the
-`verified_local` cell to point at a real runtime test that actually issues
-IPv4 (ATYP 0x01) and IPv6 (ATYP 0x04) targets in parallel — a config-only
+matrix as verified. Five `#[should_panic]` self-tests corrupt the matrix to prove
+the comparator bites. Linux `dual_stack` and `dns` gates additionally require
+the `verified_local` cells to point at real runtime tests — one that issues
+IPv4 (ATYP 0x01) and IPv6 (ATYP 0x04) targets in parallel, and one that drives
+concurrent DNS queries with singleflight/cache/flush assertions. A config-only
 source is rejected.
 
 ## Evidence ledger by clause
@@ -47,6 +48,15 @@ source is rejected.
   ingress bindings (v4 + v6) on one instance. This is loopback only — this
   machine has no IPv6 default route; no external v6 reachability or six-platform
   matrix is claimed.
+- **DNS, parallel scenario (Linux)**: `verified_local` for the loopback slice.
+  Config tests (`crates/rillane-config/tests/dns_block.rs`) plus a real runtime
+  test (`crates/rillane-runtime/tests/dns_parallel_acceptance.rs`) where a live
+  `DnsService` local UDP listener serves eight concurrent client queries for one
+  cold domain through a mock upstream: singleflight collapses them to a single
+  upstream exchange (stampede defense), repeat queries hit the cache without
+  touching the upstream, `clear_cache` forces a fresh upstream round, and
+  distinct domains resolve independently. Loopback only — no TUN hijack, no
+  public resolver, no six-platform matrix claimed.
 - **DNS, dual-stack, single-application traffic (Windows)**: `partial`.
   Real `ping.exe` ICMP/UDP and `curl.exe` HTTP transactions enter the Wintun
   ring (`ril-033`); escape-bind UDP DNS query to `223.5.5.5` succeeds

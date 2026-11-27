@@ -22,7 +22,7 @@ Evidence documents backing `todo.md` acceptance items. Two honest kinds live her
 | RIL-083 UDP association and probe trace wiring | [ril-083-udp-association-trace](./ril-083-udp-association-trace) · [zh](./ril-083-udp-association-trace.zh) | Local ledger | UDP association lifecycle traced live (mapped/reclaimed/closed) plus url-test probe traces; device batches open |
 | RIL-084 six-platform artifact matrix | [ril-084-artifact-matrix](./ril-084-artifact-matrix) · [zh](./ril-084-artifact-matrix.zh) | Local ledger | Artifact face aligned; device/signing acceptance unchecked |
 | RIL-085 three-desktop e2e clause matrix | [ril-085-desktop-e2e-matrix](./ril-085-desktop-e2e-matrix) · [zh](./ril-085-desktop-e2e-matrix.zh) | Local ledger | Clause×platform ledger; Linux cross-uid permission + port reuse verified by real processes; browser/game grouped traces not run |
-| RIL-086 six-platform parallel scenario matrix | [ril-086-parallel-scenario-matrix](./ril-086-parallel-scenario-matrix) · [zh](./ril-086-parallel-scenario-matrix.zh) | Local ledger | Clause×platform ledger; Linux dual-stack loopback forwarding verified; real website/QUIC+game parallel matrix not run |
+| RIL-086 six-platform parallel scenario matrix | [ril-086-parallel-scenario-matrix](./ril-086-parallel-scenario-matrix) · [zh](./ril-086-parallel-scenario-matrix.zh) | Local ledger | Clause×platform ledger; Linux dual-stack and parallel DNS loopback verified; real website/QUIC+game parallel matrix not run |
 
 The ledgers' machine-readable sources live outside the docs tree:
 `contracts/build_matrix_v1.json`, `contracts/desktop_e2e_matrix_v1.json`,

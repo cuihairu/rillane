@@ -212,6 +212,41 @@ fn comparator_bites_on_stale_linux_dual_stack_cell() {
     assert_eq!(status, "verified_local", "Linux 双栈格应为 verified_local");
 }
 
+/// Linux DNS 格的已升格状态必须有真实可跑的运行时证据文件，且源码中
+/// 真的发起并发查询并验证 singleflight/缓存/冲刷（不是纯文本门冒充实测）。
+#[test]
+#[cfg(target_os = "linux")]
+fn linux_dns_cell_points_at_real_runtime_test() {
+    let matrix = load_matrix();
+    let (status, evidence) = cell(&matrix, "dns", "linux-systemd");
+    assert_eq!(status, "verified_local", "Linux DNS 格应为 verified_local");
+    assert_eq!(
+        evidence.len(),
+        2,
+        "Linux DNS 应指向配置面 + 运行时实测两份证据"
+    );
+    let src = read_text(&evidence[1]);
+    assert!(
+        src.contains("#[tokio::test]")
+            && src.contains("join_all")
+            && src.contains("clear_cache")
+            && src.contains("hits.load"),
+        "Linux DNS 证据 {} 未含真实并发查询/缓存/冲刷测试形态",
+        evidence[1]
+    );
+}
+
+/// 对账器自证：把 Linux DNS 格降回 partial → 本门须点名。
+#[test]
+#[cfg(target_os = "linux")]
+#[should_panic(expected = "Linux DNS 格应为 verified_local")]
+fn comparator_bites_on_stale_linux_dns_cell() {
+    let mut matrix = load_matrix();
+    matrix["clauses"]["dns"]["cells"]["linux-systemd"]["status"] = serde_json::json!("partial");
+    let (status, _) = cell(&matrix, "dns", "linux-systemd");
+    assert_eq!(status, "verified_local", "Linux DNS 格应为 verified_local");
+}
+
 /// 对账器自证：伪造核心场景 Windows 实测 → 必须点名 panic。
 #[test]
 #[should_panic(expected = "真机矩阵六平台均未跑")]

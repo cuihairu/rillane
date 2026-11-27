@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "comment": "RIL-086 六平台并行场景验收账本：真实网站/QUIC 与游戏并行转发矩阵（条款 × 平台）。每格只允许四种诚实状态——verified_local（本机真实测试/真实应用流）/ verified_device（仓内真机证据）/ partial（仅协议/配置/调度面核验，无六平台并行真机运行）/ needs_device（平台真机未接入/签名面未过）。Linux 双栈条款已由真实运行时回环测试实测（IPv4/IPv6 并行转发，仅回环非外网/真机）；Linux DNS/协议与 Windows 均为 partial（单应用/单测面），其余平台真机未接入，全部如实记 needs_device/partial。真实网站/QUIC 与游戏并行转发矩阵本身仍是六平台真机验收，绝不标 verified。契约门 crates/rillane-platform/tests/parallel_scenario_matrix_contract.rs 钉住封闭集合、证据文件存在、QUIC 与游戏并行矩阵不冒充实测、不支持项有明确拒绝/降级面。",
+  "comment": "RIL-086 六平台并行场景验收账本：真实网站/QUIC 与游戏并行转发矩阵（条款 × 平台）。每格只允许四种诚实状态——verified_local（本机真实测试/真实应用流）/ verified_device（仓内真机证据）/ partial（仅协议/配置/调度面核验，无六平台并行真机运行）/ needs_device（平台真机未接入/签名面未过）。Linux 双栈与 DNS 条款已由真实运行时测试实测（IPv4/IPv6 并行回环转发、并发 DNS singleflight/缓存/冲刷，仅本机回环非外网/真机）；Linux 协议与 Windows 均为 partial（单应用/单测面），其余平台真机未接入，全部如实记 needs_device/partial。真实网站/QUIC 与游戏并行转发矩阵本身仍是六平台真机验收，绝不标 verified。契约门 crates/rillane-platform/tests/parallel_scenario_matrix_contract.rs 钉住封闭集合、证据文件存在、QUIC 与游戏并行矩阵不冒充实测、不支持项有明确拒绝/降级面。",
   "platforms": [
     "linux-systemd",
     "openwrt",
@@ -52,9 +52,12 @@
       "title": "并行场景下的 DNS 解析/劫持面",
       "cells": {
         "linux-systemd": {
-          "status": "partial",
-          "evidence": ["crates/rillane-config/tests/dns_block.rs"],
-          "note": "DNS 上游/缓存配置校验与非法值拒绝有测试；运行时解析/劫持并行真机矩阵未跑"
+          "status": "verified_local",
+          "evidence": [
+            "crates/rillane-config/tests/dns_block.rs",
+            "crates/rillane-runtime/tests/dns_parallel_acceptance.rs"
+          ],
+          "note": "配置面（上游/缓存校验、非法值拒绝）有测试；真实运行时 DNS 服务 + 本地 UDP mock 上游实测：八客户端同冷名并发查询 singleflight 合并为一次上游、缓存命中不触上游、clear_cache 后重回上游、不同域名独立不串答。仅本机回环监听，不测 TUN 劫持/公网解析器/六平台真机矩阵"
         },
         "openwrt": {
           "status": "needs_device",
