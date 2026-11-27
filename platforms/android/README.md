@@ -17,10 +17,14 @@ NDK 需逐依赖喂 CC/AR/cmake 面，ring/aws-lc-sys 均探不到裸 clang 前�
 与 platforms/openwrt 同走 cross 约定）、Android SDK（compileSdk 35 +
 licenses；buildToolsVersion 未显式声明，走 AGP 缺省）、java 17+、首次运行需网络（gradle 发行版 +
 AGP/Kotlin 插件下载，gradle 8.10.2 由脚本按需落 `~/.rillane-tools/`，不依赖
-系统 gradle 版本）。
+系统 gradle 版本）。`rillane-ffi` 以移动档交叉（`--no-default-features --features
+mobile`，无 wasmtime/JIT 插件面——default 档 full 仅供宿主；账本
+`contracts/mobile_diagnostic_bridge_v1.json` 的 `android.mobile_profile` 钉死），
+NDK 下载断点续传+重试；SDK 默认 `$ANDROID_HOME`（或 `$ANDROID_SDK_ROOT`，
+再回退 `~/Android/Sdk`）——路径不同时显式设 `ANDROID_HOME`。
 
 ```sh
-platforms/android/build.sh
+ANDROID_HOME=/path/to/android-sdk platforms/android/build.sh
 adb install -r platforms/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 

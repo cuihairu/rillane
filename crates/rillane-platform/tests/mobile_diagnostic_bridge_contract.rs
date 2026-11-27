@@ -349,6 +349,55 @@ fn android_mobile_profile_builds_ffi_without_wasmtime() {
     android_mobile_profile_check(&ledger, &script);
 }
 
+/// Android README 构建说明 ↔ build 脚本档位自洽：README 必须写明移动档
+/// 交叉旗标与 SDK 路径入口（照抄脚本口径），不得教用户跑 full 档进移动端。
+fn android_readme_check(script: &str, doc: &str) {
+    let profile = load_ledger()["hosts"]
+        .as_array()
+        .expect("hosts")
+        .iter()
+        .find(|h| h["id"] == "android")
+        .expect("android 主机")["mobile_profile"]
+        .clone();
+    let flag = profile["flag"].as_str().expect("flag");
+    assert!(
+        script.contains(flag),
+        "前置：build 脚本档位本身已漂（README 检查以外的问题）"
+    );
+    // README 按行宽折行（flag 中间换行），归一化空白再比（脚本侧原样即可）
+    let doc_flat = doc.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        doc_flat.contains(flag),
+        "platforms/android/README.md 未写明移动档交叉旗标 {flag}——构建说明与脚本档位脱节"
+    );
+    assert!(
+        doc.contains("ANDROID_HOME"),
+        "platforms/android/README.md 未给出 Android SDK 路径入口（ANDROID_HOME 覆盖）"
+    );
+}
+
+#[test]
+fn android_readme_documents_mobile_profile() {
+    let script = read_text("platforms/android/build.sh");
+    let doc = read_text("platforms/android/README.md");
+    android_readme_check(&script, &doc);
+}
+
+/// 对账器自证：README 删掉档位旗标 → README 门必须点名。
+#[test]
+#[should_panic(expected = "未写明移动档交叉旗标")]
+fn comparator_bites_on_android_readme_profile_lag() {
+    let script = read_text("platforms/android/build.sh");
+    // README 折行把旗标拆到两行，先归一化再抹掉（抹不掉即自证失效）
+    let flat = read_text("platforms/android/README.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let tampered = flat.replace("--no-default-features --features mobile", "");
+    assert_ne!(tampered, flat, "篡改形与原形相同（自证失效）");
+    android_readme_check(&script, &tampered);
+}
+
 /// 对账器自证：脚本退回 default=full 漂移形 → 本门必须点名。
 #[test]
 #[should_panic(expected = "Android build 缺移动构建档")]
