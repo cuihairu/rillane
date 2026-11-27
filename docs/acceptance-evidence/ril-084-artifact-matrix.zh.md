@@ -36,6 +36,13 @@ RIL-084 勾选保持关闭（依赖 RIL-036/039/041/042/046/049 真机批次未�
    核对 build.sh/README 出处、禁止与 `run_verification` 升格冲突，并有
    删条目自证 panic。
 
+7. **构建日志与依赖可复核（RIL-084 第二段）**：矩阵声称「日志落
+   .build-log.txt」的平台，其 build.sh 必须真的写该日志（声明 ⊆ 脚本，
+   注入假声称自证 panic）；Cargo.lock 的每个非 registry 来源必须是根
+   Cargo.toml `[patch.crates-io]` 申报过的（当前恰好一个：rustls fork
+   钉 rev d17d0fc），registry 依赖逐个带 checksum，workspace 成员逐个
+   落锁且版本与 `[workspace.package].version` 一致；混入未申报 git 来源
+   自证 panic。
 ## 验证边界（如实）
 
 - 已验：矩阵与 CI/nightly 工作流、平台脚本/文档的结构对账；Android AVD API 33

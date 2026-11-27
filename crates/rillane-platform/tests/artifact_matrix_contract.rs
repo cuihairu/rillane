@@ -282,7 +282,7 @@ fn openwrt_unsupported_architectures_are_named_with_reopen_conditions() {
     }
 }
 
-/// 对账器自证：删掉 unsupported_architectures → 本门必须点名失败/// 对账器自证：篡改矩阵（伪造 macOS 已验）→ 本门必须点名失败
+/// 对账器自证：篡改矩阵（伪造 macOS 已验）→ 本门必须点名失败
 /// （防止值域断言被静默绕过）。
 #[test]
 #[should_panic(expected = "macos-launchd 无真机证据不得标实测")]
@@ -304,6 +304,7 @@ fn comparator_bites_on_faked_device_evidence() {
     }
 }
 
+/// 对账器自证：删掉 unsupported_architectures → 本门必须点名失败。
 #[test]
 #[should_panic(expected = "openwrt 须显式列 unsupported_architectures")]
 fn comparator_bites_on_dropped_unsupported_architecture_list() {
@@ -316,4 +317,186 @@ fn comparator_bites_on_dropped_unsupported_architecture_list() {
     let _ = entry["unsupported_architectures"]
         .as_array()
         .expect("openwrt 须显式列 unsupported_architectures");
+}
+
+// —— RIL-084 第二段：构建日志与依赖可复核 ——
+
+/// 根 Cargo.toml [patch.crates-io] 申报的 git 来源（`git+<url>?rev=<rev>` 前缀）。
+fn declared_patch_git_sources() -> BTreeSet<String> {
+    let root = script_text("Cargo.toml");
+    let patch = root
+        .split("\n[patch.crates-io]")
+        .nth(1)
+        .expect("根 Cargo.toml 缺 [patch.crates-io] 段（段头须顶格）");
+    let patch: String = patch
+        .split('\n')
+        .take_while(|l| !l.starts_with('['))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = BTreeSet::new();
+    for line in patch.lines() {
+        if line.contains("git = \"") {
+            let url = line
+                .split("git = \"")
+                .nth(1)
+                .expect("git url")
+                .split('"')
+                .next()
+                .expect("闭合引号");
+            let rev = line
+                .split("rev = \"")
+                .nth(1)
+                .expect("rev")
+                .split('"')
+                .next()
+                .expect("闭合引号");
+            out.insert(format!("git+{url}?rev={rev}"));
+        }
+    }
+    assert!(!out.is_empty(), "[patch.crates-io] 段未解析到任何 git 申报");
+    out
+}
+
+fn lock_git_sources_and_registry_counts() -> (BTreeSet<String>, usize, usize) {
+    let lock = script_text("Cargo.lock");
+    let mut git = BTreeSet::new();
+    let mut registry = 0usize;
+    let mut checksums = 0usize;
+    for line in lock.lines() {
+        let line = line.trim();
+        if let Some(src) = line.strip_prefix("source = \"") {
+            let src = src.trim_end_matches('"');
+            if src.starts_with("registry+") {
+                registry += 1;
+            } else {
+                git.insert(src.to_string());
+            }
+        } else if line.starts_with("checksum = \"") {
+            checksums += 1;
+        }
+    }
+    (git, registry, checksums)
+}
+
+fn assert_provenance_matches_declaration(
+    declared: &BTreeSet<String>,
+    actual_git: &BTreeSet<String>,
+    registry: usize,
+    checksums: usize,
+) {
+    for s in actual_git {
+        assert!(
+            declared.iter().any(|d| s.starts_with(d.as_str())),
+            "Cargo.lock 出现未申报来源 {s}（依赖不可复核：新 git 来源须进 [patch.crates-io] 钉 rev）"
+        );
+    }
+    for d in declared {
+        assert!(
+            actual_git.iter().any(|s| s.starts_with(d.as_str())),
+            "[patch.crates-io] 申报 {d} 未落在 Cargo.lock（申报与锁漂移）"
+        );
+    }
+    assert_eq!(
+        registry, checksums,
+        "registry 依赖 {registry} 个但 checksum {checksums} 条（来源完整性不可复核）"
+    );
+}
+
+/// 依赖可复核：Cargo.lock 的每一个非 registry 来源都必须是根 Cargo.toml
+/// [patch.crates-io] 申报过的（当前恰好一个：rustls fork 钉 rev）；
+/// registry 依赖逐个带 checksum；workspace 成员逐个落锁且版本与
+/// [workspace.package].version 一致。
+#[test]
+fn dependency_provenance_is_reviewable() {
+    let declared = declared_patch_git_sources();
+    let (actual_git, registry, checksums) = lock_git_sources_and_registry_counts();
+    assert_provenance_matches_declaration(&declared, &actual_git, registry, checksums);
+
+    let root = script_text("Cargo.toml");
+    let ws_version = root
+        .split("[workspace.package]")
+        .nth(1)
+        .expect("根 Cargo.toml 缺 [workspace.package]")
+        .lines()
+        .find_map(|l| l.strip_prefix("version = \""))
+        .expect("[workspace.package] 缺 version")
+        .split('"')
+        .next()
+        .expect("闭合引号");
+    let members_block: String = root
+        .split("members = [")
+        .nth(1)
+        .expect("根 Cargo.toml 缺 members")
+        .split(']')
+        .next()
+        .expect("闭合")
+        .to_string();
+    let lock = script_text("Cargo.lock");
+    for member_line in members_block.lines() {
+        let dir = member_line.trim().trim_end_matches(',').trim_matches('"');
+        if dir.is_empty() {
+            continue;
+        }
+        let manifest = script_text(&format!("{dir}/Cargo.toml"));
+        let name = manifest
+            .lines()
+            .find_map(|l| l.strip_prefix("name = \""))
+            .expect("成员缺 name")
+            .split('"')
+            .next()
+            .expect("闭合引号");
+        assert!(
+            lock.contains(&format!("name = \"{name}\"")),
+            "workspace 成员 {name}（{dir}）未落在 Cargo.lock（依赖树不可复核）"
+        );
+        let block = lock
+            .split(&format!("name = \"{name}\""))
+            .nth(1)
+            .expect("成员锁块")
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .expect("版本行");
+        assert!(
+            block.contains(&format!("version = \"{ws_version}\"")),
+            "成员 {name} 锁定版本 {block:?} 与 workspace 版本 {ws_version} 漂移"
+        );
+    }
+}
+
+/// 构建日志可复核：矩阵声称「日志落 .build-log.txt」的平台，其 build.sh
+/// 必须真的写该日志（声明 ⊆ 脚本；脚本多写不罚）。
+#[test]
+fn build_log_claims_are_backed_by_scripts() {
+    let matrix = load_matrix();
+    assert_log_claims_backed(&matrix);
+}
+
+fn assert_log_claims_backed(matrix: &Value) {
+    for (key, p) in matrix["platforms"].as_object().expect("platforms") {
+        let evidence = p["build_evidence"].as_str().expect("build_evidence");
+        let script = script_text(p["build_script"].as_str().expect("build_script"));
+        assert!(
+            !evidence.contains(".build-log") || script.contains(".build-log"),
+            "{key} 矩阵声称日志落 .build-log.txt 但 build.sh 不写（构建日志不可复核）"
+        );
+    }
+}
+
+/// 对账器自证（RIL-084 第二段）：给不写日志的平台注入日志声称 → 必须点名。
+#[test]
+#[should_panic(expected = "ios 矩阵声称日志落 .build-log.txt 但 build.sh 不写")]
+fn comparator_bites_on_unbacked_log_claim() {
+    let mut matrix = load_matrix();
+    matrix["platforms"]["ios"]["build_evidence"] = serde_json::json!("日志落 .build-log.txt");
+    assert_log_claims_backed(&matrix);
+}
+
+/// 对账器自证（RIL-084 第二段）：Cargo.lock 混入未申报 git 来源 → 必须点名。
+#[test]
+#[should_panic(expected = "Cargo.lock 出现未申报来源")]
+fn comparator_bites_on_undeclared_git_source() {
+    let declared = declared_patch_git_sources();
+    let mut actual_git = BTreeSet::new();
+    actual_git.insert("git+https://example.com/evil?rev=deadbeef".to_string());
+    assert_provenance_matches_declaration(&declared, &actual_git, 0, 0);
 }
