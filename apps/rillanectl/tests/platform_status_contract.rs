@@ -550,6 +550,67 @@ fn artifact_matrix_evidence_matches_ledger_run_note() {
     }
 }
 
+/// 平台视图的 Linux 验收状态格必须与桌面账本同口径：账本里已升格
+/// `verified_local` 的条款不得仍写成「未跑」（RIL-085 第二段把
+/// permission_denied/port_reuse 升格后，平台视图曾残留旧措辞）。本检查
+/// 从账本取数，不写死条款名——后续任何格升格都会被接住。
+fn check_linux_verified_clauses_not_stale(lang: &str, doc: &str, matrix: &Value) {
+    let mut verified = Vec::new();
+    for (clause, entry) in matrix["clauses"].as_object().expect("desktop clauses 对象") {
+        let status = entry["cells"]["linux"]["status"]
+            .as_str()
+            .unwrap_or_else(|| panic!("desktop {clause}/linux 缺状态"));
+        if status == "verified_local" || status == "verified_device" {
+            verified.push(clause.as_str());
+        }
+    }
+    verified.sort();
+    assert!(
+        verified.contains(&"permission_denied") && verified.contains(&"port_reuse"),
+        "账本已升格面不在预期内（账本漂移）：{verified:?}"
+    );
+    // 平台视图 Linux 行必须点名这两项已本地实测，且不得再把它们写进
+    // 「未跑」格。措辞可双语，按 lang 选词。
+    let (label, verified_word, not_run_word) = match lang {
+        "en" => ("EN", "verified by real-process", "not run"),
+        _ => ("zh", "已真实进程实测", "未跑"),
+    };
+    {
+        let line = doc
+            .lines()
+            .find(|l| l.starts_with("| Linux (systemd/deb)"))
+            .unwrap_or_else(|| panic!("{label} 平台视图缺 Linux 行"));
+        assert!(
+            line.contains(verified_word),
+            "{label} 平台视图 Linux 行未反映账本已升格面（{verified_word}）：{line}"
+        );
+        // 只允许 browser-grouped/fault samples 出现在未跑格；权限/复用
+        // 若仍在「未跑」一侧即为陈旧。
+        if let Some((_, tail)) = line.split_once(not_run_word) {
+            assert!(
+                !tail.contains("permission_denied")
+                    && !tail.contains("port_reuse")
+                    && !tail.contains("权限不足")
+                    && !tail.contains("端口复用"),
+                "{label} 平台视图仍把账本 verified_local 的权限不足/端口复用写成未跑：{line}"
+            );
+        }
+    }
+}
+
+#[test]
+fn platform_pages_pin_current_desktop_e2e_verified_faces() {
+    let matrix: Value = serde_json::from_str(&read_repo("contracts/desktop_e2e_matrix_v1.json"))
+        .expect("桌面账本解析");
+    for (lang, path) in [
+        ("en", "docs/platform-support.md"),
+        ("zh", "docs/zh/platform-support.md"),
+    ] {
+        let doc = read_repo(path);
+        check_linux_verified_clauses_not_stale(lang, &doc, &matrix);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 对账器自证：全部调用生产检查函数，不复制断言
 // ---------------------------------------------------------------------------
@@ -627,4 +688,19 @@ fn comparator_bites_on_role_split_not_covering_face() {
         &read_repo("docs/acceptance-evidence/ril-043-jni-symbol-face.md"),
         &methods,
     );
+}
+
+#[test]
+#[should_panic(expected = "平台视图 Linux 行未反映账本已升格面")]
+fn comparator_bites_on_stale_linux_verified_face() {
+    // 把 Linux 行里「已真实进程实测」改回「未跑」——平台视图重述账本
+    // verified_local 面为未跑，本门必须点名。
+    let matrix: Value = serde_json::from_str(&read_repo("contracts/desktop_e2e_matrix_v1.json"))
+        .expect("桌面账本解析");
+    let stale = read_repo("docs/platform-support.md").replacen(
+        "cross-uid permission denial and same-target multi-process port reuse verified by real-process tests",
+        "permission_denied / port_reuse not run",
+        1,
+    );
+    check_linux_verified_clauses_not_stale("en", &stale, &matrix);
 }

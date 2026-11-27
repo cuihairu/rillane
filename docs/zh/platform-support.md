@@ -11,7 +11,7 @@
 
 | 平台 | 构建面 | 已交付运行面 | 验收状态 | 具名缺口 |
 |---|---|---|---|---|
-| Linux (systemd/deb) | x86_64 + aarch64 nightly 产物；armv7 CI 仅检查；未声明发行版下限（glibc 随构建机） | TUN TCP/UDP 数据通路、进程身份归因、规则来源/Explain——最完整的平台 | tcp/udp/name_path/pid_reuse/rule_source 本地已验；permission_denied / port_reuse / 浏览器分组轨迹 / 故障样例未跑 | 桌面会话场景（真实浏览器 + 两款游戏）、跨属主拒绝面、端口复用面 |
+| Linux (systemd/deb) | x86_64 + aarch64 nightly 产物；armv7 CI 仅检查；未声明发行版下限（glibc 随构建机） | TUN TCP/UDP 数据通路、进程身份归因、规则来源/Explain——最完整的平台 | tcp/udp/name_path/pid_reuse/rule_source 本地已验；跨 uid 权限不足与同目标多进程端口复用已真实进程实测（`setpriv`/双进程归属）；浏览器分组轨迹 / 故障样例未跑 | 桌面会话场景（真实浏览器 + 两款游戏）、故障样例 |
 | OpenWrt | 3 个产物三元组；下限 OpenWrt 22.03+（fw4/nftables，`rule_backend: nft`） | 网关接线脚手架 | 零真机验收——RIL-041/042 未跑 | 缺 OpenWrt 设备：接线、运维与资源验收全未跑 |
 | Windows | x86_64 windows-gnu 交叉（仅编译级）；最低版本未验证 | 接管/旁路、进程归属、服务与退出恢复 | `imac` 机批次已验（RIL-032–035）：身份/接管/归属/服务恢复；规则来源本地已验（平台无关决策面） | 浏览器/游戏分组轨迹与故障样例（仅跑过 curl.exe HTTP 面）；DNS 劫持端到端；休眠恢复 |
 | macOS (launchd) | 2 个 universal2 产物三元组；须 macOS 原生构建（Apple SDK 再分发限制） | 仅构建/宿主脚手架 | 全条款待 macOS SSH 接入（仅平台无关的规则来源面本地已验） | RIL-036–039 未交付——Intel mac 待接入 fleet |
