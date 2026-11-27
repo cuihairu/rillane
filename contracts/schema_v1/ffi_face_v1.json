@@ -91,7 +91,8 @@
         "limit": "number",
         "items": "array"
       },
-      "note": "接线前恒空 items——本面连同「真实流量后仍空」的诚实空态一并钉死"
+      "verification": "live_trace_wiring_ril083",
+      "note": "RIL-083 第二段活面取证：真实流量经 TracedFlowOutput 准入后 items 非空（早期「接线前恒空」的诚实空态已随接线摘除），分页信封键集恒定，列表项形状见 flows_item 面"
     },
     "flows_item": {
       "mode": "exact",

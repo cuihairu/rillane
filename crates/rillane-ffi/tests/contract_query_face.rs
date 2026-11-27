@@ -190,7 +190,8 @@ fn ffi_query_faces_match_frozen_contract() {
     );
 
     // -- 真实流量往返（socks5 → direct → 本机 echo）：数据面可用性 +
-    //    「诚实空态」钉死——SessionTracer 接线未落地，流量过后 items 仍空 --
+    //    活面取证——RIL-083 第二段起入口流接 SessionTracer（TracedFlowOutput），
+    //    流量必须产出轨迹并收口，不得再回到「流量过后仍空」的旧空态 --
     let listener = std::net::TcpListener::bind(("127.0.0.1", ECHO_PORT)).expect("echo 绑定");
     let server = std::thread::spawn(move || {
         use std::io::{Read, Write};
@@ -289,7 +290,7 @@ fn ffi_query_faces_match_frozen_contract() {
     );
 
     // -- 活面取证后的面标记：pending 标记不得回潮（摘除是显式动作） --
-    for live_id in ["flows_item", "flow_found"] {
+    for live_id in ["flows_envelope", "flows_item", "flow_found"] {
         assert_ne!(
             face["faces"][live_id]["verification"], "pending_live_trace_wiring",
             "面 {live_id} 已活面取证（RIL-083 第二段）——pending 标记不得回潮"

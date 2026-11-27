@@ -1,5 +1,8 @@
 //! RIL-091 第七段：平台支持状态页与移动 FFI / RIL-044 / RIL-082 证据页对齐契约门。
 //!
+//! 第九段扩展：JNI 角色拆分（5 生命周期/状态 + 7 查询）从 Kotlin 源逐名
+//! 分组核对证据页措辞、两语设计入口必列平台适配器选型页且 zh 双胞胎在
+//! 场、RIL-084 证据页 Android 摘要不得压掉账本 run_note 的已验清单。
 //! 前六段交付了站点、平台视图、命令 help、README、操作示例与功能矩阵，但
 //! 后续 RIL-043/044 段把 JNI 面从 14 推到 18 方法、C ABI 从 15 推到 19 导出，
 //! 历史证据页和平台视图没有跟上：仍有 14/15/16 方法、15 C ABI 符号的说法，
@@ -111,6 +114,70 @@ const STALE_DELIVERY_PHRASES: [&str; 6] = [
     "delivered in the next segment",
 ];
 const STALE_DELIVERY_PHRASES_ZH: [&str; 2] = ["有界诊断 IPC 在下一段交付", "RIL-044 其余交付"];
+
+/// JNI 角色分组（RIL-091 第九段钉死拆分：证据页曾写 4 生命周期/状态 +
+/// 8 查询，实际 Kotlin 面是 5 + 7——总数同为 18，计数门接不住分类错）
+const ROLE_LIFECYCLE_STATUS: [&str; 5] = ["version", "lastError", "start", "stop", "isRunning"];
+const ROLE_QUERY: [&str; 7] = [
+    "statsJson",
+    "routingJson",
+    "nodesJson",
+    "dnsStatsJson",
+    "dnsResolversJson",
+    "flowsJson",
+    "flowJson",
+];
+const ROLE_TUN_FD: [&str; 2] = ["tunStart", "tunStop"];
+const ROLE_SECRET_INJECTION: [&str; 1] = ["startWithSecrets"];
+const ROLE_NETWORK_CHANGE: [&str; 1] = ["networkChanged"];
+const ROLE_DIAGNOSTIC_IPC: [&str; 2] = ["diagnosticIpcStart", "diagnosticIpcStop"];
+
+const STALE_ROLE_SPLIT: [&str; 2] = ["4 lifecycle/status + 8 query", "4 生命周期/状态 + 8 查询"];
+
+/// 生产检查：从 Kotlin 源真分组核对证据页的角色拆分（总数是 18 但拆错同样
+/// 误导宿主消费方；分组与源逐名封闭，防止 5+7 漂移成 6+6 也漏检）
+fn check_jni_role_split(path: &str, doc: &str, methods: &BTreeSet<String>) {
+    let groups = [
+        ("lifecycle/status", &ROLE_LIFECYCLE_STATUS[..]),
+        ("query", &ROLE_QUERY[..]),
+        ("TUN fd", &ROLE_TUN_FD[..]),
+        ("secret injection", &ROLE_SECRET_INJECTION[..]),
+        ("network change", &ROLE_NETWORK_CHANGE[..]),
+        ("diagnostic IPC", &ROLE_DIAGNOSTIC_IPC[..]),
+    ];
+    for (role, expected) in groups {
+        for name in expected {
+            assert!(
+                methods.contains(*name),
+                "{path} 的角色分组声明 {role} 含 Kotlin 面不存在的方法 {name}"
+            );
+        }
+    }
+    let covered: BTreeSet<&str> = groups
+        .iter()
+        .flat_map(|(_, names)| names.iter().copied())
+        .collect();
+    assert_eq!(
+        covered.len(),
+        methods.len(),
+        "{path} 角色分组源面未一一覆盖：源 {methods:?} 分组 {covered:?}"
+    );
+    let phrase = if path.ends_with(".zh.md") {
+        "5 生命周期/状态 + 7 查询"
+    } else {
+        "5 lifecycle/status + 7 query"
+    };
+    assert!(
+        doc.contains(phrase),
+        "{path} JNI 角色拆分漂移——Kotlin 面逐名分组为 5 lifecycle/status + 7 query，须写「{phrase}」"
+    );
+    for stale in STALE_ROLE_SPLIT {
+        assert!(
+            !doc.contains(stale),
+            "{path} 仍写旧角色拆分「{stale}」——实际为 5 生命周期/状态 + 7 查询"
+        );
+    }
+}
 
 /// RIL-044 四个核心半边证据：条目锚点、证据文档、契约测试
 const RIL_044_EVIDENCE: [(&str, &str, &str); 4] = [
@@ -404,6 +471,85 @@ fn platform_readmes_have_no_dangling_notes_or_wrong_deb_template() {
     );
 }
 
+#[test]
+fn jni_evidence_pages_pin_role_split_from_kotlin_face() {
+    let kotlin = read_repo("platforms/android/app/src/main/java/com/rillane/rillane/RillaneFfi.kt");
+    let methods = kotlin_externals(&kotlin);
+    for path in [
+        "docs/acceptance-evidence/ril-043-jni-symbol-face.md",
+        "docs/acceptance-evidence/ril-043-jni-symbol-face.zh.md",
+    ] {
+        check_jni_role_split(path, &read_repo(path), &methods);
+    }
+}
+
+#[test]
+fn design_index_twin_pairs_platform_adapter_decision() {
+    let en = read_repo("docs/design/index.md");
+    let zh = read_repo("docs/zh/design/index.md");
+    let anchor = "platform-adapter-decision";
+    assert!(
+        en.contains(anchor) && zh.contains(anchor),
+        "两语设计入口必须都列平台适配器选型决策（EN={} ZH={}）",
+        en.contains(anchor),
+        zh.contains(anchor)
+    );
+    for path in [
+        "docs/design/platform-adapter-decision.md",
+        "docs/zh/design/platform-adapter-decision.md",
+    ] {
+        let doc = read_repo(path);
+        assert!(
+            doc.contains("D-PA-6"),
+            "{path} 缺已接受的 D-PA-1..6 决策集（空壳或沉行）"
+        );
+        assert!(
+            doc.contains("RIL-094"),
+            "{path} 缺 iOS 签名硬门边界——决策不能冒充解阻"
+        );
+    }
+}
+
+#[test]
+fn artifact_matrix_evidence_matches_ledger_run_note() {
+    let matrix: Value =
+        serde_json::from_str(&read_repo("contracts/build_matrix_v1.json")).expect("构建矩阵解析");
+    let note = matrix["platforms"]["android"]["run_note"]
+        .as_str()
+        .expect("android.run_note");
+    for phrase in [
+        "安装",
+        "autostart",
+        "撤销",
+        "切网",
+        "onTrimMemory",
+        "字体放大",
+        "四 Tab 渲染",
+        "仅 ICMP 回环",
+    ] {
+        assert!(
+            note.contains(phrase),
+            "账本 android.run_note 漂移：缺「{phrase}」"
+        );
+    }
+    for path in [
+        "docs/acceptance-evidence/ril-084-artifact-matrix.md",
+        "docs/acceptance-evidence/ril-084-artifact-matrix.zh.md",
+    ] {
+        let doc = read_repo(path);
+        for phrase in ["autostart", "onTrimMemory", "四 Tab 渲染", "仅 ICMP 回环"] {
+            assert!(
+                doc.contains(phrase),
+                "{path} Android 运行验收摘要与账本 run_note 不一致：缺「{phrase}」"
+            );
+        }
+        assert!(
+            !doc.contains("verified_emulator（AVD API33，仅 ICMP 回环）"),
+            "{path} 仍把账本七项已验面压缩成「仅 ICMP 回环」"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 对账器自证：全部调用生产检查函数，不复制断言
 // ---------------------------------------------------------------------------
@@ -467,5 +613,18 @@ fn comparator_bites_on_dangling_note() {
     assert!(
         !doc.contains("当前实现 注记"),
         "platforms/openwrt/README.md 仍有悬空交叉引用「当前实现 注记」——仓内无该节"
+    );
+}
+
+#[test]
+#[should_panic(expected = "角色分组源面未一一覆盖")]
+fn comparator_bites_on_role_split_not_covering_face() {
+    let kotlin = read_repo("platforms/android/app/src/main/java/com/rillane/rillane/RillaneFfi.kt");
+    let mut methods = kotlin_externals(&kotlin);
+    methods.insert("phantomMethod".to_string());
+    check_jni_role_split(
+        "docs/acceptance-evidence/ril-043-jni-symbol-face.md",
+        &read_repo("docs/acceptance-evidence/ril-043-jni-symbol-face.md"),
+        &methods,
     );
 }

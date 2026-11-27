@@ -14,7 +14,7 @@ RIL-084 勾选保持关闭（依赖 RIL-036/039/041/042/046/049 真机批次未�
 | OpenWrt | musl ×3 产物 | 22.03+（fw4/nft） | ipk ×3 | 无 | needs_device（opkg/procd/TUN/nft 未验） |
 | Windows | x86_64-gnu 产物 | 最低版本未验证 | zip（含服务脚本） | 无 Authenticode | needs_os（SCM 1053 缺口） |
 | macOS launchd | darwin ×2 产物（universal2） | 未声明 | tar.gz（lipo 合并） | 未签名/notarize | needs_os（本机不产 Mach-O） |
-| Android | arm64 + x86_64 产物 | API 24（target 33 / compile 35） | debug APK | **仅 debug key** | verified_emulator（AVD API33，仅 ICMP 回环） |
+| Android | arm64 + x86_64 产物 | API 24（target 33 / compile 35） | debug APK | **仅 debug key** | verified_emulator（AVD API33：安装/autostart/撤销/切网/onTrimMemory/字体放大/四 Tab 渲染已验；数据面仅 ICMP 回环） |
 | iOS | device/sim ×3 产物（xcframework） | 需签名设备 + 付费账号 | xcframework | 无 entitlement | needs_signing（RIL-094 阻塞） |
 
 ## 契约门钉死的事实

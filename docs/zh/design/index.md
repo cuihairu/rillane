@@ -13,6 +13,7 @@
 | [10 张原型图库](ui/README.md) | 桌面 6 页、iOS/Android 各 2 页，PNG/离线图库/提示词 |
 | [Debug、路径解释与可选 MCP](debug-and-mcp.md) | 规则推演、真实轨迹、主动探测、脱敏、工具权限和配置闭环 |
 | [竞品架构研究](../research/proxy-architectures-2026-11-14.md) | Mihomo、sing-box、Surge 的来源证据、SVG 与借鉴理由 |
+| [平台适配器选型](platform-adapter-decision.md) | 跨平台 TUN 调研与决策：平台接口倒置、smoltcp 用户态栈、tun crate 设备层、移动端 fd 注入、六平台矩阵 |
 
 实施任务统一维护在仓库根目录 [todo.md](https://github.com/cuihairu/rillane/blob/main/todo.md)，不在其他文档复制完成清单。按进程分流只要求 Windows/macOS/Linux 本机；OpenWrt/Android/iOS 按可得域名、IP、端口或设备证据分流。
 
