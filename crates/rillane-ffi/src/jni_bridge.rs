@@ -81,6 +81,32 @@ pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_start(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_startWithSecrets(
+    mut env: JNIEnv,
+    _class: JClass,
+    config: JString,
+    secrets_json: JString,
+) -> jlong {
+    let yaml = match config_bytes(&mut env, &config) {
+        Ok(s) => s,
+        Err(null) => return null as jlong,
+    };
+    let secrets = match config_bytes(&mut env, &secrets_json) {
+        Ok(s) => s,
+        Err(null) => return null as jlong,
+    };
+    let h = unsafe {
+        crate::rillane_ffi_start_with_secrets(
+            yaml.as_ptr().cast(),
+            yaml.len(),
+            secrets.as_ptr().cast(),
+            secrets.len(),
+        )
+    };
+    h as usize as jlong
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_rillane_rillane_RillaneFfi_stop(
     _env: JNIEnv,
     _class: JClass,

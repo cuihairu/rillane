@@ -132,28 +132,52 @@ pub unsafe extern "C" fn rillane_ffi_start(
     config_yaml: *const c_char,
     config_len: usize,
 ) -> *mut FfiHandle {
+    let Some(yaml) = (unsafe { read_config_str(config_yaml, config_len) }) else {
+        return ptr::null_mut();
+    };
+    // 直通路径不含解析面：配置里出现秘密引用 = 宿主走错启动口，
+    // 把引用字面量当密码用是静默错误配置——fail-closed 指向正确入口。
+    if yaml.contains(SECRET_REF_MARKER) {
+        set_last_error(
+            "config_yaml 含秘密引用，须经 rillane_ffi_start_with_secrets 提供 [secret.ref.missing]"
+                .into(),
+        );
+        return ptr::null_mut();
+    }
+    start_from_yaml(yaml)
+}
+
+/// 读取并校验配置 YAML（两个启动口共用）：null/空、尾随 NUL 容忍、UTF-8。
+/// 失败时已写入 last_error 并返回 None（口径同原 `rillane_ffi_start` 文案）。
+///
+/// # Safety
+/// `config_yaml` 须指向 ≥ `config_len` 字节（可含尾随 NUL）。
+unsafe fn read_config_str<'a>(config_yaml: *const c_char, config_len: usize) -> Option<&'a str> {
     if config_yaml.is_null() || config_len == 0 {
         set_last_error("config_yaml 为空".into());
-        return ptr::null_mut();
+        return None;
     }
     let bytes = unsafe { std::slice::from_raw_parts(config_yaml.cast::<u8>(), config_len) };
     // 容忍调用方传带尾随 NUL 的 C 字符串（Kotlin jstring→UTF-8 常见形态）
     let bytes = match bytes.iter().position(|&b| b == 0) {
         Some(0) => {
             set_last_error("config_yaml 以 NUL 开头".into());
-            return ptr::null_mut();
+            return None;
         }
         Some(i) => &bytes[..i],
         None => bytes,
     };
-    let yaml = match std::str::from_utf8(bytes) {
-        Ok(s) => s,
+    match std::str::from_utf8(bytes) {
+        Ok(s) => Some(s),
         Err(e) => {
             set_last_error(format!("config_yaml 非 UTF-8：{e}"));
-            return ptr::null_mut();
+            None
         }
-    };
+    }
+}
 
+/// 捕获启动 panic 并收敛到 NULL + last_error（两个启动口共用收尾）
+fn start_from_yaml(yaml: &str) -> *mut FfiHandle {
     match catch_unwind(AssertUnwindSafe(|| start_inner(yaml))) {
         Ok(Ok(h)) => h,
         Ok(Err(e)) => {
@@ -165,6 +189,125 @@ pub unsafe extern "C" fn rillane_ffi_start(
             ptr::null_mut()
         }
     }
+}
+
+/// `${secret:<name>}` 引用标记（RIL-044 配置/秘密引用注入面）
+const SECRET_REF_MARKER: &str = "${secret:";
+
+/// 解析配置 YAML 里的 `${secret:<name>}` 秘密引用（RIL-044）。
+///
+/// 纪律（模块头与头文件同名口径）：
+/// - **单遍扫描、替换值不重扫**——替换进输出的秘密值即使长得像引用
+///   （值里含 `${secret:`）也按字面量对待，绝不二次展开（防递归注入）；
+/// - **fail-closed**——缺右括号/空名/表值非字符串 → `secret.ref.malformed`，
+///   表里没有对应键 → `secret.ref.missing`，绝不静默替换成空串；
+/// - **表漂移不静默**——表里未被引用的键（模板改了引用名或键拼错）
+///   → `secret.map.unused` 点名，不让宿主误以为秘密已接线。
+fn resolve_secret_refs(
+    yaml: &str,
+    secrets: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<String> {
+    let mut out = String::with_capacity(yaml.len());
+    let mut rest = yaml;
+    let mut used: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    while let Some(pos) = rest.find(SECRET_REF_MARKER) {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos + SECRET_REF_MARKER.len()..];
+        let Some(close) = tail.find('}') else {
+            anyhow::bail!(
+                "秘密引用缺右括号 [secret.ref.malformed]：{}…",
+                &rest[pos..(pos + 40).min(rest.len())]
+            );
+        };
+        let name = &tail[..close];
+        if name.is_empty() {
+            anyhow::bail!("秘密引用名字为空 [secret.ref.malformed]");
+        }
+        match secrets.get(name) {
+            Some(serde_json::Value::String(value)) => {
+                used.insert(name);
+                // 字面量插入，不重扫（非递归）
+                out.push_str(value);
+            }
+            Some(_) => anyhow::bail!("秘密引用值须为字符串 [secret.ref.malformed]：{name}"),
+            None => anyhow::bail!("秘密引用未提供 [secret.ref.missing]：{name}"),
+        }
+        rest = &tail[close + 1..];
+    }
+    out.push_str(rest);
+    let unused: Vec<&String> = secrets
+        .keys()
+        .filter(|k| !used.contains(k.as_str()))
+        .collect();
+    if !unused.is_empty() {
+        anyhow::bail!("秘密表含未使用键 [secret.map.unused]：{unused:?}");
+    }
+    Ok(out)
+}
+
+/// 以配置 YAML + 秘密引用表启动完整 runtime（RIL-044 配置/秘密引用注入面）。
+///
+/// config YAML 内 `${secret:<name>}` 由 `secrets_json`（JSON 对象，值全为
+/// 字符串）解析替换：单遍非递归、fail-closed（稳定码 `secret.ref.missing` /
+/// `secret.ref.malformed` / `secret.map.invalid` / `secret.map.unused`）。
+/// 无引用的配置 + 空表 `{}` 等价 `rillane_ffi_start` 的直通路径。
+///
+/// # Safety
+/// 两对指针同 `rillane_ffi_start` 口径（≥ len 字节 UTF-8，可含尾随 NUL）；
+/// 返回句柄只能配对一次 `rillane_ffi_stop`。
+#[no_mangle]
+pub unsafe extern "C" fn rillane_ffi_start_with_secrets(
+    config_yaml: *const c_char,
+    config_len: usize,
+    secrets_json: *const c_char,
+    secrets_len: usize,
+) -> *mut FfiHandle {
+    let Some(yaml) = (unsafe { read_config_str(config_yaml, config_len) }) else {
+        return ptr::null_mut();
+    };
+    if secrets_json.is_null() || secrets_len == 0 {
+        set_last_error("secrets_json 为空".into());
+        return ptr::null_mut();
+    }
+    let sbytes = unsafe { std::slice::from_raw_parts(secrets_json.cast::<u8>(), secrets_len) };
+    let sbytes = match sbytes.iter().position(|&b| b == 0) {
+        Some(0) => {
+            set_last_error("secrets_json 以 NUL 开头".into());
+            return ptr::null_mut();
+        }
+        Some(i) => &sbytes[..i],
+        None => sbytes,
+    };
+    let stext = match std::str::from_utf8(sbytes) {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(format!("secrets_json 非 UTF-8：{e}"));
+            return ptr::null_mut();
+        }
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(stext) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(format!("secrets_json 非法 JSON [secret.map.invalid]：{e}"));
+            return ptr::null_mut();
+        }
+    };
+    let Some(map) = parsed.as_object() else {
+        set_last_error("secrets_json 须为 JSON 对象 [secret.map.invalid]".into());
+        return ptr::null_mut();
+    };
+    if map.values().any(|v| !v.is_string()) {
+        set_last_error("secrets_json 值须全为字符串 [secret.map.invalid]".into());
+        return ptr::null_mut();
+    }
+    let resolved = match resolve_secret_refs(yaml, map) {
+        Ok(r) => r,
+        Err(e) => {
+            set_last_error(format!("{e:#}"));
+            return ptr::null_mut();
+        }
+    };
+    start_from_yaml(&resolved)
 }
 
 /// JSON 值 → C 字符串（`into_raw`；调用方以 `rillane_ffi_free_string` 归还）

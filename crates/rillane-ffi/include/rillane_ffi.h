@@ -35,6 +35,17 @@ char *rillane_ffi_last_error(void);
  */
 rillane_ffi_handle_t *rillane_ffi_start(const char *config_yaml, size_t config_len);
 
+/*
+ * 以配置 YAML + 秘密引用表启动（RIL-044 配置/秘密引用注入面）。
+ * config_yaml 内 `${secret:<name>}` 由 secrets_json（JSON 对象，值全为
+ * 字符串）解析替换：单遍非递归（替换值不重扫）、fail-closed——缺引用
+ * [secret.ref.missing]、坏引用 [secret.ref.malformed]、表非法
+ * [secret.map.invalid]、表含未使用键 [secret.map.unused] 均返回 NULL。
+ * 两对指针同 rillane_ffi_start 口径（>= len 字节 UTF-8，可带尾随 NUL）。
+ */
+rillane_ffi_handle_t *rillane_ffi_start_with_secrets(const char *config_yaml, size_t config_len,
+                                                     const char *secrets_json, size_t secrets_len);
+
 /* 停止并释放句柄（TUN 线程先行收尾；句柄此后悬空）。0 成功 / -1 失败 */
 int32_t rillane_ffi_stop(rillane_ffi_handle_t *handle);
 

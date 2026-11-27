@@ -18,6 +18,15 @@ object RillaneFfi {
     /** 以配置 YAML 启动完整 runtime；返回句柄，0 = 失败（取 lastError） */
     external fun start(configYaml: String): Long
 
+    /**
+     * 以配置 YAML + 秘密引用表启动（RIL-044）：YAML 内 `${secret:name}` 由
+     * secretsJson（JSON 对象，值全为字符串）解析替换——单遍非递归（替换值不
+     * 重扫）；缺引用/坏引用/表非法 fail-closed（稳定码 secret.ref.* /
+     * secret.map.*），秘密值不进日志、不进查询面。返回句柄，0 = 失败
+     * （取 lastError）。
+     */
+    external fun startWithSecrets(configYaml: String, secretsJson: String): Long
+
     /** 停止并释放句柄（句柄此后不得复用）。0 成功 / -1 失败 */
     external fun stop(handle: Long): Int
 
