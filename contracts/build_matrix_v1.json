@@ -62,7 +62,7 @@
       ],
       "artifact": "ipk: rillane_<ver>_<arch>.ipk（三 musl 目标；含 rillaned + rillanectl + init.d + yaml 示例）",
       "build_script": "platforms/openwrt/build.sh",
-      "build_evidence": "L1/L2 本机（记录性）：cross 三目标零失败 + file/readelf 输出入 .build-log.txt + ar 成员名记录；无 static/control 字段/齐件断言",
+      "build_evidence": "L1/L2 本机（记录性）：cross 三目标零失败 + file/readelf 输出入 .build-log.txt + ar 成员名记录；已产 ipk 另经 RIL-042 真包拆解门断言 ar 三成员/tar 可解/control 字段与齐件/procd 要素（缺包跳过）；二进制 static 面仍无断言分支",
       "signing": {
         "release_signed": false,
         "debug_key_only": false,
@@ -73,7 +73,8 @@
       "run_note": "真机 opkg 安装/升级、procd 起停/respawn、kmod-tun 数据面、nft 专用表生效/撤销均未验；见 platforms/openwrt/README.md 验证边界",
       "evidence": [
         "platforms/openwrt/README.md",
-        "platforms/openwrt/build.sh"
+        "platforms/openwrt/build.sh",
+        "crates/rillane-platform/tests/openwrt_ipk_contract.rs"
       ]
     },
     "windows": {

@@ -69,9 +69,14 @@ reload 不触碰外来表，规则随 rillaned 启停自动应用/撤销（模�
 - 三目标 `cross build --release` 零失败（构建失败本身会中断脚本）；二进制
   `file` 与 `readelf -d` 输出记入 `.build-log.txt`——musl 面无 interpreter/
   NEEDED 即为静态，但 grep 命中 NEEDED 也不判失败，无 static 断言分支；
-- ipk 结构：`ar t` 成员名记日志；无成员序断言、无 tar 解包可解性检查、
-  无 control 字段/齐件断言（deb 产线的 `dpkg-deb -I/-c` + 齐件循环在
-  `systemd/build.sh`，openwrt 侧未做）。
+- ipk 结构：`ar t` 成员名记日志；包内结构另由 RIL-042 契约门
+  `crates/rillane-platform/tests/openwrt_ipk_contract.rs` 对已产 ipk 做真包
+  拆解断言（ar 三成员 + 两个 tar 可解、control 字段/conffiles/postinst、
+  二进制与 init.d 齐件、procd 要素、仓内脚本与包内同形）——该门仅在
+  本机有 `dist/openwrt/*.ipk` 时实测，缺包跳过不冒充实测。
+
+**未验（需要真机或目标架构仿真环境）**
+- 真机 opkg 安装/升级路径（DISTRIB_ARCH 命中、conffile 升级保留语义）；
 
 **未验（需要真机或目标架构仿真环境）**
 - 真机 opkg 安装/升级路径（DISTRIB_ARCH 命中、conffile 升级保留语义）；
